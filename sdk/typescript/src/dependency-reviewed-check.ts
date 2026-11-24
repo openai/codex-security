@@ -1,21 +1,10 @@
 import {
-  publishApprovedClaims,
-  reportedUse,
-  selectedPremises,
-} from "./dependency-reviewed-publication.js";
-import {
   dependencyGraphCandidates,
   observedDependencyCandidates,
   type DependencyGraphCandidate,
   type GraphCandidates,
 } from "./dependency-graph-candidates.js";
-import {
-  dependencyReceiptSelectionSchema,
-  selectedReceiptKey,
-  selectedReceiptReference,
-  selectedReceiptValue,
-  type BoundReceiptSelection,
-} from "./dependency-graph-evidence.js";
+import { dependencyReceiptSelectionSchema } from "./dependency-graph-evidence.js";
 import {
   dependencyLookupScope,
   dependencyLookupSearch,
@@ -30,11 +19,8 @@ import {
 import {
   createPremiseQueue,
   claimDependencies,
-  claimInputs,
-  claimSelections,
   currentApproval,
   dependencyPremiseRefSchema,
-  premiseKey,
   retainedUse,
   assertReviewedPremises,
 } from "./dependency-review-queue.js";
@@ -87,6 +73,10 @@ import {
 } from "./dependency-discovery.js";
 import {
   approveDependencyClaims,
+  publishApprovedClaims,
+  prepareClaimReview,
+  reportedUse,
+  selectedPremises,
   approvedUse,
   findingSelectionProblem,
   DependencyReviewRejection,
@@ -255,37 +245,7 @@ function issuePackages(issue: Issue, pkg?: DependencyPackage) {
   ];
 }
 
-async function verifyScopedUse(
-  use: z.infer<typeof investigationSchema>["uses"][number],
-  directory: string,
-  signal: AbortSignal,
-  scopes: Scope[],
-  advisories: Advisory[],
-  records: readonly DependencyEvidenceRecord[],
-  callerScope: string | undefined,
-  decidingPremiseEvidence: DecidingPremiseEvidence,
-) {
-  const scope = scopes.find((s) => s.id === use.scope);
-  if (!scope)
-    throw new CodexSecurityError("Unknown dependency scope: " + use.scope);
-  return verifyProposedUse(
-    directory,
-    scope,
-    use,
-    signal,
-    use.version &&
-      (use.component === undefined || use.component === scope.component)
-      ? affectedByFrozenVersion(
-          scope.discovery.package,
-          use.version,
-          advisories,
-        )
-      : undefined,
-    records,
-    callerScope,
-    decidingPremiseEvidence,
-  );
-}
+type ProposedUse = z.infer<typeof investigationSchema>["uses"][number];
 
 function coverageAt(
   kind: "dismissed" | "unresolved",
@@ -313,16 +273,13 @@ function coverageAt(
 
 async function prepareDraft(
   raw: string,
-  directory: string,
   signal: AbortSignal,
   scopes: Scope[],
-  advisories: Advisory[],
-  records: readonly DependencyEvidenceRecord[],
   boundary: Pick<ReviewedCheckOptions, "scope" | "sources" | "sinks">,
   submitted: readonly VerifiedUse[],
   dispositions: readonly VerifiedDisposition[],
   graphCandidates: GraphCandidates,
-  decidingPremiseEvidence: DecidingPremiseEvidence,
+  verify: (use: ProposedUse) => Promise<VerifiedUse>,
 ) {
   const proposal = decode(raw, investigationSchema);
   const scoped =
@@ -393,16 +350,7 @@ async function prepareDraft(
   const inline = await Promise.all(
     proposal.uses.map(async (use, index) => {
       try {
-        return await verifyScopedUse(
-          use,
-          directory,
-          signal,
-          scopes,
-          advisories,
-          records,
-          boundary.scope,
-          decidingPremiseEvidence,
-        );
+        return await verify(use);
       } catch (error) {
         signal.throwIfAborted();
         throw new CodexSecurityError(
@@ -691,6 +639,29 @@ async function investigateIssue(
     const searches: DependencySearch[] = [];
     const decidingPremiseEvidence: DecidingPremiseEvidence = (ref) =>
       selectedPremises(store, records, [ref]).evidence;
+    function verifyUse(use: ProposedUse, snapshot = [...records.values()]) {
+      const scope = scopes.find((s) => s.id === use.scope);
+      if (!scope)
+        throw new CodexSecurityError("Unknown dependency scope: " + use.scope);
+      return verifyProposedUse(
+        directory,
+        scope,
+        use,
+        signal,
+        use.version &&
+          (use.component === undefined || use.component === scope.component)
+          ? affectedByFrozenVersion(
+              scope.discovery.package,
+              use.version,
+              issue.advisories,
+            )
+          : undefined,
+        snapshot,
+        options.scope,
+        decidingPremiseEvidence,
+      );
+    }
+
     const recordEvidence = (record: DependencyEvidenceRecord) => {
       signal.throwIfAborted();
       block.observe(record);
@@ -829,98 +800,19 @@ async function investigateIssue(
         return true;
       });
       if (!pending.length) return;
-      const selectedValue = (row: BoundReceiptSelection) =>
-        selectedReceiptValue(records.get(row.receiptId)!, row.selection);
       const requestReview = (outstanding: Claim[], problem?: string) => {
-        let previewBytes = 24_000;
-        const receiptIds = new Set<string>();
-        const projectedIds = new Set<string>();
-        const supplied = outstanding.map((c) => {
-          const {
-            sources,
-            sourceIds,
-            receiptKeys,
-            wholeReceiptIds,
-            selected,
-            dependencies,
-          } = claimInputs(c);
-          for (const id of wholeReceiptIds) receiptIds.add(id);
-          for (const row of selected) projectedIds.add(row.receiptId);
-          return {
-            ...reference(c),
-            payload: c.value,
-            ...(c.value.kind === "disposition" &&
-              c.value.replacesUse && {
-                previousUse: approvedUse(store, c.value.replacesUse),
-              }),
-            availableEvidenceKeys: [
-              ...new Set([
-                ...sourceIds,
-                ...receiptKeys,
-                ...dependencies.map(premiseKey),
-              ]),
-            ],
-            ...(selected.length && {
-              receiptSelections: selected.map((row) => {
-                const value = selectedValue(row);
-                const raw = JSON.stringify(value);
-                const size = Buffer.byteLength(raw);
-                const inline = size <= 4000 && size <= previewBytes;
-                if (inline) previewBytes -= size;
-                return {
-                  id: selectedReceiptKey(row),
-                  ...selectedReceiptReference(row),
-                  ...(inline
-                    ? { result: value }
-                    : {
-                        instructions:
-                          "Read the original row with read_dependency_evidence using its receiptId as id and this selection.",
-                      }),
-                };
-              }),
-            }),
-            sources: sources.map((source, i) => ({
-              id: sourceIds[i],
-              source,
-            })),
-            dependencies,
-          };
-        });
-        const reviewsCoverage = outstanding.some(
-          (c) => c.value.kind === "coverage",
+        const { claims, approvedClaims, evidence } = prepareClaimReview(
+          store,
+          records,
+          outstanding,
         );
-        const reviewedAssessments = reviewsCoverage
-          ? store
-              .claims<Claim["value"]>()
-              .map((c) => retainedUse(store, c.id) ?? c)
-              .filter(
-                (c) =>
-                  c.value.kind !== "premise" &&
-                  c.value.kind !== "coverage" &&
-                  !outstanding.some((row) => row.id === c.id) &&
-                  currentApproval(store, c),
-              )
-          : [];
-        const previous = [
-          ...reviewedAssessments,
-          ...queue!.approved([
-            ...[...outstanding, ...reviewedAssessments].flatMap(
-              claimDependencies,
-            ),
-            ...supplied.flatMap(
-              (c) => c.previousUse?.payload.use.premises ?? [],
-            ),
-          ]),
-        ];
-        for (const c of previous)
-          for (const row of claimSelections(c)) projectedIds.add(row.receiptId);
         return run(
           [
             reviewInstructions,
             JSON.stringify(z.toJSONSchema(reviewSchema)),
             JSON.stringify({
               ...input,
-              claims: supplied,
+              claims,
               ...(problem && {
                 reviewCorrection: {
                   problem,
@@ -930,25 +822,8 @@ async function investigateIssue(
               ...(evidenceLimitations.size && {
                 evidenceLimitations: [...evidenceLimitations],
               }),
-              approvedClaims: previous.map((c) => ({
-                ...reference(c),
-                payload: c.value,
-                decision: currentApproval(store, c),
-              })),
-              evidence: evidencePreviews(
-                [
-                  ...[...receiptIds].map((id) => records.get(id)!),
-                  ...(reviewsCoverage
-                    ? [...records.values()].filter(
-                        (r) =>
-                          r.server !== investigationServer &&
-                          !receiptIds.has(r.sha256) &&
-                          !projectedIds.has(r.sha256),
-                      )
-                    : []),
-                ],
-                previewBytes,
-              ),
+              approvedClaims,
+              evidence,
             }),
           ].join("\n\n"),
         );
@@ -1117,16 +992,7 @@ async function investigateIssue(
                 "use" in a
                   ? {
                       kind: "use",
-                      use: await verifyScopedUse(
-                        a.use,
-                        directory,
-                        signal,
-                        scopes,
-                        issue.advisories,
-                        [...records.values()],
-                        options.scope,
-                        decidingPremiseEvidence,
-                      ),
+                      use: await verifyUse(a.use),
                     }
                   : {
                       kind: "disposition",
@@ -1278,13 +1144,11 @@ async function investigateIssue(
                 c.id +
                 " before finalizing.",
             );
+        const snapshot = [...records.values()];
         draft = await prepareDraft(
           raw,
-          directory,
           signal,
           scopes,
-          issue.advisories,
-          [...records.values()],
           options,
           submitted.flatMap((c) =>
             c.value.kind === "use" ? [c.value.use] : [],
@@ -1293,7 +1157,7 @@ async function investigateIssue(
             c.value.kind === "disposition" ? [c.value.disposition] : [],
           ),
           await graphCandidates(),
-          decidingPremiseEvidence,
+          (use) => verifyUse(use, snapshot),
         );
         for (const use of draft.additionalUses)
           assertReviewedPremises(store, use.premises ?? []);
@@ -1333,63 +1197,53 @@ async function investigateIssue(
           throw new DependencyReviewRejection(
             "The investigation changed during final review. Check the latest assessments, evidence and outstanding callers before submitting again.",
           );
-        const premises = reviewQueue.approved(
-          claims.flatMap(claimDependencies),
-        );
-        const report = store.read(() => {
-          const published = publishApprovedClaims(
-            store,
-            [...premises, ...claims],
-            {
-              records,
-              failures: block.failures,
-              contextHash,
-              revision,
-              subject,
-            },
-          );
-          return {
-            schemaVersion: 2 as const,
-            uses: published.uses,
-            claims: published.claims,
-            claimEvidence: published.claimEvidence,
-            assumptions: [assumptions.join("\n")],
-            limitations,
-            coverage: [...coverage, ...published.dispositions],
-            searches: [
-              ...discoveries.map((d) => ({
-                source: "repository",
-                tool: "dependency_discovery",
-                scope: [`package=${d.package.name}`, `revision=${d.revision}`],
-                startedAt,
-                finishedAt,
-                result: d.callers.length ? "matches" : "unknown",
-                completeness: d.coverage.status,
-                details: d.coverage.gaps,
+        const { dispositions: reviewedCoverage, ...published } =
+          publishApprovedClaims(store, claims, {
+            records,
+            failures: block.failures,
+            contextHash,
+            revision,
+            subject,
+          });
+        const report = {
+          schemaVersion: 2 as const,
+          ...published,
+          assumptions: [assumptions.join("\n")],
+          limitations,
+          coverage: [...coverage, ...reviewedCoverage],
+          searches: [
+            ...discoveries.map((d) => ({
+              source: "repository",
+              tool: "dependency_discovery",
+              scope: [`package=${d.package.name}`, `revision=${d.revision}`],
+              startedAt,
+              finishedAt,
+              result: d.callers.length ? "matches" : "unknown",
+              completeness: d.coverage.status,
+              details: d.coverage.gaps,
+              evidenceReferences: [],
+            })),
+            ...searches,
+            ...(options.evidenceSources ?? [])
+              .filter(
+                ({ server }) => !searches.some((s) => s.source === server),
+              )
+              .map(({ server }): DependencySearch => ({
+                source: server,
+                tool: "MCP inventory",
+                scope: [],
+                startedAt: null,
+                finishedAt: new Date().toISOString(),
+                result: "not_run",
+                completeness: "skipped",
+                details: ["No lookup from this source was recorded."],
                 evidenceReferences: [],
               })),
-              ...searches,
-              ...(options.evidenceSources ?? [])
-                .filter(
-                  ({ server }) => !searches.some((s) => s.source === server),
-                )
-                .map(({ server }): DependencySearch => ({
-                  source: server,
-                  tool: "MCP inventory",
-                  scope: [],
-                  startedAt: null,
-                  finishedAt: new Date().toISOString(),
-                  result: "not_run",
-                  completeness: "skipped",
-                  details: ["No lookup from this source was recorded."],
-                  evidenceReferences: [],
-                })),
-            ],
-            advisories: issue.advisories.map((a) => a.url),
-            advisoryDetails: issue.advisories,
-            usage: usage as ScanTokenUsage | null,
-          };
-        });
+          ],
+          advisories: issue.advisories.map((a) => a.url),
+          advisoryDetails: issue.advisories,
+          usage: usage as ScanTokenUsage | null,
+        };
         return { report };
       } catch (error) {
         if (!(error instanceof DependencyReviewRejection) || !canCorrect)

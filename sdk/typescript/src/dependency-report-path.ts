@@ -3,6 +3,8 @@ import {
   inputFor,
   matchTraceFrame,
   type Finding,
+  type StepKind,
+  type Site,
   type StackReport,
 } from "./dependency-report-model.js";
 import { stackFrames } from "./dependency-report-stacks.js";
@@ -184,15 +186,16 @@ function sampledPath(
     },
   );
   const notes: string[] = [];
-  if (source === null) notes.push("Source frame unassigned.");
-  else if (!frames.some((f) => f.rawIndex === source))
-    notes.push(`Source frame #${source} absent.`);
-  if (o.sinkIndex === null) notes.push("Query sink frame unassigned.");
-  else if (!frames.some((f) => f.rawIndex === o.sinkIndex))
-    notes.push(`Query sink frame #${o.sinkIndex} absent.`);
+  const retained = new Set(frames.map((f) => f.rawIndex));
+  function checkFrame(label: string, index: number | null) {
+    if (index === null) notes.push(`${label} frame unassigned.`);
+    else if (!retained.has(index))
+      notes.push(`${label} frame #${index} absent.`);
+  }
+  checkFrame("Source", source);
+  checkFrame("Query sink", o.sinkIndex);
   for (const { sinkId, rawIndex } of o.sinkMatches)
-    if (!frames.some((f) => f.rawIndex === rawIndex))
-      notes.push(`Matched sink ${sinkId} frame #${rawIndex} absent.`);
+    checkFrame(`Matched sink ${sinkId}`, rawIndex);
   if (o.framesTruncated === true) notes.push("Frames truncated.");
   if (o.framesTruncated === null) notes.push("Frame truncation unknown.");
   if (!frames.length) notes.push("No saved frames.");
@@ -210,41 +213,34 @@ function sampledPath(
     initialIndex: selected ? frames.indexOf(selected) : -1,
   };
 }
-function sourcePath(finding: Finding): PathInspector {
-  const { item } = finding;
-  const frames: PathFrame[] = [];
-  const notes: string[] = [];
-  const trail = item.trace ?? [];
+type SourceFrame = PathFrame &
+  (
+    | { role: "gap" }
+    | { role: "source" | "call" | "call_site"; path: string; line: number }
+  );
+const base = { omittedBefore: 0, inRange: true };
+const gap = (label: string): SourceFrame => ({ ...base, role: "gap", label });
+
+export function sourceFrames(finding: Finding): SourceFrame[] {
+  const trail = finding.item.trace ?? [];
   const sink = finding.kind === "coverage" ? undefined : finding.proof?.sink;
-  const endpoint = inputFor(item)?.endpoint;
-  const base = { omittedBefore: 0, inRange: true };
-  const gap = (label: string) => frames.push({ ...base, role: "gap", label });
-  function add(
-    kind: "source" | "handoff" | "sink",
+  function frame(
+    kind: StepKind,
     label: string,
-    site: { path: string; line: number; commit?: string },
+    site: Site,
     argument?: string,
-  ) {
+  ): SourceFrame {
     const match = matchTraceFrame(finding, kind, site);
-    if ("gap" in match) {
-      gap(match.gap);
-      return;
-    }
+    if ("gap" in match) return gap(match.gap);
     const { cite, index } = match;
     const { path, line } = site;
     const text = finding.excerpts[citationKey(cite)]?.text;
+    const { startLine, commit } = cite;
     const code =
-      text !== undefined &&
-      text.split("\n")[line - cite.startLine] !== undefined
-        ? {
-            text,
-            path,
-            startLine: cite.startLine,
-            commit: cite.commit,
-            citationIndex: index,
-          }
+      text?.split("\n")[line - startLine] !== undefined
+        ? { text, path, startLine, commit, citationIndex: index }
         : undefined;
-    frames.push({
+    return {
       ...base,
       role:
         kind === "sink" ? "call_site" : kind === "handoff" ? "call" : "source",
@@ -256,14 +252,24 @@ function sourcePath(finding: Finding): PathInspector {
       unavailable: code
         ? undefined
         : "The report cites this line but contains no matching excerpt.",
-    });
+    };
   }
-  for (const step of trail) {
-    if (step.kind === "gap") gap(step.label);
-    else add(step.kind, step.label, step.site, step.argument);
-  }
-  if (sink) {
-    add("sink", sink.function, sink.callSite, sink.argument);
+  const frames = trail.map((step) =>
+    step.kind === "gap"
+      ? gap(step.label)
+      : frame(step.kind, step.label, step.site, step.argument),
+  );
+  if (sink)
+    frames.push(frame("sink", sink.function, sink.callSite, sink.argument));
+  return frames;
+}
+
+function sourcePath(finding: Finding): PathInspector {
+  const frames = sourceFrames(finding);
+  const notes: string[] = [];
+  const trail = finding.item.trace ?? [];
+  if (finding.kind !== "coverage" && finding.proof?.sink) {
+    const endpoint = inputFor(finding.item)?.endpoint;
     if (!trail.length)
       notes.push(
         endpoint
@@ -274,7 +280,7 @@ function sourcePath(finding: Finding): PathInspector {
       notes.push("Input source unverified.");
   } else if (finding.kind === "coverage" && finding.item.handoff) {
     notes.push("Last verified: " + finding.item.handoff.verified);
-    gap(finding.item.handoff.missing);
+    frames.push(gap(finding.item.handoff.missing));
   } else if (trail.length) {
     notes.push("No cited sink recorded.");
   }

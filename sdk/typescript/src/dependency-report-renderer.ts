@@ -10,7 +10,7 @@ import {
 } from "./dependency-report-model.js";
 import type { PathInspector, PathFrame } from "./dependency-report-path.js";
 import {
-  escapeHtml as esc,
+  para,
   prose,
   findingAudit,
   sectionAudit,
@@ -19,12 +19,16 @@ import {
   advisoryHeader,
   basename,
   checkout,
-  entries,
+  sites,
+  context as join,
   rail,
   status,
   type Entry,
 } from "./dependency-report-index.js";
-import { renderDependencyCode } from "./dependency-report-code.js";
+import {
+  escapeHtml as esc,
+  renderDependencyCode,
+} from "./dependency-report-code.js";
 import { reportStyles } from "./dependency-report-ui.js";
 import { reportInteractions } from "./dependency-report-interactions.js";
 
@@ -41,8 +45,6 @@ const conditionStates = {
   unknown: "Unknown",
   ruled_out: "Ruled out",
 };
-const join = (parts: (string | null | undefined | false)[]) =>
-  [...new Set(parts.filter(Boolean))].join(" · ");
 const line = (path: string, n?: number) =>
   path + (n !== undefined ? ":" + n : "");
 // A second frame may refer to a different line in the same excerpt. Stop
@@ -74,12 +76,8 @@ function relatedLines(frames: PathFrame[], index: number) {
   }
   return lines;
 }
-function frameContents(
-  frame: PathFrame,
-  id: string,
-  path: PathInspector,
-  index: number,
-) {
+function frameContents(path: PathInspector, index: number, id: string) {
+  const frame = path.frames[index]!;
   const { code, line: n, argument } = frame;
   const detail = frame.detail
     ? `<p class="frame-detail">${prose(frame.detail)}</p>`
@@ -102,12 +100,8 @@ function frameContents(
       : `<a href="#${id}-source-${code.citationIndex + 1}">${position}</a>`;
   return `<div class="code-meta">${citation}${code.commit ? `<span title="${esc(code.commit)}">${esc(code.commit.slice(0, 10))}</span>` : ""}</div>${listing}${detail}`;
 }
-function frameRow(
-  frame: PathFrame,
-  index: number,
-  id: string,
-  path: PathInspector,
-) {
+function frameRow(path: PathInspector, index: number, id: string) {
+  const frame = path.frames[index]!;
   const attrs = `data-in-range="${frame.inRange}"`;
   if (frame.role === "gap")
     return `<p class="gap" ${attrs}>${prose(frame.label)}</p>`;
@@ -119,7 +113,7 @@ function frameRow(
     : "";
   return `${before}<details class="frame" id="${id}-frame-${index}" data-frame="${index}" data-role="${frame.role}" ${attrs}${index === path.initialIndex ? " open" : ""}>
    <summary><span class="frame-role">${roles[frame.role]}</span><span class="frame-name">${esc(frame.label)}</span><span class="frame-location" title="${esc(pathName || "")}">${esc(join([location, frame.rawIndex !== undefined && "Frame " + frame.rawIndex]))}</span></summary>
-   <div class="frame-body">${frameContents(frame, id, path, index)}</div></details>`;
+   <div class="frame-body">${frameContents(path, index, id)}</div></details>`;
 }
 function inspector(path: PathInspector, id: string) {
   if (!path.frames.length) return "";
@@ -148,7 +142,7 @@ function inspector(path: PathInspector, id: string) {
       : "";
   return `<section class="inspector" data-inspector aria-label="${description}">
    <div class="inspector-head"><div><p class="eyebrow">${description}</p><h3>${heading}</h3></div>${tools}</div>
-   <div class="path-list">${path.frames.map((f, i) => frameRow(f, i, id, path)).join("")}</div>
+   <div class="path-list">${path.frames.map((_, i) => frameRow(path, i, id)).join("")}</div>
    ${path.notes.length ? `<p class="inspector-notes">${esc(path.notes.join(" "))}</p>` : ""}</section>`;
 }
 function conditions(f: Finding) {
@@ -225,7 +219,7 @@ function content(section: Section, e: Entry) {
       return "<h2>Investigation pending</h2><p>The package investigation stopped before this advisory.</p>";
     if (section.blocked) {
       const b = section.blocked;
-      return `<h2>Investigation blocked</h2>${[b.reason, b.affectedScope, b.scopeImpact, b.unblockCondition].map((x) => (x ? `<p>${prose(x)}</p>` : "")).join("")}`;
+      return `<h2>Investigation blocked</h2>${[b.reason, b.affectedScope, b.scopeImpact, b.unblockCondition].map(para).join("")}`;
     }
     return `<h2>No findings</h2><p>${section.stack ? "No assessed stacks in this capture." : "No reviewed uses in this investigation."}</p>`;
   }
@@ -260,18 +254,21 @@ function content(section: Section, e: Entry) {
 export function renderPreparedDependencyReport(report: Report): string {
   const groups = report.sections.map((section, i) => ({
     section,
-    entries: entries(section, i + 1),
+    sites: sites(section, i + 1),
   }));
   const pages = groups
-    .map(
-      (
-        { section, entries },
-        i,
-      ) => `<section class="advisory" data-section id="check-${i + 1}">
+    .map(({ section, sites }, i) => {
+      const articles = sites
+        .flat()
+        .map(
+          (e) =>
+            `<article class="finding" data-finding id="${e.id}" data-verdict="${e.state}">${content(section, e)}</article>`,
+        );
+      return `<section class="advisory" data-section id="check-${i + 1}">
   ${advisoryHeader(report, section)}
-  ${entries.map((e) => `<article class="finding" data-finding id="${e.id}" data-verdict="${e.state}">${content(section, e)}</article>`).join("")}
-  ${sectionAudit(section)}</section>`,
-    )
+  ${articles.join("")}
+  ${sectionAudit(section)}</section>`;
+    })
     .join("");
   const hash = createHash("sha256").update(reportInteractions).digest("base64");
   const policy = `default-src 'none'; style-src 'unsafe-inline'; script-src 'sha256-${hash}'; base-uri 'none'; form-action 'none'`;

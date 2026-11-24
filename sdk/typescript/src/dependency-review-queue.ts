@@ -1,12 +1,10 @@
 import {
   bindReceiptSelections,
   dependencyReceiptSelectionSchema,
-  selectedReceiptKey,
   type BoundReceiptSelection,
 } from "./dependency-graph-evidence.js";
 import { z } from "zod";
 import type { DependencyAttemptStore } from "./dependency-attempt-store.js";
-import { dependencyRecordHash } from "./dependency-attempt-store.js";
 import { readDependencySourceCitation } from "./dependency-source-identity.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { Claim, Decision } from "./dependency-reviewed-claims.js";
@@ -61,7 +59,7 @@ export type Premise = {
   dependencies: PremiseRef[];
 };
 
-function claimFinding(value: Claim["value"]) {
+export function claimFinding(value: Claim["value"]) {
   if (value.kind === "use") return value.use;
   if (value.kind === "disposition") return value.disposition;
 }
@@ -70,36 +68,6 @@ export function claimDependencies({ value }: Claim): PremiseRef[] {
   return value.kind === "premise"
     ? value.dependencies
     : (claimFinding(value)?.premises ?? []);
-}
-
-export function claimSelections({ value }: Claim) {
-  const evidence = value.kind === "premise" ? value : claimFinding(value);
-  return evidence?.boundReceipts ?? [];
-}
-
-export function claimInputs(claim: Claim) {
-  const v = claim.value;
-  const finding = claimFinding(v);
-  const sources = v.kind === "premise" ? v.sources : (finding?.evidence ?? []);
-  const selected = claimSelections(claim);
-  const wholeReceipts =
-    v.kind === "premise"
-      ? v.receiptIds
-      : finding
-        ? finding.observations
-            .filter((r) => !selected.some((row) => row.receiptId === r.sha256))
-            .map((r) => r.sha256)
-        : [];
-  return {
-    sources,
-    sourceIds: sources.map(dependencyRecordHash),
-    wholeReceiptIds: [...new Set(wholeReceipts)],
-    receiptKeys: [
-      ...new Set([...wholeReceipts, ...selected.map(selectedReceiptKey)]),
-    ],
-    selected,
-    dependencies: claimDependencies(claim),
-  };
 }
 
 /** An approval is reusable only while the exact claim and all its prerequisites remain current. */
@@ -352,20 +320,6 @@ export function createPremiseQueue(options: {
             (!ids || ids.includes(c.id)),
         )
         .map(status);
-    },
-    approved(refs: PremiseRef[]) {
-      const closure = new Map<string, Claim>();
-      for (const ref of refs) {
-        const visit = (r: PremiseRef) => {
-          if (closure.has(premiseKey(r))) return;
-          assertReviewedPremises(store, [r]);
-          const c = store.claim<Claim["value"]>(r.id, r.revision)!;
-          closure.set(premiseKey(r), c);
-          claimDependencies(c).forEach(visit);
-        };
-        visit(ref);
-      }
-      return [...closure.values()];
     },
   };
 }

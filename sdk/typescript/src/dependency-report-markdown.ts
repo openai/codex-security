@@ -1,5 +1,4 @@
 import {
-  citationKey,
   counts,
   inputFor,
   matchTraceFrame,
@@ -15,7 +14,11 @@ import {
   type Section,
   type StackAssessment,
 } from "./dependency-report-model.js";
-import { inspectPath } from "./dependency-report-path.js";
+import {
+  inspectPath,
+  sourceFrames,
+  type PathFrame,
+} from "./dependency-report-path.js";
 import { dependencyVerdictLabels } from "./dependency-verdict-labels.js";
 
 // Saved report text can contain Markdown or HTML. Keep it in the paragraph
@@ -92,8 +95,9 @@ function stackEvidence(f: Extract<Finding, { kind: "stack" }>) {
         code(obs.id) +
         (obs.observedAt ? " at " + code(obs.observedAt) : ""),
     );
-    if (actual !== query) context.push("Assessment scope: " + actual);
-  } else if (actual !== query) context.push("Group scope: " + actual);
+  }
+  if (actual !== query)
+    context.push(`${obs ? "Assessment" : "Group"} scope: ${actual}`);
   const limits: string[] = [];
   if (a.status === "no_match") limits.push("No matching sample in this query.");
   if (a.status === "no_coverage")
@@ -128,10 +132,7 @@ function stackEvidence(f: Extract<Finding, { kind: "stack" }>) {
   );
   for (const ref of a.missingClaims)
     limits.push(
-      "Missing referenced claim " +
-        code(ref.id + "@" + ref.revision) +
-        " · " +
-        code(ref.hash),
+      `Missing referenced claim ${code(ref.id + "@" + ref.revision)} · ${code(ref.hash)}`,
     );
   return blocks(
     limits.join(" "),
@@ -206,10 +207,7 @@ function workload(f: Exclude<Finding, { kind: "stack" }>) {
     );
   if (runtime?.mitigation)
     facts.push(
-      "Mitigation (" +
-        runtime.mitigation.basis +
-        "): " +
-        prose(runtime.mitigation.detail),
+      `Mitigation (${runtime.mitigation.basis}): ${prose(runtime.mitigation.detail)}`,
     );
   if (place?.deploymentDetail) facts.push(prose(place.deploymentDetail));
   if (place?.revision) facts.push("Revision " + code(place.revision));
@@ -224,10 +222,7 @@ function workload(f: Exclude<Finding, { kind: "stack" }>) {
   for (const i of f.item.inspections ?? [])
     facts.push(
       join([
-        prose(i.target.label) +
-          " (" +
-          i.target.relationship.replaceAll("_", " ") +
-          ")",
+        `${prose(i.target.label)} (${i.target.relationship.replaceAll("_", " ")})`,
         prose(i.question),
         i.outcome.replaceAll("_", " "),
         i.result && prose(i.result),
@@ -263,42 +258,27 @@ function snippet(path: string, line: string) {
   const fence = line.startsWith("```") ? "~~~" : "```";
   return fence + language + "\n" + line + "\n" + fence;
 }
+function sourceLine({ code, line }: PathFrame) {
+  return code && line !== undefined
+    ? code.text.split(/\r?\n/u)[line - code.startLine]?.trim()
+    : undefined;
+}
 function trace(f: Finding) {
-  function describe(
-    kind: "source" | "handoff" | "sink",
-    label: string,
-    site: { path: string; line: number; commit?: string },
-    arg?: string,
-  ) {
-    const match = matchTraceFrame(f, kind, site);
-    if ("gap" in match) return "Missing link: " + prose(match.gap);
-    const excerpt = f.excerpts[citationKey(match.cite)];
-    const line = excerpt?.text
-      .split(/\r?\n/u)
-      [site.line - match.cite.startLine]?.trim();
-    const title = { source: "Input", handoff: "Call", sink: "Sink call" }[kind];
+  const titles = { source: "Input", call: "Call", call_site: "Sink call" };
+  const steps = sourceFrames(f).map((frame) => {
+    if (frame.role === "gap") return "Missing link: " + prose(frame.label);
+    const { label, path, line, argument } = frame;
+    const text = sourceLine(frame);
     const symbol = /^[\w.$:#]+(?:\(\))?$/u.test(label)
       ? code(label)
       : prose(label);
-    const argument = arg && line?.includes(arg) ? " · follow " + code(arg) : "";
-    const heading =
-      "**" +
-      title +
-      "** " +
-      symbol +
-      " · " +
-      code(site.path + ":" + site.line) +
-      argument;
-    return blocks(heading, line && snippet(site.path, line));
-  }
-  const steps = (f.item.trace ?? []).map((s) =>
-    s.kind === "gap"
-      ? "Missing link: " + prose(s.label)
-      : describe(s.kind, s.label, s.site, s.argument),
-  );
-  const sink = f.kind === "coverage" ? undefined : f.proof?.sink;
-  if (sink)
-    steps.push(describe("sink", sink.function, sink.callSite, sink.argument));
+    const heading = join([
+      `**${titles[frame.role]}** ${symbol}`,
+      code(path + ":" + line),
+      argument && text?.includes(argument) && "follow " + code(argument),
+    ]);
+    return blocks(heading, text && snippet(path, text));
+  });
   if (steps.length < 2) return steps[0] ?? "";
   const numbered = steps.map((step, i) => {
     const marker = i + 1 + ". ";
@@ -333,10 +313,7 @@ function callPath(f: Finding, target?: Report["target"]) {
     const location = path
       ? join([path, line?.toString()], ":")
       : line && "line " + line;
-    const text =
-      excerpt && line !== undefined
-        ? excerpt.text.split(/\r?\n/u)[line - excerpt.startLine]?.trim()
-        : undefined;
+    const text = sourceLine(frame);
     const sink =
       text &&
       reviewed &&
@@ -378,18 +355,14 @@ function callPath(f: Finding, target?: Report["target"]) {
     source && blocks("**Source review**", source),
   );
 }
-function title(f: Finding, path = f.anchor?.path) {
+function title(f: Finding, path?: string) {
   const status =
     f.kind === "coverage"
       ? "Unresolved coverage"
       : dependencyVerdictLabels[f.item.verdict];
   const site = f.anchor;
   if (!site) return prose(f.label) + " — " + status;
-  const prefix = {
-    reference: "Reference ",
-    last_verified: "Last verified step ",
-    call: "",
-  }[site.kind];
+  const prefix = site.kind === "reference" ? "Reference " : "";
   return prefix + code((path ?? site.path) + ":" + site.line) + " — " + status;
 }
 function contextLabel(f: Finding) {
@@ -426,14 +399,14 @@ function finding(f: Finding, heading: string, target?: Report["target"]) {
     f.item.component &&
     code(join([f.item.component, f.item.version], " "));
   const handoff = f.kind === "coverage" && f.item.handoff;
-  const checks = f.kind === "coverage" ? [] : (f.proof?.conditions ?? []);
+  const context = prose(contextLabel(f));
   const [firstQuestion, ...others] = questions(f);
   // Prefer the explicit deciding conditions to a long explanation for open
   // stacks. Never invent a shorter verdict by truncating the agent's prose.
   const explainInDetails =
     f.kind === "stack" &&
     f.assessment.verdict === "unknown" &&
-    checks.some((check) => check.status === "unknown") &&
+    f.proof?.conditions?.some((check) => check.status === "unknown") &&
     !!firstQuestion;
   const evidence = blocks(
     explainInDetails && prose(f.item.reason),
@@ -445,7 +418,7 @@ function finding(f: Finding, heading: string, target?: Report["target"]) {
     heading + " " + title(f),
     join([
       f.anchor && (f.kind === "stack" ? code(f.label) : prose(f.label)),
-      prose(contextLabel(f)),
+      context,
       dependency,
     ]),
     input &&
@@ -469,42 +442,30 @@ function finding(f: Finding, heading: string, target?: Report["target"]) {
   return {
     decision,
     evidence:
-      evidence &&
-      blocks(
-        heading + "# " + join([identity, prose(contextLabel(f))]),
-        evidence,
-      ),
+      evidence && blocks(heading + "# " + join([identity, context]), evidence),
   };
 }
 function decisionIndex(findings: Finding[]) {
   if (findings.length <= 1) return;
   // Use the short file name unless two different files share it.
-  const files = new Map<string, Set<string>>();
   const basename = (path: string) => path.split(/[\\/]/u).at(-1)!;
-  for (const { anchor } of findings)
-    if (anchor) {
-      const name = basename(anchor.path);
-      if (!files.has(name)) files.set(name, new Set());
-      files.get(name)!.add(anchor.path);
-    }
+  const paths = new Set(
+    findings.flatMap((f) => (f.anchor ? [f.anchor.path] : [])),
+  );
+  const files = Map.groupBy(paths, basename);
   const scopes = findings.map((f) => prose(contextLabel(f)));
   const common = scopes.every((s) => s === scopes[0]) ? scopes[0] : undefined;
   const rows = findings.map((f, i) => {
     const name = f.anchor && basename(f.anchor.path);
-    const path = name && files.get(name)!.size === 1 ? name : f.anchor?.path;
+    const path = name && files.get(name)!.length === 1 ? name : f.anchor?.path;
     return join([title(f, path), !common && scopes[i]]);
   });
-  const duplicates = new Set<string>(),
-    seen = new Set<string>();
-  for (const row of rows) {
-    if (seen.has(row)) duplicates.add(row);
-    seen.add(row);
-  }
+  const groups = Map.groupBy(rows, (row) => row);
   return blocks(
     join(["**Results**", common]),
     list(
       rows.map((row, i) => {
-        if (!duplicates.has(row)) return row;
+        if (groups.get(row)!.length === 1) return row;
         const f = findings[i]!;
         return join([
           row,
@@ -559,6 +520,8 @@ function sectionBody(section: Section, heading: string) {
   );
   const results = findings.map((f) => finding(f, heading, stack?.target));
   const evidence = results.map((result) => result.evidence).filter(Boolean);
+  const subsection = (title: string, items: string[]) =>
+    items.length > 0 && blocks(heading + " " + title, list(items));
   return blocks(
     ...advisory,
     list(advisoryFunctions(details).map(code), "Vulnerable functions"),
@@ -583,22 +546,12 @@ function sectionBody(section: Section, heading: string) {
     ...evidence,
     stack?.review &&
       "Reviewed draft digest · " + code(stack.review.draftDigest),
-    dismissed.length > 0 &&
-      blocks(
-        heading + " Dismissed candidates",
-        list(
-          dismissed.map((f) => prose(f.label) + " — " + prose(f.item.reason)),
-        ),
-      ),
-    check?.limitations?.length
-      ? blocks(
-          heading + " Report limitations",
-          list(check.limitations.map(prose)),
-        )
-      : "",
-    urls.length
-      ? blocks(heading + " Advisory references", list(urls.map(code)))
-      : "",
+    subsection(
+      "Dismissed candidates",
+      dismissed.map((f) => prose(f.label) + " — " + prose(f.item.reason)),
+    ),
+    subsection("Report limitations", check?.limitations?.map(prose) ?? []),
+    subsection("Advisory references", urls.map(code)),
   );
 }
 
@@ -615,10 +568,7 @@ export function renderPreparedDependencyReportMarkdown(report: Report): string {
     blocks(
       "# " + prose(report.title),
       report.target
-        ? "Repository " +
-            code(report.target.repository) +
-            " · Analyzed commit " +
-            code(report.target.sha)
+        ? `Repository ${code(report.target.repository)} · Analyzed commit ${code(report.target.sha)}`
         : "Checkout not recorded",
       report.description && prose(report.description),
       sections.length === 0

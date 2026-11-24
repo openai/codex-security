@@ -11,11 +11,8 @@ import {
   type Section,
 } from "./dependency-report-model.js";
 import { inspectPath, type PathInspector } from "./dependency-report-path.js";
-import {
-  escapeHtml as esc,
-  safeLink,
-  prose,
-} from "./dependency-report-audit.js";
+import { escapeHtml as esc } from "./dependency-report-code.js";
+import { code, safeLink, prose } from "./dependency-report-audit.js";
 import { dependencyVerdictLabels } from "./dependency-verdict-labels.js";
 
 export type State =
@@ -30,7 +27,7 @@ export type Entry = {
   finding?: Finding;
   path?: PathInspector;
 };
-export type Group = { section: Section; entries: Entry[] };
+type Group = { section: Section; sites: Entry[][] };
 
 const labels: Record<State, string> = {
   ...dependencyVerdictLabels,
@@ -46,7 +43,7 @@ export function status(state: State): string {
 export function basename(path: string): string {
   return path.split(/[\\/]/u).at(-1) || path;
 }
-function context(values: (string | undefined | null)[]) {
+export function context(values: (string | undefined | null | false)[]) {
   return [...new Set(values.filter(Boolean))].join(" · ");
 }
 function image(digest?: string | null) {
@@ -90,7 +87,7 @@ function label(f: Finding, path: PathInspector): string {
   return f.item.location || f.proof?.sink?.function || f.item.component;
 }
 
-export function entries(section: Section, index: number): Entry[] {
+export function sites(section: Section, index: number): Entry[][] {
   const findings = section.prepared?.findings;
   if (!findings?.length) {
     const state = section.pending
@@ -98,13 +95,16 @@ export function entries(section: Section, index: number): Entry[] {
       : section.blocked
         ? "blocked"
         : "empty";
-    const name = section.pending
-      ? "Investigation not started"
-      : section.blocked
-        ? "Investigation blocked"
-        : "No reviewed uses";
     return [
-      { id: "empty-" + index, state, name, file: section.title, scope: "" },
+      [
+        {
+          id: "empty-" + index,
+          state,
+          name: "",
+          file: section.title,
+          scope: "",
+        },
+      ],
     ];
   }
   const items = findings.map((finding): Entry => {
@@ -131,11 +131,8 @@ export function entries(section: Section, index: number): Entry[] {
   }
   // Each variant keeps its own verdict and URL. Only exact source locations
   // share a heading. Group order follows the highest-priority use at each site.
-  return [...siteGroups(items)].flat();
+  return [...Map.groupBy(items, (entry) => entry.location ?? entry).values()];
 }
-const siteGroups = (items: Entry[]) =>
-  Map.groupBy(items, (entry) => entry.location ?? entry).values();
-
 function searchTerms(entry: Entry, section: Section) {
   const f = entry.finding;
   return [
@@ -150,20 +147,20 @@ function searchTerms(entry: Entry, section: Section) {
     .filter(Boolean)
     .join(" ");
 }
-function queueGroup({ section, entries: items }: Group, multi: boolean) {
-  const rows = [...siteGroups(items)]
+function queueGroup({ section, sites }: Group, multi: boolean) {
+  const rows = sites
     .map((variants) => {
       const nested = variants.length > 1;
       const key = (v: Entry) => JSON.stringify([v.name, v.scope, v.state]);
       const repeats = Map.groupBy(variants, key);
       const links = variants
         .map((entry, i) => {
-          const name =
-            entry.name === entry.file || !entry.finding ? "" : entry.name;
+          const name = entry.name === entry.file ? "" : entry.name;
           const duplicate = repeats.get(key(entry))!.length > 1;
-          const navScope = entry.finding
-            ? scope(entry.finding, nested)
-            : entry.scope;
+          const navScope =
+            entry.finding && !nested
+              ? scope(entry.finding, false)
+              : entry.scope;
           const detail = context([
             navScope,
             duplicate ? "Assessment " + (i + 1) : undefined,
@@ -184,7 +181,7 @@ function queueGroup({ section, entries: items }: Group, multi: boolean) {
   return `<div class="queue-group">${multi ? `<h3 class="queue-title">${esc(section.title)}</h3>` : ""}${rows}</div>`;
 }
 export function rail(groups: Group[]): string {
-  const items = groups.flatMap((group) => group.entries);
+  const items = groups.flatMap((group) => group.sites.flat());
   const otherStates = (
     ["unresolved", "blocked", "pending", "empty"] as const
   ).filter((s) => items.some((e) => e.state === s));
@@ -220,6 +217,12 @@ export function rail(groups: Group[]): string {
 
 function packages(details: Advisory[]) {
   const result = new Set<string>();
+  const add = (name: string, fixes: string[], range?: string | null) => {
+    const suffix = fixes.length
+      ? " (fixed in " + fixes.map(esc).join(", ") + ")"
+      : "";
+    result.add(code(name) + (range ? " " + esc(range) : "") + suffix);
+  };
   for (const advisory of details) {
     for (const affected of advisory.affected) {
       if (!affected.package) continue;
@@ -229,26 +232,14 @@ function packages(details: Advisory[]) {
         for (const event of range.events)
           if ("fixed" in event) fixes.add(event.fixed);
       }
-      const suffix = fixes.size
-        ? " (fixed in " + [...fixes].map(esc).join(", ") + ")"
-        : "";
-      result.add(
-        `<code>${esc(affected.package.ecosystem + ":" + affected.package.name)}</code>` +
-          suffix,
-      );
+      add(affected.package.ecosystem + ":" + affected.package.name, [...fixes]);
     }
     for (const v of advisory.vulnerabilities ?? []) {
       if (!v.package.name) continue;
-      const affected = v.vulnerable_version_range
-        ? " " + esc(v.vulnerable_version_range)
-        : "";
-      const fix = v.first_patched_version
-        ? " (fixed in " + esc(v.first_patched_version) + ")"
-        : "";
-      result.add(
-        `<code>${esc(v.package.ecosystem + ":" + v.package.name)}</code>` +
-          affected +
-          fix,
+      add(
+        v.package.ecosystem + ":" + v.package.name,
+        v.first_patched_version ? [v.first_patched_version] : [],
+        v.vulnerable_version_range,
       );
     }
   }
@@ -260,9 +251,7 @@ function advisoryDetails(
   details: Advisory[],
   urls: string[],
 ) {
-  const functions = advisoryFunctions(details).map(
-    (name) => `<code>${esc(name)}</code>`,
-  );
+  const functions = advisoryFunctions(details).map(code);
   const sources = [...new Set(urls)].map((url) => {
     const item = details.find((d) => d.url === url);
     return safeLink(url, item?.id || url);

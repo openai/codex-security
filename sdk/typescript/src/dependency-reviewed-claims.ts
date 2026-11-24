@@ -1,8 +1,12 @@
+import { evidencePreviews } from "./dependency-investigation-session.js";
 import type { GraphCandidates } from "./dependency-graph-candidates.js";
 import { defaultDependencyCallerScope } from "./dependency-caller-scope.js";
 import {
   assertReviewedPremises,
-  claimInputs,
+  retainedUse,
+  claimDependencies,
+  claimFinding,
+  dependencyPremiseRefSchema,
   currentApproval,
   premiseKey,
   type Premise,
@@ -25,12 +29,11 @@ import {
   dependencyGitCommitSchema,
   readDependencySourceCitation,
 } from "./dependency-source-identity.js";
-import type { discoverDependencyRepository } from "./dependency-discovery.js";
+import type { RepositoryDiscovery as Discovery } from "./dependency-discovery.js";
 import {
   investigationServer,
   type DependencyEvidenceRecord,
 } from "./dependency-evidence-sources.js";
-import { dependencyPremiseRefSchema } from "./dependency-review-queue.js";
 import {
   bindReceiptSelections,
   dependencyReceiptSelectionSchema,
@@ -46,7 +49,6 @@ import {
   dependencyUseSchema,
 } from "./dependency-stack-use.js";
 
-type Discovery = Awaited<ReturnType<typeof discoverDependencyRepository>>;
 const text = z.string().trim().min(1);
 const source = z.strictObject({
   path: text,
@@ -430,6 +432,36 @@ export type DecidingPremiseEvidence = (
   ref: PremiseRef,
 ) => DependencyReviewReference[];
 
+type SourceRange = Omit<
+  Extract<DependencyReviewReference, { kind: "source" }>,
+  "kind"
+>;
+
+function sourceReference({ path, commit, startLine, endLine }: SourceRange) {
+  return { kind: "source" as const, path, commit, startLine, endLine };
+}
+
+function siteReference(path: string, commit: string, line: number) {
+  return sourceReference({ path, commit, startLine: line, endLine: line });
+}
+
+function observationReference(ref: {
+  sha256: string;
+  originalPayloadSha256: string;
+}) {
+  return {
+    kind: "receipt" as const,
+    receiptId: ref.sha256,
+    originalPayloadSha256: ref.originalPayloadSha256,
+  };
+}
+
+function containsLine(range: SourceRange, path: string, line: number) {
+  return (
+    range.path === path && range.startLine <= line && line <= range.endLine
+  );
+}
+
 function coversReference(
   proof: DependencyReviewReference,
   ref: DependencyReviewReference,
@@ -558,13 +590,7 @@ function bindFindingEvidence(
   ) {
     details.push({
       field,
-      ref: {
-        kind: "source",
-        path: site.path,
-        commit: site.commit ?? revision,
-        startLine: site.line,
-        endLine: site.line,
-      },
+      ref: siteReference(site.path, site.commit ?? revision, site.line),
     });
   }
   use.trace?.forEach((frame, i) => {
@@ -578,11 +604,10 @@ function bindFindingEvidence(
       use.proof.sink.callSite.commit)
   )
     registerSite("proof.sink.callSite", use.proof.sink.callSite);
-  use.services?.forEach((v, i) => register("services[" + i + "]", v.evidence));
-  use.inspections?.forEach((v, i) =>
-    register("inspections[" + i + "]", v.evidence),
-  );
-  use.tags?.forEach((v, i) => register("tags[" + i + "]", v.evidence));
+  for (const field of ["services", "inspections", "tags"] as const)
+    use[field]?.forEach((entry, index) =>
+      register(`${field}[${index}]`, entry.evidence),
+    );
   register("inputSource", use.inputSource?.evidence);
   register("runtimeContext", use.runtimeContext?.evidence);
   use.openConditions?.forEach((v, i) =>
@@ -604,18 +629,13 @@ function bindFindingEvidence(
   const boundReceipts = bindReceiptSelections(selections, (id) =>
     recordById.get(id),
   );
+  const rowsByReceipt = Map.groupBy(boundReceipts, (row) => row.receiptId);
   const candidates: { key: string; ref: DependencyReviewReference }[] = [];
   if (details.length) {
     for (const range of evidence)
       candidates.push({
         key: dependencyRecordHash(range),
-        ref: {
-          kind: "source",
-          path: range.path,
-          commit: range.commit,
-          startLine: range.startLine,
-          endLine: range.endLine,
-        },
+        ref: sourceReference(range),
       });
     for (const row of boundReceipts)
       candidates.push({
@@ -623,15 +643,8 @@ function bindFindingEvidence(
         ref: selectedReceiptReference(row),
       });
     for (const obs of observations)
-      if (!boundReceipts.some((row) => row.receiptId === obs.sha256))
-        candidates.push({
-          key: obs.sha256,
-          ref: {
-            kind: "receipt",
-            receiptId: obs.sha256,
-            originalPayloadSha256: obs.originalPayloadSha256,
-          },
-        });
+      if (!rowsByReceipt.has(obs.sha256))
+        candidates.push({ key: obs.sha256, ref: observationReference(obs) });
     for (const premise of use.premises ?? [])
       for (const ref of decidingPremiseEvidence?.(premise) ?? [])
         candidates.push({ key: premiseKey(premise), ref });
@@ -656,23 +669,16 @@ function bindFindingEvidence(
           (ranges.size > 8 ? " (additional ranges omitted)." : ".")
         : "";
       throw new CodexSecurityError(
-        "Unbound finding evidence at " +
-          field +
-          ": " +
-          JSON.stringify(ref) +
-          "." +
-          allowed +
+        `Unbound finding evidence at ${field}: ${JSON.stringify(ref)}.${allowed}` +
           " Cite a contained range at its Git revision, the exact selected original receipt and payload hash, or an approved premise that selected that evidence.",
       );
     }
     return { field, keys: [...new Set(keys)] };
   });
   const linkedObservations = observations.map((observation) => {
-    const candidates = boundReceipts.filter(
-      (row) => row.receiptId === observation.sha256,
-    );
-    if (!candidates.length) return { ...observation, evidenceKeys: undefined };
-    const evidenceKeys = candidates
+    const rows = rowsByReceipt.get(observation.sha256);
+    if (!rows) return { ...observation, evidenceKeys: undefined };
+    const evidenceKeys = rows
       .filter((row) => {
         const selected = selectedReceiptValue(
           recordById.get(row.receiptId)!,
@@ -688,8 +694,7 @@ function bindFindingEvidence(
     return { ...observation, evidenceKeys };
   });
   return {
-    observations,
-    linkedObservations,
+    observations: linkedObservations,
     boundReceipts,
     findingEvidence,
     running,
@@ -769,28 +774,13 @@ export async function verifyProposedDisposition(
         `Unknown candidate for this disposition in scope ${scope.id}: ${path}:${line}.`,
       );
     const keys = evidence
-      .filter(
-        (e) =>
-          e.commit === revision &&
-          e.path === path &&
-          e.startLine <= line &&
-          line <= e.endLine,
-      )
+      .filter((ref) => ref.commit === revision && containsLine(ref, path, line))
       .map(dependencyRecordHash);
+    const site = siteReference(path, revision, line);
     for (const premise of input.premises ?? [])
       if (
         decidingPremiseEvidence(premise).some((ref) =>
-          coversReference(
-            ref,
-            {
-              kind: "source",
-              path,
-              startLine: line,
-              endLine: line,
-              commit: revision,
-            },
-            revision,
-          ),
+          coversReference(ref, site, revision),
         )
       )
         keys.push(premiseKey(premise));
@@ -807,27 +797,17 @@ export async function verifyProposedDisposition(
     };
   });
   const location = input.location ?? scope.location;
+  const names = [location, scope.location, input.place?.workload];
+  const identifiesWorkload = (q: string) =>
+    names.some((name) => name && name !== "." && mentions(q, name));
   if (
     bound.running.length &&
-    !bound.running.some(
-      (q) =>
-        mentions(q, revision) &&
-        [location, scope.location, input.place?.workload].some(
-          (name) => name && name !== "." && mentions(q, name),
-        ),
-    )
+    !bound.running.some((q) => mentions(q, revision) && identifiesWorkload(q))
   )
     throw new CodexSecurityError(
       "An observation of a running place must identify this disposition's revision and workload.",
     );
-  if (
-    bound.access.length &&
-    !bound.access.some((q) =>
-      [location, scope.location, input.place?.workload].some(
-        (name) => name && name !== "." && mentions(q, name),
-      ),
-    )
-  )
+  if (bound.access.length && !bound.access.some(identifiesWorkload))
     throw new CodexSecurityError(
       "A caller access observation must identify this disposition's workload.",
     );
@@ -837,7 +817,7 @@ export async function verifyProposedDisposition(
     locations,
     revision,
     evidence,
-    observations: bound.linkedObservations,
+    observations: bound.observations,
     boundReceipts: bound.boundReceipts,
     findingEvidence: bound.findingEvidence,
   };
@@ -872,14 +852,13 @@ export async function verifyProposedUse(
     // A containing distribution and the library in its wheel or binary have
     // independently selected versions. Bind the nested identity to original
     // source before letting review decide the caller and advisory relationship.
-    const byPath = new Map<string, string[]>();
-    for (const ref of evidence) {
-      if (ref.commit !== revision) continue;
-      const excerpts = byPath.get(ref.path) ?? [];
-      excerpts.push(ref.excerpt);
-      byPath.set(ref.path, excerpts);
-    }
-    const excerpts = [...byPath.values()].map((lines) => lines.join("\n"));
+    const byPath = Map.groupBy(
+      evidence.filter((ref) => ref.commit === revision),
+      (ref) => ref.path,
+    );
+    const excerpts = [...byPath.values()].map((refs) =>
+      refs.map((ref) => ref.excerpt).join("\n"),
+    );
     const parents = excerpts.filter((text) => {
       const name = text.toLowerCase().includes(scope.component.toLowerCase());
       // A filename can delimit its version with "-" rather than quotes.
@@ -911,11 +890,7 @@ export async function verifyProposedUse(
     path !== undefined &&
     line !== undefined &&
     evidence.some(
-      (ref) =>
-        ref.commit === revision &&
-        ref.path === path &&
-        ref.startLine <= line &&
-        line <= ref.endLine,
+      (ref) => ref.commit === revision && containsLine(ref, path, line),
     );
   const citesSelection = covers(
     scope.selection?.lockfile,
@@ -933,21 +908,15 @@ export async function verifyProposedUse(
       `Cite the dependency selection or caller for this scope: ${scope.location}`,
     );
   assertDependencyUseProofCitations(use.proof, evidence, scope.location);
-  const {
-    observations,
-    linkedObservations,
-    boundReceipts,
-    findingEvidence,
-    running,
-    access,
-  } = bindFindingEvidence(
-    use,
-    revision,
-    evidence,
-    records,
-    callerScope,
-    decidingPremiseEvidence,
-  );
+  const { observations, boundReceipts, findingEvidence, running, access } =
+    bindFindingEvidence(
+      use,
+      revision,
+      evidence,
+      records,
+      callerScope,
+      decidingPremiseEvidence,
+    );
   const location = verifiedLocation(scope, use, running, covers);
   const names = [location, ...scope.runtimeServices].filter(
     (name) => name !== ".",
@@ -1006,18 +975,17 @@ export async function verifyProposedUse(
   if (use.verdict === "exploitable") {
     if (
       !facts.has("attacker_control") ||
-      !use.proof.sink ||
       !use.proof.conditions.length ||
       use.proof.conditions.some((c) => c.status !== "met") ||
-      !observations.some((ref) => ref.supports.includes("running")) ||
-      !observations.some((ref) => ref.supports.includes("access"))
+      !running.length ||
+      !access.length
     )
       throw new CodexSecurityError(
         "An exploitable use needs cited attacker control, all advisory conditions met, and observations of this running workload and caller access.",
       );
   }
   for (const support of ["running", "access"] as const) {
-    const keys = linkedObservations.flatMap((r) =>
+    const keys = observations.flatMap((r) =>
       r.supports.includes(support) ? (r.evidenceKeys ?? [r.sha256]) : [],
     );
     if (keys.length)
@@ -1040,9 +1008,7 @@ export async function verifyProposedUse(
         evidence.some(
           (ref) =>
             ref.supports.includes("exclusion") &&
-            ref.path === line.path &&
-            ref.startLine <= line.line &&
-            ref.endLine >= line.line,
+            containsLine(ref, line.path, line.line),
         ),
       ),
     );
@@ -1062,7 +1028,7 @@ export async function verifyProposedUse(
     ...use,
     selectedCopyExcluded,
     evidence,
-    observations: linkedObservations,
+    observations,
     ...(boundReceipts.length && { boundReceipts }),
     ...(findingEvidence.length && { findingEvidence }),
     location,
@@ -1113,19 +1079,151 @@ export function findingSelectionProblem(
   decision: Decision,
 ) {
   if (!decision.approved) return;
-  const finding =
-    value.kind === "use"
-      ? value.use
-      : value.kind === "disposition"
-        ? value.disposition
-        : undefined;
-  const missing = finding?.findingEvidence
-    ?.filter(
+  const missing = claimFinding(value)
+    ?.findingEvidence?.filter(
       ({ keys }) => !keys.some((key) => decision.evidenceKeys.includes(key)),
     )
     .map(({ field }) => field);
   if (missing?.length)
     return `Approval of ${id} requires evidence for ${missing.join(", ")}. Select a key from each findingEvidence entry or reject the claim.`;
+}
+
+function claimSelections({ value }: Claim) {
+  const evidence = value.kind === "premise" ? value : claimFinding(value);
+  return evidence?.boundReceipts ?? [];
+}
+
+function claimInputs(claim: Claim) {
+  const v = claim.value;
+  const finding = claimFinding(v);
+  const sources = v.kind === "premise" ? v.sources : (finding?.evidence ?? []);
+  const selected = claimSelections(claim);
+  const projected = new Set(selected.map((row) => row.receiptId));
+  const wholeReceiptIds =
+    v.kind === "premise"
+      ? v.receiptIds
+      : (finding?.observations ?? [])
+          .map((r) => r.sha256)
+          .filter((id) => !projected.has(id));
+  const sourceIds = sources.map(dependencyRecordHash);
+  const receiptKeys = [
+    ...new Set([...wholeReceiptIds, ...selected.map(selectedReceiptKey)]),
+  ];
+  const dependencies = claimDependencies(claim);
+  // Offer exactly the keys we accept when the reviewer replies.
+  const keys = new Set([
+    ...sourceIds,
+    ...receiptKeys,
+    ...dependencies.map(premiseKey),
+  ]);
+  return {
+    sources,
+    sourceIds,
+    wholeReceiptIds,
+    receiptKeys,
+    selected,
+    dependencies,
+    keys,
+  };
+}
+
+export function prepareClaimReview(
+  store: DependencyAttemptStore,
+  records: Receipts,
+  outstanding: Claim[],
+) {
+  let previewBytes = 24_000;
+  const receiptIds = new Set<string>();
+  const projectedIds = new Set<string>();
+  const claims = outstanding.map((c) => {
+    const inputs = claimInputs(c);
+    const { selected } = inputs;
+    for (const id of inputs.wholeReceiptIds) receiptIds.add(id);
+    for (const row of selected) projectedIds.add(row.receiptId);
+    return {
+      ...reference(c),
+      payload: c.value,
+      ...(c.value.kind === "disposition" &&
+        c.value.replacesUse && {
+          previousUse: approvedUse(store, c.value.replacesUse),
+        }),
+      availableEvidenceKeys: [...inputs.keys],
+      ...(selected.length && {
+        receiptSelections: selected.map((row) => {
+          const value = selectedReceiptValue(
+            records.get(row.receiptId)!,
+            row.selection,
+          );
+          const size = Buffer.byteLength(JSON.stringify(value));
+          const inline = size <= 4000 && size <= previewBytes;
+          if (inline) previewBytes -= size;
+          return {
+            id: selectedReceiptKey(row),
+            ...selectedReceiptReference(row),
+            ...(inline
+              ? { result: value }
+              : {
+                  instructions:
+                    "Read the original row with read_dependency_evidence using its receiptId as id and this selection.",
+                }),
+          };
+        }),
+      }),
+      sources: inputs.sources.map((source, i) => ({
+        id: inputs.sourceIds[i],
+        source,
+      })),
+      dependencies: inputs.dependencies,
+    };
+  });
+  const reviewsCoverage = outstanding.some((c) => c.value.kind === "coverage");
+
+  const approvals = new Map<string, Decision | undefined>();
+  const previous: Claim[] = [];
+  if (reviewsCoverage) {
+    const ids = new Set(outstanding.map((c) => c.id));
+    for (const row of store.claims<ReviewClaim>()) {
+      const claim = retainedUse(store, row.id) ?? row;
+      if (
+        !ids.has(claim.id) &&
+        claimFinding(claim.value) &&
+        currentApproval(store, claim, approvals)
+      )
+        previous.push(claim);
+    }
+  }
+  const prerequisites = [
+    ...[...outstanding, ...previous].flatMap(claimDependencies),
+    ...claims.flatMap((c) => c.previousUse?.payload.use.premises ?? []),
+  ];
+  const approved = [
+    ...previous,
+    ...approvedPremises(store, prerequisites, "all", approvals),
+  ];
+  // Coverage review sees remaining external receipts, but a selected row
+  // must not implicitly include the whole result it came from.
+  if (reviewsCoverage) {
+    for (const c of approved)
+      for (const row of claimSelections(c)) projectedIds.add(row.receiptId);
+    for (const record of records.values())
+      if (
+        record.server !== investigationServer &&
+        !projectedIds.has(record.sha256)
+      )
+        receiptIds.add(record.sha256);
+  }
+  return {
+    claims,
+    approvedClaims: approved.map((c) => ({
+      ...reference(c),
+      payload: c.value,
+      decision: currentApproval(store, c, approvals),
+    })),
+    evidence: evidencePreviews(
+      [...receiptIds].map((id) => records.get(id)!),
+      previewBytes,
+    ),
+  };
 }
 
 /** Commit approvals only if every decision still names the exact current claim. */
@@ -1154,8 +1252,8 @@ export function approveDependencyClaims(
         throw new CodexSecurityError(
           "Independent review does not match the current claim revisions.",
         );
-      const { sourceIds, receiptKeys, dependencies } = claimInputs(claim);
-      assertReviewedPremises(store, dependencies);
+      const inputs = claimInputs(claim);
+      assertReviewedPremises(store, inputs.dependencies);
       if (
         decision.approved &&
         claim.value.kind === "disposition" &&
@@ -1163,11 +1261,7 @@ export function approveDependencyClaims(
         !currentApproval(store, claim)
       )
         approvedUse(store, claim.value.replacesUse);
-      const allowed = new Set([
-        ...sourceIds,
-        ...receiptKeys,
-        ...dependencies.map(premiseKey),
-      ]);
+      const allowed = inputs.keys;
       if (
         new Set(decision.evidenceKeys).size !== decision.evidenceKeys.length ||
         decision.evidenceKeys.some((key) => !allowed.has(key)) ||
@@ -1199,4 +1293,347 @@ export function approveDependencyClaims(
         .join("\n"),
     );
   return reviewed;
+}
+
+// Approval requires every prerequisite. Only the edges selected by the reviewer
+// contribute deciding evidence. Both views preserve first-visit order.
+function approvedPremises(
+  store: DependencyAttemptStore,
+  refs: PremiseRef[],
+  edges: "all" | "deciding" = "all",
+  approvals = new Map<string, Decision | undefined>(),
+) {
+  const visited = new Map<string, Claim>();
+  function visit(ref: PremiseRef) {
+    const key = premiseKey(ref);
+    if (visited.has(key)) return;
+    assertReviewedPremises(store, [ref], approvals);
+    const row = store.claim<ReviewClaim>(ref.id, ref.revision)!;
+    visited.set(key, row);
+    const keys = approvals.get(key)!.evidenceKeys;
+    for (const dep of claimDependencies(row))
+      if (edges === "all" || keys.includes(premiseKey(dep))) visit(dep);
+  }
+  refs.forEach(visit);
+  return [...visited.values()];
+}
+
+type Receipts = ReadonlyMap<string, DependencyEvidenceRecord>;
+
+export function selectedPremises(
+  store: DependencyAttemptStore,
+  records: Receipts,
+  refs: PremiseRef[],
+  approvals = new Map<string, Decision | undefined>(),
+) {
+  const rows = approvedPremises(store, refs, "deciding", approvals);
+  const evidence: DependencyReviewReference[] = [];
+  for (const row of rows) {
+    if (row.value.kind !== "premise") continue;
+    const keys = new Set(approvals.get(premiseKey(row))!.evidenceKeys);
+    for (const ref of row.value.sources)
+      if (keys.has(dependencyRecordHash(ref)))
+        evidence.push(sourceReference(ref));
+    for (const projection of row.value.boundReceipts ?? [])
+      if (keys.has(selectedReceiptKey(projection)))
+        evidence.push(selectedReceiptReference(projection));
+    for (const id of new Set(row.value.receiptIds))
+      if (keys.has(id))
+        evidence.push({
+          kind: "receipt",
+          receiptId: id,
+          originalPayloadSha256: dependencyRecordHash(records.get(id)!.result),
+        });
+  }
+  return { claims: rows.map(reference), evidence };
+}
+
+function publishedFindingEvidence(
+  use: VerifiedUse | VerifiedDisposition,
+  keys: ReadonlySet<string>,
+  premiseEvidence: readonly DependencyReviewReference[],
+) {
+  const decidingEvidence: DependencyReviewReference[] = [
+    ...use.evidence
+      .filter((ref) => keys.has(dependencyRecordHash(ref)))
+      .map(sourceReference),
+    ...use.observations
+      .filter((ref) => !ref.evidenceKeys && keys.has(ref.sha256))
+      .map(observationReference),
+    ...(use.boundReceipts ?? [])
+      .filter((row) => keys.has(selectedReceiptKey(row)))
+      .map(selectedReceiptReference),
+    ...premiseEvidence,
+  ];
+  const evidence = use.evidence.map(
+    ({ path, commit, startLine, endLine, supports }) => ({
+      path,
+      commit,
+      startLine,
+      endLine,
+      supports: supports.filter(
+        (s) => s === "affected_copy" || s === "affected_use",
+      ),
+    }),
+  );
+  const key = (ref: (typeof evidence)[number]) =>
+    JSON.stringify([ref.path, ref.commit, ref.startLine, ref.endLine]);
+  const ranges = new Set(evidence.map(key));
+  for (const ref of premiseEvidence) {
+    if (ref.kind !== "source") continue;
+    const range = {
+      path: ref.path,
+      commit: ref.commit ?? use.revision,
+      startLine: ref.startLine,
+      endLine: ref.endLine,
+      supports: [],
+    };
+    const rangeKey = key(range);
+    if (!ranges.has(rangeKey)) {
+      evidence.push(range);
+      ranges.add(rangeKey);
+    }
+  }
+  return {
+    evidence,
+    ...(use.trace && {
+      trace: use.trace.map((frame) =>
+        frame.kind === "gap"
+          ? frame
+          : {
+              ...frame,
+              site: {
+                ...frame.site,
+                commit: frame.site.commit ?? use.revision,
+              },
+            },
+      ),
+    }),
+    observations: use.observations.map((ref) => ({
+      server: ref.server,
+      record: ref.quote,
+      supports: ref.supports.filter(
+        (s) => s === "running" || s === "access" || s === "affected_copy",
+      ),
+    })),
+    decidingEvidence: [
+      ...new Map(
+        decidingEvidence.map((ref) => [dependencyRecordHash(ref), ref]),
+      ).values(),
+    ],
+  };
+}
+
+type SelectedPremises = ReturnType<typeof selectedPremises>;
+
+function findingDetails({
+  services,
+  openConditions,
+  inspections,
+  inputSource,
+  runtimeContext,
+  tags,
+}: VerifiedUse | VerifiedDisposition) {
+  return {
+    ...(services && { services }),
+    ...(openConditions && { openConditions }),
+    ...(inspections && { inspections }),
+    ...(inputSource && { inputSource }),
+    ...(runtimeContext && { runtimeContext }),
+    ...(tags && { tags }),
+  };
+}
+
+function reportedDisposition(
+  disposition: VerifiedDisposition,
+  claim: Claim,
+  keys: ReadonlySet<string>,
+  selected: SelectedPremises,
+) {
+  const { kind, reason, location, locations, place, handoff, classification } =
+    disposition;
+  return {
+    kind,
+    reason,
+    location,
+    ...(locations.length && { locations }),
+    ...(place && { place }),
+    ...(handoff && { handoff }),
+    ...(classification && { classification }),
+    ...findingDetails(disposition),
+    ...publishedFindingEvidence(disposition, keys, selected.evidence),
+    conclusionClaim: reference(claim),
+    ...(selected.claims.length && { supportingClaims: selected.claims }),
+  };
+}
+
+export function reportedUse(
+  use: VerifiedUse,
+  claim: Claim,
+  evidenceKeys: readonly string[],
+  selected: SelectedPremises = { evidence: [], claims: [] },
+) {
+  const runningQuotes = use.observations
+    .filter((ref) => ref.supports.includes("running"))
+    .map((ref) => ref.quote);
+  const running = runningQuotes.length > 0;
+  const configured =
+    use.configured || use.place?.deploymentBasis === "configured";
+
+  const deployment = running
+    ? ("confirmed" as const)
+    : configured
+      ? ("configured" as const)
+      : ("unknown" as const);
+  return {
+    location: use.location,
+    component: use.component,
+    version: use.version,
+    verdict: use.verdict,
+    reason: use.reason,
+    deployment,
+    ...publishedFindingEvidence(use, new Set(evidenceKeys), selected.evidence),
+    ...findingDetails(use),
+    place: {
+      kind: use.placeKind ?? "unknown",
+      environment: null,
+      artifact: null,
+      observationWindow: null,
+      deploymentBasis:
+        deployment === "confirmed" ? ("observed" as const) : deployment,
+      deploymentDetail: running ? runningQuotes.join("\n") : null,
+      dependencySelection: use.version,
+      patch: null,
+      ...use.place,
+      ...(running && { deploymentBasis: "observed" as const }),
+      revision: use.revision,
+      unresolvedQuestions: [
+        ...new Set([
+          ...use.remainingQuestions,
+          ...(use.place?.unresolvedQuestions ?? []),
+        ]),
+      ],
+    },
+    proof:
+      use.trace?.length && use.proof.sink
+        ? {
+            ...use.proof,
+            sink: {
+              ...use.proof.sink,
+              callSite: {
+                ...use.proof.sink.callSite,
+                commit: use.proof.sink.callSite.commit ?? use.revision,
+              },
+            },
+          }
+        : use.proof,
+    conclusionClaim: reference(claim),
+    ...(selected.claims.length && { supportingClaims: selected.claims }),
+  };
+}
+
+/** Read claims, approvals and their prerequisites in one consistent snapshot. */
+export function publishApprovedClaims(
+  store: DependencyAttemptStore,
+  conclusions: Claim[],
+  context: {
+    records: Receipts;
+    failures: Receipts;
+    contextHash: string;
+    revision: string | undefined;
+    subject: string;
+  },
+) {
+  const { records, failures, contextHash, revision, subject } = context;
+  return store.read(() => {
+    const approvals = new Map<string, Decision | undefined>();
+    const premises = approvedPremises(
+      store,
+      conclusions.flatMap(claimDependencies),
+      "all",
+      approvals,
+    );
+    const uses: ReturnType<typeof reportedUse>[] = [];
+    const dispositions: ReturnType<typeof reportedDisposition>[] = [];
+    const sources = new Map<
+      string,
+      ReturnType<typeof claimInputs>["sources"][number]
+    >();
+    const receipts = new Map<string, unknown>([...records, ...failures]);
+    const claims = [...premises, ...conclusions].map((claim) => {
+      const review = currentApproval(store, claim, approvals);
+      if (!review)
+        throw new DependencyReviewRejection(
+          "Missing current approval for " + claim.id,
+        );
+
+      const { value } = claim;
+      const inputs = claimInputs(claim);
+      const keys = new Set(review.evidenceKeys);
+      for (const [i, source] of inputs.sources.entries())
+        sources.set(inputs.sourceIds[i]!, source);
+      for (const row of inputs.selected) {
+        const key = selectedReceiptKey(row);
+        if (keys.has(key))
+          receipts.set(key, {
+            ...row,
+            result: selectedReceiptValue(
+              records.get(row.receiptId)!,
+              row.selection,
+            ),
+          });
+      }
+
+      let location: string | null = null;
+      if (value.kind === "use" || value.kind === "disposition") {
+        const selected = selectedPremises(
+          store,
+          records,
+          inputs.dependencies.filter((ref) => keys.has(premiseKey(ref))),
+          approvals,
+        );
+        if (value.kind === "use") {
+          location = value.use.location;
+          uses.push(
+            reportedUse(value.use, claim, review.evidenceKeys, selected),
+          );
+        } else {
+          location = value.disposition.location;
+          dispositions.push(
+            reportedDisposition(value.disposition, claim, keys, selected),
+          );
+        }
+      }
+      return {
+        ...reference(claim),
+        state: "approved" as const,
+        contextHash,
+        payload: value,
+        scope: { revision: revision ?? null, location, subject },
+        dependencies: inputs.dependencies,
+        decision: {
+          accepted: true as const,
+          reason: review.reason,
+          evidenceKeys: review.evidenceKeys,
+          citedVersion:
+            value.kind === "use" ? (value.use.version ?? null) : null,
+        },
+        evidence: {
+          sourceIds: inputs.sourceIds,
+          receiptIds: inputs.receiptKeys.filter(
+            (key) => !key.startsWith("receipt:") || keys.has(key),
+          ),
+        },
+      };
+    });
+    return {
+      uses,
+      dispositions,
+      claims,
+      claimEvidence: {
+        sources: Object.fromEntries(sources),
+        receipts: Object.fromEntries(receipts),
+      },
+    };
+  });
 }

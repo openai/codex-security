@@ -13,7 +13,8 @@ import { basename, dirname, join, relative } from "node:path";
 import type { DependencyBlockDetails } from "./dependency-blocked-schema.js";
 import type { DependencyPackage } from "./dependency-advisory.js";
 import { formatSecurityPolicyText } from "./security-policy.js";
-import { isRecord } from "./record.js";
+import { asRecord, isRecord } from "./record.js";
+import { dependencyVerdictLabels } from "./dependency-verdict-labels.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { DependencyTarget } from "./dependency-source-identity.js";
 
@@ -52,6 +53,12 @@ export type DependencyProgressSink = (
   details?: Record<string, unknown>,
 ) => void;
 
+const defaultStages: Record<string, string> = {
+  advisory: "advisory_lookup",
+  discovery: "investigate",
+  investigation: "investigate",
+  review: "review",
+};
 const stages: Record<string, string> = {
   osv: "Looking up advisories in OSV",
   advisory_lookup: "Looking up advisories",
@@ -71,12 +78,16 @@ const activities: Record<string, string> = {
   runtime: "Checking runtime inventory",
   profiles: "Checking runtime stacks",
 };
-const verdictNames: Record<string, string> = {
-  exploitable: "exploitable",
-  potentially_exploitable: "potentially exploitable",
-  ruled_out: "ruled out",
-  unknown: "requires more information",
-};
+const verdictNames = Object.fromEntries(
+  Object.entries(dependencyVerdictLabels).map(([key, label]) => [
+    key,
+    label.toLowerCase(),
+  ]),
+);
+
+function progressParts(...parts: unknown[]) {
+  return parts.filter(Boolean).join(" · ");
+}
 
 function pathList(value: unknown) {
   if (!Array.isArray(value)) return "";
@@ -106,23 +117,19 @@ function progressLine(type: string, fields: Record<string, unknown>) {
     case "advisory_summary":
       return `Advisory · ${fields["summary"]}`;
     case "proposed_sink":
-      return [
+      return progressParts(
         "Proposed sink",
         fields["function"],
         fields["path"] &&
           `${fields["path"]}${fields["line"] ? ":" + fields["line"] : ""}`,
-      ]
-        .filter(Boolean)
-        .join(" · ");
+      );
     case "activity_started": {
-      const scope = isRecord(fields["scope"]) ? fields["scope"] : {};
-      return [
+      const scope = asRecord(fields["scope"]) ?? {};
+      return progressParts(
         activities[String(fields["activity"])],
         scope["upstream"] ?? pathList(scope["files"] ?? scope["directories"]),
         scope["symbol"],
-      ]
-        .filter(Boolean)
-        .join(" · ");
+      );
     }
     case "activity_finished": {
       const paths = pathList(fields["searchedPaths"]);
@@ -133,31 +140,27 @@ function progressLine(type: string, fields: Record<string, unknown>) {
       return;
     }
     case "reviewed":
-      return [
+      return progressParts(
         verdictNames[String(fields["verdict"])],
         fields["location"],
         fields["scope"],
         fields["reason"],
         fields["previousVerdict"] &&
           `previously ${verdictNames[String(fields["previousVerdict"])]}`,
-      ]
-        .filter(Boolean)
-        .join(" · ");
+      );
     case "reviewed_group":
       return `${verdictNames[String(fields["verdict"])]} · ${fields["callsites"]} reviewed calls · ${fields["location"]}`;
     case "report_ready": {
-      const counts = Object.entries(
-        isRecord(fields["verdicts"]) ? fields["verdicts"] : {},
-      ).filter(([, n]) => typeof n === "number" && n > 0);
-      return [
+      const counts = Object.entries(asRecord(fields["verdicts"]) ?? {}).filter(
+        ([, n]) => typeof n === "number" && n > 0,
+      );
+      return progressParts(
         "Investigation summary",
         ...counts.map(([key, n]) => `${n} ${verdictNames[key]}`),
         !counts.length && "0 reviewed uses",
         fields["limitations"] && `${fields["limitations"]} limitations`,
         fields["path"] && `Report saved · ${fields["path"]}`,
-      ]
-        .filter(Boolean)
-        .join(" · ");
+      );
     }
     case "finished":
       if (fields["outcome"] !== "completed")
@@ -173,22 +176,17 @@ function reportSummary(report: unknown) {
     unknown: 0,
   };
   let limitations = 0;
-  if (isRecord(report)) {
-    for (const check of Array.isArray(report["checks"])
-      ? report["checks"]
-      : [report]) {
-      if (!isRecord(check)) continue;
-      if (Array.isArray(check["limitations"]))
-        limitations += check["limitations"].length;
-      const uses = check["uses"] ?? check["assessments"];
-      if (Array.isArray(uses))
-        for (const use of uses)
-          if (
-            isRecord(use) &&
-            typeof use["verdict"] === "string" &&
-            Object.hasOwn(verdicts, use["verdict"])
-          )
-            verdicts[use["verdict"] as keyof typeof verdicts]++;
+  const checks = asRecord(report)?.["checks"];
+  for (const check of Array.isArray(checks) ? checks : [report]) {
+    if (!isRecord(check)) continue;
+    if (Array.isArray(check["limitations"]))
+      limitations += check["limitations"].length;
+    const uses = check["uses"] ?? check["assessments"];
+    if (!Array.isArray(uses)) continue;
+    for (const use of uses) {
+      const verdict = asRecord(use)?.["verdict"];
+      if (typeof verdict === "string" && Object.hasOwn(verdicts, verdict))
+        verdicts[verdict as keyof typeof verdicts]++;
     }
   }
   return { verdicts, limitations };
@@ -313,12 +311,7 @@ export async function withDependencyCheckOutput<T>(
     subject = options.subject,
     details?: Record<string, unknown>,
   ) {
-    const phase = {
-      advisory: "advisory_lookup",
-      discovery: "investigate",
-      investigation: "investigate",
-      review: "review",
-    }[type as "advisory" | "discovery" | "investigation" | "review"];
+    const phase = defaultStages[type];
     writeEvent(type, subject, details);
     if (phase)
       writeEvent("stage", subject, { stage: details?.["stage"] ?? phase });

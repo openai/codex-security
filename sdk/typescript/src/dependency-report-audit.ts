@@ -1,4 +1,7 @@
-import { renderDependencyCode } from "./dependency-report-code.js";
+import {
+  escapeHtml as esc,
+  renderDependencyCode,
+} from "./dependency-report-code.js";
 import {
   citationKey,
   inputFor,
@@ -12,24 +15,12 @@ import {
   type DependencyReviewReference,
   type Section,
   type StackReport,
-  type DependencyFindingDetails,
 } from "./dependency-report-model.js";
-import { isRecord } from "./record.js";
+import { asRecord, isRecord } from "./record.js";
+import type { DependencyClaimReference } from "./dependency-stack-claims.js";
 import { claimKey, walkClaims } from "./dependency-report-proof.js";
-const esc = (value: string) =>
-  value.replace(
-    /[&<>"'\r]/gu,
-    (ch) =>
-      ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#39;",
-        "\r": "&#13;",
-      })[ch]!,
-  );
-const code = (value: string) => `<code>${esc(value)}</code>`;
+
+export const code = (value: string) => `<code>${esc(value)}</code>`;
 const n = (count: number, noun: string) =>
   `${count.toLocaleString("en-US")} ${noun}${count === 1 ? "" : "s"}`;
 const rangeLabel = ({
@@ -38,7 +29,6 @@ const rangeLabel = ({
   endLine,
 }: Pick<Citation, "path" | "startLine" | "endLine">) =>
   `${path}:${startLine}${endLine === startLine ? "" : `–${endLine}`}`;
-export { esc as escapeHtml };
 export function safeLink(value: string, label = value) {
   const url = URL.parse(value);
   if (
@@ -94,6 +84,7 @@ const factLabels: Record<string, string> = {
   access: "Caller access",
 };
 type Field = [string, string | null | undefined];
+const str = (x: unknown) => (typeof x === "string" ? x : undefined);
 function facts(rows: Field[]) {
   const body = rows
     .map(([key, value]) =>
@@ -108,11 +99,16 @@ const audit = (label: string, html: string) =>
   html
     ? `<details class="audit"><summary>${esc(label)}</summary><div class="audit-body">${html}</div></details>`
     : "";
-const list = (entries: string[]) =>
-  entries.length
-    ? `<ul>${entries.map((v) => `<li>${v}</li>`).join("")}</ul>`
-    : "";
-const para = (value?: string | null) => (value ? `<p>${prose(value)}</p>` : "");
+function list(entries: string[], idPrefix?: string) {
+  if (!entries.length) return "";
+  const rows = entries.map((value, i) => {
+    const id = idPrefix ? ` id="${idPrefix}-${i + 1}"` : "";
+    return `<li${id}>${value}</li>`;
+  });
+  return `<ul>${rows.join("")}</ul>`;
+}
+export const para = (value?: string | null) =>
+  value ? `<p>${prose(value)}</p>` : "";
 function sourceIndex(
   item: Finding["item"],
   ref: Extract<DependencyReviewReference, { kind: "source" }>,
@@ -129,10 +125,7 @@ function receiptRefs(item: Finding["item"]) {
   return [
     ...new Map(
       (item.decidingEvidence ?? [])
-        .filter(
-          (r): r is Extract<DependencyReviewReference, { kind: "receipt" }> =>
-            r.kind === "receipt",
-        )
+        .filter((r) => r.kind === "receipt")
         .map((r) => [JSON.stringify(r), r]),
     ).values(),
   ];
@@ -145,7 +138,7 @@ function refLink(finding: Finding, ref: DependencyReviewReference) {
   const label = ref.kind === "source" ? rangeLabel(ref) : ref.receiptId;
   return at < 0
     ? code(label)
-    : `<a href="#${finding.id}-${ref.kind === "source" ? "source" : "receipt"}-${at + 1}">${code(label)}</a>`;
+    : `<a href="#${finding.id}-${ref.kind}-${at + 1}">${code(label)}</a>`;
 }
 function referenceList(finding: Finding, refs: DependencyReviewReference[]) {
   return refs.map((ref) => refLink(finding, ref)).join(" · ");
@@ -154,56 +147,50 @@ function receiptMetadata(
   check: Check,
   ref: Extract<DependencyReviewReference, { kind: "receipt" }>,
 ) {
-  return Object.values(check.claimEvidence?.receipts ?? {}).find(
-    (v) =>
+  for (const v of Object.values(check.claimEvidence?.receipts ?? {})) {
+    if (
       isRecord(v) &&
       v["receiptId"] === ref.receiptId &&
       v["originalPayloadSha256"] === ref.originalPayloadSha256 &&
       JSON.stringify(v["selection"] ?? null) ===
-        JSON.stringify(ref.selection ?? null),
-  );
+        JSON.stringify(ref.selection ?? null)
+    )
+      return v;
+  }
 }
 function originalEvidence(f: Finding, check?: Check) {
-  const sources = f.item.evidence.map((cite, i) => {
+  const supports = (keys: string[]) =>
+    para(keys.map((k) => factLabels[k] ?? k).join(" · "));
+  const sources = f.item.evidence.map((cite) => {
     const text = f.excerpts[citationKey(cite)]?.text;
-    const supports = cite.supports.map((k) => factLabels[k] ?? k).join(" · ");
-    return `<li id="${f.id}-source-${i + 1}">${code(rangeLabel(cite))}${cite.commit ? " · " + code(cite.commit) : ""}${para(supports)}${text !== undefined ? `<details><summary>Source excerpt</summary>${renderDependencyCode(text, cite.path, cite.startLine)}</details>` : ""}</li>`;
+    return `${code(rangeLabel(cite))}${cite.commit ? " · " + code(cite.commit) : ""}${supports(cite.supports)}${text !== undefined ? `<details><summary>Source excerpt</summary>${renderDependencyCode(text, cite.path, cite.startLine)}</details>` : ""}`;
   });
   const receipts = check
-    ? receiptRefs(f.item).map((r, i) => {
+    ? receiptRefs(f.item).map((r) => {
         const m = receiptMetadata(check, r);
-        const origin =
-          isRecord(m) && isRecord(m["origin"]) ? m["origin"] : undefined;
-        const tool = origin?.["tool"];
-        const str = (x: unknown) => (typeof x === "string" ? x : undefined);
+        const tool = asRecord(m?.["origin"])?.["tool"];
         const fields = facts([
-          ["Server", isRecord(m) ? str(m["server"]) : undefined],
+          ["Server", str(m?.["server"])],
           ["Tool", str(isRecord(tool) ? tool["name"] : tool)],
-          ["Outcome", isRecord(m) ? str(m["outcome"]) : undefined],
+          ["Outcome", str(m?.["outcome"])],
           ["SHA-256", r.originalPayloadSha256],
           [
             "Selected record",
             r.selection ? JSON.stringify(r.selection) : undefined,
           ],
         ]);
-        return `<li id="${f.id}-receipt-${i + 1}">${code(r.receiptId)}${fields}</li>`;
+        return code(r.receiptId) + fields;
       })
     : [];
   const observations = list(
     f.item.observations.map(
       (o) =>
-        `<strong>${esc(o.server)}</strong>${para(o.record)}${para(o.supports.map((k) => factLabels[k] ?? k).join(" · "))}`,
+        `<strong>${esc(o.server)}</strong>${para(o.record)}${supports(o.supports)}`,
     ),
   );
   return (
-    group(
-      "Source references",
-      sources.length ? `<ul>${sources.join("")}</ul>` : "",
-    ) +
-    group(
-      "Original receipts",
-      receipts.length ? `<ul>${receipts.join("")}</ul>` : "",
-    ) +
+    group("Source references", list(sources, f.id + "-source")) +
+    group("Original receipts", list(receipts, f.id + "-receipt")) +
     group("Observations", observations)
   );
 }
@@ -228,12 +215,7 @@ function target(f: Finding) {
     ["Observation window", p?.observationWindow],
     ["Selected copy", p?.dependencySelection],
     ["Patch or backport", p?.patch],
-    [
-      "Tags",
-      tagsFor(f)
-        .map((t) => t.name)
-        .join(" · "),
-    ],
+    ["Tags", tagsFor(f).join(" · ")],
   ]);
   const services = servicesFor(f.item);
   const rows = list(
@@ -264,16 +246,9 @@ function context(f: Finding) {
   const m = runtime?.mitigation;
   const launch = runtime
     ? facts([
+        [`Launch (${runtime.launch?.basis ?? ""})`, runtime.launch?.command],
         [
-          "Launch (" + (runtime.launch?.basis ?? "") + ")",
-          runtime.launch?.command,
-        ],
-        [
-          "Mitigation " +
-            (m?.state === "unknown" ? "unverified" : m?.state) +
-            " (" +
-            m?.basis +
-            ")",
+          `Mitigation ${m?.state === "unknown" ? "unverified" : m?.state} (${m?.basis})`,
           m?.detail,
         ],
       ]) +
@@ -323,10 +298,7 @@ function questions(f: Finding) {
     list([...entries, ...Array.from(other, prose)]),
   );
 }
-const outcomes: Record<
-  NonNullable<DependencyFindingDetails["inspections"]>[number]["outcome"],
-  string
-> = {
+const outcomes = {
   succeeded: "Completed",
   denied: "Access denied",
   unsupported: "Unsupported source",
@@ -385,6 +357,9 @@ function inspections(f: Finding) {
   });
   return group("Inspections and results", list(entries));
 }
+function claimLabel(ref: DependencyClaimReference) {
+  return `${code(ref.id)} · r${ref.revision} · ${code(ref.hash)}`;
+}
 function checkClaims(f: Finding, check: Check) {
   if (!f.item.conclusionClaim && !f.item.supportingClaims?.length) return "";
   const byKey = new Map(check.claims?.map((c) => [claimKey(c), c]));
@@ -392,7 +367,7 @@ function checkClaims(f: Finding, check: Check) {
   if (f.item.conclusionClaim) refs.unshift(f.item.conclusionClaim);
   const entries: string[] = [];
   for (const { ref, claim } of walkClaims(refs, byKey)) {
-    const refHtml = `${code(ref.id)} · r${ref.revision} · ${code(ref.hash)}`;
+    const refHtml = claimLabel(ref);
     entries.push(
       claim
         ? refHtml + para(claim.decision.reason)
@@ -416,6 +391,8 @@ function sampleScope(scope: SampleScope) {
     ["Window", scope.window.start + " to " + scope.window.end],
   ]);
 }
+const truncated = (value: boolean | null) =>
+  value === null ? "Unverified" : value ? "Yes" : "No";
 function sampleRecords(finding: StackFinding) {
   const a = finding.assessment,
     o = a.observation;
@@ -427,88 +404,56 @@ function sampleRecords(finding: StackFinding) {
     ["Query sink frame", o?.sinkIndex?.toString()],
     ["Query", a.queryId],
     ["Group", a.groupId],
-    [
-      "Query truncated",
-      a.truncated === null ? "Unverified" : a.truncated ? "Yes" : "No",
-    ],
+    ["Query truncated", truncated(a.truncated)],
     ["Observation", o?.id],
     ["Observed at", o?.observedAt],
     ["Stack hash", o?.stackHash],
-    [
-      "Frames truncated",
-      !o
-        ? undefined
-        : o.framesTruncated === null
-          ? "Unverified"
-          : o.framesTruncated
-            ? "Yes"
-            : "No",
-    ],
+    ["Frames truncated", o && truncated(o.framesTruncated)],
     ["Captured sink IDs", o?.sinkIds?.join(", ")],
     ["Assessed frame indices", a.frameIndices?.join(", ")],
   ]);
-  const bindings = (o?.bindings ?? [])
-    .map(
-      (b) =>
-        `<li>${facts([
-          ["Package", b.package],
-          ["Version", b.version],
-          ["Provenance", b.provenance],
-          ["Frames", b.frameIndices?.join(", ")],
-          ["Image digest", b.imageDigest],
-          ["Source revision", b.sourceSha],
-          ["Source ranges", b.evidence?.map(rangeLabel).join(", ")],
-        ])}</li>`,
-    )
-    .join("");
+  const bindings = (o?.bindings ?? []).map((b) =>
+    facts([
+      ["Package", b.package],
+      ["Version", b.version],
+      ["Provenance", b.provenance],
+      ["Frames", b.frameIndices?.join(", ")],
+      ["Image digest", b.imageDigest],
+      ["Source revision", b.sourceSha],
+      ["Source ranges", b.evidence?.map(rangeLabel).join(", ")],
+    ]),
+  );
   const scope = `<details><summary>Sampling scope and records</summary>
     ${records}<h4>Query scope</h4>${sampleScope(a.queryScope)}
     <h4>Assessment scope</h4>${sampleScope(a.scope)}
-    ${bindings ? `<h4>Dependency bindings</h4><ul>${bindings}</ul>` : ""}
+    ${group("Dependency bindings", list(bindings))}
     </details>`;
-  const claims = a.claims
-    .map((c) => {
-      const sources = c.sources
-        .map((s) => {
-          const ref = {
-            kind: "source" as const,
-            path: s.path,
-            startLine: s.startLine,
-            endLine: s.endLine,
-            commit: s.commit,
-          };
-          const link = refLink(finding, ref);
-          if (
-            sourceIndex(finding.item, ref) >= 0 &&
-            finding.excerpts[citationKey(ref)]?.text === s.text
-          )
-            return `<p>${link} · ${code(s.commit)}</p>`;
-          return `<details><summary>${link} · ${code(s.commit)}</summary>${renderDependencyCode(s.text, s.path, s.startLine)}</details>`;
-        })
-        .join("");
-      const control = a.attackerControlClaim;
-      const label =
-        control &&
-        control.id === c.id &&
-        control.revision === c.revision &&
-        control.hash === c.hash
-          ? "Input control claim"
-          : "Claim";
-      return `<li>${c.fact ? `<p>${prose(c.fact)}</p>` : "<p>No readable claim text recorded.</p>"}${c.limits ? `<p class="muted">${prose(c.limits)}</p>` : ""}${sources}<details><summary>${label} reference</summary>${code(c.id)} · r${c.revision} · ${code(c.hash)}</details></li>`;
-    })
-    .join("");
-  const missing = a.missingClaims
-    .map(
-      (c) =>
-        `<li>Missing claim ${code(c.id)} · r${c.revision} · ${code(c.hash)}</li>`,
-    )
-    .join("");
-  return (
-    scope +
-    (claims || missing
-      ? `<details><summary>Supporting claims (${a.claims.length} available)</summary><ul>${claims}${missing}</ul></details>`
-      : "")
-  );
+  const claims = a.claims.map((c) => {
+    const sources = c.sources
+      .map((s) => {
+        const ref = { ...s, kind: "source" as const };
+        const link = refLink(finding, ref);
+        if (
+          sourceIndex(finding.item, ref) >= 0 &&
+          finding.excerpts[citationKey(ref)]?.text === s.text
+        )
+          return `<p>${link} · ${code(s.commit)}</p>`;
+        return `<details><summary>${link} · ${code(s.commit)}</summary>${renderDependencyCode(s.text, s.path, s.startLine)}</details>`;
+      })
+      .join("");
+    const control = a.attackerControlClaim;
+    const label =
+      control && claimKey(control) === claimKey(c)
+        ? "Input control claim"
+        : "Claim";
+    return `${para(c.fact || "No readable claim text recorded.")}${c.limits ? `<p class="muted">${prose(c.limits)}</p>` : ""}${sources}<details><summary>${label} reference</summary>${claimLabel(c)}</details>`;
+  });
+  for (const ref of a.missingClaims)
+    claims.push("Missing claim " + claimLabel(ref));
+  return claims.length
+    ? scope +
+        `<details><summary>Supporting claims (${a.claims.length} available)</summary>${list(claims)}</details>`
+    : scope;
 }
 
 function frameRecords(f: StackFinding) {
@@ -543,42 +488,33 @@ function frameRecords(f: StackFinding) {
 }
 export function findingAudit(section: Section, finding: Finding) {
   const item = finding.item;
-  const useReason =
-    finding.kind === "stack" ? finding.assessment.use?.reason : undefined;
-  const reasons =
-    group("Full assessment", para(item.reason)) +
-    group(
-      "Source assessment",
-      useReason && useReason !== item.reason ? para(useReason) : "",
-    );
+  const stack = finding.kind === "stack" ? finding : undefined;
+  const useReason = stack?.assessment.use?.reason;
   const handoff =
     finding.kind === "coverage" ? finding.item.handoff : undefined;
-  const handoffHtml = handoff
-    ? group(
+  const parts = [
+    group("Full assessment", para(item.reason)),
+    useReason === item.reason
+      ? ""
+      : group("Source assessment", para(useReason)),
+    group("Independent review", para(stack?.assessment.reviewReason)),
+    questions(finding),
+    handoff &&
+      group(
         "Handoff",
         facts([
           ["Last verified", handoff.verified],
           ["Missing link", handoff.missing],
         ]),
-      )
-    : "";
-  return audit(
-    "Reasoning and evidence",
-    reasons +
-      (finding.kind === "stack"
-        ? group("Independent review", para(finding.assessment.reviewReason))
-        : "") +
-      questions(finding) +
-      handoffHtml +
-      context(finding) +
-      target(finding) +
-      inspections(finding) +
-      (finding.kind === "stack"
-        ? sampleRecords(finding) + frameRecords(finding)
-        : "") +
-      originalEvidence(finding, section.check) +
-      (section.check ? checkClaims(finding, section.check) : ""),
-  );
+      ),
+    context(finding),
+    target(finding),
+    inspections(finding),
+    stack && sampleRecords(stack) + frameRecords(stack),
+    originalEvidence(finding, section.check),
+    section.check && checkClaims(finding, section.check),
+  ];
+  return audit("Reasoning and evidence", parts.join(""));
 }
 function limitations(check: Check, findings: Finding[]) {
   const grouped = new Map<string, Set<string>>();
@@ -648,22 +584,14 @@ function sampleLimits(stack: StackReport, findings: Finding[]) {
       f.kind === "stack" ? [[f.assessment.workItemId, f] as const] : [],
     ),
   );
+  const workItemLink = (id: string) => {
+    const f = byWorkItem.get(id);
+    if (!f) return code(id);
+    const name = f.anchor ? `${f.anchor.path}:${f.anchor.line}` : f.label;
+    return `<a href="#${f.id}">${esc(name)}</a> · ${code(id)}`;
+  };
   const limits = labels
-    .map(([label, ids]) =>
-      group(
-        label,
-        list(
-          ids.map((id) => {
-            const f = byWorkItem.get(id);
-            if (!f) return code(id);
-            const name = f.anchor
-              ? `${f.anchor.path}:${f.anchor.line}`
-              : f.label;
-            return `<a href="#${f.id}">${esc(name)}</a> · ${code(id)}`;
-          }),
-        ),
-      ),
-    )
+    .map(([label, ids]) => group(label, list(ids.map(workItemLink))))
     .join("");
   const asked = new Set(stack.assessments.flatMap((a) => a.remainingQuestions));
   const other = stack.remainingQuestions.filter((q) => !asked.has(q));

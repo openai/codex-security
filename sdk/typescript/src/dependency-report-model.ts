@@ -1,21 +1,12 @@
-import {
-  readStackReport,
-  type StackReport,
-  type StackAssessment,
-} from "./dependency-report-stacks.js";
-export type { StackReport, StackAssessment };
-
 import { z } from "zod";
 import type { dependencyAdvisoryDetailsSchema } from "./dependency-advisory.js";
-import { dependencyInvestigationBlockedSchema } from "./dependency-report-reader.js";
 import {
   claimKey,
   savedSnippets,
   citationKey,
 } from "./dependency-report-proof.js";
-export { citationKey };
-type DependencyReportProof = NonNullable<ReviewedDependencyUse["proof"]>;
 import {
+  dependencyInvestigationBlockedSchema,
   readDependencyCheckOutput,
   reviewedDependencyCheckSchema,
   type DependencyCoverageDisposition,
@@ -25,16 +16,20 @@ import {
   type DependencyVerdict,
   type ReviewedDependencyUse,
 } from "./dependency-report-reader.js";
-import { isRecord } from "./record.js";
+import {
+  readStackReport,
+  type StackReport,
+  type StackAssessment,
+} from "./dependency-report-stacks.js";
 import type { DependencyTarget } from "./dependency-source-identity.js";
+import { isRecord } from "./record.js";
 
+export { citationKey };
 export type {
-  DependencyCoverageDisposition,
-  DependencyFindingDetails,
+  StackReport,
+  StackAssessment,
   DependencyReviewReference,
-  DependencyUse,
   DependencyVerdict,
-  ReviewedDependencyUse,
 };
 export type Check = z.infer<typeof reviewedDependencyCheckSchema>;
 export type Advisory = z.infer<typeof dependencyAdvisoryDetailsSchema>;
@@ -45,16 +40,15 @@ export type InputSource = NonNullable<DependencyFindingDetails["inputSource"]>;
 export type RuntimeContext = NonNullable<
   DependencyFindingDetails["runtimeContext"]
 >;
-type Anchor = {
-  path: string;
-  line: number;
+type DependencyReportProof = NonNullable<ReviewedDependencyUse["proof"]>;
+export type Site = NonNullable<DependencyReportProof["sink"]>["callSite"];
+export type StepKind = "source" | "handoff" | "sink";
+type Anchor = Site & {
   endLine?: number;
-  commit?: string;
-  kind: "call" | "reference" | "last_verified";
+  kind: "call" | "reference";
 };
 type Entry = {
   id: string;
-  original: number;
   anchor?: Anchor;
   label: string;
   excerpts: Record<string, { text: string }>;
@@ -114,14 +108,12 @@ export const verdictOrder: DependencyVerdict[] = findingOrder.filter(
   (state) => state !== "unresolved",
 );
 
-function unwrap(value: unknown) {
-  return isRecord(value) &&
-    (value["answer"] !== undefined || value["data"] !== undefined)
-    ? (value["answer"] ?? value["data"])
-    : value;
-}
 function readReport(value: unknown): Report {
-  const raw = unwrap(value);
+  const raw =
+    isRecord(value) &&
+    (value["answer"] !== undefined || value["data"] !== undefined)
+      ? (value["answer"] ?? value["data"])
+      : value;
   const stack = readStackReport(raw);
   if (stack)
     return {
@@ -234,16 +226,14 @@ export function servicesFor(item: Finding["item"]): Service[] {
     reviewedRefs(item, service.evidence),
   );
 }
-export function reviewedRefs(
+function reviewedRefs(
   item: Finding["item"],
   refs: DependencyReviewReference[],
 ) {
   return (
     refs.length > 0 &&
     refs.every((ref) =>
-      (item.decidingEvidence ?? []).some((original) =>
-        refMatches(ref, original),
-      ),
+      item.decidingEvidence?.some((original) => refMatches(ref, original)),
     )
   );
 }
@@ -263,23 +253,18 @@ export function tagsFor(finding: Finding) {
     ...(finding.item.tags ?? [])
       .filter((tag) => reviewedRefs(finding.item, tag.evidence))
       .map((tag) => tag.name),
-    ...(p
-      ? [
-          p.environment && `env:${p.environment}`,
-          p.variant && `variant:${p.variant}`,
-          p.role && `role:${p.role}`,
-          p.platform && `platform:${p.platform}`,
-          p.kind !== "unknown" && `kind:${p.kind}`,
-        ]
-      : []),
+    p?.environment && `env:${p.environment}`,
+    p?.variant && `variant:${p.variant}`,
+    p?.role && `role:${p.role}`,
+    p?.platform && `platform:${p.platform}`,
+    p && p.kind !== "unknown" && `kind:${p.kind}`,
   ].filter((name): name is string => !!name);
-  return [...new Set(names)].map((name) => ({ name }));
+  return [...new Set(names)];
 }
 function prepareCheck(check: Check, index: number) {
   const findings = check.uses.map((item, i): Finding => ({
     ...identity(item, item.proof),
     id: `use-${index}-${i + 1}`,
-    original: i,
     kind: "use",
     item,
     proof: item.proof,
@@ -289,7 +274,6 @@ function prepareCheck(check: Check, index: number) {
     const entry: Finding = {
       ...identity(item),
       id: `coverage-${index}-${i + 1}`,
-      original: i,
       kind: "coverage",
       item,
     };
@@ -304,26 +288,38 @@ function prepareFindings(
 ): PreparedCheck {
   const rank = (f: Finding) =>
     findingOrder.indexOf(f.kind === "coverage" ? "unresolved" : f.item.verdict);
-  findings.sort((a, b) => rank(a) - rank(b) || a.original - b.original);
+  findings.sort((a, b) => rank(a) - rank(b));
   return { findings, dismissed };
 }
 export function counts(findings: readonly Finding[]) {
   const breakdown = Object.fromEntries(
     verdictOrder.map((v) => [v, 0]),
   ) as Record<DependencyVerdict, number>;
-  let assessed = 0;
-  let reviewed = 0,
-    unresolved = 0;
-  for (const item of findings)
-    if (item.kind === "use") {
-      reviewed++;
-      breakdown[item.item.verdict]++;
-    } else if (item.kind === "stack") {
-      assessed++;
-      breakdown[item.item.verdict]++;
-    } else unresolved++;
-  return { reviewed, assessed, unresolved, breakdown };
+  let reviewed = 0;
+  let unresolved = 0;
+  for (const finding of findings) {
+    if (finding.kind === "coverage") unresolved++;
+    else {
+      if (finding.kind === "use") reviewed++;
+      breakdown[finding.item.verdict]++;
+    }
+  }
+  return { reviewed, unresolved, breakdown };
 }
+
+function citationsAt(item: Finding["item"], kind: StepKind, site: Site) {
+  const matches = item.evidence.filter(
+    (c) =>
+      c.path === site.path &&
+      c.startLine <= site.line &&
+      site.line <= c.endLine &&
+      (c.commit === site.commit ||
+        (kind === "sink" && site.commit === undefined)),
+  );
+  const ambiguous = matches.some((c) => c.commit !== matches[0]?.commit);
+  return { matches, ambiguous };
+}
+
 type Claims = NonNullable<Check["claims"]>;
 function identity(
   item: Finding["item"],
@@ -337,18 +333,8 @@ function identity(
     "locations" in item ? item.locations?.find((c) => c.line) : undefined;
   let anchor: Anchor | undefined;
   if (site) {
-    const revisions = new Set(
-      item.evidence
-        .filter(
-          (c) =>
-            c.path === site.path &&
-            c.startLine <= site.line &&
-            c.endLine >= site.line,
-        )
-        .map((c) => c.commit),
-    );
-    const commit =
-      site.commit ?? (revisions.size === 1 ? [...revisions][0] : undefined);
+    const { matches, ambiguous } = citationsAt(item, "sink", site);
+    const commit = site.commit ?? (ambiguous ? undefined : matches[0]?.commit);
     anchor = { ...site, commit, kind: "call" };
   } else if (candidate?.line)
     anchor = { kind: "reference", path: candidate.path, line: candidate.line };
@@ -369,14 +355,11 @@ function stackFinding(
   section: number,
   original: number,
 ): Finding {
-  const id = "stack-" + section + "-" + (original + 1);
   const { use, observation } = assessment;
-  const source = observation?.frames.find(
-    (f) => f.rawIndex === observation.sourceIndex,
-  )?.frame.name;
-  const sink = observation?.frames.find(
-    (f) => f.rawIndex === observation.sinkIndex,
-  )?.frame.name;
+  const nameAt = (index?: number | null) =>
+    observation?.frames.find((f) => f.rawIndex === index)?.frame.name;
+  const source = nameAt(observation?.sourceIndex);
+  const sink = nameAt(observation?.sinkIndex);
   const location = use?.location ?? sink ?? assessment.queryId;
   const item = {
     ...use,
@@ -394,8 +377,7 @@ function stackFinding(
       : (proof?.sink?.function ?? location);
   return {
     ...identity(item, proof),
-    id,
-    original,
+    id: `stack-${section}-${original + 1}`,
     kind: "stack",
     assessment,
     item,
@@ -431,21 +413,20 @@ export function prepareDependencyReport(value: unknown): Report {
         );
       section.prepared = prepareCheck(check, i + 1);
     }
+    if (!section.prepared) continue;
+    const { findings, dismissed } = section.prepared;
     if (
-      section.check?.uses.some((use) => use.verdict === "unknown") ||
       section.stack?.verdict === "unknown" ||
-      section.stack?.assessments.some((a) => a.verdict === "unknown")
+      findings.some(
+        (f) => f.kind !== "coverage" && f.item.verdict === "unknown",
+      )
     )
       report.contextHint = section.stack
         ? "Have more context? Describe who controls the input in the relevant entry in your --sources JSON, then rerun cs exploitability check with the updated inputs."
         : "Have more context? Set exploitability.scope.instructions in project.yaml to describe the callers and what they control, then rerun with --config project.yaml. This replaces the default caller scope.";
     const claims = new Map(section.check?.claims?.map((c) => [claimKey(c), c]));
-    if (section.prepared)
-      for (const finding of [
-        ...section.prepared.findings,
-        ...section.prepared.dismissed,
-      ])
-        loadExcerpts(section, finding, claims);
+    for (const finding of [...findings, ...dismissed])
+      loadExcerpts(section, finding, claims);
   }
   return report;
 }
@@ -454,19 +435,12 @@ export function prepareDependencyReport(value: unknown): Report {
 // unique. An explicit trace also needs a deciding reference for each step.
 export function matchTraceFrame(
   finding: Finding,
-  kind: "source" | "handoff" | "sink",
-  site: { path: string; line: number; commit?: string },
+  kind: StepKind,
+  site: Site,
 ): { index: number; cite: Citation } | { gap: string } {
   const { item } = finding;
-  const matches = item.evidence.filter(
-    (c) =>
-      c.path === site.path &&
-      c.startLine <= site.line &&
-      site.line <= c.endLine &&
-      (c.commit === site.commit ||
-        (kind === "sink" && site.commit === undefined)),
-  );
-  if (new Set(matches.map((c) => c.commit)).size > 1)
+  const { matches, ambiguous } = citationsAt(item, kind, site);
+  if (ambiguous)
     return { gap: "Sink revision is ambiguous across the cited copies." };
   const cite =
     matches.find((c) => finding.excerpts[citationKey(c)]) ?? matches[0];

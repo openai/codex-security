@@ -7,6 +7,8 @@ import {
 import { dependencyVerdictLabels } from "./dependency-verdict-labels.js";
 import { formatSecurityPolicyText } from "./security-policy.js";
 
+const quantity = (count: number, label: string) =>
+  `${count} ${label}${count === 1 ? "" : "s"}`;
 function scope(finding: Finding): string {
   if (finding.kind === "stack") {
     const s = finding.assessment.scope;
@@ -42,10 +44,7 @@ export function summarizeDependencyReport(report: Report): string {
   ];
   if (report.target)
     lines.push(
-      "Repository " +
-        report.target.repository +
-        " · Analyzed commit " +
-        report.target.sha,
+      `Repository ${report.target.repository} · Analyzed commit ${report.target.sha}`,
     );
   for (const section of report.sections) {
     if (section.title !== report.title) lines.push("", section.title);
@@ -68,40 +67,27 @@ export function summarizeDependencyReport(report: Report): string {
           dependencyVerdictLabels[section.stack.verdict],
           `${section.stack.coverage.assessed}/${section.stack.coverage.total} stack items assessed`,
         ]
-      : [reviewed + " reviewed " + (reviewed === 1 ? "use" : "uses")];
-    for (const verdict of verdictOrder)
-      if (
-        breakdown[verdict] &&
-        (!section.stack ||
-          breakdown[verdict] !== findings.length ||
-          section.stack.verdict !== verdict)
-      )
-        totals.push(
-          `${dependencyVerdictLabels[verdict]}: ${breakdown[verdict]}`,
-        );
+      : [quantity(reviewed, "reviewed use")];
+    for (const verdict of verdictOrder) {
+      const count = breakdown[verdict];
+      if (verdict === section.stack?.verdict && count === findings.length)
+        continue;
+      if (count) totals.push(`${dependencyVerdictLabels[verdict]}: ${count}`);
+    }
     if (unresolved)
-      totals.push(
-        unresolved +
-          " unresolved coverage " +
-          (unresolved === 1 ? "item" : "items"),
-      );
+      totals.push(quantity(unresolved, "unresolved coverage item"));
     lines.push(totals.join(" · "));
     if (section.stack) {
-      const c = section.stack.coverage;
-      const assessments = section.stack.assessments;
-      const cutGroups = new Set(
-        assessments
-          .filter((a) => a.truncated)
-          .map((a) => JSON.stringify([a.queryId, a.groupId])),
-      ).size;
-      const cutStacks = assessments.filter(
-        (a) => a.observation?.framesTruncated,
-      ).length;
+      const { coverage: c, assessments } = section.stack;
+      const groups = new Set<string>();
+      let cutStacks = 0;
+      for (const a of assessments) {
+        if (a.truncated) groups.add(JSON.stringify([a.queryId, a.groupId]));
+        if (a.observation?.framesTruncated) cutStacks++;
+      }
       const limits = [
-        cutGroups &&
-          `${cutGroups} truncated capture ${cutGroups === 1 ? "group" : "groups"}`,
-        cutStacks &&
-          `${cutStacks} ${cutStacks === 1 ? "stack" : "stacks"} with truncated frames`,
+        groups.size && quantity(groups.size, "truncated capture group"),
+        cutStacks && quantity(cutStacks, "stack") + " with truncated frames",
         c.truncationUnknown.length &&
           c.truncationUnknown.length + " truncation unknown",
         c.noMatch.length && c.noMatch.length + " without a match",

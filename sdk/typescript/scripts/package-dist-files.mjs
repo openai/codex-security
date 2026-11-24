@@ -73,7 +73,6 @@ const distModules = [
   "dependency-evidence-sources",
   "dependency-reviewed-check",
   "dependency-reviewed-claims",
-  "dependency-reviewed-publication",
   "classify-scan-severity",
   "severity-store",
   "severity-review",
