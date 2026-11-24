@@ -1,5 +1,6 @@
 /// <reference lib="es2023.array" />
 import { randomUUID } from "node:crypto";
+import { CYBERSECURITY_POLICY_REFUSAL_MESSAGES } from "../native-policy-refusals.js";
 import { promises as fs } from "node:fs";
 import { basename, dirname, join, relative, sep } from "node:path";
 import {
@@ -35,7 +36,6 @@ import { DeepScanWorkerRunner } from "./worker-runner.js";
 import type { AcceptedDiscovery, DiscoveryOutcome } from "./worker-runner.js";
 import {
   confirmedOwnershipChange,
-  isNativePolicyRefusal,
   errorNameWithCode,
   abortError,
   errorMessage,
@@ -204,7 +204,7 @@ export class DeepScanCoordinator {
       if (
         !this.terminal &&
         signal?.aborted &&
-        isNativePolicyRefusal(signal.reason)
+        CYBERSECURITY_POLICY_REFUSAL_MESSAGES.has(signal.reason)
       ) {
         this.abortController.abort(
           new DeepScanNonRetryableError(signal.reason),
