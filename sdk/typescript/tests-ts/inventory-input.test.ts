@@ -29,6 +29,14 @@ const pathNameBytes =
   process.platform === "darwin" ? Buffer.from("雪") : Buffer.from([0xff]);
 afterEach(temporary.cleanup);
 
+function diffScopeArgs(base: string, mode: string) {
+  return ["--scope", ".", "--diff-base", base, "--diff-mode", mode];
+}
+
+function rankArgs(base: string, mode: string) {
+  return ["--base", base, "--mode", mode];
+}
+
 function fixture(name = "repository") {
   const root = temporary.create("codex-security-inventory-"),
     repo = join(root, name),
@@ -112,10 +120,10 @@ process.exitCode = result.status;
       );
   const localRows = (args: string[] = []) =>
     rows("make-diff-rank-input", [
-      "--base",
-      git(repo, "hash-object", "-w", "-t", "tree", "--stdin"),
-      "--mode",
-      "local-patch",
+      ...rankArgs(
+        git(repo, "hash-object", "-w", "-t", "tree", "--stdin"),
+        "local-patch",
+      ),
       ...args,
     ]);
   const commit = () => {
@@ -210,14 +218,10 @@ cp.spawn = (command, args, options) => {
 require("node:module").syncBuiltinESMExports();
 `,
   );
-  const result = f.run(
-    "make-diff-rank-input",
-    ["--base", base, "--mode", "revisions"],
-    {
-      ...f.toolEnvironment,
-      NODE_OPTIONS: `${f.toolEnvironment["NODE_OPTIONS"] ?? ""} --require ${JSON.stringify(preload)}`,
-    },
-  );
+  const result = f.run("make-diff-rank-input", rankArgs(base, "revisions"), {
+    ...f.toolEnvironment,
+    NODE_OPTIONS: `${f.toolEnvironment["NODE_OPTIONS"] ?? ""} --require ${JSON.stringify(preload)}`,
+  });
   expect(result.status, result.stderr).toBe(0);
   const rows = readFileSync(f.out, "utf8")
     .trim()
@@ -1172,12 +1176,7 @@ for (const mode of ["revisions", "local-patch"]) {
       );
     }
     if (mode === "revisions") f.commit();
-    const rows = f.rows("make-diff-rank-input", [
-      "--base",
-      base,
-      "--mode",
-      mode,
-    ]);
+    const rows = f.rows("make-diff-rank-input", rankArgs(base, mode));
     expect(rows.map(({ path, preview }) => [path, preview])).toEqual(
       ["text-utf16be", "text-utf16le", "text-utf8"].map((path) => [
         path,
@@ -1254,7 +1253,7 @@ for (const mode of ["revisions", "local-patch"]) {
       f.commit();
       f.write("changed.py", "worktree must not leak\n");
     }
-    const args = ["--base", base, "--mode", mode];
+    const args = rankArgs(base, mode);
     const rows = f.rows("make-diff-rank-input", args);
     expect(rows.find((row) => row.path === "changed.py")?.preview).toBe("new");
     expect(rows.find((row) => row.path === "deleted.py")?.preview).toBe("");
@@ -1266,14 +1265,7 @@ for (const mode of ["revisions", "local-patch"]) {
       "unstaged.py",
     ]);
     expect(
-      f.success("generate-in-scope-files", [
-        "--scope",
-        ".",
-        "--diff-base",
-        base,
-        "--diff-mode",
-        mode,
-      ]),
+      f.success("generate-in-scope-files", diffScopeArgs(base, mode)),
     ).toBe(rows.map((row) => row.path + "\n").join(""));
   });
 }
@@ -1306,12 +1298,7 @@ test("local diff retains the historical text when a rename destination cannot be
   symlinkSync(outside, join(f.repo, "link"), "junction");
 
   const expected = ["excluded.py", "linked.py", "live.py", "removed.py"];
-  const ranked = f.rows("make-diff-rank-input", [
-    "--base",
-    base,
-    "--mode",
-    "local-patch",
-  ]);
+  const ranked = f.rows("make-diff-rank-input", rankArgs(base, "local-patch"));
   expect(ranked.map(({ path }) => path)).toEqual(expected);
   expect(ranked.map(({ preview }) => preview)).toEqual([
     "",
@@ -1320,14 +1307,7 @@ test("local diff retains the historical text when a rename destination cannot be
     "",
   ]);
   expect(
-    f.success("generate-in-scope-files", [
-      "--scope",
-      ".",
-      "--diff-base",
-      base,
-      "--diff-mode",
-      "local-patch",
-    ]),
+    f.success("generate-in-scope-files", diffScopeArgs(base, "local-patch")),
   ).toBe(expected.join("\n") + "\n");
 });
 
@@ -1350,21 +1330,9 @@ for (const [mode, undoStagedChange] of [
       symlinkSync("routes.py", changed, "file");
     } else if (mode === "revisions") f.commit();
     const inventory = f
-      .success("generate-in-scope-files", [
-        "--scope",
-        ".",
-        "--diff-base",
-        base,
-        "--diff-mode",
-        mode,
-      ])
+      .success("generate-in-scope-files", diffScopeArgs(base, mode))
       .split("\n");
-    const ranked = f.rows("make-diff-rank-input", [
-      "--base",
-      base,
-      "--mode",
-      mode,
-    ]);
+    const ranked = f.rows("make-diff-rank-input", rankArgs(base, mode));
     expect(inventory.includes("changed.py")).toBe(!undoStagedChange);
     expect(ranked.some(({ path }) => path === "changed.py")).toBe(
       !undoStagedChange,
@@ -1408,20 +1376,13 @@ for (const mode of ["revisions", "local-patch"] as const) {
           : ["visible.py"];
       expect(
         f
-          .success("generate-in-scope-files", [
-            "--scope",
-            ".",
-            "--diff-base",
-            base,
-            "--diff-mode",
-            mode,
-          ])
+          .success("generate-in-scope-files", diffScopeArgs(base, mode))
           .trim()
           .split("\n"),
       ).toEqual(expected);
       expect(
         f
-          .rows("make-diff-rank-input", ["--base", base, "--mode", mode])
+          .rows("make-diff-rank-input", rankArgs(base, mode))
           .map(({ path }) => path),
       ).toEqual(expected);
     });
@@ -1456,24 +1417,15 @@ for (const location of ["outside", "repository-extra", "inside"]) {
 
       const retained = location === "inside" && !binary;
       expect(
-        f.success("generate-in-scope-files", [
-          "--scope",
-          ".",
-          "--diff-base",
-          base,
-          "--diff-mode",
-          "local-patch",
-        ]),
+        f.success(
+          "generate-in-scope-files",
+          diffScopeArgs(base, "local-patch"),
+        ),
       ).toBe(
         `safe.py\nsrc/nested/changed.py\n${retained ? "src/nested/source.py\n" : ""}`,
       );
       expect(
-        f.rows("make-diff-rank-input", [
-          "--base",
-          base,
-          "--mode",
-          "local-patch",
-        ]),
+        f.rows("make-diff-rank-input", rankArgs(base, "local-patch")),
       ).toEqual([
         { path: "safe.py", area: "diff", preview: "after" },
         { path: "src/nested/changed.py", area: "diff", preview: "" },
@@ -1526,7 +1478,7 @@ require("node:module").syncBuiltinESMExports();
     );
     const result = f.run(
       "generate-in-scope-files",
-      ["--scope", ".", "--diff-base", base, "--diff-mode", "local-patch"],
+      diffScopeArgs(base, "local-patch"),
       {
         ...f.toolEnvironment,
         NODE_OPTIONS: `${f.toolEnvironment["NODE_OPTIONS"] ?? ""} --require ${JSON.stringify(preload)}`,
@@ -1578,7 +1530,7 @@ Module._extensions[".node"] = (loaded, path) => {
   );
   const result = f.run(
     "generate-in-scope-files",
-    ["--scope", ".", "--diff-base", base, "--diff-mode", "local-patch"],
+    diffScopeArgs(base, "local-patch"),
     {
       ...f.toolEnvironment,
       NODE_OPTIONS: `${f.toolEnvironment["NODE_OPTIONS"] ?? ""} --require ${JSON.stringify(preload)}`,
@@ -1666,14 +1618,7 @@ test("failed inventory generation preserves the existing file", () => {
     ["--scope", "missing"],
     ["--scope", ".."],
     ["--scope", ".", "--diff-base", "missing-revision"],
-    [
-      "--scope",
-      ".",
-      "--diff-base",
-      "missing-revision",
-      "--diff-mode",
-      "local-patch",
-    ],
+    diffScopeArgs("missing-revision", "local-patch"),
   ]) {
     expect(f.run("generate-in-scope-files", args).status).toBe(2);
     expect(readFileSync(f.out, "utf8")).toBe("previous\n");
@@ -1743,14 +1688,10 @@ for (const mode of ["revisions", "local-patch"]) {
       const name = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x2e, 0x70, 0x79]);
       writeFileSync(Buffer.concat([Buffer.from(f.repo + "/"), name]), "text\n");
       if (mode === "revisions") f.commit();
-      const result = f.run("generate-in-scope-files", [
-        "--scope",
-        ".",
-        "--diff-base",
-        base,
-        "--diff-mode",
-        mode,
-      ]);
+      const result = f.run(
+        "generate-in-scope-files",
+        diffScopeArgs(base, mode),
+      );
       expect(result.status, result.stderr).toBe(0);
       expect(readFileSync(f.out)).toEqual(
         Buffer.concat([name, Buffer.from("\n")]),
@@ -2960,12 +2901,7 @@ test("diff inventory accepts a base revision matching a path", () => {
   f.write("release/build.py", "build = 2\n");
   expect(
     f
-      .rows("make-diff-rank-input", [
-        "--base",
-        "release",
-        "--mode",
-        "local-patch",
-      ])
+      .rows("make-diff-rank-input", rankArgs("release", "local-patch"))
       .map((row) => row.path),
   ).toEqual(["release/build.py"]);
 });
@@ -2997,19 +2933,12 @@ test("local diffs exclude SVN metadata and revision diffs retain it", () => {
       .sort();
     expect(
       f
-        .rows("make-diff-rank-input", ["--base", base, "--mode", mode])
+        .rows("make-diff-rank-input", rankArgs(base, mode))
         .map((row) => row.path),
     ).toEqual(expected);
     expect(
       f
-        .success("generate-in-scope-files", [
-          "--scope",
-          ".",
-          "--diff-base",
-          base,
-          "--diff-mode",
-          mode,
-        ])
+        .success("generate-in-scope-files", diffScopeArgs(base, mode))
         .trim()
         .split("\n"),
     ).toEqual(expected);

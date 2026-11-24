@@ -1,23 +1,9 @@
-import { readFileSync } from "node:fs";
 import { expect, test } from "bun:test";
 import { renderProgress } from "../../../.github/scripts/release-progress.mjs";
+import { workflow } from "./support/workflow.js";
 
-const workflow = Bun.YAML.parse(
-  readFileSync(
-    new URL("../../../.github/workflows/release-progress.yml", import.meta.url),
-    "utf8",
-  ),
-) as {
-  on: { workflow_run: { workflows: string[]; types: string[] } };
-  concurrency: { group: string };
-  jobs: {
-    identify: {
-      permissions: Record<string, string>;
-      steps: Array<{ uses?: string; run: string }>;
-    };
-    report: { concurrency: { group: string; queue: string } };
-  };
-};
+const progress = workflow("release-progress");
+const identifyJob = progress.jobs["identify"]!;
 
 const sha = "a".repeat(40);
 const releasePull = {
@@ -43,7 +29,7 @@ function identify(
   const execute = new Function(
     "require",
     "process",
-    workflow.jobs.identify.steps[0]!.run,
+    identifyJob.steps![0]!.run!,
   );
   execute(
     (name: string) => {
@@ -83,14 +69,7 @@ function identify(
 }
 
 test("release verification reports a failed Darwin signer when publication is skipped", () => {
-  const release = Bun.YAML.parse(
-    readFileSync(
-      new URL("../../../.github/workflows/node-release.yml", import.meta.url),
-      "utf8",
-    ),
-  ) as {
-    jobs: Record<string, { name?: string }>;
-  };
+  const release = workflow("node-release");
   const jobName = release.jobs["sign-darwin"]?.name ?? "sign-darwin";
   const progress = renderProgress(
     { "node-release": { status: "completed", conclusion: "failure" } },
@@ -116,29 +95,14 @@ test("release verification reports a failed Darwin signer when publication is sk
 });
 
 test("main CI completions report independently of cutting a release", () => {
-  expect(workflow.on).toHaveProperty("workflow_call");
-  expect(workflow.on.workflow_run).toEqual({
+  expect(progress.on).toHaveProperty("workflow_call");
+  expect(progress.on["workflow_run"]).toEqual({
     workflows: ["node-release", "node-github-release"],
     types: ["in_progress", "completed"],
   });
-  const cut = Bun.YAML.parse(
-    readFileSync(
-      new URL(
-        "../../../.github/workflows/node-release-cut.yml",
-        import.meta.url,
-      ),
-      "utf8",
-    ),
-  ) as {
-    on: Record<string, unknown>;
-    jobs: {
-      progress: { if: string; uses: string };
-      cut: {
-        env: { RELEASE_SHA: string };
-        steps: { uses?: string; with?: { ref?: string } }[];
-      };
-    };
-  };
+  const cut = workflow("node-release-cut");
+  const cutJob = cut.jobs["cut"]!;
+  const report = cut.jobs["progress"]!;
   expect(cut.on).toEqual({
     workflow_run: {
       workflows: ["node-ci"],
@@ -148,21 +112,19 @@ test("main CI completions report independently of cutting a release", () => {
     workflow_dispatch: null,
   });
   const verifiedSha = "${{ github.event.workflow_run.head_sha || github.sha }}";
-  expect(cut.jobs.cut.env.RELEASE_SHA).toBe(verifiedSha);
+  expect(cutJob.env!["RELEASE_SHA"]).toBe(verifiedSha);
   expect(
-    cut.jobs.cut.steps.find(({ uses }) => uses?.startsWith("actions/checkout@"))
-      ?.with?.ref,
+    cutJob.steps!.find(({ uses }) => uses?.startsWith("actions/checkout@"))
+      ?.with?.["ref"],
   ).toBe(verifiedSha);
-  expect(cut.jobs.progress.uses).toBe(
-    "./.github/workflows/release-progress.yml",
-  );
-  expect(cut.jobs.cut).not.toHaveProperty("needs");
-  expect(cut.jobs.progress).not.toHaveProperty("needs");
-  expect(cut.jobs.cut).toHaveProperty("concurrency", {
+  expect(report.uses).toBe("./.github/workflows/release-progress.yml");
+  expect(cutJob).not.toHaveProperty("needs");
+  expect(report).not.toHaveProperty("needs");
+  expect(cutJob).toHaveProperty("concurrency", {
     group: "node-release-cut",
     queue: "max",
   });
-  const selected = new Function("github", `return (${cut.jobs.progress.if})`);
+  const selected = new Function("github", `return (${report.if})`);
   const context = {
     repository: "openai/codex-security",
     event_name: "workflow_run",
@@ -196,8 +158,8 @@ test("ordinary CI commits do not reach release checkout or reporting", () => {
     expect(identify(ciRun, [[pull]]).output).toBe("");
   }
   expect(identify(ciRun, [[]]).output).toBe("");
-  expect(workflow.jobs.identify.steps.every((step) => !step.uses)).toBe(true);
-  expect(workflow.jobs.identify.permissions).toEqual({
+  expect(identifyJob.steps!.every((step) => !step.uses)).toBe(true);
+  expect(identifyJob.permissions).toEqual({
     actions: "read",
     contents: "read",
     "pull-requests": "read",
@@ -252,7 +214,7 @@ function refreshGroup(
   name: string,
   inputs: Record<string, unknown> = {},
 ) {
-  return workflow.concurrency.group.replace(
+  return progress.concurrency!.group.replace(
     /\$\{\{(.*?)\}\}/gu,
     (_, expression) =>
       String(
@@ -276,7 +238,7 @@ test("same-run refreshes coalesce without blocking observers or other stages", (
     refresh,
   );
   expect(refreshGroup(205, "", "", { "run-id": "102" })).not.toBe(refresh);
-  expect(workflow.jobs.report.concurrency).toEqual({
+  expect(progress.jobs["report"]!.concurrency).toEqual({
     group:
       "release-progress-${{ github.repository }}-${{ needs.identify.outputs.version }}",
     queue: "max",

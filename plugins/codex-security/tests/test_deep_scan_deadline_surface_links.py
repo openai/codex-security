@@ -7,22 +7,22 @@ import os
 
 import pytest
 from workbench_test_support import (
+    merge_interrupted,
+    pending_review,
     read_review_state,
     replay_saved_results,
+    review_surface,
     saved_binding,
     saved_discovery_worker,
     saved_draft,
     select_checkpoint,
     write_checkpoint,
+    write_draft_checkpoint,
 )
 
 
 def surface(label, identity="entry", disposition="needs_follow_up"):
-    return {"id": identity, "label": label, "disposition": disposition, "receiptRefs": []}
-
-
-def pending(identity, reason, surface_id="entry"):
-    return {"id": identity, "reason": reason, "surfaceIds": [surface_id]}
+    return review_surface(identity, label, disposition)
 
 
 @pytest.mark.parametrize(
@@ -34,25 +34,23 @@ def test_deadline_surface_links_follow_sources_across_repeated_crashes(
     scan = deadline_scan
     worker_id, output = scan.canceled_discovery_output(attempt=2)
     archived = output.parent / "attempts" / "attempt-01"
-    shared = pending("shared-review", "Review all retained observations.")
+    shared = pending_review("shared-review", "Review all retained observations.")
     checkpoints = []
     for index, (source, label) in enumerate(
         [(archived, "download"), (output, "upload"), (output, "export")], start=1
     ):
         # Each is a valid raw input checkpoint saved before the writer merges history.
-        checkpoint = write_checkpoint(
-            source / "checkpoints",
-            saved_draft(
-                scan.scan_id,
-                surfaces=[surface(label)],
-                deferred=[pending(f"{label}-review", f"Review {label}."), shared],
-            ),
+        checkpoint = write_draft_checkpoint(
+            source,
+            scan.scan_id,
+            surfaces=[surface(label)],
+            deferred=[pending_review(f"{label}-review", f"Review {label}."), shared],
             mtime_ns=index * 100,
         )
         checkpoints.append(checkpoint)
     canonical_id = f"{worker_id}/entry" if parent_collision else "parent-entry"
     canonical_surface = surface("Canonical parent", canonical_id)
-    canonical_pending = pending("parent-review", "Parent review remains.", canonical_id)
+    canonical_pending = pending_review("parent-review", "Parent review remains.", canonical_id)
     scan.coverage.update(surfaces=[canonical_surface], deferred=[canonical_pending])
     (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
     originals = {path: path.read_bytes() for path in checkpoints}
@@ -86,13 +84,11 @@ def test_deadline_retains_all_targets_of_one_legacy_surface_id(
                 (scan.scan_id,),
             )
     _, output = scan.canceled_discovery_output()
-    checkpoint = write_checkpoint(
-        output / "checkpoints",
-        saved_draft(
-            scan.scan_id,
-            surfaces=[surface("download"), surface("upload")],
-            deferred=[pending("review", "Review both legacy observations.")],
-        ),
+    checkpoint = write_draft_checkpoint(
+        output,
+        scan.scan_id,
+        surfaces=[surface("download"), surface("upload")],
+        deferred=[pending_review("review", "Review both legacy observations.")],
     )
     original = checkpoint.read_bytes()
 
@@ -112,13 +108,11 @@ def test_deadline_retains_all_targets_of_one_legacy_surface_id(
 def test_deadline_deferred_only_checkpoint_keeps_prior_surface_link(workbench_db, deadline_scan):
     scan = deadline_scan
     worker_id, output = scan.canceled_discovery_output()
-    earlier = write_checkpoint(
-        output / "checkpoints",
-        saved_draft(scan.scan_id, surfaces=[surface("Earlier review", "prior")]),
+    earlier = write_draft_checkpoint(
+        output, scan.scan_id, surfaces=[surface("Earlier review", "prior")]
     )
-    current = write_checkpoint(
-        output / "checkpoints",
-        saved_draft(scan.scan_id, deferred=[pending("review", "Review prior surface.", "prior")]),
+    current = write_draft_checkpoint(
+        output, scan.scan_id, deferred=[pending_review("review", "Review prior surface.", "prior")]
     )
     os.utime(earlier, ns=(100, 100))
     os.utime(current, ns=(200, 200))
@@ -144,7 +138,7 @@ def test_deadline_reopened_generic_surface_copy_retains_its_link(workbench_db, d
         saved_draft(
             scan.scan_id,
             surfaces=[surface("Worker review")],
-            deferred=[pending("review", "Initial review pending.")],
+            deferred=[pending_review("review", "Initial review pending.")],
         ),
         saved_draft(
             scan.scan_id,
@@ -155,7 +149,7 @@ def test_deadline_reopened_generic_surface_copy_retains_its_link(workbench_db, d
         saved_draft(
             scan.scan_id,
             surfaces=[surface("Worker review")],
-            deferred=[pending("review", "Review reopened.")],
+            deferred=[pending_review("review", "Review reopened.")],
         ),
     ]
     originals = {}
@@ -184,19 +178,16 @@ def test_stopped_recovery_preserves_source_link_union(workbench_api, tmp_path):
     binding = saved_binding("deep_repository")
     output = tmp_path / "worker" / "output"
     archived = output.parent / "attempts" / "attempt-01"
-    shared = pending("review", "Review retained observations.")
+    shared = pending_review("review", "Review retained observations.")
     originals = {}
     for source, label in ((archived, "download"), (output, "upload")):
-        checkpoint = write_checkpoint(
-            source / "checkpoints",
-            saved_draft(scan_id, surfaces=[surface(label)], deferred=[shared]),
+        checkpoint = write_draft_checkpoint(
+            source, scan_id, surfaces=[surface(label)], deferred=[shared]
         )
         originals[checkpoint] = checkpoint.read_bytes()
     workers = [saved_discovery_worker(output, "worker", 2)]
 
-    documents = saved.merge_saved_results(
-        tmp_path, scan_id, binding, workers, [], stopped=True, reason="interrupted"
-    )
+    documents = merge_interrupted(saved, tmp_path, scan_id, binding, workers)
     replay = replay_saved_results(saved, documents, tmp_path, scan_id, binding, workers)
 
     assert replay[2] == documents[2]
@@ -215,7 +206,7 @@ def test_deadline_retains_equal_task_origins_from_selected_worker_result(
     scan = deadline_scan
     worker_id, output = scan.canceled_discovery_output(attempt=2)
     archived = output.parent / "attempts" / "attempt-01"
-    previous_task = pending("download-review", "Download review pending.")
+    previous_task = pending_review("download-review", "Download review pending.")
     archived_draft = saved_draft(
         scan.scan_id, surfaces=[surface("download")], deferred=[previous_task]
     )
@@ -224,9 +215,11 @@ def test_deadline_retains_equal_task_origins_from_selected_worker_result(
     archived_result = archived / "result.json"
     archived_result.write_bytes(checkpoint.read_bytes())
     os.utime(archived_result, ns=(120, 120))
-    current_task = pending("upload-review", "Upload review pending.")
+    current_task = pending_review("upload-review", "Upload review pending.")
     retained_task = (
-        pending("download-review", "Download review updated.") if changed_task else previous_task
+        pending_review("download-review", "Download review updated.")
+        if changed_task
+        else previous_task
     )
     incoming = saved_draft(
         scan.scan_id,
@@ -268,31 +261,29 @@ def test_deadline_dropped_legacy_surface_does_not_rebind_its_pending_task(
     scan = deadline_scan
     worker_id, output = scan.canceled_discovery_output(attempt=2)
     archived = output.parent / "attempts" / "attempt-01"
-    download_task = pending("download-review", "Download review pending.")
-    archived_checkpoint = write_checkpoint(
-        archived / "checkpoints",
-        saved_draft(scan.scan_id, surfaces=[surface("download")], deferred=[download_task]),
+    download_task = pending_review("download-review", "Download review pending.")
+    archived_checkpoint = write_draft_checkpoint(
+        archived,
+        scan.scan_id,
+        surfaces=[surface("download")],
+        deferred=[download_task],
         mtime_ns=100,
     )
     archived_result = archived / "result.json"
     archived_result.write_bytes(archived_checkpoint.read_bytes())
     os.utime(archived_result, ns=(110, 110))
-    upload_task = pending("upload-review", "Upload review pending.")
+    upload_task = pending_review("upload-review", "Upload review pending.")
     # Historical artifacts can contain labels rejected during finalization.
     malformed_surface = surface("\u0085")
-    raw_checkpoint = write_checkpoint(
-        output / "checkpoints",
-        saved_draft(scan.scan_id, surfaces=[malformed_surface], deferred=[upload_task]),
-        mtime_ns=200,
+    raw_checkpoint = write_draft_checkpoint(
+        output, scan.scan_id, surfaces=[malformed_surface], deferred=[upload_task], mtime_ns=200
     )
     if selected_result:
-        selected = write_checkpoint(
-            output / "checkpoints",
-            saved_draft(
-                scan.scan_id,
-                surfaces=[malformed_surface],
-                deferred=[upload_task, download_task],
-            ),
+        selected = write_draft_checkpoint(
+            output,
+            scan.scan_id,
+            surfaces=[malformed_surface],
+            deferred=[upload_task, download_task],
             mtime_ns=210,
         )
         select_checkpoint(output, selected, mtime_ns=220)
@@ -329,48 +320,40 @@ def test_deadline_inherited_surface_links_follow_historical_observations(
     )
     archived = output.parent / "attempts" / "attempt-01"
     first_output = archived if history == "retry-checkpoints" else output
-    write_checkpoint(
-        first_output / "checkpoints",
-        saved_draft(scan.scan_id, surfaces=[surface("Earlier observation")]),
-        mtime_ns=100,
+    write_draft_checkpoint(
+        first_output, scan.scan_id, surfaces=[surface("Earlier observation")], mtime_ns=100
     )
     expected_labels = {"Earlier observation"}
     if history != "parent-collision":
-        write_checkpoint(
-            output / "checkpoints",
-            saved_draft(scan.scan_id, surfaces=[surface("Newer observation")]),
-            mtime_ns=200,
+        write_draft_checkpoint(
+            output, scan.scan_id, surfaces=[surface("Newer observation")], mtime_ns=200
         )
         expected_labels.add("Newer observation")
-    inherited_task = pending("history-review", "Review the inherited surface.")
-    unknown_task = pending("unknown-review", "Review an unresolved reference.", "not-declared")
-    write_checkpoint(
-        output / "checkpoints",
-        saved_draft(scan.scan_id, deferred=[inherited_task, unknown_task]),
-        mtime_ns=300,
+    inherited_task = pending_review("history-review", "Review the inherited surface.")
+    unknown_task = pending_review(
+        "unknown-review", "Review an unresolved reference.", "not-declared"
+    )
+    write_draft_checkpoint(
+        output, scan.scan_id, deferred=[inherited_task, unknown_task], mtime_ns=300
     )
     if history == "coalesced-history":
         # The merged checkpoint copies a task whose earlier raw source inherited history.
-        selected = write_checkpoint(
-            output / "checkpoints",
-            saved_draft(
-                scan.scan_id,
-                surfaces=[surface("Newer observation")],
-                deferred=[inherited_task, unknown_task],
-            ),
+        selected = write_draft_checkpoint(
+            output,
+            scan.scan_id,
+            surfaces=[surface("Newer observation")],
+            deferred=[inherited_task, unknown_task],
             mtime_ns=400,
         )
         select_checkpoint(output, selected, mtime_ns=410)
     if history == "current-checkpoints":
         # An interrupted later write cannot identify an earlier task's target.
-        write_checkpoint(
-            output / "checkpoints",
-            saved_draft(scan.scan_id, surfaces=[surface("Later observation")]),
-            mtime_ns=400,
+        write_draft_checkpoint(
+            output, scan.scan_id, surfaces=[surface("Later observation")], mtime_ns=400
         )
     canonical_id = f"{worker_id}/entry" if history == "parent-collision" else "parent-entry"
     canonical_surface = surface("Canonical parent", canonical_id)
-    canonical_task = pending("parent-review", "Parent review remains.", canonical_id)
+    canonical_task = pending_review("parent-review", "Parent review remains.", canonical_id)
     scan.coverage.update(surfaces=[canonical_surface], deferred=[canonical_task])
     (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
     originals = {path: path.read_bytes() for path in output.parent.rglob("*") if path.is_file()}
@@ -403,34 +386,31 @@ def test_deadline_candidate_supersession_preserves_independent_surface_links(
     worker_id, output = scan.canceled_discovery_output()
     canonical_id = f"{worker_id}/entry"
     canonical_surface = surface("Canonical parent", canonical_id)
-    canonical_task = pending("parent-review", "Parent review remains.", canonical_id)
+    canonical_task = pending_review("parent-review", "Parent review remains.", canonical_id)
     scan.coverage.update(surfaces=[canonical_surface], deferred=[canonical_task])
     (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
-    independent = pending("independent-review", "Review another caller.")
+    independent = pending_review("independent-review", "Review another caller.")
     candidate_surface = {**surface("Candidate review"), "candidateId": "candidate"}
     earlier_surfaces = [candidate_surface]
     if legacy_duplicate_id:
         # Legacy artifacts may reuse an ID for a candidate and an independent observation.
         earlier_surfaces.append(surface("Independent observation"))
-    write_checkpoint(
-        output / "checkpoints",
-        saved_draft(scan.scan_id, surfaces=earlier_surfaces, deferred=[independent]),
-        mtime_ns=100,
+    write_draft_checkpoint(
+        output, scan.scan_id, surfaces=earlier_surfaces, deferred=[independent], mtime_ns=100
     )
     outcome_id = "outcome" if changed_surface_id else "entry"
     outcome = {
         **surface("Candidate reviewed", outcome_id, "rejected"),
         "candidateId": "candidate",
     }
-    write_checkpoint(
-        output / "checkpoints",
-        saved_draft(scan.scan_id, complete=True, surfaces=[outcome]),
-        mtime_ns=200,
-    )
+    write_draft_checkpoint(output, scan.scan_id, complete=True, surfaces=[outcome], mtime_ns=200)
     # The selected merged checkpoint retains independent work before result publication.
-    selected = write_checkpoint(
-        output / "checkpoints",
-        saved_draft(scan.scan_id, complete=True, surfaces=[outcome], deferred=[independent]),
+    selected = write_draft_checkpoint(
+        output,
+        scan.scan_id,
+        complete=True,
+        surfaces=[outcome],
+        deferred=[independent],
         mtime_ns=210,
     )
     select_checkpoint(output, selected, mtime_ns=220)
