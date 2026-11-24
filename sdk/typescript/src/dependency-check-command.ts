@@ -1,72 +1,94 @@
 import { Cli, z } from "incur";
 import { environmentEntry } from "./auth.js";
 import { resolveConfigPath } from "./config-path.js";
-import { withDependencyCheckOutput } from "./dependency-check-output.js";
 import {
+  dependencyCheckOutputSchema,
+  dependencyPackageCheckOutputSchema,
+} from "./dependency-reachability.js";
+import { dependencyScopedBlockedSchema } from "./dependency-blocked-schema.js";
+import {
+  withDependencyCheckOutput,
   DependencyInvestigationBlockedError,
-  runReviewedDependencyCheck,
-} from "./dependency-reviewed-check.js";
+} from "./dependency-check-output.js";
 import type { DependencyCliContext } from "./dependency-stack-cli.js";
 import { stackInvestigationReportSchema } from "./dependency-stack-assessment.js";
-import {
-  runLocalStackInvestigation,
-  stackInvestigationPrompt,
-} from "./dependency-stack-launcher.js";
+import { formatSecurityPolicyText } from "./security-policy.js";
+import { prepareDependencyReport } from "./dependency-report-model.js";
+import { summarizeDependencyReport } from "./dependency-report-summary.js";
+import { renderPreparedDependencyReportMarkdown } from "./dependency-report-markdown.js";
 import { CodexSecurityError } from "./errors.js";
 import { readProjectConfig } from "./project-config.js";
 import { enclosingGitWorktreeRoot, normalizeRepository } from "./targets.js";
 
 const text = z.string().trim().min(1);
-const reviewedOutput = z
+export const reportFileOption = text
+  .optional()
+  .describe(
+    "Save the completed JSON report to a new file. With --format html, save HTML here instead (default: exploitability_report_<timestamp>.html in the current directory).",
+  );
+const blocked = z
   .object({
-    schemaVersion: z.literal(2),
-    uses: z.array(
-      z.object({ location: text, verdict: text, reason: text }).passthrough(),
-    ),
-    limitations: z.array(z.string()),
+    status: z.literal("blocked"),
+    code: z.literal("INVESTIGATION_BLOCKED"),
+    reason: text,
   })
   .passthrough();
-const checkOutput = z.union([
-  stackInvestigationReportSchema,
-  reviewedOutput.extend({ cve: text }),
-  z
-    .object({
-      package: z.object({ ecosystem: text, name: text }),
-      checks: z.array(reviewedOutput),
-    })
-    .passthrough(),
-]);
+const advisoryId = { advisoryId: z.string().nullable() };
+const blockedPackage = dependencyPackageCheckOutputSchema
+  .extend({
+    ...blocked.shape,
+    checks: z.array(
+      z.union([
+        dependencyPackageCheckOutputSchema.shape.checks.element,
+        dependencyScopedBlockedSchema.safeExtend(advisoryId),
+        blocked.extend(advisoryId),
+      ]),
+    ),
+    pendingAdvisories: z.array(z.string().nullable()).optional(),
+  })
+  .passthrough();
 
-type Result =
-  | Awaited<ReturnType<typeof runReviewedDependencyCheck>>
-  | Awaited<ReturnType<typeof runLocalStackInvestigation>>;
-function summarize(report: Result): string {
-  if ("verdict" in report)
-    return [
-      `${report.cve} · ${report.verdict}`,
-      ...report.assessments.map(
-        (a) => `  ${a.workItemId}: ${a.verdict} — ${a.reason}`,
-      ),
-    ].join("\n");
-  const checks = "checks" in report ? report.checks : [report];
-  if (!checks.length && "package" in report)
-    return `${report.package.ecosystem}:${report.package.name}: no published advisories found.`;
-  return checks
-    .map((check) => {
-      const title =
-        "cve" in check
-          ? check.cve
-          : (check.advisoryId ?? "Caller-supplied description");
-      return [
-        title,
-        ...check.uses.map(
-          (u) =>
-            `  ${u.location} · ${u.component}@${u.version ?? "unknown"} · ${u.verdict}: ${u.reason}`,
-        ),
-        ...check.limitations.map((s) => `  Gap: ${s}`),
-      ].join("\n");
-    })
-    .join("\n\n");
+/** HTML is a file, never a document dumped to stdout. All other formats keep
+ * --report-file independent of the terminal and preserve the canonical JSON. */
+export function dependencyReportDestination(
+  cwd: string,
+  requested: string | undefined,
+  context: DependencyCliContext,
+) {
+  const html = context.htmlReportRequested?.();
+  const path =
+    requested ??
+    (html
+      ? `exploitability_report_${new Date().toISOString().replace(/[-:.]/gu, "")}.html`
+      : undefined);
+  return {
+    reportFile: path && resolveConfigPath(cwd, path),
+    reportFormat: html ? ("html" as const) : ("json" as const),
+  };
+}
+
+export function presentDependencyResult<T>(
+  result: T,
+  context: DependencyCliContext,
+  format: string,
+  options: { summary?: boolean; savedPath?: string } = {},
+): T | string {
+  if (context.htmlReportRequested?.()) {
+    const summary = summarizeDependencyReport(prepareDependencyReport(result));
+    // A blocked investigation has no completed artifact to link.
+    return options.savedPath
+      ? summary + "\n\n" + formatSecurityPolicyText(options.savedPath)
+      : summary;
+  }
+  if (context.hasOutputFilter?.()) return result;
+  if (format === "md")
+    return formatSecurityPolicyText(
+      renderPreparedDependencyReportMarkdown(prepareDependencyReport(result)),
+      true,
+    ).trimEnd();
+  if (options.summary && format === "toon")
+    return summarizeDependencyReport(prepareDependencyReport(result));
+  return result;
 }
 
 export function registerDependencyCheck(
@@ -76,6 +98,7 @@ export function registerDependencyCheck(
   group.command("check", {
     description:
       "Investigate a CVE or package in this checkout, optionally using a supplied stack capture.",
+    hint: "Read the summary on stdout, use --format md for the full text or --json for the structured result. --format html saves a browser view and prints its path.",
     alias: { config: "c" },
     destructive: false,
     mcp: false,
@@ -90,7 +113,9 @@ export function registerDependencyCheck(
         .describe("Path to the supplied source endpoint document."),
       sinks: text
         .optional()
-        .describe("Path to the sink endpoints and frozen advisory."),
+        .describe(
+          "Path to the sink endpoints and catalog advisory. The CLI looks up public advisory details unless supplied.",
+        ),
       stacks: text
         .optional()
         .describe("Path to the observed stacks and target revision."),
@@ -111,19 +136,14 @@ export function registerDependencyCheck(
       progressEvents: text
         .optional()
         .describe("Stream investigation progress to a new JSON Lines file."),
-      reportFile: text
-        .optional()
-        .describe("Save the completed JSON report to a new file."),
+      reportFile: reportFileOption,
     }),
     output: z.union([
-      checkOutput,
-      z
-        .object({
-          status: z.literal("blocked"),
-          code: z.literal("INVESTIGATION_BLOCKED"),
-          reason: text,
-        })
-        .passthrough(),
+      ...dependencyCheckOutputSchema.options,
+      stackInvestigationReportSchema,
+      dependencyScopedBlockedSchema,
+      blockedPackage,
+      blocked,
       z.string(),
     ]),
     async run({ args, options, format, formatExplicit }) {
@@ -169,13 +189,18 @@ export function registerDependencyCheck(
             codex: options.codex,
             config,
           };
+          const destination = dependencyReportDestination(
+            cwd,
+            options.reportFile,
+            context,
+          );
           const result = await withDependencyCheckOutput(
             {
               subject: args.subject,
+              checkout: repository,
+              display: (line) => context.stderr.write(line + "\n"),
               signal,
-              reportFile:
-                options.reportFile &&
-                resolveConfigPath(cwd, options.reportFile),
+              ...destination,
               progressEvents:
                 options.progressEvents &&
                 resolveConfigPath(cwd, options.progressEvents),
@@ -183,35 +208,37 @@ export function registerDependencyCheck(
                 (context.stderr ?? process.stderr).write(message + "\n"),
             },
             async (emit) => {
+              const project = config
+                ? await readProjectConfig(config, cwd)
+                : undefined;
+              const scope = project?.input.exploitability?.scope;
               if (sources && sinks && stacks) {
-                emit("investigation");
+                const { runLocalStackInvestigation } =
+                  await import("./dependency-stack-launcher.js");
                 return runLocalStackInvestigation({
                   cve: args.subject.toUpperCase(),
+                  callerScope: scope?.instructions,
                   repository,
                   signal,
                   sourcesPath: resolveConfigPath(cwd, sources),
                   sinksPath: resolveConfigPath(cwd, sinks),
                   stacksPath: resolveConfigPath(cwd, stacks),
-                  async investigate(session) {
-                    await context.runAgent({
-                      directory: session.directory,
-                      signal,
-                      prompt: await stackInvestigationPrompt(session),
-                      ...settings,
-                    });
-                    return 0;
-                  },
+                  emit,
+                  runAgent: (request) =>
+                    context.runAgent({ ...request, ...settings }),
                 });
               }
-              const project = config
-                ? await readProjectConfig(config, cwd)
-                : undefined;
-              return runReviewedDependencyCheck(
+              const { runReviewedDependencyCheck } =
+                await import("./dependency-reviewed-check.js");
+              const reviewed = await runReviewedDependencyCheck(
                 {
                   directory: repository,
                   subject: args.subject,
                   vulnDescription: options.vulnDescription,
-                  scope: project?.input.exploitability?.scope?.instructions,
+                  scope: scope?.instructions,
+                  excludePaths: scope?.exclude_paths,
+                  sources: project?.input.exploitability?.sources,
+                  sinks: project?.input.exploitability?.sinks,
                   evidenceSources:
                     project?.input.exploitability?.evidence_sources,
                   onProgress: emit,
@@ -220,18 +247,20 @@ export function registerDependencyCheck(
                 },
                 { runAgent: context.runAgent },
               );
+              return dependencyCheckOutputSchema.parse(reviewed);
             },
           );
-          return !formatExplicit && format === "toon"
-            ? summarize(result)
-            : result;
+          return presentDependencyResult(result, context, format, {
+            summary: !formatExplicit,
+            savedPath: destination.reportFile,
+          });
         })
         .catch((error: unknown) => {
           if (error instanceof DependencyInvestigationBlockedError) {
             context.setExitCode(2);
-            return !formatExplicit && format === "toon"
-              ? error.message
-              : error.outcome;
+            return presentDependencyResult(error.outcome, context, format, {
+              summary: !formatExplicit,
+            });
           }
           throw error;
         });

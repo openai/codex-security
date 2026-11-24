@@ -275,25 +275,23 @@ def _indexed_findings(
             [],
         ).append(row)
 
-    # Global comparisons do not bind legacy history across current targets. A scoped
-    # projection already admits only its own target's legacy rows and decisions.
-    for identity, occurrences in list(grouped.items()):
+    # When a match group spans current targets, keep decisions within each verified
+    # generation or legacy target in that group. Scoped queries already select their history.
+    finding_groups = []
+    for occurrences in grouped.values():
         current_targets = {
             row["target_id"] for row in occurrences if row["repository_generation"] is not None
         }
         if len(current_targets) <= 1 or scan_scope is not None:
+            finding_groups.append(occurrences)
             continue
-        current = []
+        partitions: dict[tuple[str, str], list[sqlite3.Row]] = {}
         for row in occurrences:
-            if row["repository_generation"] is None:
-                legacy_identity = (scan_repository_group(row), identity[1])
-                grouped.setdefault(legacy_identity, []).append(row)
-            else:
-                current.append(row)
-        grouped[identity] = current
+            partitions.setdefault(scan_repository_group(row), []).append(row)
+        finding_groups.extend(partitions.values())
 
     findings = []
-    for occurrences in grouped.values():
+    for occurrences in finding_groups:
         latest = max(
             occurrences,
             key=lambda row: (timestamp_key(row["created_at"]), row["occurrence_id"]),
