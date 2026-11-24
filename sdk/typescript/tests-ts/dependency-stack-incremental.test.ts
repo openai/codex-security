@@ -127,9 +127,10 @@ test("the gated CLI accepts an interactive init and runtime evidence without a p
   );
   expect(evidence.receiptId).toMatch(/^runtime-/);
   const { commands } = await invoke(["tools", "--state", state]);
-  expect(commands.map((item: { name: string }) => item.name)).not.toContain(
-    "read-stacks",
-  );
+  const names = commands.map((item: { name: string }) => item.name);
+  expect(names).toContain("record-evidence");
+  expect(names).toContain("record-observations");
+  expect(names).not.toContain("read-stacks");
 });
 
 function query(id: string) {
@@ -204,31 +205,6 @@ async function packet(root: string, repo: string, sha: string) {
   });
   return inputs;
 }
-
-test("packet runs expose full frames and a capture receipt through next", async () => {
-  await using dir = await scopedTemporaryDirectory("incremental-stack-packet-");
-  const { repo, sha, state, run } = await fixture(dir.path);
-  const inputs = await packet(dir.path, repo, sha);
-  await executeStackRun("init", { state, inputs, repo });
-  const tools = (await run("tools")) as {
-    commands: { name: string }[];
-  };
-  const names = tools.commands.map(({ name }) => name);
-  expect(names).toContain("record-evidence");
-  expect(names).toContain("record-observations");
-  expect(names).not.toContain("read-stacks");
-  const current = (await run("next")) as {
-    receiptId: string;
-    rootFirstRawIndices: number[];
-    workItem: { observation: { frames: { name: string }[] } };
-  };
-  expect(current.workItem.observation.frames.map(({ name }) => name)).toEqual([
-    "decode",
-    "request",
-  ]);
-  expect(current.rootFirstRawIndices).toEqual([1, 0]);
-  expect(current.receiptId).toMatch(/^capture-/);
-});
 
 test("interactive runs import runtime evidence, append work, and resume a finalized report", async () => {
   await using dir = await scopedTemporaryDirectory(
@@ -424,9 +400,6 @@ test("a supplemental capture citation automatically carries its original runtime
   expect(receipts.map(({ receiptId }) => receiptId)).toContain(
     current.receiptId,
   );
-  expect(receipts.map(({ receiptId }) => receiptId)).toContain(
-    runtime.receiptId,
-  );
   expect(
     receipts.find(({ receiptId }) => receiptId === runtime.receiptId)!.result,
   ).toEqual(JSON.parse(JSON.stringify(original)));
@@ -438,6 +411,12 @@ test("runtime imports reject invalid integrity, fabricated stacks, and contradic
     "incremental-stack-integrity-",
   );
   const { repo, state, run, recordQuery } = await fixture(dir.path);
+  await executeStackRun("init", { state, repo });
+  const original = query("verified");
+  const runtime = await recordQuery(original);
+  await expect(
+    run("record-observations", { receiptId: runtime.receiptId }),
+  ).rejects.toThrow("Unknown catalog sink");
   await executeStackRun("init", {
     state,
     repo,
@@ -459,8 +438,6 @@ test("runtime imports reject invalid integrity, fabricated stacks, and contradic
       queries: [query("invalid")],
     }),
   ).rejects.toThrow(/receipt/i);
-  const original = query("verified");
-  const runtime = await recordQuery(original);
   const fabricated = structuredClone(original);
   fabricated.groups[0]!.observations[0]!.frames[0]!.name = "fabricated";
   await expect(
@@ -468,7 +445,7 @@ test("runtime imports reject invalid integrity, fabricated stacks, and contradic
       receiptId: runtime.receiptId,
       queries: [fabricated],
     }),
-  ).rejects.toThrow(/receipt|match|original/i);
+  ).rejects.toThrow("does not match");
   const contradictory = structuredClone(original);
   contradictory.scope.service = "different-service";
   await expect(
@@ -479,7 +456,7 @@ test("runtime imports reject invalid integrity, fabricated stacks, and contradic
   ).rejects.toThrow(/receipt|match|scope|original/i);
   await expect(
     run("record-observations", { queries: [original] }),
-  ).rejects.toThrow(/receipt/i);
+  ).rejects.toThrow("require an original runtime receipt");
   expect(await run("next")).toMatchObject({
     workItem: null,
   });

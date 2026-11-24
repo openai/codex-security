@@ -32,8 +32,8 @@ import {
 import {
   readStackPacket,
   stackFramesRootFirst,
-  stackPacketWorkItems,
   type StackPacket,
+  type StackWorkItem,
 } from "./dependency-stack-packet.js";
 import { CodexSecurityError } from "./errors.js";
 import { isRecord } from "./record.js";
@@ -44,11 +44,13 @@ import {
   selectRuntimeReceipt,
 } from "./dependency-stack-runtime-receipts.js";
 import {
+  effectiveInputDigest,
   getLiveRun,
   initializeLive,
+  investigationVersion,
   liveInitInputSchema,
   liveMetadataGaps,
-  overlayPacket,
+  packetSnapshot,
   recordObservations,
   recordObservationsInputSchema,
   supplementalReceipt,
@@ -159,7 +161,6 @@ interface RunLocation {
   hostReview?: true;
 }
 
-type WorkItem = ReturnType<typeof stackPacketWorkItems>[number];
 type Ledger = ReturnType<typeof createDependencyClaims>;
 type ClaimInput = z.infer<typeof dependencyClaimQueueSchema>["claims"][number];
 
@@ -274,7 +275,7 @@ export function reviseLocalStackReport(
   }
 }
 
-function captureId(packet: StackPacket, item: WorkItem) {
+function captureId(packet: StackPacket, item: StackWorkItem) {
   return (
     "capture-" + dependencyClaimHash([packet.manifest.inputDigest, item.id])
   );
@@ -282,7 +283,7 @@ function captureId(packet: StackPacket, item: WorkItem) {
 
 function selectReceipt(
   packet: StackPacket,
-  items: Map<string, WorkItem>,
+  items: Map<string, StackWorkItem>,
   store: DependencyAttemptStore,
   receiptId: string,
   selection?: DependencyInventoryReceiptSelection,
@@ -396,50 +397,7 @@ function currentAssessments(store: DependencyAttemptStore, claims: Ledger) {
     );
 }
 
-function investigationVersion(store: DependencyAttemptStore) {
-  return dependencyClaimHash({
-    reviewRound: store.get<number>("review", "round") ?? 0,
-    live: getLiveRun(store) ?? null,
-    queries: store.keys("supplemental-query"),
-    runtime: store.keys("runtime-receipt"),
-    sources: store.keys("source-note"),
-  });
-}
-
-function packetSnapshot(store: DependencyAttemptStore, base?: StackPacket) {
-  const snapshot = store.read(() => ({
-    packet: overlayPacket(store, base),
-    version: investigationVersion(store),
-  }));
-  return { ...snapshot, items: stackPacketWorkItems(snapshot.packet) };
-}
-
-function reportWithEffectiveInputs(
-  store: DependencyAttemptStore,
-  packet: StackPacket,
-  report: StackInvestigationReport,
-): StackInvestigationReport {
-  if (
-    !getLiveRun(store) &&
-    !store.size("supplemental-query") &&
-    !store.size("runtime-receipt")
-  )
-    return report;
-  return {
-    ...report,
-    effectiveInputDigest: dependencyClaimHash({
-      format: "codex-security.stack-effective-input/v1",
-      inputDigest: packet.manifest.inputDigest,
-      target: packet.manifest.target,
-      sources: packet.sources,
-      sinks: packet.sinks,
-      stacks: packet.stacks,
-      runtimeReceiptIds: store.keys("runtime-receipt").sort(),
-    }),
-  };
-}
-
-function nextItem(items: WorkItem[], assessments: StackAssessment[]) {
+function nextItem(items: StackWorkItem[], assessments: StackAssessment[]) {
   const complete = new Set(assessments.map((item) => item.workItemId));
   return items.find((item) => !complete.has(item.id));
 }
@@ -469,12 +427,11 @@ async function verifyFinal(
     throw new CodexSecurityError(
       "The investigator did not finalize the report.",
     );
-  const reportFor = (rows: StackAssessment[]) =>
-    reportWithEffectiveInputs(
-      store,
-      packet,
-      finalizeStackReport(inputs, rows, claims),
-    );
+  const reportFor = (rows: StackAssessment[]) => {
+    const report = finalizeStackReport(inputs, rows, claims);
+    const digest = effectiveInputDigest(store, packet);
+    return digest ? { ...report, effectiveInputDigest: digest } : report;
+  };
   const decisions = store.values<StackAssessment>("stack-assessment");
   const snapshot = reportFor(decisions);
   const digest = dependencyClaimHash(snapshot);

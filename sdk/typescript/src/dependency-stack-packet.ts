@@ -163,69 +163,55 @@ const observation = z
       .optional(),
   })
   .superRefine((value, ctx) => {
+    const issue = (path: (string | number)[], message: string) =>
+      ctx.addIssue({ code: "custom", path, message });
     for (const [i, binding] of (value.bindings ?? []).entries()) {
       for (const [j, rawIndex] of (binding.frameIndices ?? []).entries()) {
         if (rawIndex >= value.frames.length)
-          ctx.addIssue({
-            code: "custom",
-            path: ["bindings", i, "frameIndices", j],
-            message: "Package binding index is outside the captured frames.",
-          });
+          issue(
+            ["bindings", i, "frameIndices", j],
+            "Package binding index is outside the captured frames.",
+          );
       }
     }
     if (value.sinkIndex === null && value.sinkIds?.length) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["sinkIds"],
-        message:
-          "A shorthand catalog match requires a captured query sink index.",
-      });
+      issue(
+        ["sinkIds"],
+        "A shorthand catalog match requires a captured query sink index.",
+      );
     }
     for (const [index, match] of (value.sinkMatches ?? []).entries()) {
       if (match.rawIndex >= value.frames.length) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["sinkMatches", index, "rawIndex"],
-          message: "Catalog sink index is outside the captured frames.",
-        });
+        issue(
+          ["sinkMatches", index, "rawIndex"],
+          "Catalog sink index is outside the captured frames.",
+        );
       }
       if (
         value.sinkIds?.includes(match.sinkId) &&
         match.rawIndex !== value.sinkIndex
       ) {
-        ctx.addIssue({
-          code: "custom",
-          path: ["sinkMatches", index],
-          message:
-            "Shorthand and explicit catalog indices disagree. List the matches explicitly.",
-        });
+        issue(
+          ["sinkMatches", index],
+          "Shorthand and explicit catalog indices disagree. List the matches explicitly.",
+        );
       }
     }
     if (!value.frames.length && value.framesTruncated === false) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["frames"],
-        message: "A complete observed stack must contain a frame.",
-      });
+      issue(["frames"], "A complete observed stack must contain a frame.");
     }
     if (value.sinkIndex !== null && value.sinkIndex >= value.frames.length) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["sinkIndex"],
-        message: "Sink index is outside the captured frames.",
-      });
+      issue(["sinkIndex"], "Sink index is outside the captured frames.");
     }
     if (
       value.sourceIndex !== undefined &&
       ((value.sinkIndex !== null && value.sourceIndex <= value.sinkIndex) ||
         value.sourceIndex >= value.frames.length)
     ) {
-      ctx.addIssue({
-        code: "custom",
-        path: ["sourceIndex"],
-        message:
-          "A leaf-first source must follow the sink within the captured frames.",
-      });
+      issue(
+        ["sourceIndex"],
+        "A leaf-first source must follow the sink within the captured frames.",
+      );
     }
   });
 
@@ -455,16 +441,18 @@ function uniqueIds(values: readonly { id: string }[], kind: string) {
   }
 }
 
-type Paths = Record<Role, string>;
 type Bytes = Record<Role, Buffer>;
 
-async function loadFiles(paths: Paths, repository: string): Promise<Bytes> {
-  const read = (path: string) =>
-    readRegularInputFileBytes(resolve(path), repository);
+async function loadFiles(
+  path: (role: Role) => string,
+  repository: string,
+): Promise<Bytes> {
+  const read = (role: Role) =>
+    readRegularInputFileBytes(resolve(path(role)), repository);
   const [sources, sinks, stacks] = await Promise.all([
-    read(paths.sources),
-    read(paths.sinks),
-    read(paths.stacks),
+    read("sources"),
+    read("sinks"),
+    read("stacks"),
   ]);
   return { sources, sinks, stacks };
 }
@@ -672,11 +660,7 @@ export async function prepareStackCheckPacket(
   host?: StackAdvisoryHost,
 ): Promise<StackPacket> {
   const bytes = await loadFiles(
-    {
-      sources: options.sourcesPath,
-      sinks: options.sinksPath,
-      stacks: options.stacksPath,
-    },
+    (role) => options[`${role}Path`],
     options.repository,
   );
   const documents = await decodeFiles(
@@ -742,11 +726,7 @@ export async function readStackPacket(
   );
   const manifest = stackManifestSchema.parse(parseJson(read, "manifest.json"));
   const bytes = await loadFiles(
-    {
-      sources: join(inputsDir, "sources.json"),
-      sinks: join(inputsDir, "sinks.json"),
-      stacks: join(inputsDir, "stacks.json"),
-    },
+    (role) => join(inputsDir, role + ".json"),
     repository,
   );
   for (const role of roles) {

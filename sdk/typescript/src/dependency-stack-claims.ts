@@ -3,8 +3,8 @@ import {
   DependencyAttemptStore,
   dependencyRecordHash,
 } from "./dependency-attempt-store.js";
-import { dependencyGitCommitSchema } from "./dependency-source-identity.js";
 import {
+  dependencyCitationRangeSchema,
   inventoryReceiptSelectionSchema,
   stackJsonValue,
   type BoundDependencyInventoryReceipt,
@@ -63,17 +63,10 @@ export const dependencyClaimProposalSchema = z.strictObject({
   ),
   evidence: z
     .array(
-      z
-        .strictObject({
-          path: identity,
-          commit: dependencyGitCommitSchema.optional(),
-          startLine: z.number().int().positive(),
-          endLine: z.number().int().positive(),
-        })
-        .refine(
-          (value) => value.startLine <= value.endLine,
-          "Evidence range is reversed.",
-        ),
+      dependencyCitationRangeSchema.refine(
+        (value) => value.startLine <= value.endLine,
+        "Evidence range is reversed.",
+      ),
     )
     .default([]),
   receiptIds: z.array(identity).optional(),

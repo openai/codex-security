@@ -67,32 +67,25 @@ export function inventoryJsonField(
   }
   return value;
 }
+export const dependencyCitationRangeSchema = z.strictObject({
+  path: z.string().trim().min(1),
+  commit: dependencyGitCommitSchema.optional(),
+  startLine: z.number().int().positive(),
+  endLine: z.number().int().positive(),
+});
+type Range = z.infer<typeof dependencyCitationRangeSchema>;
+
 export const dependencySourceNoteSchema = z.strictObject({
   question: z.string().trim().min(1),
   scope: z.string().trim().min(1),
   claim: z.string().trim().min(1),
-  evidence: z
-    .array(
-      z.strictObject({
-        path: z.string().trim().min(1),
-        commit: dependencyGitCommitSchema.optional(),
-        startLine: z.number().int().positive(),
-        endLine: z.number().int().positive(),
-      }),
-    )
-    .min(1),
+  evidence: z.array(dependencyCitationRangeSchema).min(1),
 });
 export const dependencySourceNoteQuerySchema = z.strictObject({
   id: z.string().trim().min(1).optional(),
   search: z.string().trim().min(1).optional(),
 });
 
-interface Range {
-  path: string;
-  commit?: string | undefined;
-  startLine: number;
-  endLine: number;
-}
 export interface DependencyExcerpt extends Range {
   text: string;
   sourceIdentity: {

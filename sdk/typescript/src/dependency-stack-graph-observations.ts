@@ -5,7 +5,7 @@ import {
   type StackPacket,
 } from "./dependency-stack-packet.js";
 import { CodexSecurityError } from "./errors.js";
-import { canonicalJson, isRecord } from "./record.js";
+import { asRecord, canonicalJson, isRecord } from "./record.js";
 
 const querySchema = sampledStacksSchema.shape.queries.element;
 type Query = z.infer<typeof querySchema>;
@@ -17,6 +17,10 @@ function fail(message: string): never {
 
 function stringValue(value: unknown): string | undefined {
   return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function arrayOrEmpty(value: unknown): unknown[] {
+  return Array.isArray(value) ? value : [];
 }
 
 function graphFrame(value: unknown) {
@@ -176,47 +180,35 @@ function graphQueries(
     end = stringValue(scope["end"]);
   if (!id || !start || !end)
     fail("Graph evidence requires an original query ID and sampling window.");
-  const structured = isRecord(scope["query"]) ? scope["query"] : undefined;
-  const ruleInputs =
-    structured &&
-    Array.isArray(structured["rules"]) &&
-    structured["rules"].length
-      ? structured["rules"].map((rule) =>
-          isRecord(rule)
-            ? rule
-            : fail("Graph evidence has invalid query rules."),
-        )
-      : [
-          {
-            sources: structured?.["sources"] ?? [],
-            sinks: structured?.["sinks"] ?? scope["frames"] ?? [],
-          },
-        ];
-  const sourceSelectors = ruleInputs.flatMap((rule) =>
-    Array.isArray(rule["sources"]) ? rule["sources"] : [],
-  );
-  const sinkSelectors = ruleInputs.flatMap((rule) =>
-    Array.isArray(rule["sinks"]) ? rule["sinks"] : [],
-  );
-  const annotateRules = (side: "sources" | "sinks", fallback: unknown[]) =>
-    structured &&
-    Array.isArray(structured["rules"]) &&
-    structured["rules"].length
-      ? ruleInputs.flatMap((rule, ruleIndex) =>
-          (Array.isArray(rule[side]) ? rule[side] : []).map((selector) =>
-            isRecord(selector)
-              ? { ...selector, rule_index: ruleIndex }
-              : { name: selector, rule_index: ruleIndex },
-          ),
-        )
-      : fallback;
-  const querySources = annotateRules("sources", sourceSelectors);
-  const querySinks = annotateRules("sinks", sinkSelectors);
+  const structured = asRecord(scope["query"]);
+  const rules = arrayOrEmpty(structured?.["rules"]);
+  const ruleInputs = rules.length
+    ? rules.map(
+        (rule) =>
+          asRecord(rule) ?? fail("Graph evidence has invalid query rules."),
+      )
+    : [
+        {
+          sources: structured?.["sources"],
+          sinks: structured?.["sinks"] ?? scope["frames"],
+        },
+      ];
+  const querySelectors = (side: "sources" | "sinks") =>
+    ruleInputs.flatMap((rule, ruleIndex) => {
+      const selectors = arrayOrEmpty(rule[side]);
+      if (!rules.length) return selectors;
+      return selectors.map((selector) => ({
+        ...(asRecord(selector) ?? { name: selector }),
+        rule_index: ruleIndex,
+      }));
+    });
+  const querySources = querySelectors("sources");
+  const querySinks = querySelectors("sinks");
   const inferred =
     structured?.["kind"] === "async_parent" ||
     metadata["instance_correlation_verified"] === false ||
     typeof metadata["join_basis"] === "string";
-  if (!sinkSelectors.length)
+  if (!querySinks.length)
     fail("Graph evidence does not identify the queried sink selectors.");
   const observations = value["observations"].map((raw) => {
     if (
@@ -231,9 +223,7 @@ function graphQueries(
     if (canonicalJson(rowScope["window"]) !== canonicalJson({ start, end }))
       fail("Graph observation window differs from the query window.");
     const frames = raw["frames"].map(graphFrame).reverse();
-    const matches = isRecord(rowScope["matches"])
-      ? rowScope["matches"]
-      : undefined;
+    const matches = asRecord(rowScope["matches"]);
     if (structured && !matches)
       fail("A structured graph query requires captured match indices.");
     if (matches && matches["frame_order"] !== "root_first")
@@ -243,22 +233,15 @@ function graphQueries(
     const matchedSinks: { sinkId: string; rawIndex: number }[] = [];
     let sinkIndex: number | null = null,
       sourceIndex: number | undefined;
-    const rules =
-      matches && Array.isArray(matches["rules"]) ? matches["rules"] : [];
-    for (const rawRule of rules) {
+    for (const rawRule of arrayOrEmpty(matches?.["rules"])) {
       if (!isRecord(rawRule) || !Number.isInteger(rawRule["rule_index"]))
         fail("Graph evidence contains an invalid match rule.");
       if (rawRule["matched"] !== true) continue;
       const input = ruleInputs[Number(rawRule["rule_index"])];
       if (!input) fail("Graph evidence references an unknown query rule.");
-      const selectors =
-        input && Array.isArray(input["sinks"]) ? input["sinks"] : [];
-      const pairs = Array.isArray(rawRule["ordered_pairs"])
-        ? rawRule["ordered_pairs"]
-        : [];
-      for (const rawMatch of Array.isArray(rawRule["sinks"])
-        ? rawRule["sinks"]
-        : []) {
+      const selectors = arrayOrEmpty(input["sinks"]);
+      const pairs = arrayOrEmpty(rawRule["ordered_pairs"]);
+      for (const rawMatch of arrayOrEmpty(rawRule["sinks"])) {
         if (
           !isRecord(rawMatch) ||
           !Number.isInteger(rawMatch["frame_index"]) ||
@@ -284,9 +267,7 @@ function graphQueries(
           // A rule can contain additional sink hits without an allowed source ancestor.
           if (!isRecord(pair) || !Array.isArray(pair["source_ancestors"]))
             continue;
-          const sources = Array.isArray(input["sources"])
-            ? input["sources"]
-            : [];
+          const sources = arrayOrEmpty(input["sources"]);
           for (const ancestor of pair["source_ancestors"]) {
             if (
               !isRecord(ancestor) ||
@@ -318,13 +299,8 @@ function graphQueries(
             matchedSinks.push({ sinkId: sink.id, rawIndex: index });
       }
     }
-    if (
-      !matches &&
-      (!structured ||
-        structured["kind"] === "sink" ||
-        structured["kind"] === "discovery")
-    ) {
-      for (const selector of sinkSelectors) {
+    if (!matches) {
+      for (const selector of querySinks) {
         for (const [index, frame] of frames.entries()) {
           if (!graphSelectorMatches(selector, frame)) continue;
           sinkIndex ??= index;

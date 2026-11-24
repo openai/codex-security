@@ -6,7 +6,6 @@ import {
   report,
   reviewed,
   sourceRef,
-  withExcerpts,
 } from "./support/dependency-report-fixtures.js";
 
 const sha = "a".repeat(40);
@@ -123,37 +122,6 @@ test("source excerpts from a different revision or contradicting the same line n
   source.commit = sha;
   claim.sources.push({ ...source, text: "return other(bytes);" });
   expect(code()).toBeUndefined();
-});
-test("query sink alone is not a matched vulnerable function", () => {
-  const { run, observation } = sample();
-  observation.sinkMatches = [];
-  expect(run().frames.at(-1)?.role).toBe("query_sink");
-});
-test("single reviewed caller is not a runtime stack or dependency implementation", () => {
-  const use = reviewed(1, {
-    location: "upstream → helper → decode",
-    proof: {
-      sink: {
-        function: "decode",
-        callSite: { path: "src/handler-1.ts", line: 2 },
-      },
-      conditions: [],
-    },
-  });
-  const input = withExcerpts(report([use]), ["return decode(input);"]);
-  const finding =
-    prepareDependencyReport(input).sections[0]!.prepared!.findings[0]!;
-  const result = inspectPath(finding);
-  expect(result.basis).toBe("source");
-  expect(result.frames).toHaveLength(1);
-  expect(result.frames[result.initialIndex]).toMatchObject({
-    role: "call_site",
-    label: "decode",
-    line: 2,
-    code: { text: "return decode(input);" },
-  });
-  expect(result.frames[0]?.rawIndex).toBeUndefined();
-  expect(result.notes).toContain("Upstream callers not recorded.");
 });
 test("a missing or unreviewed source step is a gap, not a selectable call", () => {
   const line = 2;

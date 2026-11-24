@@ -48,7 +48,6 @@ const distModules = [
   "dependency-report-renderer",
   "dependency-report-ui",
   "dependency-resource-session",
-  "dependency-verdict-progress",
   "dependency-reachability",
   "dependency-review-queue",
   "dependency-source-evidence",

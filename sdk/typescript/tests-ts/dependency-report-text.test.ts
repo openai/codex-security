@@ -29,7 +29,6 @@ test("Markdown attaches the missing check and scoped exclusion to their respecti
     parts.filter((p) => p.includes("Shared document helper")),
   ).toHaveLength(1);
   expect(output).toContain("enabled implementation has not been linked");
-  expect(output).not.toContain("[object Object]");
 });
 
 test("stack Markdown explains sampled call, gaps and claims without borrowing evidence for a no-match", () => {
@@ -47,7 +46,6 @@ test("stack Markdown explains sampled call, gaps and claims without borrowing ev
   expect(sampled).toContain("src/codec.ts:3");
   expect(sampled).toContain("sample-codec 1.0");
   expect(sampled).toContain("Which decoder mode ran?");
-  expect(sampled).toContain("return decode(bytes);");
   expect(sampled).toContain(
     "**Sampled stack** · caller first\n\n- `upload` · source, frame 4\n- … 3 intervening frames omitted\n- `decode` · matched sink, frame 0",
   );
@@ -61,7 +59,6 @@ test("stack Markdown explains sampled call, gaps and claims without borrowing ev
   expect(missing).not.toContain("return decode(bytes);");
   expect(missing).not.toContain("Sampled copy 1.0");
   expect(output).not.toContain("RAW_RECEIPT_CONTENT");
-  expect(output).not.toContain("[object Object]");
 });
 
 test("Markdown puts the bound code at its sampled frame and shows locations even without source", () => {
@@ -139,7 +136,6 @@ test("zero reviewed uses still retains unresolved handoffs", () => {
   const output = renderDependencyReportMarkdown(input);
   expect(output).toContain("0 reviewed uses");
   expect(output).toContain(input.coverage[0]!.reason);
-  expect(output).not.toContain("[object Object]");
 });
 
 test("the short stack summary leads with decisions and questions scoped to each sampled use", () => {

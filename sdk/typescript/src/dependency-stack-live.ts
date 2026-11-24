@@ -8,6 +8,7 @@ import {
 import {
   queryWorkItems,
   sampledStacksSchema,
+  stackPacketWorkItems,
   stackSinkMatches,
   stackSinksSchema,
   stackSourcesSchema,
@@ -25,7 +26,6 @@ const text = z.string().min(1);
 const querySchema = sampledStacksSchema.shape.queries.element;
 type Query = z.infer<typeof querySchema>;
 type Origin = z.infer<typeof sampledStacksSchema.shape.origin>;
-type Source = StackPacket["sources"]["sources"][number];
 type Sink = StackPacket["sinks"]["sinks"][number];
 
 export const liveInitInputSchema = z.strictObject({
@@ -61,7 +61,7 @@ export interface LiveRun {
   inputDigest: string;
   cve?: string;
   advisory?: StackPacket["manifest"]["advisory"];
-  sources: Source[];
+  sources: StackPacket["sources"]["sources"];
   sinks: Sink[];
 }
 
@@ -82,9 +82,9 @@ export function getLiveRun(store: DependencyAttemptStore): LiveRun | undefined {
 }
 
 function mergeEndpoints<T extends { id: string }>(
-  existing: readonly T[],
-  incoming: readonly T[],
   kind: string,
+  existing: readonly T[] = [],
+  incoming: readonly T[] = [],
 ): T[] {
   const result = [...existing];
   const byId = new Map(existing.map((value) => [value.id, value]));
@@ -167,16 +167,8 @@ export async function initializeLive(
     attemptId,
     toolRevision,
   };
-  const sources = mergeEndpoints(
-    existing?.sources ?? [],
-    update.sources ?? [],
-    "source",
-  );
-  const sinks = mergeEndpoints(
-    existing?.sinks ?? [],
-    update.sinks ?? [],
-    "sink",
-  );
+  const sources = mergeEndpoints("source", existing?.sources, update.sources);
+  const sinks = mergeEndpoints("sink", existing?.sinks, update.sinks);
   const sourceIds = new Set(sources.map((value) => value.id));
   for (const sink of sinks)
     if (sourceIds.has(sink.id)) fail(`Duplicate endpoint ID: ${sink.id}.`);
@@ -366,14 +358,15 @@ function queryReceipt(
   };
 }
 
-function supplementalQueries(store: DependencyAttemptStore) {
+function replayQueries(store: DependencyAttemptStore, base: Query[] = []) {
   const entries = store.values<SupplementalQuery>("supplemental-query");
-  for (const entry of entries) {
-    const actual = queryReceipt(entry.query, entry).sha256;
-    if (actual !== entry.sha256)
+  for (const entry of entries)
+    if (queryReceipt(entry.query, entry).sha256 !== entry.sha256)
       fail("Recorded supplemental observation evidence changed.");
-  }
-  return entries;
+  return entries.reduce(
+    (queries, entry) => mergeQuery(queries, entry.query),
+    base,
+  );
 }
 
 export function normalizeRuntimeObservationQueries(
@@ -392,15 +385,54 @@ export function overlayPacket(
   base?: StackPacket,
 ): StackPacket {
   const packet = base ?? livePacket(store);
-  const additions = supplementalQueries(store);
-  if (!additions.length) return packet;
-  const queries = additions.reduce(
-    (current, entry) => mergeQuery(current, entry.query),
-    packet.stacks.queries,
-  );
+  const queries = replayQueries(store, packet.stacks.queries);
+  if (queries === packet.stacks.queries) return packet;
   const sinkIds = new Set(packet.sinks.sinks.map((sink) => sink.id));
   for (const query of queries) validateAddedQuery(query, sinkIds);
   return { ...packet, stacks: { ...packet.stacks, queries } };
+}
+
+export function investigationVersion(store: DependencyAttemptStore) {
+  return dependencyRecordHash({
+    reviewRound: store.get<number>("review", "round") ?? 0,
+    live: getLiveRun(store) ?? null,
+    queries: store.keys("supplemental-query"),
+    runtime: store.keys("runtime-receipt"),
+    sources: store.keys("source-note"),
+  });
+}
+
+export function packetSnapshot(
+  store: DependencyAttemptStore,
+  base?: StackPacket,
+) {
+  const snapshot = store.read(() => ({
+    packet: overlayPacket(store, base),
+    version: investigationVersion(store),
+  }));
+  return { ...snapshot, items: stackPacketWorkItems(snapshot.packet) };
+}
+
+export function effectiveInputDigest(
+  store: DependencyAttemptStore,
+  packet: StackPacket,
+) {
+  if (
+    !getLiveRun(store) &&
+    !store.size("supplemental-query") &&
+    !store.size("runtime-receipt")
+  )
+    return undefined;
+  const { manifest, sources, sinks, stacks } = packet;
+  return dependencyRecordHash({
+    format: "codex-security.stack-effective-input/v1",
+    inputDigest: manifest.inputDigest,
+    target: manifest.target,
+    sources,
+    sinks,
+    stacks,
+    runtimeReceiptIds: store.keys("runtime-receipt").sort(),
+  });
 }
 
 export function recordObservations(
@@ -420,26 +452,19 @@ export function recordObservations(
   const requested = parsed.queries ?? originalQueries ?? [];
   if (!requested.length)
     fail("No captured queries were available in the runtime receipt.");
-  for (const query of requested) {
-    const requiresReceipt = query.groups.some(
-      (group) => group.status !== "no_coverage",
-    );
-    if (requiresReceipt && !originalQueries)
-      fail(
-        "Observed stacks and no-match results require an original runtime receipt.",
-      );
-    if (
-      originalQueries &&
-      !originalQueries.some(
-        (original) => canonicalJson(original) === canonicalJson(query),
-      )
-    )
-      fail("The supplied query does not match the original runtime receipt.");
+  if (originalQueries && parsed.queries) {
+    const originals = new Set(originalQueries.map(canonicalJson));
+    for (const query of requested)
+      if (!originals.has(canonicalJson(query)))
+        fail("The supplied query does not match the original runtime receipt.");
+  } else if (!originalQueries) {
+    for (const query of requested)
+      if (query.groups.some((group) => group.status !== "no_coverage"))
+        fail(
+          "Observed stacks and no-match results require an original runtime receipt.",
+        );
   }
-  let queries = supplementalQueries(store).reduce(
-    (current, entry) => mergeQuery(current, entry.query),
-    [...(base?.stacks.queries ?? [])],
-  );
+  let queries = replayQueries(store, base?.stacks.queries);
   const added = requested.map((query) => {
     validateAddedQuery(query, sinkIds);
     queries = mergeQuery(queries, query);

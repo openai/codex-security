@@ -106,16 +106,7 @@ const proposedUse = z.strictObject({
     .describe(
       "Specific consumer, service or build when discovered from source. For an unnamed root manifest, quote one running observation naming the service, package, version, Git revision and path to its cited manifest or caller.",
     ),
-  placeKind: z
-    .enum([
-      "service",
-      "job",
-      "configured_build",
-      "artifact",
-      "library_caller",
-      "unknown",
-    ])
-    .optional(),
+  placeKind: z.enum(dependencyPlaceSchema.shape.kind.options).optional(),
   configured: z
     .boolean()
     .optional()
@@ -1450,12 +1441,7 @@ function reportedDisposition(
   };
 }
 
-export function reportedUse(
-  use: VerifiedUse,
-  claim: Claim,
-  evidenceKeys: readonly string[],
-  selected: SelectedPremises = { evidence: [], claims: [] },
-) {
+export function reportedDeployment(use: VerifiedUse) {
   const runningQuotes = use.observations
     .filter((ref) => ref.supports.includes("running"))
     .map((ref) => ref.quote);
@@ -1465,14 +1451,7 @@ export function reportedUse(
       ? ("configured" as const)
       : ("unknown" as const);
   return {
-    location: use.location,
-    component: use.component,
-    version: use.version,
-    verdict: use.verdict,
-    reason: use.reason,
     deployment: running ? ("confirmed" as const) : deploymentBasis,
-    ...publishedFindingEvidence(use, new Set(evidenceKeys), selected.evidence),
-    ...findingDetails(use),
     place: {
       kind: use.placeKind ?? "unknown",
       environment: null,
@@ -1492,6 +1471,26 @@ export function reportedUse(
         ]),
       ],
     },
+  };
+}
+
+export function reportedUse(
+  use: VerifiedUse,
+  claim: Claim,
+  evidenceKeys: readonly string[],
+  selected: SelectedPremises = { evidence: [], claims: [] },
+) {
+  const { deployment, place } = reportedDeployment(use);
+  return {
+    location: use.location,
+    component: use.component,
+    version: use.version,
+    verdict: use.verdict,
+    reason: use.reason,
+    deployment,
+    ...publishedFindingEvidence(use, new Set(evidenceKeys), selected.evidence),
+    ...findingDetails(use),
+    place,
     proof:
       use.trace?.length && use.proof.sink
         ? {

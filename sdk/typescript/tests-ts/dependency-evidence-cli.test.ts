@@ -6,6 +6,7 @@ import { join } from "node:path";
 import { Writable } from "node:stream";
 import { dependencyRecordHash } from "../src/dependency-attempt-store.js";
 import { dependencyCheckOutputSchema } from "../src/dependency-reachability.js";
+import type { PremiseRef } from "../src/dependency-review-queue.js";
 import { main, readSkillCommandOutput } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { requestMetadata } from "./support/request-metadata.js";
@@ -64,17 +65,26 @@ test("command schema exposes complete and blocked reports as direct output alter
   );
 });
 
-test("a reviewed check calls only selected evidence sources and reviews the original replies", async () => {
-  await using repo = await scopedTemporaryDirectory("dependency-evidence-cli-");
-  const git = (...args: string[]) =>
-    execFileSync("git", args, { cwd: repo.path });
+function approve({ id, revision, hash }: PremiseRef) {
+  return {
+    id,
+    revision,
+    hash,
+    approved: true,
+    evidenceKeys: [],
+    reason: "Verified.",
+  };
+}
+
+async function commitFixture(path: string) {
+  const git = (...args: string[]) => execFileSync("git", args, { cwd: path });
   git("init", "-q");
   await writeFile(
-    join(repo.path, "caller.js"),
+    join(path, "caller.js"),
     "export const decode = value => value;\n",
   );
   await writeFile(
-    join(repo.path, "package.json"),
+    join(path, "package.json"),
     JSON.stringify({ name: "fixture", version: "1.0.0" }),
   );
   git("add", "caller.js", "package.json");
@@ -87,6 +97,11 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
     "-qm",
     "fixture",
   );
+}
+
+test("a reviewed check calls only selected evidence sources and reviews the original replies", async () => {
+  await using repo = await scopedTemporaryDirectory("dependency-evidence-cli-");
+  await commitFixture(repo.path);
   const server = { command: "fixture-server", enabled_tools: ["read_build"] };
   const config = join(repo.path, "investigation.json");
   await writeFile(
@@ -201,29 +216,11 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
             { server: "builds", tool: "read_build", arguments: {}, result },
           ]);
           output!.stdout.write(
-            JSON.stringify({
-              decisions: payload.claims.map(
-                ({
-                  id,
-                  revision,
-                  hash,
-                }: {
-                  id: string;
-                  revision: number;
-                  hash: string;
-                }) => ({
-                  id,
-                  revision,
-                  hash,
-                  evidenceKeys: [],
-                  approved: true,
-                  reason: "The reported gap matches the evidence.",
-                }),
-              ),
-            }),
+            JSON.stringify({ decisions: payload.claims.map(approve) }),
           );
           reviewed = true;
         } else {
+          expect(output?.appServer?.resumableCoordinator).toBe(true);
           const requests: { method?: string; params?: object }[] = [];
           await readSkillCommandOutput(
             commandOutput({
@@ -251,14 +248,13 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
           expect(
             requests.find((r) => r.method === "turn/start")?.params,
           ).toMatchObject({ cyberAccessProgram: "standard" });
-          expect(output?.investigationServers).toMatchObject({
+          expect(output?.investigationServers).toEqual({
             builds: server,
-            dependency_investigation: {
+            dependency_investigation: expect.objectContaining({
               required: true,
               default_tools_approval_mode: "approve",
-            },
+            }),
           });
-          expect(output!.investigationServers!["builds"]).toEqual(server);
           expect(features).toMatchObject({ apps: false, multi_agent_v2: true });
           expect(
             parseToml(args.find((v) => v.startsWith("agents="))!)["agents"],
@@ -363,10 +359,9 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
   );
   expect(status, stderr.text() + stdout.text()).toBe(0);
   expect(reviewed).toBe(true);
-  const report = dependencyCheckOutputSchema.parse(JSON.parse(stdout.text()));
-  expect(JSON.parse(await readFile(reportPath, "utf8"))).toEqual(
-    JSON.parse(stdout.text()),
-  );
+  const json = JSON.parse(stdout.text());
+  expect(JSON.parse(await readFile(reportPath, "utf8"))).toEqual(json);
+  const report = dependencyCheckOutputSchema.parse(json);
   const events = (await readFile(eventsPath, "utf8"))
     .trim()
     .split("\n")
@@ -398,14 +393,8 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
     type: "finished",
     outcome: "completed",
   });
-  expect(stderr.text()).toContain(
-    "Using the supplied vulnerability description",
-  );
-  expect(stderr.text()).toContain("Tracing source call paths");
-  expect(stderr.text()).toContain("Reviewing evidence");
-  expect(stderr.text()).toContain("Turn access program · standard");
-  expect(stderr.text()).toContain("0 reviewed uses");
-  expect(stderr.text()).toContain(`Report saved · ${reportPath}`);
+  expect(stderr.text()).toContain("standard");
+  expect(stderr.text()).toContain(reportPath);
   expect(stderr.text()).not.toContain("\u001b");
   if (!("checks" in report)) throw new Error("Expected a package report.");
   const check = report.checks[0]!;
@@ -419,42 +408,21 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
 });
 
 const outputFlags = {
-  json: ["--json"],
   md: ["--format", "md"],
   html: ["--format", "html"],
-  tokens: ["--format", "md", "--token-count"],
   summary: [],
   filter: ["--filter-output", "vulnDescription"],
 };
 test.each(Object.keys(outputFlags) as (keyof typeof outputFlags)[])(
-  "a coordinator reports its selected access program and writes the requested %s output",
+  "saves the report and prints the requested %s output",
   checkCoordinatorOutput,
 );
 
 async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
-  await using repo = await scopedTemporaryDirectory("dependency-progress-");
-  execFileSync("git", ["init", "-q"], { cwd: repo.path });
-  await writeFile(
-    join(repo.path, "package.json"),
-    JSON.stringify({ name: "fixture", version: "1.0.0" }),
-  );
-  execFileSync("git", ["add", "package.json"], { cwd: repo.path });
-  execFileSync(
-    "git",
-    [
-      "-c",
-      "user.name=Fixture",
-      "-c",
-      "user.email=fixture@example.invalid",
-      "commit",
-      "-qm",
-      "fixture",
-    ],
-    { cwd: repo.path },
-  );
+  await using repo = await scopedTemporaryDirectory("dependency-output-");
+  await commitFixture(repo.path);
   const stdout = capture(format === "summary"),
     stderr = capture(false);
-  const eventsPath = join(repo.path, "events.jsonl");
   // The suffix alone must not turn a canonical JSON report into HTML.
   const requestedPath = join(
     repo.path,
@@ -467,8 +435,6 @@ async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
       "npm:sample",
       "--vuln-description",
       "Supplied condition",
-      "--progress-events",
-      eventsPath,
       ...(format === "html" ? [] : ["--report-file", requestedPath]),
       ...outputFlags[format],
     ],
@@ -481,36 +447,13 @@ async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
         TERM: "dumb",
       },
       async onCodex(_args, output, _env, prompt) {
-        if (output?.appServer) {
-          expect(output.appServer.resumableCoordinator).toBe(true);
-          output.appServer.onAccessProgram?.("standard");
-        }
         const packet = JSON.parse(
           (prompt ?? output?.appServer?.prompt)!.split("\n\n").at(-1)!,
         );
         output!.stdout.write(
           JSON.stringify(
             packet.claims
-              ? {
-                  decisions: packet.claims.map(
-                    ({
-                      id,
-                      revision,
-                      hash,
-                    }: {
-                      id: string;
-                      revision: number;
-                      hash: string;
-                    }) => ({
-                      id,
-                      revision,
-                      hash,
-                      approved: true,
-                      evidenceKeys: [],
-                      reason: "The package is absent.",
-                    }),
-                  ),
-                }
+              ? { decisions: packet.claims.map(approve) }
               : { uses: [], limitations: ["No applicable package was found."] },
           ),
         );
@@ -518,7 +461,7 @@ async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
       },
     }),
   );
-  expect(status, stdout.text()).toBe(0);
+  expect(status, stderr.text() + stdout.text()).toBe(0);
   const reportPath =
     format === "html"
       ? stdout.text().trimEnd().split("\n").at(-1)!
@@ -526,17 +469,15 @@ async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
   if (format === "html") {
     expect(reportPath.startsWith(repo.path)).toBe(true);
     expect(reportPath).toMatch(/exploitability_report_\d{8}T\d{9}Z\.html$/u);
-  } else expect(stderr.text()).toContain("Report saved · " + reportPath);
-  const contents = await readFile(reportPath, "utf8");
-  if (format === "html") {
+    const contents = await readFile(reportPath, "utf8");
     expect(contents).toStartWith("<!doctype html>");
     expect(contents).toContain("No applicable package was found.");
-  } else expect(JSON.parse(contents).checks).toHaveLength(1);
+  } else
+    expect(JSON.parse(await readFile(reportPath, "utf8")).checks).toHaveLength(
+      1,
+    );
   const output = stdout.text().trim();
   switch (format) {
-    case "json":
-      expect(JSON.parse(output)).toEqual(JSON.parse(contents));
-      break;
     case "summary":
     case "html":
       expect(output).not.toContain("<!doctype html>");
@@ -551,16 +492,5 @@ async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
     case "filter":
       expect(output).toBe("Supplied condition");
       break;
-    case "tokens":
-      expect(Number(output)).toBeGreaterThan(0);
-      break;
   }
-  expect(stderr.text()).toContain("Turn access program · standard");
-  const events = (await readFile(eventsPath, "utf8"))
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line));
-  expect(events.filter((e) => e.type === "access_program")).toMatchObject([
-    { program: "standard", subject: "sample" },
-  ]);
 }

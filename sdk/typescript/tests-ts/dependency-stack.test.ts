@@ -401,8 +401,14 @@ for (const [label, bindSource, separateImage, expectedPositive] of [
     const { inputs, state, call, capture, claims, write, row } =
       await startProof(dir.path, files);
     expect(capture).toMatchObject({
+      receiptId: expect.stringMatching(/^capture-/),
       rootFirstRawIndices: [1, 0],
-      observation: { frames: [{ offset: "9007199254740993" }, {}] },
+      observation: {
+        frames: [
+          { name: "decode", offset: "9007199254740993" },
+          { name: "request" },
+        ],
+      },
     });
     expect(await call("record-claims", write)).toEqual({ claims });
     expect(await call("query-claims", { ids: ["caller"] })).toMatchObject({

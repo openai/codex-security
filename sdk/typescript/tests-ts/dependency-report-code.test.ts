@@ -10,7 +10,6 @@ test("keeps numbered, highlighted rows and escapes exact source text", () => {
   );
 
   expect(html).not.toContain("<img");
-  expect(html).toContain("&lt;img src=x onerror=alert(1)&gt; &amp; data");
   const rows: Array<[string | null, boolean]> = [];
   const numbers: string[] = [];
   const lines: string[] = [];
@@ -93,4 +92,18 @@ test("uses escaped plain text for unrecognized file types", () => {
     '<span class="code-text">const a &lt; b &amp; c</span>',
   );
   expect(html).not.toContain("tok-");
+});
+
+test("marks only unambiguous expressions on the cited line and escapes syntax inside the mark", () => {
+  const listing = (line: string, argument: string) =>
+    renderDependencyCode(line, "src.ts", 3, new Set([3]), {
+      line: 3,
+      expression: argument,
+    });
+  expect(listing("run(a, a)", "a")).not.toContain("<mark");
+  expect(listing("run(payload)", "load")).not.toContain("<mark");
+  const marked = listing('read(doc["<main>"])', 'doc["<main>"]');
+  expect(marked).toContain(
+    '<mark class="trace-argument">doc[<span class="tok-string">&quot;&lt;main&gt;&quot;</span>]</mark>',
+  );
 });

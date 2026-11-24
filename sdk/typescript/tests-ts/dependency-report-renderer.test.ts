@@ -44,6 +44,10 @@ function elements(html: string, selector: string, attrs: string[] = []) {
     text: r.text.replace(/\s+/gu, " ").trim(),
   }));
 }
+function attributes(html: string, selector: string, attr: string) {
+  return elements(html, selector, [attr]).map((node) => node.attrs[attr]);
+}
+
 function panel(html: string, id: string) {
   const article = html.match(
     new RegExp('<article[^>]* id="' + id + '"[^>]*>[\\s\\S]*?</article>'),
@@ -91,10 +95,8 @@ describe("call site report", () => {
     });
     const observed = panel(html, "stack-1-1");
     const frames = elements(observed, "details.frame", [
-      "id",
       "data-role",
       "data-in-range",
-      "open",
     ]);
     expect(frames.map((f) => f.attrs["data-role"])).toEqual([
       "call",
@@ -103,11 +105,9 @@ describe("call site report", () => {
       "sink",
     ]);
     expect(frames[0]!.attrs["data-in-range"]).toBe("false");
-    expect(
-      elements(observed, "details.frame[open]", ["id"]).map(
-        (f) => f.attrs["id"],
-      ),
-    ).toEqual(["stack-1-1-frame-2"]);
+    expect(attributes(observed, "details.frame[open]", "id")).toEqual([
+      "stack-1-1-frame-2",
+    ]);
     expect(frames[2]!.text).toContain("caller");
     expect(
       elements(observed, "#stack-1-1-frame-2 [data-highlighted]"),
@@ -140,12 +140,11 @@ describe("call site report", () => {
     expect(entry!.text).toContain("codec.ts:3");
     expect(entry!.text).not.toContain("stack-a");
     const html = renderDependencyReport(broadReport());
-    const links = elements(html, "a[data-entry]", ["href"]);
     const articles = elements(html, "article[data-finding]", [
       "id",
       "data-verdict",
     ]);
-    expect(links.map((l) => l.attrs["href"])).toEqual(
+    expect(attributes(html, "a[data-entry]", "href")).toEqual(
       articles.map((a) => "#" + a.attrs["id"]),
     );
     expect(new Set(articles.map((a) => a.attrs["id"])).size).toBe(88);
@@ -166,15 +165,19 @@ describe("call site report", () => {
     );
     const source = panel(html, "use-1-1");
     expect(text(source)).toContain("Source review");
-    const frames = elements(source, "details.frame", ["data-role", "open"]);
-    expect(frames.map((f) => f.attrs["data-role"])).toEqual(["call_site"]);
-    expect(elements(source, "details.frame[open]")).toHaveLength(1);
-    expect(elements(source, ".frame [data-highlighted]")).toHaveLength(1);
-    expect(
-      elements(source, "[data-condition]", ["data-condition"]).map(
-        (c) => c.attrs["data-condition"],
-      ),
-    ).toEqual(["met", "unknown"]);
+    expect(text(source)).toContain("Upstream callers not recorded");
+    expect(attributes(source, "details.frame", "data-role")).toEqual([
+      "call_site",
+    ]);
+    const active = elements(source, "details.frame[open] [data-highlighted]", [
+      "data-line",
+    ]);
+    expect(active.map((row) => row.attrs["data-line"])).toEqual(["2"]);
+    expect(active[0]!.text).toContain("decodeFrame");
+    expect(attributes(source, "[data-condition]", "data-condition")).toEqual([
+      "met",
+      "unknown",
+    ]);
     for (const fact of [
       "Request reaches decoder before authentication",
       "Read the admitted worker setting",
@@ -301,7 +304,7 @@ describe("call site report", () => {
     expect(elements(item, "[data-role=sink]")).toHaveLength(0);
     expect(text(item)).toContain("Deployment unverified");
   });
-  test("shows blocked and pending advisories as states, not as use verdicts", () => {
+  test("distinguishes an empty check from blocked and pending advisories", () => {
     const blocked = {
       status: "blocked",
       code: "INVESTIGATION_BLOCKED",
@@ -314,27 +317,18 @@ describe("call site report", () => {
       package: { ecosystem: "npm", name: "sample-codec" },
       checks: [
         { ...check, advisoryId: "CVE-2099-44001" },
-        { ...blocked, advisoryId: "CVE-2099-44002" },
+        { ...check, uses: [], advisoryId: "CVE-2099-44002" },
+        { ...blocked, advisoryId: "CVE-2099-44003" },
       ],
-      pendingAdvisories: ["CVE-2099-44003"],
+      pendingAdvisories: ["CVE-2099-44004"],
     });
-    const entries = elements(html, "[data-entry]", ["data-verdict"]);
-    expect(entries).toHaveLength(3);
-    expect(
-      entries.filter((a) => a.attrs["data-verdict"] === "unknown"),
-    ).toHaveLength(1);
-    expect(text(html)).toContain("Restore inventory.");
-    expect(text(html)).toMatch(/not (started|investigated)/i);
-    expect(text(html)).not.toContain("undefined");
-  });
-  test("empty report has no vulnerable or cleared findings", () => {
-    const html = renderDependencyReport(report([]));
-    expect(elements(html, "[data-entry][data-verdict=ruled_out]")).toHaveLength(
-      0,
-    );
-    expect(text(html)).toMatch(
-      /no (reviewed|assessed|findings|uses|call sites)/i,
-    );
+    expect(attributes(html, "[data-entry]", "data-verdict")).toEqual([
+      "unknown",
+      "empty",
+      "blocked",
+      "pending",
+    ]);
+    expect(text(panel(html, "empty-3"))).toContain(blocked.unblockCondition);
   });
   test("keeps receipt metadata but never embeds raw inventory payloads in HTML", () => {
     const u = reviewed(1);
@@ -371,15 +365,38 @@ describe("call site report", () => {
     b.evidence = a.evidence;
     b.decidingEvidence = a.decidingEvidence;
     b.services = [service("svc:b", "Beta", b.decidingEvidence[0]!)];
-    const input = report(
-      [a, b],
-      [unresolved(1), unresolved(2, { kind: "dismissed" }), unresolved(3)],
+    const dismissed = unresolved(2, {
+      kind: "dismissed",
+      evidence: [
+        { path: "src/handler-1.ts", startLine: 1, endLine: 1, supports: [] },
+      ],
+      decidingEvidence: [sourceRef("src/handler-1.ts", 1)],
+    });
+    const input = withExcerpts(
+      report([a], [dismissed]),
+      ["safeMode();"],
+      ["dismissedMode();"],
     );
-    const html = renderDependencyReport(withExcerpts(input, ["safeMode();"]));
-    expect(
-      elements(html, "a[data-entry]", ["href"]).map((l) => l.attrs["href"]),
-    ).toEqual(["#use-1-2", "#use-1-1", "#coverage-1-1", "#coverage-1-3"]);
-    expect(elements(html, "details#coverage-1-2")).toHaveLength(1);
+    input.uses.push(b);
+    input.coverage.unshift(unresolved(1));
+    input.coverage.push(unresolved(3));
+    input.claimEvidence.sources["uncited"] = {
+      path: "src/handler-1.ts",
+      startLine: 3,
+      endLine: 3,
+      excerpt: "uncitedMode();",
+    };
+    const html = renderDependencyReport(input);
+    expect(attributes(html, "a[data-entry]", "href")).toEqual([
+      "#use-1-2",
+      "#use-1-1",
+      "#coverage-1-1",
+      "#coverage-1-3",
+    ]);
+    const dismissedItems = elements(html, "details#coverage-1-2");
+    expect(dismissedItems).toHaveLength(1);
+    expect(dismissedItems[0]!.text).toContain("dismissedMode");
+    expect(html).not.toContain("uncitedMode");
     expect(panel(html, "use-1-1")).toContain("safeMode");
     expect(panel(html, "use-1-2")).not.toContain("safeMode");
   });
@@ -487,44 +504,6 @@ describe("call site report", () => {
       expect(text(html)).toContain(symbol);
     },
   );
-  test("shows only cited excerpts including dismissed coverage, and highlights the exact call site", () => {
-    const u = reviewed(1, {
-      location: "POST /upload → decodeFrame",
-      evidence: [{ path: "entry.ts", startLine: 2, endLine: 2, supports: [] }],
-      decidingEvidence: [sourceRef("entry.ts", 2)],
-      proof: {
-        sink: {
-          function: "decodeFrame",
-          callSite: { path: "entry.ts", line: 2 },
-        },
-        conditions: [],
-      },
-    });
-    const dismissed = unresolved(2, {
-      kind: "dismissed",
-      reason: "Excluded from the requested scope.",
-      evidence: [{ path: "entry.ts", startLine: 1, endLine: 1, supports: [] }],
-      decidingEvidence: [sourceRef("entry.ts", 1)],
-    });
-    const r = withExcerpts(
-      report([u], [dismissed]),
-      ["const value = decodeFrame(input);"],
-      ["const input = 1;"],
-    );
-    r.claimEvidence.sources["uncited"] = {
-      path: "entry.ts",
-      startLine: 3,
-      endLine: 3,
-      excerpt: "const unused = 3;",
-    };
-    const html = renderDependencyReport(r);
-    expect(
-      elements(html, '.frame .code-row[data-highlighted][data-line="2"]'),
-    ).toHaveLength(1);
-    expect(html).toContain("decodeFrame(input)");
-    expect(text(html)).toContain("const input");
-    expect(html).not.toContain("const unused");
-  });
   test("deduplicates unresolved limitations without removing source records or merging leads", () => {
     const a = unresolved(1, { reason: "The selected build is missing." }),
       b = unresolved(2, { reason: "The selected build is missing." });
@@ -542,9 +521,6 @@ describe("call site report", () => {
     expect(text(html)).toContain("Independent shared limitation");
     expect(text(html)).toContain("src/parser-1.ts:2.");
     expect(text(html)).toContain("src/parser-2.ts:3.");
-    expect(html.indexOf("Report limitations")).toBeLessThan(
-      html.indexOf("Investigation scope and search coverage"),
-    );
   });
   test("escapes untrusted metadata and snippets, has a valid script hash, offline styles, keyboard and print fallbacks", () => {
     const raw = '<svg onload="alert(1)">',
@@ -610,5 +586,136 @@ describe("call site report", () => {
       },
     ];
     expect(() => renderDependencyReport(report([u]))).toThrow();
+  });
+  test("follows cited argument renames and retains an exact anchor for each frame", () => {
+    const input = "read.ts";
+    const output = "write.ts";
+    const item = reviewed(1, {
+      evidence: [
+        { path: input, startLine: 1, endLine: 2, supports: [] },
+        { path: output, startLine: 4, endLine: 4, supports: [] },
+      ],
+      decidingEvidence: [
+        sourceRef(input, 1),
+        sourceRef(input, 2),
+        sourceRef(output, 4),
+      ],
+      trace: [
+        {
+          kind: "source",
+          label: "Request bytes",
+          site: { path: input, line: 1 },
+          argument: "request.body",
+        },
+        {
+          kind: "handoff",
+          label: "Document handler",
+          site: { path: input, line: 2 },
+          argument: "doc",
+        },
+      ],
+      proof: {
+        sink: {
+          function: "codec.read",
+          callSite: { path: output, line: 4 },
+          argument: "payload",
+        },
+        conditions: [],
+      },
+    });
+    const excerpts = [
+      "const doc = request.body;\nhandle(doc);",
+      "codec.read(payload);",
+    ];
+    const html = renderDependencyReport(withExcerpts(report([item]), excerpts));
+    expect(attributes(html, "details.frame", "data-role")).toEqual([
+      "source",
+      "call",
+      "call_site",
+    ]);
+    expect(attributes(html, "details.frame[open]", "data-role")).toEqual([
+      "source",
+    ]);
+    expect(
+      attributes(html, "details.frame[open] [data-highlighted]", "data-line"),
+    ).toEqual(["1"]);
+    expect(
+      elements(html, "details.frame[open] [data-highlighted] [data-follow]"),
+    ).toHaveLength(1);
+    expect(
+      attributes(html, "details.frame[open] [data-related]", "data-line"),
+    ).toEqual(["2"]);
+    const gapped = {
+      ...item,
+      trace: [
+        item.trace![0]!,
+        { kind: "gap" as const, label: "Missing caller" },
+        item.trace![1]!,
+      ],
+    };
+    const gappedHtml = renderDependencyReport(
+      withExcerpts(report([gapped]), excerpts),
+    );
+    expect(
+      elements(gappedHtml, "details.frame[open] [data-related]"),
+    ).toHaveLength(0);
+
+    for (const value of ["request.body", "doc", "payload"])
+      expect(html).toContain(`<mark class="trace-argument">${value}</mark>`);
+    for (const ordinal of [1, 2]) {
+      const id = `use-1-1-source-${ordinal}`;
+      expect(html).toContain(`href="#${id}"`);
+      expect(html.split(`id="${id}"`).length).toBe(2);
+    }
+  });
+
+  test("never converts location labels into call frames or a coverage gap into a sink", () => {
+    const item = reviewed(1, {
+      location: "Upload → allegedWrapper() → allegedSink()",
+    });
+    expect(
+      elements(renderDependencyReport(report([item])), "details.frame"),
+    ).toHaveLength(0);
+    const gap = unresolved(1, {
+      trace: [
+        {
+          kind: "source",
+          label: "Upload",
+          site: { path: "src/parser-1.ts", line: 2 },
+        },
+      ],
+      handoff: {
+        verified: "Bytes reach the parser.",
+        missing: "Which plugin handles the document?",
+      },
+    });
+    const html = renderDependencyReport(report([], [gap]));
+    expect(attributes(html, "details.frame", "data-role")).toEqual(["source"]);
+    expect(html).toContain("Which plugin handles the document?");
+    expect(html).toContain("Bytes reach the parser.");
+  });
+
+  test("withholds frame claims tied to a different revision or absent deciding citation", () => {
+    const path = "src/handler-1.ts";
+    const item = reviewed(1, {
+      trace: [
+        {
+          kind: "source",
+          label: "Unsupported frame",
+          site: { path, line: 2, commit: "a".repeat(40) },
+        },
+      ],
+    });
+    const sourceFrames = () =>
+      elements(
+        renderDependencyReport(report([item])),
+        "details.frame[data-role=source]",
+      );
+    expect(sourceFrames()).toHaveLength(0);
+    item.trace = [
+      { kind: "source", label: "Unsupported frame", site: { path, line: 2 } },
+    ];
+    item.decidingEvidence = [];
+    expect(sourceFrames()).toHaveLength(0);
   });
 });

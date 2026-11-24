@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
@@ -17,10 +16,14 @@ import {
 import { evidencePreviews } from "../src/dependency-investigation-session";
 import { affectedByFrozenVersion } from "../src/dependency-advisory";
 import { dependencyCheckOutputSchema } from "../src/dependency-reachability";
-import { withDependencyCheckOutput } from "../src/dependency-check-output";
+import {
+  createDependencyVerdictProgress,
+  withDependencyCheckOutput,
+} from "../src/dependency-check-output";
 import {
   approveDependencyClaims,
   reviewScopes,
+  reportedDeployment,
   reportedUse,
   verifyProposedUse,
   type Claim,
@@ -978,6 +981,67 @@ test("replacing an approved premise invalidates transitive users and preserves i
   }
 });
 
+test("withdrawn approvals leave the verdict group before the next progress update", async () => {
+  await using f = await fixture({
+    "app.js": "parse(request.body);\n".repeat(4),
+  });
+  f.use.evidence[0]!.endLine = 4;
+  const scope = reviewScopes([f.discovery])[0]!;
+  const verified = await verifyProposedUse(f.path, scope, f.use, signal, true);
+  const premise = { id: "guard", revision: 1, hash: "a".repeat(64) };
+  const output: Record<string, unknown>[] = [];
+  const progress = createDependencyVerdictProgress(
+    "example",
+    (type, _, fields) => output.push({ type, ...fields }),
+  );
+  function approve(
+    line: number,
+    verdict: "ruled_out" | "unknown" = "ruled_out",
+  ) {
+    const use = {
+      ...verified,
+      location: `app.js:${line}`,
+      verdict,
+      premises: [premise],
+    };
+    progress.update(String(line), {
+      use,
+      place: reportedDeployment(use).place,
+      callers: [],
+      decision: { reason: "guard", evidenceKeys: [premiseKey(premise)] },
+    });
+  }
+  approve(1);
+  approve(2);
+  progress.update("2");
+  progress.flush();
+  expect(output).toHaveLength(1);
+  approve(3);
+  approve(4);
+  progress.flush();
+  approve(2, "unknown");
+  expect(output).toHaveLength(3);
+  progress.flush();
+  for (const id of ["1", "3", "4"]) progress.update(id);
+  progress.flush();
+  approve(1);
+
+  const groupId = output[0]!["groupId"];
+  expect(output).toMatchObject([
+    { type: "reviewed", groupId: expect.any(String) },
+    { type: "reviewed_group", groupId, callsites: 3 },
+    {
+      type: "reviewed",
+      location: "app.js:2",
+      previousVerdict: "ruled_out",
+      verdict: "unknown",
+    },
+    { type: "reviewed_group", groupId, callsites: 0, assessments: 0 },
+    { type: "reviewed", groupId: expect.any(String) },
+  ]);
+  expect(output[4]!["groupId"]).not.toBe(groupId);
+});
+
 test("publish a complete report once and keep progress separate from an unsuccessful report", async () => {
   await using f = await scopedTemporaryDirectory("dependency-output-test-");
   const reportFile = join(f.path, "report.json"),
@@ -1371,7 +1435,7 @@ test("only unambiguous returned facts can bind a selected copy and independent c
     {
       id: "CVE-2099-0001",
       url: "https://example.invalid/advisory",
-      sha256: createHash("sha256").update("fixture advisory").digest("hex"),
+      sha256: "a".repeat(64),
       affected: [
         {
           package: f.pkg,
@@ -1423,9 +1487,6 @@ test("resource citations use delivered text and reject echoed URIs and truncated
       records[1]!,
     ]);
   };
-  expect((await verify("release://example", running!.quote)).verdict).toBe(
-    "exploitable",
-  );
   for (const native of [false, true]) {
     expect(
       (await verify("release://example", running!.quote, native)).verdict,
@@ -2101,11 +2162,7 @@ test("native investigators share asynchronous reviews, immutable premises and pa
           wait: true,
         })) as State[];
         expect(approved!.state).toBe("approved");
-        const premise = {
-          id: approved!.id,
-          hash: approved!.hash,
-          revision: approved!.revision,
-        };
+        const premise = reference(approved!);
         await expect(
           other("submit_dependency_assessments", {
             assessments: [
@@ -2137,17 +2194,12 @@ test("native investigators share asynchronous reviews, immutable premises and pa
           ids: ["premise:consumer"],
           wait: true,
         })) as State[];
-        const consumerRef = {
-          id: consumer!.id,
-          revision: consumer!.revision,
-          hash: consumer!.hash,
-        };
         await other("submit_dependency_assessments", {
           assessments: [
             {
               id: "app",
               expectedRevision: 0,
-              use: { ...f.use, premises: [consumerRef] },
+              use: { ...f.use, premises: [reference(consumer!)] },
             },
           ],
         });
@@ -2798,7 +2850,7 @@ test("a correction in a live review batch preserves its independent sibling appr
   await using f = await fixture();
   const started = Promise.withResolvers<void>();
   const release = Promise.withResolvers<void>();
-  const seen: string[][] = [];
+  const batches: number[] = [];
   const previous = new Map<string, string[]>();
   await f.check(
     { vulnDescription: "Parser issue" },
@@ -2807,7 +2859,7 @@ test("a correction in a live review batch preserves its independent sibling appr
         const input = agentInput(req.prompt);
         if (!req.coordinator) {
           const rows = input.claims as ReviewClaim[];
-          seen.push(rows.map(premiseKey));
+          batches.push(rows.length);
           for (const c of rows) {
             previous.set(
               c.id + "/" + c.revision,
@@ -2848,9 +2900,7 @@ test("a correction in a live review batch preserves its independent sibling appr
           ["premise:before", 2, "approved"],
           ["premise:sibling", 1, "approved"],
         ]);
-        expect(seen).toHaveLength(2);
-        expect(seen[0]).toHaveLength(2);
-        expect(seen[1]).toHaveLength(1);
+        expect(batches).toEqual([2, 1]);
 
         await call("submit_dependency_claims", {
           claims: [

@@ -172,7 +172,7 @@ const observation = z.strictObject({
     ),
 });
 const placeText = text.nullable();
-const dependencyPlaceSchema = z.strictObject({
+export const dependencyPlaceSchema = z.strictObject({
   kind: z
     .enum([
       "service",
@@ -230,11 +230,8 @@ const reviewReference = z.discriminatedUnion("kind", [
     kind: z.literal("receipt"),
     receiptId: z.string(),
     originalPayloadSha256: z.string(),
-    selection: z
-      .strictObject({
-        textBlock: z.number().int().nonnegative().nullable(),
-        record: z.array(z.union([z.string(), z.number().int().nonnegative()])),
-      })
+    selection: dependencyReceiptSelectionSchema
+      .omit({ receiptId: true })
       .optional(),
   }),
 ]);
@@ -255,6 +252,9 @@ const serviceAssociation = z.strictObject({
       "Original bound evidence that establishes this service association.",
     ),
 });
+// Keep distinct schema instances so the published JSON references stay stable.
+const namedEvidence = () =>
+  z.strictObject({ name: text, evidence: z.array(reviewReference).min(1) });
 const openCondition = z.strictObject({
   question: text,
   target: text.describe(
@@ -262,12 +262,7 @@ const openCondition = z.strictObject({
   ),
   decidingCheck: text.optional(),
   ruledOutIf: text.optional(),
-  assignee: z
-    .strictObject({
-      name: text,
-      evidence: z.array(reviewReference).min(1),
-    })
-    .optional(),
+  assignee: namedEvidence().optional(),
 });
 const inputSource = z.strictObject({
   exposure: z
@@ -296,10 +291,6 @@ const runtimeContext = z.strictObject({
     .optional(),
   containerUrl: text.optional(),
   traceUrl: text.optional(),
-  evidence: z.array(reviewReference).min(1),
-});
-const findingTag = z.strictObject({
-  name: text,
   evidence: z.array(reviewReference).min(1),
 });
 const inspectionTarget = z.strictObject({
@@ -395,11 +386,9 @@ const inspection = z
       });
   });
 
-const site = dependencyUseProofSchema.shape.sink
-  .unwrap()
-  .shape.callSite.extend({
-    commit: dependencyGitCommitSchema.optional(),
-  });
+const site = lineReference.extend({
+  commit: dependencyGitCommitSchema.optional(),
+});
 const argument = text.describe(
   "Exact single-line expression carrying the input at the cited site. Omit when ambiguous.",
 );
@@ -443,20 +432,23 @@ export const dependencyFindingDetailsShape = {
   inspections: z.array(inspection).optional(),
   inputSource: inputSource.optional(),
   runtimeContext: runtimeContext.optional(),
-  tags: z.array(findingTag).optional(),
+  tags: z.array(namedEvidence()).optional(),
 };
 export const dependencyCoverageHandoffSchema = z.strictObject({
   verified: text,
   missing: text,
 });
-export { dependencyPlaceSchema };
 
-const reportUseSchema = dependencyUseSchema.safeExtend({
+export const reviewedDependencyUseSchema = dependencyUseSchema.safeExtend({
   proof: repositoryUseProofSchema.optional(),
   observations: z.array(observation).prefault([]),
-  place: dependencyPlaceSchema.optional(),
+  place: dependencyPlaceSchema,
   ...dependencyFindingDetailsShape,
+  decidingEvidence: z.array(reviewReference),
+  conclusionClaim: dependencyClaimReferenceSchema.optional(),
+  supportingClaims: z.array(dependencyClaimReferenceSchema).optional(),
 });
+export type ReviewedDependencyUse = z.infer<typeof reviewedDependencyUseSchema>;
 
 export const dependencyTestScopeClassification = z.literal(
   "test_only_outside_scope",
@@ -469,7 +461,7 @@ export const dependencyCoverageDispositionSchema = z.strictObject({
   handoff: dependencyCoverageHandoffSchema.optional(),
   ...dependencyFindingDetailsShape,
   evidence: dependencyUseSchema.shape.evidence,
-  observations: reportUseSchema.shape.observations,
+  observations: reviewedDependencyUseSchema.shape.observations,
   decidingEvidence: z.array(reviewReference).optional(),
   conclusionClaim: dependencyClaimReferenceSchema.optional(),
   supportingClaims: z.array(dependencyClaimReferenceSchema).optional(),
@@ -532,14 +524,6 @@ const dependencySearchSchema = z.strictObject({
   evidenceReferences: z.array(z.string()),
 });
 export type DependencySearch = z.infer<typeof dependencySearchSchema>;
-
-export const reviewedDependencyUseSchema = reportUseSchema.safeExtend({
-  place: dependencyPlaceSchema,
-  decidingEvidence: z.array(reviewReference),
-  conclusionClaim: dependencyClaimReferenceSchema.optional(),
-  supportingClaims: z.array(dependencyClaimReferenceSchema).optional(),
-});
-export type ReviewedDependencyUse = z.infer<typeof reviewedDependencyUseSchema>;
 
 export const dependencyReachabilityReportSchema = z
   .strictObject({ limitations: z.array(z.string()) })

@@ -29,13 +29,9 @@ import {
   DependencyInvestigationBlockedError,
   type BlockedCheck,
   type DependencyProgressSink,
+  createDependencyVerdictProgress,
 } from "./dependency-check-output.js";
 export { DependencyInvestigationBlockedError } from "./dependency-check-output.js";
-import {
-  createDependencyVerdictProgress,
-  reviewedDependencyCallSite,
-  sharedVerdictEvidence,
-} from "./dependency-verdict-progress.js";
 import { isRecord } from "./record.js";
 import { addTokenUsage } from "./cost.js";
 import type { DependencyAgentRequest } from "./dependency-cli.js";
@@ -72,7 +68,7 @@ import {
   approveDependencyClaims,
   publishApprovedClaims,
   prepareClaimReview,
-  reportedUse,
+  reportedDeployment,
   selectedPremises,
   approvedUse,
   findingSelectionProblem,
@@ -895,8 +891,7 @@ async function investigateIssue(
                 verdictProgress.update(claim.id);
               continue;
             }
-            const verified = claim.value.use;
-            const use = reportedUse(verified, claim, decision.evidenceKeys);
+            const use = claim.value.use;
             const sink = use.proof.sink;
             if (sink)
               proposedSink(
@@ -905,21 +900,12 @@ async function investigateIssue(
                 sink.callSite.path,
                 sink.callSite.line,
               );
-            const scope = scopes.find((scope) => scope.id === verified.scope);
-            const callSite = reviewedDependencyCallSite(
-              use,
-              scope?.discovery.callers ?? [],
-            );
             verdictProgress.update(claim.id, {
               use,
-              callSite,
-              reason: decision.reason,
-              evidenceKeys: decision.evidenceKeys,
-              sharedEvidenceKeys: sharedVerdictEvidence(
-                verified,
-                callSite,
-                decision.evidenceKeys,
-              ),
+              place: reportedDeployment(use).place,
+              callers:
+                scopes.find((s) => s.id === use.scope)?.discovery.callers ?? [],
+              decision,
             });
           }
         verdictProgress.flush();
