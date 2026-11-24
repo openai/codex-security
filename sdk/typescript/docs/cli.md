@@ -3452,6 +3452,8 @@ other supported formats are `toon`, `yaml`, and `jsonl`. Framework token control
 remain available, but `--filter-output` and Markdown output are unsupported.
 With JSON or JSONL, `--full-output` wraps the result; incomplete execution returns
 `ok: false` with the retained result in `data` and a `SCAN_FAILED` error.
+Use `cs scan dependencies --schema --json` to inspect the command's dependency
+result and CLI failure output schemas.
 
 | Exit code    | Meaning                                                                |
 | ------------ | ---------------------------------------------------------------------- |

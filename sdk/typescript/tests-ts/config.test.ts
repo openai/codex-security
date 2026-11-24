@@ -1,4 +1,5 @@
 import {
+  macOsSandboxUnavailable,
   shouldScheduleNativeSandboxTests,
   waitForWindowsSandboxSetup,
 } from "./support/native-sandbox.js";
@@ -164,26 +165,6 @@ function runPinnedCodex(
       stdout: "pipe",
       stderr: "pipe",
     },
-  );
-}
-
-function macOsSandboxUnavailable(): boolean {
-  if (process.platform !== "darwin") return false;
-
-  // Check the host independently of the generated scan permission profile.
-  const result = Bun.spawnSync(
-    [
-      "/usr/bin/sandbox-exec",
-      "-p",
-      "(version 1) (allow default)",
-      "/usr/bin/true",
-    ],
-    { stdout: "pipe", stderr: "pipe" },
-  );
-  return (
-    result.exitCode !== 0 &&
-    new TextDecoder().decode(result.stderr).trim() ===
-      "sandbox-exec: sandbox_apply: Operation not permitted"
   );
 }
 

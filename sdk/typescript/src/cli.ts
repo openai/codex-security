@@ -1435,6 +1435,33 @@ function cliFailureSchema(...codes: [string, ...string[]]) {
   });
 }
 
+const dependencyScanOutputSchema: z.ZodType<
+  Record<string, unknown> | undefined
+> = z
+  .union([
+    z.object({
+      schemaVersion: z.literal("sca/v0"),
+      status: z.enum(["completed", "partial", "failed"]),
+      startedAt: z.string(),
+      completedAt: z.string(),
+      repository: z.object({
+        path: z.string(),
+        revision: z.string().nullable(),
+        dirty: z.boolean().nullable(),
+      }),
+      scanner: jsonDocument,
+      coverage: jsonDocument,
+      components: z.array(jsonDocument),
+      matches: z.array(jsonDocument),
+      assessments: z.array(jsonDocument),
+      diagnostics: z.array(z.string()),
+      model: jsonDocument,
+      outputDir: z.string(),
+    }),
+    cliFailureSchema("SCAN_FAILED"),
+  ])
+  .optional();
+
 function scanOutputSchema(
   ...codes: [string, ...string[]]
 ): z.ZodType<Record<string, unknown> | undefined> {
@@ -6075,7 +6102,7 @@ export async function main(
         alias: { config: "c" },
         args: SCAN_REPOSITORY_ARGUMENTS,
         options: z.object(SHARED_SCAN_OPTION_SCHEMAS),
-        output: scanOutputSchema("SCAN_FAILED"),
+        output: dependencyScanOutputSchema,
         async run({ args, options, format, error: incurError }) {
           let outcome: ScanOutcome;
           try {

@@ -1,5 +1,6 @@
 import { requestMetadata } from "./support/request-metadata.js";
 import {
+  macOsSandboxUnavailable,
   shouldScheduleNativeSandboxTests,
   waitForWindowsSandboxSetup,
 } from "./support/native-sandbox.js";
@@ -945,7 +946,7 @@ if (args.includes("app-server")) {
 );
 
 async function nativeDependencySandboxAvailable(): Promise<boolean> {
-  if (process.platform === "win32") return false;
+  if (process.platform === "win32" || macOsSandboxUnavailable()) return false;
   const directories = createTemporaryDirectories();
   try {
     const root = await directories.create("sca-sandbox-capability-");

@@ -1,6 +1,26 @@
 import { join } from "node:path";
 import { expect } from "bun:test";
 
+export function macOsSandboxUnavailable(): boolean {
+  if (process.platform !== "darwin") return false;
+
+  // Check the host independently of the generated scan permission profile.
+  const result = Bun.spawnSync(
+    [
+      "/usr/bin/sandbox-exec",
+      "-p",
+      "(version 1) (allow default)",
+      "/usr/bin/true",
+    ],
+    { stdout: "pipe", stderr: "pipe" },
+  );
+  return (
+    result.exitCode !== 0 &&
+    new TextDecoder().decode(result.stderr).trim() ===
+      "sandbox-exec: sandbox_apply: Operation not permitted"
+  );
+}
+
 export function shouldScheduleNativeSandboxTests(
   platform: NodeJS.Platform,
   environment: NodeJS.ProcessEnv,
