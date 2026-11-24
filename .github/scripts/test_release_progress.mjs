@@ -117,7 +117,7 @@ function fixture(repo) {
   };
   return {
     runs,
-    addRun(id, name, extra) {
+    setRun(id, name, extra) {
       const input = run(id, name, extra);
       runs.set(input.id, input);
       return input;
@@ -154,7 +154,7 @@ test("ignores pull-request CI and unrelated or unmerged commits", async () => {
     "unassociated",
   ]) {
     const f = fixture();
-    f.addRun(1, "node-ci");
+    f.setRun(1, "node-ci");
     if (scenario === "pull-request") f.runs.get(1).event = "pull_request";
     if (scenario === "ordinary") f.pulls[0].title = "fix: improve reporting";
     if (scenario === "release-maintenance")
@@ -174,7 +174,7 @@ test("accepts stable version-bump titles with breaking-change markers", async ()
   ]) {
     const f = fixture();
     f.pulls[0].title = title;
-    f.addRun(1, "node-ci");
+    f.setRun(1, "node-ci");
     assert.equal((await f.update(1)).action, "created");
   }
 });
@@ -182,7 +182,7 @@ test("accepts stable version-bump titles with breaking-change markers", async ()
 test("recognizes ref-qualified workflow paths for progress and observation", async () => {
   for (const workflow of ["node-ci", "node-release", "node-github-release"]) {
     const f = fixture();
-    const input = f.addRun(1, workflow, { conclusion: "failure" });
+    const input = f.setRun(1, workflow, { conclusion: "failure" });
     input.path += `@${input.head_branch}`;
     assert.equal((await f.update(1)).action, "created");
     assert.ok(f.body().includes(`"${workflow}":1`));
@@ -206,10 +206,10 @@ test("queued or cancelled duplicates cannot hide an active protected approval", 
       ["pending", true],
     ]) {
       const f = fixture();
-      f.addRun(1, workflow, {
+      f.setRun(1, workflow, {
         status: environment === "npm" ? "waiting" : "in_progress",
       });
-      f.addRun(2, workflow, {
+      f.setRun(2, workflow, {
         status: queuedState,
         ...(queuedArrivesFirst
           ? { run_started_at: "2026-01-01T00:03:00Z" }
@@ -247,8 +247,8 @@ test("queued or cancelled duplicates cannot hide an active protected approval", 
 
 test("a new attempt of an older run supersedes a newer cancelled run", async () => {
   const f = fixture();
-  f.addRun(1, "node-release", { conclusion: "failure" });
-  f.addRun(2, "node-release", { conclusion: "cancelled" });
+  f.setRun(1, "node-release", { conclusion: "failure" });
+  f.setRun(2, "node-release", { conclusion: "cancelled" });
   await f.update(2);
   Object.assign(f.runs.get(1), {
     run_attempt: 2,
@@ -265,10 +265,10 @@ test("a new attempt of an older run supersedes a newer cancelled run", async () 
 
 test("successful verified recovery completes despite a failed npm retry", async () => {
   const f = fixture();
-  f.addRun(2, "node-release", { conclusion: "failure" });
+  f.setRun(2, "node-release", { conclusion: "failure" });
   f.jobs.set(2, [job("verify", "failure")]);
   await f.update(2);
-  f.addRun(3, "node-github-release", { conclusion: "success" });
+  f.setRun(3, "node-github-release", { conclusion: "success" });
   f.jobs.set(3, [job("release status")]);
   await f.update(3);
   assert.match(f.body(), /## Automated release complete/u);
@@ -324,7 +324,7 @@ test("keeps the published container result on a historical failed release", () =
 
 test("observer follows protected approval through completion without workflow events", async () => {
   const f = fixture();
-  f.addRun(2, "node-release");
+  f.setRun(2, "node-release");
   f.jobs.set(2, [job("verify", null)]);
   let waits = 0;
   await f.watch(2, async (milliseconds) => {
@@ -361,14 +361,14 @@ test("observer follows protected approval through completion without workflow ev
 
 test("observer refreshes final failures and ignores unrelated runs", async () => {
   const f = fixture();
-  f.addRun(3, "node-github-release");
+  f.setRun(3, "node-github-release");
   await f.watch(3, async () => {
     f.complete(3, "failure");
     f.jobs.set(3, [job("release status", "failure")]);
   });
   assert.equal(f.writes().length, 2);
-  f.addRun(1, "node-ci");
-  f.addRun(4, "unrelated");
+  f.setRun(1, "node-ci");
+  f.setRun(4, "unrelated");
   for (const id of [1, 4])
     await f.watch(id, () => assert.fail("must not poll"));
   assert.equal(f.writes().length, 2);
@@ -376,7 +376,7 @@ test("observer refreshes final failures and ignores unrelated runs", async () =>
 
 test("tracks protected container approval and failed reusable workflow jobs", async () => {
   const f = fixture();
-  f.addRun(3, "node-github-release");
+  f.setRun(3, "node-github-release");
   f.jobs.set(3, [job("publish matching container / source")]);
   f.deployments.set(3, [{ environment: { name: "container" } }]);
   await f.update(3);
@@ -399,10 +399,10 @@ test("tracks protected container approval and failed reusable workflow jobs", as
 
 test("keeps one comment across CI, verification, and protected approval", async () => {
   const f = fixture();
-  f.addRun(1, "node-ci");
+  f.setRun(1, "node-ci");
   assert.equal((await f.update(1)).action, "created");
   f.complete(1, "success");
-  f.addRun(2, "node-release", { status: "waiting" });
+  f.setRun(2, "node-release", { status: "waiting" });
   f.jobs.set(2, [
     job("native / bundle"),
     job("verify"),
@@ -436,7 +436,7 @@ test("keeps one comment across CI, verification, and protected approval", async 
 
 test("tracks approval and completion of existing npm release verification", async () => {
   const f = fixture();
-  f.addRun(2, "node-release", { status: "waiting" });
+  f.setRun(2, "node-release", { status: "waiting" });
   f.jobs.set(2, [job("verify"), job("Verify existing npm release", null)]);
   f.deployments.set(2, [{ environment: { name: "npm" } }]);
   await f.update(2);
@@ -482,10 +482,10 @@ test("follows a release tagged on a successful fix back to its version-bump PR",
     { ...pull, number: 43, title: "fix: release verification" },
   ]);
   f.tag(fix);
-  f.addRun(1, "node-ci", { head_sha: bump, conclusion: "failure" });
+  f.setRun(1, "node-ci", { head_sha: bump, conclusion: "failure" });
   await f.update(1);
   assert.match(f.body(), /Post-merge CI \| Failed/u);
-  f.addRun(2, "node-release", { head_sha: fix, status: "waiting" });
+  f.setRun(2, "node-release", { head_sha: fix, status: "waiting" });
   f.jobs.set(2, [job("verify"), job("publish", null)]);
   f.deployments.set(2, [{ environment: { name: "npm" } }]);
   assert.equal((await f.update(2)).action, "updated");
@@ -497,7 +497,7 @@ test("follows a release tagged on a successful fix back to its version-bump PR",
   );
   assert.match(f.body(), /Approve the protected \*\*npm\*\* deployment/u);
   f.complete(2, "success");
-  f.addRun(3, "node-github-release", {
+  f.setRun(3, "node-github-release", {
     head_sha: automationSha,
     conclusion: "success",
   });
@@ -506,7 +506,7 @@ test("follows a release tagged on a successful fix back to its version-bump PR",
   assert.equal(f.comments.length, 1);
   const completed = f.body();
   assert.equal((await f.update(1)).action, "ignored");
-  f.addRun(4, "node-ci", { head_sha: fix, conclusion: "success" });
+  f.setRun(4, "node-ci", { head_sha: fix, conclusion: "success" });
   assert.equal((await f.update(4)).action, "ignored");
   assert.equal(f.body(), completed);
 });
@@ -519,7 +519,7 @@ test("continues a release backfill when saved workflow runs were deleted", async
       [2, "node-release"],
       [3, "node-github-release"],
     ]) {
-      f.addRun(id, workflow, { conclusion: "success" });
+      f.setRun(id, workflow, { conclusion: "success" });
       await f.update(id);
     }
     for (const id of deleted) {
@@ -529,7 +529,7 @@ test("continues a release backfill when saved workflow runs were deleted", async
         Object.assign(new Error("Workflow run was deleted"), { status: 404 }),
       );
     }
-    f.addRun(4, "node-github-release");
+    f.setRun(4, "node-github-release");
     assert.equal((await f.update(4)).action, "updated");
     assert.equal(f.comments.length, 1);
     assert.match(f.body(), /"node-github-release":4/u);
@@ -550,14 +550,14 @@ test("continues a release backfill when saved workflow runs were deleted", async
 test("surfaces other errors while loading saved workflow runs", async () => {
   for (const status of [401, 403, 500]) {
     const f = fixture();
-    f.addRun(1, "node-ci");
+    f.setRun(1, "node-ci");
     await f.update(1);
     const previous = f.body();
     const error = Object.assign(new Error("Workflow run request failed"), {
       status,
     });
     f.errors.set("actions/runs/1", error);
-    f.addRun(2, "node-release");
+    f.setRun(2, "node-release");
     await assert.rejects(f.update(2), (caught) => caught === error);
     assert.equal(f.body(), previous);
     assert.equal(f.writes().length, 1);
@@ -595,7 +595,7 @@ test("workflow results remain visible when no jobs start or every job is skipped
         ["startup_failure", "startup_failure"],
       ]) {
         const f = fixture();
-        f.addRun(1, workflow);
+        f.setRun(1, workflow);
         f.jobs.set(
           1,
           skipped
@@ -628,7 +628,7 @@ test("workflow results remain visible when no jobs start or every job is skipped
 test("reports failed shards and cancelled publication without declaring completion", async () => {
   for (const conclusion of ["failure", "cancelled"]) {
     const f = fixture();
-    f.addRun(2, "node-release", { conclusion });
+    f.setRun(2, "node-release", { conclusion });
     f.jobs.set(2, [
       job("verify"),
       job("release tests / 2", conclusion),
@@ -643,7 +643,7 @@ test("reports failed shards and cancelled publication without declaring completi
 test("reports a failed handoff after npm publication succeeds", async () => {
   for (const conclusion of ["failure", "cancelled"]) {
     const f = fixture();
-    f.addRun(2, "node-release", { conclusion });
+    f.setRun(2, "node-release", { conclusion });
     f.jobs.set(2, [
       job("verify"),
       job("publish"),
@@ -663,7 +663,7 @@ test("reports a failed handoff after npm publication succeeds", async () => {
 
 test("Action verification failures take precedence over skipped publication", async () => {
   const f = fixture();
-  f.addRun(3, "node-github-release", { conclusion: "failure" });
+  f.setRun(3, "node-github-release", { conclusion: "failure" });
   f.jobs.set(3, [
     job("verify matching Action", "failure"),
     job("publish matching Action", "skipped"),
@@ -678,7 +678,7 @@ test("resolves GitHub publication to the release tag, including annotated tags",
   for (const annotated of [false, true]) {
     const f = fixture();
     if (annotated) f.annotate();
-    f.addRun(3, "node-github-release", {
+    f.setRun(3, "node-github-release", {
       head_sha: automationSha,
       conclusion: "success",
     });
@@ -710,7 +710,7 @@ test("resolves GitHub publication to the release tag, including annotated tags",
 
 test("shows partial publication failures and installation failures beyond the first page", async () => {
   const f = fixture();
-  f.addRun(3, "node-github-release", { conclusion: "failure" });
+  f.setRun(3, "node-github-release", { conclusion: "failure" });
   f.jobs.set(3, [
     job("publish verified GitHub release"),
     ...Array.from({ length: 100 }, (_, i) =>
@@ -729,8 +729,8 @@ test("shows partial publication failures and installation failures beyond the fi
 
 test("late events cannot replace a newer run and reruns refresh the latest attempt", async () => {
   const f = fixture();
-  f.addRun(1, "node-ci", { conclusion: "failure" });
-  f.addRun(2, "node-ci", { conclusion: "success" });
+  f.setRun(1, "node-ci", { conclusion: "failure" });
+  f.setRun(2, "node-ci", { conclusion: "success" });
   await f.update(2);
   await f.update(1);
   assert.match(f.body(), /Post-merge CI \| Passed/u);
@@ -748,7 +748,7 @@ test("does not overwrite human comments containing the marker", async () => {
     body: `${marker}\nMy notes`,
   };
   f.comments.push(human);
-  f.addRun(1, "node-ci");
+  f.setRun(1, "node-ci");
   await f.update(1);
   assert.equal(f.comments.length, 2);
   assert.equal(human.body, `${marker}\nMy notes`);

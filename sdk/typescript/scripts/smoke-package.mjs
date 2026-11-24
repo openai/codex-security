@@ -508,7 +508,7 @@ try {
     NODE_OPTIONS: "--preserve-symlinks-main --no-experimental-detect-module",
     NODE_USE_ENV_PROXY: undefined,
   };
-  function runShim(shim, argument) {
+  function runInstalledCli(shim, argument) {
     const options = {
       cwd: consumer,
       capture: true,
@@ -538,10 +538,10 @@ try {
       `npm must create the published ${name} executable shim.`,
     );
 
-    const version = runShim(executable, "--version");
+    const version = runInstalledCli(executable, "--version");
     assert.equal(version.trim(), packageManifest.version);
 
-    const help = runShim(executable, "--help");
+    const help = runInstalledCli(executable, "--help");
     assert.match(help, /Usage: codex-security\b/u);
     assert.match(help, /\bpublish\b/u);
     assert.match(help, /\bdedupe\b/u);
@@ -598,7 +598,7 @@ try {
   assert.equal(failed.stdout, "");
   assert.equal(failed.stderr, "working directory is unavailable\n");
 
-  function runCli(args, env) {
+  function runLauncher(args, env) {
     return run(process.execPath, [launcher, ...args], {
       cwd: consumer,
       capture: true,
@@ -606,12 +606,12 @@ try {
     });
   }
 
-  const policyHelp = runCli(["policy", "--help"]);
+  const policyHelp = runLauncher(["policy", "--help"]);
   assert.match(policyHelp, /SECURITY\.md/u);
   const policyTarget = join(consumer, "policy-target");
   await mkdir(policyTarget);
   const policyPreflight = JSON.parse(
-    runCli(
+    runLauncher(
       ["policy", policyTarget, "--auth", "chatgpt", "--dry-run", "--json"],
       {
         ...process.env,
@@ -627,13 +627,13 @@ try {
   assert.deepEqual(await readdir(policyTarget), []);
 
   const starterPath = join(consumer, "codex-security.yaml");
-  const starter = JSON.parse(runCli(["init", "--json"]));
+  const starter = JSON.parse(runLauncher(["init", "--json"]));
   // Compare file identities across symlink aliases and Windows short names.
   const canonicalStarterPath = await realpath(starterPath);
   assert.equal(await realpath(starter.path), canonicalStarterPath);
   for (const args of [["-c", starterPath], []]) {
     const info = JSON.parse(
-      runCli(["info", ...args, "--json"], {
+      runLauncher(["info", ...args, "--json"], {
         ...process.env,
         CODEX_SECURITY_PROJECT_CONFIG: starterPath,
       }),
@@ -646,7 +646,7 @@ try {
   const nestedDirectory = join(consumer, "settings");
   await mkdir(nestedDirectory);
   const nestedPath = join(nestedDirectory, "security.json");
-  runCli(["init", nestedPath, "--json"]);
+  runLauncher(["init", nestedPath, "--json"]);
   const nestedConfig = JSON.parse(await readFile(nestedPath, "utf8"));
   assert.equal(
     await realpath(resolve(nestedDirectory, nestedConfig.$schema)),
@@ -681,7 +681,7 @@ try {
   );
   assert.equal(trackingIds, "csf_852f90d6e1177502ff113d4a\n");
   const publication = JSON.parse(
-    runCli(
+    runLauncher(
       [
         "publish",
         "scan",
@@ -710,7 +710,7 @@ try {
   assert.equal(publication.counts.findings, 1);
   assert.equal(publication.counts.created, 0);
   assert.match(publication.issues[0].title, /^\[Codex Security\]\[HIGH\] /u);
-  assert.match(runCli(["publish", "scan", "--help"]), /--skip-existing/u);
+  assert.match(runLauncher(["publish", "scan", "--help"]), /--skip-existing/u);
   const missingHistory = spawnSync(
     process.execPath,
     [

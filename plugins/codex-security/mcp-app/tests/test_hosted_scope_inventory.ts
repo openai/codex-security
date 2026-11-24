@@ -6,7 +6,7 @@ import { test, type TestContext } from "node:test";
 import { importSource } from "./import-module.ts";
 
 const { writeHostedScopeInventory } = (await importSource(
-  join(import.meta.dirname, "../src/helpers/hosted-scope-inventory.ts"),
+  "src/helpers/hosted-scope-inventory.ts",
 )) as typeof import("../src/helpers/hosted-scope-inventory.ts");
 
 function fixture(t: TestContext) {

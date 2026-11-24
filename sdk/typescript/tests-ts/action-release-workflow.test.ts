@@ -11,30 +11,12 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { createTemporaryDirectoriesSync } from "./support/temporary-directories.js";
 import { runWorkflowScript } from "./support/workflow-script.js";
-import { workflow as readWorkflow } from "./support/workflow.js";
+import { workflow } from "./support/workflow.js";
 
-type Step = {
-  name: string;
-  id?: string;
-  run?: string;
-  uses?: string;
-  with?: Record<string, string | boolean>;
-  if?: string;
-  "continue-on-error"?: boolean;
-};
-type Job = {
-  steps: Step[];
-  env?: Record<string, string>;
-  permissions?: Record<string, string>;
-  needs?: string[];
-  outputs?: Record<string, string>;
-};
-const workflow = readWorkflow("node-github-release") as {
-  jobs: Record<string, Job>;
-};
+const { jobs } = workflow("node-github-release");
 
 function step(job: string, name: string) {
-  const value = workflow.jobs[job]?.steps.find((step) => step.name === name);
+  const value = jobs[job]?.steps!.find((step) => step.name === name);
   if (!value) throw new Error(`Missing workflow step: ${job}/${name}`);
   return value;
 }
@@ -207,8 +189,8 @@ function fixture(includeAction = true) {
 }
 
 test("runs CLI verification read-only and passes only its identified runtime lock to publication", () => {
-  const verification = workflow.jobs["action-verify"]!;
-  const publication = workflow.jobs["action"]!;
+  const verification = jobs["action-verify"]!;
+  const publication = jobs["action"]!;
   expect(verification.permissions).toEqual({ contents: "read" });
   expect(publication.permissions).toEqual({ contents: "write" });
   expect(publication.needs).toContain("action-verify");
@@ -217,7 +199,7 @@ test("runs CLI verification read-only and passes only its identified runtime loc
     path: "release-source",
     "persist-credentials": false,
   });
-  const artifacts = verification.steps.filter((step) =>
+  const artifacts = verification.steps!.filter((step) =>
     step.uses?.startsWith("actions/upload-artifact@"),
   );
   expect(artifacts).toHaveLength(1);
@@ -249,8 +231,8 @@ test("runs CLI verification read-only and passes only its identified runtime loc
     ),
   ) as { scripts: Record<string, string> };
   expect(actionPackage.scripts["check-dist"]).toBeString();
-  const publicationCommands = publication.steps
-    .map((step) => step.run ?? "")
+  const publicationCommands = publication
+    .steps!.map((step) => step.run ?? "")
     .join("\n");
   expect(publicationCommands).not.toMatch(
     /test:cli|scripts\/linux-smoke\.mjs|npm ci --prefix runtime/u,
@@ -371,19 +353,15 @@ test("stages the verified runtime lock without copying verification workspace so
 test.each([0, 42])(
   "gates runtime verification through Socket with an empty cache (exit %j)",
   (firewallExit) => {
-    const verification = workflow.jobs["action-verify"]!;
+    const steps = jobs["action-verify"]!.steps!;
     const install = step(
       "action-verify",
       "Install Action and CLI dependencies",
     );
     const validate = step("action-verify", "Validate the packaged Action");
     const upload = step("action-verify", "Save verified CLI runtime lock");
-    expect(verification.steps.indexOf(install)).toBeLessThan(
-      verification.steps.indexOf(validate),
-    );
-    expect(verification.steps.indexOf(validate)).toBeLessThan(
-      verification.steps.indexOf(upload),
-    );
+    expect(steps.indexOf(install)).toBeLessThan(steps.indexOf(validate));
+    expect(steps.indexOf(validate)).toBeLessThan(steps.indexOf(upload));
     expect(install["continue-on-error"]).toBeUndefined();
     expect(validate.if).toBeUndefined();
     expect(upload.if).toBeUndefined();
@@ -455,7 +433,7 @@ ${validate.run}`,
 );
 
 function reuseAndInstall(job: string) {
-  const steps = workflow.jobs[job]!.steps;
+  const steps = jobs[job]!.steps!;
   const reuse = step(job, "Reuse an existing immutable Action distribution");
   const install = step(
     job,
@@ -998,7 +976,7 @@ test.each(["success", "failure", "cancelled", "skipped"])(
     expect(
       step("complete", "Summarize release channels")["continue-on-error"],
     ).toBe(true);
-    expect(workflow.jobs["complete"]?.env?.["CONTAINER_RESULT"]).toBe(
+    expect(jobs["complete"]?.env?.["CONTAINER_RESULT"]).toBe(
       "${{ needs.container.result }}",
     );
   },
