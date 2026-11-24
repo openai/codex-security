@@ -1,5 +1,4 @@
 import { expect, test } from "bun:test";
-import { createHash } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
@@ -98,25 +97,10 @@ test("caller ownership and installed versions come from the same committed works
       git("rev-parse", "HEAD:package-lock.json"),
       git("hash-object", "-w", "package-lock.json"),
     );
-    const payload = JSON.stringify({
-      service: "alpha",
-      package: { ...pkg, version: "1.0.0" },
-      revision,
-      coverage: "partial",
-      evidence: "One request was sampled.",
-      access: {
-        caller: "example client",
-        evidence: "One client request reached this service.",
-      },
-    });
     const result = await discoverDependencyRepository({
       repository: repo,
       package: pkg,
       environment: { PATH: "" },
-      runtimeReceipts: [
-        { source: "sample", payload },
-        { source: "opaque", payload: "{}" },
-      ],
     });
     expect(result.revision).toBe(revision);
     expect(result.sourceLeads).toEqual([
@@ -149,22 +133,13 @@ test("caller ownership and installed versions come from the same committed works
       );
     }
     expect(result.buildFiles).toEqual(["Dockerfile"]);
-    expect(result.runtime[0]).toMatchObject({
-      payload,
-      sha256: createHash("sha256").update(payload).digest("hex"),
-      observation: {
-        service: "alpha",
-        access: {
-          caller: "example client",
-          evidence: "One client request reached this service.",
-        },
-      },
-    });
-    expect(result.runtime[1]!.observation).toBeUndefined();
+    expect(result.runtime).toEqual([]);
     expect(result.coverage.status).toBe("partial");
     expect(result.coverage.gaps.join("\n")).toMatch(/OpenGrep is unavailable/);
     expect(result.coverage.gaps.join("\n")).toMatch(/unlocked/);
-    expect(result.coverage.gaps.join("\n")).toMatch(/opaque is unknown/);
+    expect(result.coverage.gaps).toContain(
+      "No runtime observations were supplied.",
+    );
   } finally {
     await removeTemporaryDirectory(repo);
   }
@@ -244,6 +219,7 @@ test("reports a nested build-only package in the active caller boundary", async 
       package: { ecosystem: "Debian", name: "libwebp7" },
       callerBoundary: { productionOnly: true, excludePaths: [] },
     });
+    expect(result.coverage.status).toBe("unknown");
     expect(result.buildFiles.sort()).toEqual([
       "services/renderer/Dockerfile",
       "tests/owned/Dockerfile",
