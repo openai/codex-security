@@ -772,6 +772,47 @@ test("hosted receipts hash MCP checkpoints as written", async () => {
   expect(checkpoint!.sha256).toBe(hash("sha256", contents));
 });
 
+test("hosted exclusions are normalized, sealed, and checked before dispatch", async () => {
+  const input = await fixture(["service-a/generated.ts"]);
+  const executor = draftExecutor((request) => {
+    expect(request.scope.excludePaths).toEqual([
+      "missing",
+      "service-a/generated.ts",
+    ]);
+    expect(request.prompt).toContain("service-a/generated.ts");
+  });
+  const result = await runHostedScan(
+    {
+      ...input,
+      scope: {
+        paths: ["service-a"],
+        excludePaths: ["service-a/generated.ts", "missing", "./missing"],
+      },
+    },
+    { executor },
+  );
+  expect(result.status, JSON.stringify(result)).toBe("completed");
+  expect(result.scope.excludePaths).toEqual([
+    "missing",
+    "service-a/generated.ts",
+  ]);
+  const manifest = await readJson<any>(
+    join(result.outputDirectory, "scan-manifest.json"),
+  );
+  expect(manifest.scan.scope.excludePaths).toEqual(result.scope.excludePaths);
+  const rejected = noExecution();
+  await expect(
+    runHostedScan(
+      {
+        ...input,
+        scope: { paths: ["service-a"], excludePaths: ["../outside"] },
+      },
+      { executor: rejected },
+    ),
+  ).rejects.toMatchObject({ reason: "scope_syntax" });
+  expect(rejected.run).not.toHaveBeenCalled();
+});
+
 test("a changed checkout cannot produce accepted completed output", async () => {
   const input = await fixture();
   input.severityRubric = severityRubric;
@@ -852,6 +893,7 @@ test.each([
 
 test.each([
   { args: ["scan", "--host", "--path", "service-a"] },
+  { args: ["scan", "--host", "--exclude-path", "generated"] },
   { args: ["scan", ".", "--host"] },
 ])("host mode rejects unsupported combinations %p", async ({ args }) => {
   const stdout = capture();
@@ -879,8 +921,12 @@ test("--host=false leaves a scan preview in CLI mode", async () => {
 test.each([false, true])(
   "CLI pipes retain reasoning effort, progress and execution receipts, including cancellation (%p)",
   async (cancel) => {
-    const input = await fixture();
+    const input = await fixture(["service-a/generated.ts"]);
     if (!cancel) {
+      input.scope = {
+        paths: ["service-a"],
+        excludePaths: ["missing", "service-a/generated.ts"],
+      };
       input.reasoningEffort = "synthetic-future-effort";
       input.ownerSuggestions = true;
       input.severityRubric = severityRubric;
@@ -915,6 +961,7 @@ test.each([false, true])(
         messages.push(message);
         if (message.method === "execution.run") {
           expect(message.params.reasoningEffort).toBe(input.reasoningEffort);
+          expect(message.params.scope).toEqual(input.scope);
           expect(
             message.params.runtime.environment.CODEX_SECURITY_SURFACE,
           ).toBe("cli");
@@ -1677,6 +1724,7 @@ test("the exported contract fixture matches v2 and rejects explicit empty scope"
   expect(fixture.execution.params.severityRubric).toEqual(severityRubric);
   expect(input.scope).toEqual({
     paths: ["service-a", "service-b"],
+    excludePaths: ["service-a/generated"],
   });
   expect(
     HostedScanInputSchema.safeParse({

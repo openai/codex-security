@@ -40,7 +40,10 @@ const result = await runHostedScan(
     version: 2,
     repository: "/workspace/repository",
     revision: "0123456789012345678901234567890123456789",
-    scope: { paths: ["services/api", "services/web"] },
+    scope: {
+      paths: ["services/api", "services/web"],
+      excludePaths: ["services/api/generated"],
+    },
     outputDirectory: "/scan/output",
     stateDirectory: "/scan/state",
     model: "gpt-5.6-sol",
@@ -121,7 +124,10 @@ parameters below. IDs are strings or safe integers from -9007199254740991 throug
   "version": 2,
   "repository": "/workspace/repository",
   "revision": "0123456789012345678901234567890123456789",
-  "scope": { "paths": ["services/api", "services/web"] },
+  "scope": {
+    "paths": ["services/api", "services/web"],
+    "excludePaths": ["services/api/generated"]
+  },
   "outputDirectory": "/scan/output",
   "stateDirectory": "/scan/state",
   "model": "gpt-5.6-sol",
@@ -146,7 +152,17 @@ changing filename characters. Preparation also checks the existing output
 contract: scope paths must be valid UTF-8 and cannot contain control characters,
 backslashes, or start with a drive prefix such as `C:`. Incompatible filenames
 fail before executor dispatch, including on POSIX where those files may exist.
-Every selected path must exist and remain inside
+
+An optional `scope.excludePaths` array skips literal repository-relative files or
+folders and their descendants. It defaults to no exclusions; exclusions take
+precedence over inclusions and may name paths absent at the selected revision.
+The CLI normalizes and deduplicates them, passes them to the executor, and
+checks the completed manifest against the requested exclusions. Excluded files
+remain readable as context, but findings located only in excluded paths are
+removed. Hosts must support the added scope field before requesting exclusions;
+requests without exclusions retain the previous scope shape.
+
+Every included path must exist and remain inside
 the repository at the frozen revision before any execution request. Missing paths fail the whole
 request; the CLI never skips them or broadens the scope. Canonical path aliases
 are rejected with an actionable correction. Diff, Deep, resume, mock, local
