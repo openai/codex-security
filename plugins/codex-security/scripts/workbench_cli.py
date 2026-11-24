@@ -286,6 +286,9 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     matches.add_argument("--matches-json-stdin", action="store_true")
 
     list_global_findings = subparsers.add_parser("list-global-findings")
+    list_global_findings.add_argument(
+        "--finding-id-sha256", help="Match the SHA-256 digest of the returned UTF-8 findingId."
+    )
     list_global_findings.add_argument("--query")
     list_global_findings.add_argument("--severity", choices=FINDING_SEVERITIES)
     list_global_findings.add_argument("--status", choices=FINDING_STATUSES)
