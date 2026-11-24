@@ -132,6 +132,7 @@ import {
 import { loadContract, sha256Text } from "./contract.js";
 import type { DeepScanDiagnostic } from "./deep-scan.js";
 import {
+  formatComponentCounts,
   formatDeepScanReviews,
   formatItemCount,
   type DeepScanProgress,
@@ -6769,7 +6770,7 @@ export async function main(
               dashboard?.finishComponents(result);
               stopDashboard();
               errorOutput.write(
-                `Component scans: ${result.completed} complete, ${result.failed} failed.\n${formatItemCount(result.sourceFindingCount, "finding")} → ${formatItemCount(result.findingCount, "group")}${result.deduplication?.status === "failed" ? " (matching failed)" : result.deduplication?.status === "skipped" ? " (matching skipped under total cost limit)" : ""}.\nReport: ${errorMessage(result.reportPath)}\n`,
+                `Component scans: ${result.completed} complete, ${result.failed} failed.\n${formatComponentCounts(result)}${result.deduplication?.status === "failed" ? " (matching failed)" : result.deduplication?.status === "skipped" ? " (matching skipped under total cost limit)" : ""}.\nReport: ${errorMessage(result.reportPath)}\n`,
               );
               if (result.retryPlanPath !== undefined)
                 errorOutput.write(

@@ -1,3 +1,4 @@
+import type { ComponentScanResult } from "./component-scan.js";
 import { isRecord } from "./record.js";
 import { z } from "zod";
 import { scanPhaseSchema, type ScanProgress } from "./worker-progress.js";
@@ -21,6 +22,10 @@ export interface DeepScanProgress extends z.output<typeof deepProgressSchema> {
 
 export function formatItemCount(count: number, singular: string): string {
   return count === 1 ? `1 ${singular}` : `${count} ${singular}s`;
+}
+
+export function formatComponentCounts(result: ComponentScanResult): string {
+  return `${formatItemCount(result.sourceFindingCount ?? 0, "finding")} → ${formatItemCount(result.findingCount ?? 0, "group")}`;
 }
 
 export function formatDeepScanReviews(progress: DeepScanProgress): string {
