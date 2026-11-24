@@ -1,0 +1,3 @@
+transaction	device	inode	path	package
+42	08:01	8930	/usr/lib/libwebp.so.7.1.7	libwebp-1.3.1-r0
+42	08:01	8933	/usr/lib/libwebpdemux.so.2.0.13	libwebpdemux-1.3.1-r0
