@@ -12,6 +12,7 @@ from argparse import Namespace
 import pytest
 from workbench_test_support import (
     read_review_state,
+    saved_surface,
     select_checkpoint,
     write_checkpoint,
     write_result_draft,
@@ -56,13 +57,9 @@ def test_parent_candidate_outcome_compares_headless_worker_chronology(
             "UPDATE deep_scan_workers SET attempt = ? WHERE id = ?", (attempt, worker_id)
         )
     candidate = "pending-candidate"
-    surface = {
-        "id": "worker-surface",
-        "candidateId": candidate,
-        "label": "Worker follow-up",
-        "disposition": "needs_follow_up",
-        "receiptRefs": [],
-    }
+    surface = saved_surface(
+        "worker-surface", "Worker follow-up", "needs_follow_up", candidate_id=candidate
+    )
     task = {"id": "worker-task", "candidateId": candidate, "reason": "Validate worker evidence."}
     draft = scan.worker_draft(completeness="partial", surfaces=[surface], deferred=[task])
     write_result_draft(result, draft, mtime_ns=300)
@@ -126,12 +123,7 @@ def test_missing_deferred_projection_links_first_duplicate_surface(
             (merge_state, worker_id),
         )
     surfaces = [
-        {
-            "id": "shared-surface",
-            "label": label,
-            "disposition": disposition,
-            "receiptRefs": [],
-        }
+        saved_surface("shared-surface", label, disposition)
         for label, disposition in (
             ("Archive route", "needs_follow_up"),
             ("Archive settings", "no_issue_found"),
@@ -283,12 +275,12 @@ def test_missing_accepted_result_does_not_project_an_archived_attempt(
                 **scan.coverage,
                 "completeness": "partial",
                 "surfaces": [
-                    {
-                        "id": "prior-surface",
-                        "label": "Prior unfinished review",
-                        "disposition": "needs_follow_up",
-                        "receiptRefs": ["artifacts/prior.txt"],
-                    }
+                    saved_surface(
+                        "prior-surface",
+                        "Prior unfinished review",
+                        "needs_follow_up",
+                        receipts=["artifacts/prior.txt"],
+                    )
                 ],
                 "deferred": [{"reason": "Prior proof gap.", "surfaceIds": ["prior-surface"]}],
             },
@@ -346,12 +338,7 @@ def test_failed_worker_reviews_do_not_replace_accepted_reviews(
             **scan.coverage,
             "completeness": "partial",
             "surfaces": [
-                {
-                    "id": f"{label}-surface",
-                    "label": f"{label} source review",
-                    "disposition": "needs_follow_up",
-                    "receiptRefs": [],
-                }
+                saved_surface(f"{label}-surface", f"{label} source review", "needs_follow_up")
             ],
             "deferred": [
                 {
@@ -432,12 +419,7 @@ def test_missing_projection_keeps_surface_links_and_independent_reviews(
     idless_surface,
 ):
     scan = publication_scan()
-    surface = {
-        "id": "source-surface",
-        "label": "Source review",
-        "disposition": "needs_follow_up",
-        "receiptRefs": [],
-    }
+    surface = saved_surface("source-surface", "Source review", "needs_follow_up")
     deferred = {
         "id": "pending-check",
         "reason": "Validation remains unresolved.",
@@ -646,13 +628,7 @@ def test_rejected_retry_preserves_original_finding_history(
             }
         )
     )
-    surface = {
-        "id": "review",
-        "candidateId": candidate_id,
-        "label": "Rejected candidate",
-        "disposition": "rejected",
-        "receiptRefs": [],
-    }
+    surface = saved_surface("review", "Rejected candidate", "rejected", candidate_id=candidate_id)
     result.write_text(json.dumps(scan.worker_draft(surfaces=[surface])))
     with workbench_db:
         workbench_db.execute("UPDATE deep_scan_workers SET attempt = 2 WHERE id = ?", (worker_id,))
@@ -876,12 +852,12 @@ def test_matching_accepted_checkpoint_preserves_receipt_path(
         completeness="complete",
         deferred=[],
         surfaces=[
-            {
-                "id": "source-review",
-                "label": "Accepted source review",
-                "disposition": "no_issue_found",
-                "receiptRefs": ["artifacts/evidence.txt"],
-            }
+            saved_surface(
+                "source-review",
+                "Accepted source review",
+                "no_issue_found",
+                receipts=["artifacts/evidence.txt"],
+            )
         ],
     )
     result.write_text(json.dumps(draft))
@@ -1026,13 +1002,9 @@ def test_parent_candidate_provenance_cannot_override_accepted_worker_evidence(
         os.utime(checkpoint, ns=(300, 300))
         os.utime(head, ns=(300, 300))
         originals = {path: path.read_bytes() for path in (result, checkpoint, head)}
-    rejection = {
-        "id": "parent-review",
-        "candidateId": "source-candidate",
-        "label": "Parent candidate assessment",
-        "disposition": "rejected",
-        "receiptRefs": [],
-    }
+    rejection = saved_surface(
+        "parent-review", "Parent candidate assessment", "rejected", candidate_id="source-candidate"
+    )
     if claimed_worker:
         rejection["provenance"] = {
             "workerId": worker_id,
@@ -1065,12 +1037,7 @@ def test_projected_generic_closure_updates_parent_copy_in_its_worker_namespace(
     scan = publication_scan()
     result = scan.add_worker()
     worker_id = result.parent.name
-    surface = {
-        "id": "source-surface",
-        "label": "Source follow-up",
-        "disposition": "needs_follow_up",
-        "receiptRefs": [],
-    }
+    surface = saved_surface("source-surface", "Source follow-up", "needs_follow_up")
     task = {
         "id": "source-task",
         "reason": "Complete source follow-up.",
@@ -1155,13 +1122,9 @@ def test_selected_candidate_outcome_removes_its_projected_parent_pending_rows(
     result = scan.add_worker()
     worker_id = result.parent.name
     candidate = "source-candidate"
-    surface = {
-        "id": "source-surface",
-        "candidateId": candidate,
-        "label": "Candidate follow-up",
-        "disposition": "needs_follow_up",
-        "receiptRefs": [],
-    }
+    surface = saved_surface(
+        "source-surface", "Candidate follow-up", "needs_follow_up", candidate_id=candidate
+    )
     task = {
         "id": "source-task",
         "candidateId": candidate,
@@ -1267,12 +1230,7 @@ def test_selected_worker_projection_keeps_links_and_pending_authority(
     worker_id = result.parent.name
     prefix = f"{worker_id}-attempt-1"
     candidate = "source-candidate"
-    surface = {
-        "id": "source-surface",
-        "label": "Source follow-up",
-        "disposition": "needs_follow_up",
-        "receiptRefs": [],
-    }
+    surface = saved_surface("source-surface", "Source follow-up", "needs_follow_up")
     task = {
         "id": "source-task",
         "reason": "Complete source follow-up.",
@@ -1449,12 +1407,12 @@ def test_selected_worker_projection_keeps_links_and_pending_authority(
             }
         assert len({row["id"] for row in coverage["surfaces"]}) == len(coverage["surfaces"])
     elif change in {"closed sibling candidate", "mixed receipts"}:
-        saved_surface = next(
+        retained_surface = next(
             row for row in coverage["surfaces"] if row.get("label") == surface["label"]
         )
-        assert saved_surface["disposition"] == "no_issue_found", json.dumps(saved_surface)
+        assert retained_surface["disposition"] == "no_issue_found", json.dumps(retained_surface)
         if change == "mixed receipts":
-            assert set(saved_surface["receiptRefs"]) == {
+            assert set(retained_surface["receiptRefs"]) == {
                 (result.parent / "artifacts" / f"{name}.txt").relative_to(scan.scan_dir).as_posix()
                 for name in ("old", "new")
             }
@@ -1526,12 +1484,9 @@ def test_linked_archived_receipts_preserve_accepted_surface_links(
     receipt = output / "artifacts" / "review.txt"
     receipt.parent.mkdir()
     receipt.write_text("Synthetic completed review.\n")
-    surface = {
-        "id": "source-surface",
-        "label": "Source review",
-        "disposition": "needs_follow_up",
-        "receiptRefs": ["artifacts/review.txt"],
-    }
+    surface = saved_surface(
+        "source-surface", "Source review", "needs_follow_up", receipts=["artifacts/review.txt"]
+    )
     draft = scan.worker_draft(completeness="partial", surfaces=[surface], deferred=[])
     result.write_text(json.dumps(draft))
     projected = {
@@ -1633,12 +1588,9 @@ def test_recovery_projects_receipts_from_their_source_directory(
     if source == "worker-scan-relative":
         ref = receipt.relative_to(scan.scan_dir).as_posix()
     source_ref = ref.replace("artifacts/", "artifacts/./", 1) if equivalent else ref
-    surface = {
-        "id": "review",
-        "label": "Completed source review",
-        "disposition": "no_issue_found",
-        "receiptRefs": [source_ref],
-    }
+    surface = saved_surface(
+        "review", "Completed source review", "no_issue_found", receipts=[source_ref]
+    )
     worker_coverage = {**scan.coverage, "surfaces": [surface], "deferred": []}
     if closure:
         worker_coverage["resolvedDeferred"] = [
@@ -1688,12 +1640,7 @@ def test_deferred_projection_preserves_each_referenced_source_surface(
     result = scan.add_worker()
     worker_id = result.parent.name
     surfaces = [
-        {
-            "id": f"source-{index}",
-            "label": f"Source boundary {index}",
-            "disposition": "needs_follow_up",
-            "receiptRefs": [],
-        }
+        saved_surface(f"source-{index}", f"Source boundary {index}", "needs_follow_up")
         for index in range(12)
     ]
     deferred = [

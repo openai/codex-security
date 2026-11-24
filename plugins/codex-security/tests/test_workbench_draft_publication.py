@@ -13,6 +13,7 @@ from test_workbench_standard_deep_results import deep_scan_fixture
 from workbench_test_support import (
     read_draft_documents,
     read_review_state,
+    repository_recipe,
     run_workbench,
     write_completed_contract,
 )
@@ -134,14 +135,7 @@ def test_deep_setup_draft_before_orchestration(
             "--repository",
             str(target),
             "--recipe-json",
-            json.dumps(
-                {
-                    "config": {},
-                    "mode": "deep",
-                    "repository": str(target),
-                    "target": {"kind": "repository", "paths": []},
-                }
-            ),
+            json.dumps(repository_recipe(target, mode="deep")),
         )
         scan_id = str(registered["scanId"])
     model = {"format": "markdown", "content": "# Supplied setup model\n"}

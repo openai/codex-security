@@ -14,6 +14,7 @@ from publication_fixtures import worker_finding
 from workbench_test_support import (
     read_review_state,
     saved_draft,
+    saved_surface,
     select_checkpoint,
     write_checkpoint,
     write_result_draft,
@@ -37,13 +38,10 @@ def test_deadline_completion_preserves_existing_tasks_and_recovered_findings(
     (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
     worker_id, output = scan.canceled_discovery_output()
     recovered = worker_finding(scan, "saved-before-deadline")
-    checkpoint = write_checkpoint(
-        output / "checkpoints",
-        saved_draft(
-            scan.scan_id,
-            findings=[recovered],
-            deferred=[{"id": "unfinished-review", "reason": "Review remains unfinished."}],
-        ),
+    checkpoint = scan.checkpoint(
+        output,
+        findings=[recovered],
+        deferred=[{"id": "unfinished-review", "reason": "Review remains unfinished."}],
     )
     original_checkpoint = checkpoint.read_bytes()
 
@@ -88,31 +86,14 @@ def test_deadline_completion_preserves_existing_tasks_and_recovered_findings(
 
 def test_discarded_worker_finding_leaves_its_review_pending(workbench_db, deadline_scan):
     scan = deadline_scan
-    canonical = {
-        "id": "accepted",
-        "label": "Accepted review",
-        "disposition": "reported",
-        "receiptRefs": [],
-    }
+    canonical = saved_surface("accepted", "Accepted review", "reported")
     scan.coverage["surfaces"] = [canonical]
     (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
     worker_id, output = scan.canceled_discovery_output()
     invalid = worker_finding(scan, "incomplete-worker-finding")
     invalid.pop("remediation")
-    checkpoint = write_checkpoint(
-        output / "checkpoints",
-        saved_draft(
-            scan.scan_id,
-            findings=[invalid],
-            surfaces=[
-                {
-                    "id": "entry",
-                    "label": "Worker review",
-                    "disposition": "reported",
-                    "receiptRefs": [],
-                }
-            ],
-        ),
+    checkpoint = scan.checkpoint(
+        output, findings=[invalid], surfaces=[saved_surface("entry", "Worker review", "reported")]
     )
     original = checkpoint.read_bytes()
 
@@ -141,13 +122,10 @@ def test_terminal_worker_authority_requires_valid_findings(
     scan = deadline_scan
     _, output = scan.canceled_discovery_output()
     previous = worker_finding(scan, "earlier-valid-finding")
-    checkpoint = write_checkpoint(
-        output / "checkpoints",
-        saved_draft(
-            scan.scan_id,
-            findings=[previous],
-            deferred=[{"id": "review", "reason": "Review pending."}],
-        ),
+    checkpoint = scan.checkpoint(
+        output,
+        findings=[previous],
+        deferred=[{"id": "review", "reason": "Review pending."}],
         mtime_ns=100,
     )
     sibling = worker_finding(scan, "valid-terminal-sibling")
@@ -185,11 +163,7 @@ def test_malformed_worker_finding_preserves_a_valid_sibling_outcome(workbench_db
     worker_id, output = scan.canceled_discovery_output()
     earlier = worker_finding(scan, "rejected-candidate")
     earlier["provenance"]["candidateId"] = "candidate"
-    write_checkpoint(
-        output / "checkpoints",
-        saved_draft(scan.scan_id, findings=[earlier]),
-        mtime_ns=100,
-    )
+    scan.checkpoint(output, findings=[earlier], mtime_ns=100)
     invalid = worker_finding(scan, "malformed-sibling")
     invalid.pop("remediation")
     outcome = {
@@ -239,7 +213,7 @@ def test_deadline_keeps_canonical_coverage_validation_strict(workbench_db, deadl
     coverage_file.write_text(json.dumps(scan.coverage))
     original = coverage_file.read_bytes()
     _, output = scan.canceled_discovery_output()
-    write_checkpoint(output / "checkpoints", saved_draft(scan.scan_id))
+    scan.checkpoint(output)
 
     with pytest.raises(ContractError, match="surfaces|receiptRefs"):
         scan.finish(terminal_reason="capped")
@@ -276,9 +250,7 @@ def test_worker_writeups_remain_bound_to_their_source_directory(
             writeup.parent.mkdir(parents=True)
             writeup.write_text(f"# Separate worker writeup: {finding['title']}\n")
             originals[writeup] = writeup.read_bytes()
-        checkpoint = write_checkpoint(
-            source / "checkpoints", saved_draft(scan.scan_id, findings=[finding])
-        )
+        checkpoint = scan.checkpoint(source, findings=[finding])
         originals[checkpoint] = checkpoint.read_bytes()
 
     scan.finish(terminal_reason="capped")
@@ -345,27 +317,21 @@ def test_deadline_recovery_is_idempotent_after_crash_before_commit(
     worker_id, output = scan.canceled_discovery_output(connection)
     surface_id = f"{worker_id}/entry" if worker_like_id else "entry"
     surfaces = [
-        {
-            "id": surface_id,
-            "label": "Worker review",
-            "disposition": "no_issue_found" if reviewed else "needs_follow_up",
-            "receiptRefs": [],
-        }
+        saved_surface(
+            surface_id, "Worker review", "no_issue_found" if reviewed else "needs_follow_up"
+        )
     ]
     if colliding_ids:
         surfaces.append({**surfaces[0], "label": "Separate worker review"})
-    write_checkpoint(
-        output / "checkpoints",
-        saved_draft(
-            scan.scan_id,
-            surfaces=surfaces,
-            findings=[]
-            if reviewed
-            else [worker_finding(scan, "saved-before-crash"), copy.deepcopy(scan.findings[0])],
-            deferred=[]
-            if reviewed
-            else [{"id": "review", "reason": "Review pending.", "surfaceIds": [surface_id]}],
-        ),
+    scan.checkpoint(
+        output,
+        surfaces=surfaces,
+        findings=[]
+        if reviewed
+        else [worker_finding(scan, "saved-before-crash"), copy.deepcopy(scan.findings[0])],
+        deferred=[]
+        if reviewed
+        else [{"id": "review", "reason": "Review pending.", "surfaceIds": [surface_id]}],
     )
     connection.close()
     interrupt_finish_before_commit(database, scan, 1)

@@ -163,6 +163,16 @@ def interrupt_publication(*args, **kwargs):
     raise OSError("Synthetic publication interruption")
 
 
+def saved_surface(surface_id, label, disposition, *, candidate_id=None, receipts=()):
+    return {
+        "id": surface_id,
+        **({"candidateId": candidate_id} if candidate_id is not None else {}),
+        "label": label,
+        "disposition": disposition,
+        "receiptRefs": list(receipts),
+    }
+
+
 def saved_coverage(*, deferred=(), surfaces=()):
     return {
         "surfaces": list(surfaces),
@@ -213,18 +223,32 @@ def saved_discovery_worker(output: Path, worker_id: str = "worker", attempt: int
     }
 
 
-def replay_saved_results(
-    module, documents, scan_dir, scan_id, binding, workers=(), *, stopped=True
+def merge_interrupted_results(
+    module, scan_dir, scan_id, binding, workers=None, *, stopped=True, frozen_source_digests=None
 ):
-    """Rebuild the interrupted result using the source digests frozen in the supplied manifest."""
     return module.merge_saved_results(
         scan_dir,
         scan_id,
         binding,
-        list(workers),
+        [] if workers is None else workers,
         [],
         stopped=stopped,
         reason="interrupted",
+        frozen_source_digests=frozen_source_digests,
+    )
+
+
+def replay_saved_results(
+    module, documents, scan_dir, scan_id, binding, workers=(), *, stopped=True
+):
+    """Rebuild the interrupted result using the source digests frozen in the supplied manifest."""
+    return merge_interrupted_results(
+        module,
+        scan_dir,
+        scan_id,
+        binding,
+        list(workers),
+        stopped=stopped,
         frozen_source_digests=documents[0]["scan"]["preservedSources"],
     )
 
@@ -765,6 +789,15 @@ def configure_git_command(target: Path, key: str, script: Path) -> None:
     )
 
 
+def repository_recipe(repository: Path, *, mode: str) -> dict[str, Any]:
+    return {
+        "config": {},
+        "mode": mode,
+        "repository": str(repository),
+        "target": {"kind": "repository", "paths": []},
+    }
+
+
 def create_saved_workspace(
     state_dir: Path, target: Path, *, thread_id: str | None = None, mode: str = "standard"
 ) -> dict[str, object]:
@@ -946,14 +979,7 @@ def write_completed_contract(
         "inventoryStrategy": inventory_strategy,
         "includePaths": include_paths,
         "excludePaths": [],
-        "surfaces": [
-            {
-                "id": "surface_archive_extraction",
-                "label": "Archive extraction",
-                "disposition": "reported",
-                "receiptRefs": [],
-            }
-        ],
+        "surfaces": [saved_surface("surface_archive_extraction", "Archive extraction", "reported")],
         "explicitExclusions": [],
         "deferred": [],
     }

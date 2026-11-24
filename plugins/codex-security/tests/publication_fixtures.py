@@ -12,11 +12,22 @@ from types import SimpleNamespace
 
 import pytest
 from deep_deadline_crash import interrupt_finish_before_commit
-from workbench_test_support import read_review_state, write_completed_contract
+from workbench_test_support import (
+    read_review_state,
+    saved_draft,
+    write_checkpoint,
+    write_completed_contract,
+)
 
 
 class PublicationScan(SimpleNamespace):
     """Drive publication and recovery against one test scan and its persisted worker records."""
+
+    def checkpoint(self, output: Path, *, mtime_ns: int | None = None, **draft) -> Path:
+        """Write a checkpoint for this scan without selecting it as the head."""
+        return write_checkpoint(
+            output / "checkpoints", saved_draft(self.scan_id, **draft), mtime_ns=mtime_ns
+        )
 
     def worker_draft(self, findings=(), **coverage_updates):
         """Build a completed worker result using this scan's coverage as the starting point."""

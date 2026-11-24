@@ -20,6 +20,7 @@ from workbench_test_support import (
     read_review_state,
     run_workbench,
     saved_draft,
+    saved_surface,
     select_checkpoint,
     sort_checkpoint_entries,
     write_checkpoint,
@@ -1490,12 +1491,7 @@ def test_restored_observation_keeps_independent_registered_result(
         **save_disposition(scan, result.parent, "reported"),
         "threatModel": {"summary": "Registered reporting model."},
     }
-    surface = {
-        "id": "registered-surface",
-        "label": "Synthetic reviewed surface",
-        "disposition": "no_issue_found",
-        "receiptRefs": [],
-    }
+    surface = saved_surface("registered-surface", "Synthetic reviewed surface", "no_issue_found")
     reported["coverage"]["surfaces"].append(surface)
     accepted = write_checkpoint(result.parent / "checkpoints", reported, mtime_ns=50)
     stale = {
@@ -1917,14 +1913,7 @@ def test_selected_terminal_coverage_excludes_unselected_history(
         draft = saved_draft(
             scan.scan_id,
             complete=True,
-            surfaces=[
-                {
-                    "id": "surface",
-                    "label": f"{name} surface",
-                    "disposition": "no_issue_found",
-                    "receiptRefs": [],
-                }
-            ],
+            surfaces=[saved_surface("surface", f"{name} surface", "no_issue_found")],
         )
         draft["threatModel"] = {"summary": f"{name} model"}
         draft["coverage"]["openQuestions"] = [{"question": f"{name} question"}]
@@ -2064,14 +2053,7 @@ def test_selected_terminal_coverage_has_root_worker_parity(
         draft = saved_draft(scan.scan_id, complete=terminal if name == "A" else True)
         draft["coverage"] = {**scan.coverage, **draft["coverage"]}
         draft["coverage"].update(
-            surfaces=[
-                {
-                    "id": f"surface-{name}",
-                    "label": name,
-                    "disposition": "no_issue_found",
-                    "receiptRefs": [],
-                }
-            ],
+            surfaces=[saved_surface(f"surface-{name}", name, "no_issue_found")],
             explicitExclusions=[{"pattern": f"{name}/**", "reason": f"{name} exclusion"}],
             openQuestions=[{"question": f"{name} question"}],
         )
@@ -2135,22 +2117,11 @@ def test_terminal_coverage_replacement_does_not_cross_into_a_partial_attempt(
             "UPDATE deep_scan_workers SET attempt = 2 WHERE scan_id = ?", (scan.scan_id,)
         )
     archive = directory / "attempts" / "attempt-1"
-    old = write_checkpoint(
-        archive / "checkpoints",
-        saved_draft(scan.scan_id, complete=archived_terminal),
-        mtime_ns=50,
-    )
+    old = scan.checkpoint(archive, complete=archived_terminal, mtime_ns=50)
     select_checkpoint(archive, old, mtime_ns=100)
     accepted = saved_draft(scan.scan_id, complete=True)
     accepted["coverage"].update(
-        surfaces=[
-            {
-                "id": "accepted-surface",
-                "label": "Accepted",
-                "disposition": "no_issue_found",
-                "receiptRefs": [],
-            }
-        ],
+        surfaces=[saved_surface("accepted-surface", "Accepted", "no_issue_found")],
         explicitExclusions=[{"pattern": "accepted/**", "reason": "Accepted exclusion"}],
         openQuestions=[{"question": "Accepted question"}],
     )
@@ -2164,11 +2135,7 @@ def test_terminal_coverage_replacement_does_not_cross_into_a_partial_attempt(
             )
     saved = workbench_api["saved_results"]
     scan.fail()
-    current = write_checkpoint(
-        directory / "checkpoints",
-        saved_draft(scan.scan_id, complete=current_terminal),
-        mtime_ns=300,
-    )
+    current = scan.checkpoint(directory, complete=current_terminal, mtime_ns=300)
     select_checkpoint(directory, current, mtime_ns=300)
 
     with monkeypatch.context() as patch:
@@ -2250,12 +2217,9 @@ def test_rejection_receipt_is_verified_before_suppressing_accepted_finding(
                 if receipt_state == "shared-collision"
                 else "artifacts/review.txt"
             )
-            parent_surface = {
-                "id": "earlier-review",
-                "label": "Earlier review",
-                "disposition": "no_issue_found",
-                "receiptRefs": [prior_ref],
-            }
+            parent_surface = saved_surface(
+                "earlier-review", "Earlier review", "no_issue_found", receipts=[prior_ref]
+            )
             (scan.scan_dir / "coverage.json").write_text(
                 json.dumps({**scan.coverage, "surfaces": [parent_surface]})
             )

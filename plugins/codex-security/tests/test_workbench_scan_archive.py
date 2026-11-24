@@ -11,7 +11,7 @@ import threading
 from pathlib import Path
 
 import pytest
-from workbench_test_support import fail_scan, run_workbench
+from workbench_test_support import fail_scan, repository_recipe, run_workbench
 
 
 def register_scan(
@@ -25,14 +25,7 @@ def register_scan(
         "--scan-dir",
         str(scan_dir),
         "--recipe-json",
-        json.dumps(
-            {
-                "config": {},
-                "mode": "standard",
-                "repository": str(repository),
-                "target": {"kind": "repository", "paths": []},
-            }
-        ),
+        json.dumps(repository_recipe(repository, mode="standard")),
         *arguments,
         check=check,
     )
@@ -322,14 +315,7 @@ def test_registration_rechecks_empty_output_after_competing_archive_rolls_back(
         registration_json_stdin=False,
         recipe_json_stdin=False,
         parent_scan_id=None,
-        recipe_json=json.dumps(
-            {
-                "config": {},
-                "mode": "standard",
-                "repository": str(repository),
-                "target": {"kind": "repository", "paths": []},
-            }
-        ),
+        recipe_json=json.dumps(repository_recipe(repository, mode="standard")),
     )
     register = workbench_api["register_cli_scan"]
     waiting = threading.Event()

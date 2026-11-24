@@ -16,6 +16,7 @@ from publication_fixtures import assert_published_aggregate
 from workbench_test_support import (
     saved_coverage,
     saved_draft,
+    saved_surface,
     write_checkpoint,
 )
 
@@ -88,14 +89,7 @@ def test_deep_publication_keeps_configured_scope_without_worker_observations(
     scan = publication_scan(scope=scope)
     result = scan.add_worker()
     worker_coverage = {
-        "surfaces": [
-            {
-                "id": "worker-surface",
-                "label": "Worker review",
-                "disposition": "needs_follow_up",
-                "receiptRefs": [],
-            }
-        ],
+        "surfaces": [saved_surface("worker-surface", "Worker review", "needs_follow_up")],
         "explicitExclusions": [{"pattern": "docs/", "reason": "Worker-local exclusion."}],
         "deferred": [{"id": "worker-follow-up", "reason": "Review this path again."}],
         "openQuestions": [{"question": "Which deployment controls apply?"}],
@@ -131,10 +125,7 @@ def test_deep_publication_keeps_configured_scope_without_worker_observations(
 def test_deep_publication_ignores_empty_canceled_checkpoint(publication_scan):
     scan = publication_scan()
     result = scan.add_worker(status="canceled")
-    checkpoint = write_checkpoint(
-        result.parent / "checkpoints",
-        saved_draft(scan.scan_id),
-    )
+    checkpoint = scan.checkpoint(result.parent)
     source_bytes = checkpoint.read_bytes()
 
     scan.complete()
@@ -162,12 +153,7 @@ def test_deep_publication_does_not_require_old_worker_files(publication_scan, ol
         assert result.read_text() == "{old worker output is unavailable"
 
 
-REVIEWED_SURFACE = {
-    "id": "archive",
-    "label": "Archive review",
-    "disposition": "no_issue_found",
-    "receiptRefs": [],
-}
+REVIEWED_SURFACE = saved_surface("archive", "Archive review", "no_issue_found")
 
 
 @pytest.fixture(params=[False, True], ids=["review-state", "coverage-file"])
@@ -736,9 +722,7 @@ def test_deep_publication_write_failure_keeps_original_terminal_cause(
         (scan.scan_id,),
     ).fetchone()
     assert tuple(run) == ("succeeded", "saturated", 0)
-    scan.coverage["surfaces"] = [
-        {"id": "entry", "label": "Entry review", "disposition": "no_issue_found", "receiptRefs": []}
-    ]
+    scan.coverage["surfaces"] = [saved_surface("entry", "Entry review", "no_issue_found")]
     (scan.scan_dir / "coverage.json").write_text(json.dumps(scan.coverage))
     completed = scan.complete()
     assert completed["progress"]["status"] == "complete"
@@ -941,10 +925,7 @@ def test_stopped_file_scope_filters_siblings_before_assigning_identity(publicati
     finding["extensions"] = {"candidateId": "candidate-review"}
     descendant = copy.deepcopy(finding)
     descendant["locations"] = [{"path": "subdir/extract.py/generated", "startLine": 1}]
-    checkpoint = write_checkpoint(
-        scan.scan_dir / "checkpoints",
-        saved_draft(scan.scan_id, findings=[finding, descendant]),
-    )
+    checkpoint = scan.checkpoint(scan.scan_dir, findings=[finding, descendant])
     checkpoint_bytes = checkpoint.read_bytes()
     for name in ("scan-manifest.json", "findings.json", "coverage.json"):
         (scan.scan_dir / name).unlink()

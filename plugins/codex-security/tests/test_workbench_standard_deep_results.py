@@ -24,6 +24,7 @@ from workbench_test_support import (
     finish_deep_scan,
     get_deep_scan,
     get_scan,
+    merge_interrupted_results,
     preserve_scan_results,
     read_review_state,
     replay_saved_results,
@@ -32,6 +33,7 @@ from workbench_test_support import (
     saved_coverage,
     saved_discovery_worker,
     saved_draft,
+    saved_surface,
     scan_command,
     seal_legacy_reducer,
     seed_legacy_reducer,
@@ -1545,14 +1547,7 @@ def test_complete_worker_supersedes_obsolete_checkpoint_coverage(tmp_path: Path)
         "threatModel": {"summary": "An obsolete worker model."},
         "findings": [],
         "coverage": saved_coverage(
-            surfaces=[
-                {
-                    "id": "obsolete-surface",
-                    "label": "Obsolete review",
-                    "disposition": "needs_follow_up",
-                    "receiptRefs": [],
-                }
-            ],
+            surfaces=[saved_surface("obsolete-surface", "Obsolete review", "needs_follow_up")],
             deferred=[{"id": "obsolete-work", "reason": "This was later completed."}],
         ),
     }
@@ -2402,9 +2397,7 @@ def test_recovery_retains_generic_closures_without_a_canonical_write(
         existing_checkpoint.write_bytes(payload)
         os.utime(existing_checkpoint, ns=(300, 300))
     binding = saved_binding()
-    result = workbench_saved_results.merge_saved_results(
-        scan_dir, scan_id, binding, [], [], stopped=True, reason="interrupted"
-    )
+    result = merge_interrupted_results(workbench_saved_results, scan_dir, scan_id, binding)
     assert result is not None
     recovered = result[2]
     reopened = canonical_state in {"reopened", "checkpoint_reopened"}
@@ -2423,9 +2416,7 @@ def test_recovery_retains_generic_closures_without_a_canonical_write(
         # recovery may have only that frozen checkpoint set left to work with.
         for name in ("scan-manifest.json", "findings.json", "coverage.json"):
             (scan_dir / name).unlink()
-        replay = replay_saved_results(
-            workbench_saved_results, result, scan_dir, scan_id, binding, [], stopped=True
-        )
+        replay = replay_saved_results(workbench_saved_results, result, scan_dir, scan_id, binding)
         assert replay is not None
         assert replay[2]["resolvedDeferred"] == [closure]
         assert closure["id"] not in {row.get("id") for row in replay[2]["deferred"]}
@@ -2476,15 +2467,7 @@ def test_recovered_generic_closure_cannot_close_another_workers_same_id(
         else:
             (output / "result.json").write_text(json.dumps(draft))
     binding = saved_binding("deep_repository")
-    result = workbench_saved_results.merge_saved_results(
-        scan_dir,
-        scan_id,
-        binding,
-        workers,
-        [],
-        stopped=True,
-        reason="interrupted",
-    )
+    result = merge_interrupted_results(workbench_saved_results, scan_dir, scan_id, binding, workers)
     assert result is not None
     coverage = result[2]
     expected = {"Pending in worker-two."}
@@ -2537,9 +2520,7 @@ def test_recovery_keeps_latest_generic_closure_reason(tmp_path: Path, canonical_
         mtime_ns=200,
     )
     binding = saved_binding()
-    result = workbench_saved_results.merge_saved_results(
-        scan_dir, scan_id, binding, [], [], stopped=True, reason="interrupted"
-    )
+    result = merge_interrupted_results(workbench_saved_results, scan_dir, scan_id, binding)
     assert result is not None
     expected = (
         closure if canonical_time >= 200 else {**closure, "reason": "Initial review completed."}
@@ -2597,9 +2578,7 @@ def test_recovery_rejects_closures_that_would_discard_saved_evidence(
         "scope": {"includePaths": ["."], "excludePaths": []},
         "coverageMode": "repository",
     }
-    documents = workbench_saved_results.merge_saved_results(
-        scan_dir, scan_id, binding, [], [], stopped=True, reason="interrupted"
-    )
+    documents = merge_interrupted_results(workbench_saved_results, scan_dir, scan_id, binding)
     assert documents is not None
     prepared = workbench_saved_results._prepare_scan_finalization(
         scan_dir, completion_binding=binding, recover_unsealed=True, draft_documents=documents
@@ -2657,15 +2636,11 @@ def test_recovery_restores_work_reopened_after_parent_closure(
         mtime_ns=200,
     )
     binding = saved_binding()
-    documents = workbench_saved_results.merge_saved_results(
-        scan_dir, scan_id, binding, [], [], stopped=True, reason="interrupted"
-    )
+    documents = merge_interrupted_results(workbench_saved_results, scan_dir, scan_id, binding)
     assert documents is not None
     assert pending in documents[2]["deferred"]
     assert documents[2].get("resolvedDeferred", []) == ([other] if keep_other_closure else [])
-    replay = replay_saved_results(
-        workbench_saved_results, documents, scan_dir, scan_id, binding, [], stopped=True
-    )
+    replay = replay_saved_results(workbench_saved_results, documents, scan_dir, scan_id, binding)
     assert replay is not None
     assert pending in replay[2]["deferred"]
     assert replay[2].get("resolvedDeferred", []) == ([other] if keep_other_closure else [])
@@ -2713,36 +2688,27 @@ def test_recovery_uses_frozen_worker_head_for_identical_reclosure(
     if layout == "legacy_attempt_reopens":
         workers[0]["attempt"] = 0
     binding = saved_binding("deep_repository")
-    documents = workbench_saved_results.merge_saved_results(
-        scan_dir, scan_id, binding, workers, [], stopped=True, reason="interrupted"
+    documents = merge_interrupted_results(
+        workbench_saved_results, scan_dir, scan_id, binding, workers
     )
     assert documents is not None
     assert (pending in documents[2]["deferred"]) is layout.endswith("attempt_reopens")
     frozen = documents[0]["scan"]["preservedSources"]
     head_path = next(path for path in frozen if "/checkpoint-heads/" in path)
     assert closed.stat().st_mtime_ns == 100
-    replay = workbench_saved_results.merge_saved_results(
-        scan_dir,
-        scan_id,
-        binding,
-        workers,
-        [],
-        stopped=True,
-        reason="interrupted",
-        frozen_source_digests=frozen,
+    replay = merge_interrupted_results(
+        workbench_saved_results, scan_dir, scan_id, binding, workers, frozen_source_digests=frozen
     )
     assert replay is not None
     assert replay[2] == documents[2]
     for checkpoint in (reopened, closed):
         select_checkpoint(attempt, checkpoint, mtime_ns=400)
-        replay = workbench_saved_results.merge_saved_results(
+        replay = merge_interrupted_results(
+            workbench_saved_results,
             scan_dir,
             scan_id,
             binding,
             workers,
-            [],
-            stopped=True,
-            reason="interrupted",
             frozen_source_digests=frozen,
         )
         assert replay is not None
@@ -2799,13 +2765,13 @@ def test_recovery_keeps_worker_pending_saved_before_head_update(
     )
     workers = [saved_discovery_worker(output, "worker-one", 1)]
     binding = saved_binding("deep_repository")
-    documents = workbench_saved_results.merge_saved_results(
-        scan_dir, scan_id, binding, workers, [], stopped=True, reason="interrupted"
+    documents = merge_interrupted_results(
+        workbench_saved_results, scan_dir, scan_id, binding, workers
     )
     assert documents is not None
     assert pending in documents[2]["deferred"]
     replay = replay_saved_results(
-        workbench_saved_results, documents, scan_dir, scan_id, binding, workers, stopped=True
+        workbench_saved_results, documents, scan_dir, scan_id, binding, workers
     )
     assert replay is not None
     assert replay[2] == documents[2]
@@ -2861,16 +2827,12 @@ def test_frozen_parent_retains_identical_latest_observation(
     os.utime(original, ns=(100, 100))
     write_checkpoint(original.parent, middle, mtime_ns=200)
     write_saved_parent(tmp_path, latest, 300)
-    first = module.merge_saved_results(
-        tmp_path, pending["scanId"], binding, [], [], stopped=True, reason="interrupted"
-    )
+    first = merge_interrupted_results(module, tmp_path, pending["scanId"], binding)
     assert first is not None
     assert (pending["coverage"]["deferred"][0] in first[2]["deferred"]) is reopened
     for name in ("scan-manifest.json", "findings.json", "coverage.json"):
         (tmp_path / name).unlink()
-    replay = replay_saved_results(
-        module, first, tmp_path, pending["scanId"], binding, [], stopped=True
-    )
+    replay = replay_saved_results(module, first, tmp_path, pending["scanId"], binding)
     assert replay is not None
     assert (pending["coverage"]["deferred"][0] in replay[2]["deferred"]) is reopened
     assert replay[2].get("resolvedDeferred", []) == first[2].get("resolvedDeferred", [])
@@ -2898,12 +2860,8 @@ def test_recovery_applies_surface_update_with_generic_closure(
 ) -> None:
     module, pending, closed, binding = generic_review_recovery
     pending["coverage"]["deferred"][0]["surfaceIds"] = ["api"]
-    pending["coverage"]["surfaces"] = [
-        {"id": "api", "label": "API", "disposition": "needs_follow_up", "receiptRefs": []}
-    ]
-    closed["coverage"]["surfaces"] = [
-        {"id": "api", "label": "API", "disposition": "no_issue_found", "receiptRefs": []}
-    ]
+    pending["coverage"]["surfaces"] = [saved_surface("api", "API", "needs_follow_up")]
+    closed["coverage"]["surfaces"] = [saved_surface("api", "API", "no_issue_found")]
     idless = layout.startswith("worker_idless")
     if idless:
         pending["coverage"]["deferred"][0].pop("surfaceIds")
@@ -2944,9 +2902,7 @@ def test_recovery_applies_surface_update_with_generic_closure(
     if layout == "mixed_manifest":
         canonical = {**closed, "complete": False}
         write_saved_parent(tmp_path, canonical, 300)
-    first = module.merge_saved_results(
-        tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
-    )
+    first = merge_interrupted_results(module, tmp_path, pending["scanId"], binding, workers)
     assert first is not None
     if layout == "worker_idless_shared_pending":
         assert any(row["disposition"] == "needs_follow_up" for row in first[2]["surfaces"])
@@ -2963,9 +2919,7 @@ def test_recovery_applies_surface_update_with_generic_closure(
             assert remaining in first[2]["deferred"]
     else:
         assert first[2]["surfaces"] == closed["coverage"]["surfaces"]
-    replay = replay_saved_results(
-        module, first, tmp_path, pending["scanId"], binding, workers, stopped=True
-    )
+    replay = replay_saved_results(module, first, tmp_path, pending["scanId"], binding, workers)
     assert replay is not None
     assert replay[2] == first[2]
 
@@ -2990,13 +2944,7 @@ def test_reopened_candidate_respects_current_outcome(
     terminal = copy.deepcopy(closed)
     terminal["coverage"].pop("resolvedDeferred")
     terminal["coverage"]["surfaces"] = [
-        {
-            "id": "candidate-outcome",
-            "candidateId": "review",
-            "label": "API",
-            "disposition": "rejected",
-            "receiptRefs": [],
-        }
+        saved_surface("candidate-outcome", "API", "rejected", candidate_id="review")
     ]
     workers = []
     if outcome == "reported":
@@ -3022,9 +2970,7 @@ def test_reopened_candidate_respects_current_outcome(
     )
     assert first is not None
     assert (candidate in first[2]["deferred"]) is (outcome == "other_worker")
-    replay = replay_saved_results(
-        module, first, tmp_path, pending["scanId"], binding, workers, stopped=True
-    )
+    replay = replay_saved_results(module, first, tmp_path, pending["scanId"], binding, workers)
     assert replay is not None
     assert (candidate in replay[2]["deferred"]) is (outcome == "other_worker")
 
@@ -3038,12 +2984,9 @@ def test_worker_closure_preserves_ambiguous_legacy_surface_ids(
     pending["complete"] = complete
     pending["coverage"]["deferred"][0]["surfaceIds"] = ["entry"]
     pending["coverage"]["surfaces"] = [
-        {
-            "id": "entry",
-            "label": "Previous label" if variant == "rename" else "Entry A",
-            "disposition": "needs_follow_up",
-            "receiptRefs": [],
-        }
+        saved_surface(
+            "entry", "Previous label" if variant == "rename" else "Entry A", "needs_follow_up"
+        )
     ]
     if variant != "rename":
         pending["coverage"]["surfaces"].append(
@@ -3053,12 +2996,9 @@ def test_worker_closure_preserves_ambiguous_legacy_surface_ids(
             }
         )
     closed["coverage"]["surfaces"] = [
-        {
-            "id": "entry",
-            "label": "Updated label" if variant == "rename" else "Entry A",
-            "disposition": "no_issue_found",
-            "receiptRefs": [],
-        }
+        saved_surface(
+            "entry", "Updated label" if variant == "rename" else "Entry A", "no_issue_found"
+        )
     ]
     output = tmp_path / "worker"
     output.mkdir()
@@ -3072,12 +3012,8 @@ def test_worker_closure_preserves_ambiguous_legacy_surface_ids(
     original_bytes = {path: path.read_bytes() for path in (result_path, original, terminal, head)}
     workers = [saved_discovery_worker(output, "worker", 1)]
 
-    first = module.merge_saved_results(
-        tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
-    )
-    replay = replay_saved_results(
-        module, first, tmp_path, pending["scanId"], binding, workers, stopped=True
-    )
+    first = merge_interrupted_results(module, tmp_path, pending["scanId"], binding, workers)
+    replay = replay_saved_results(module, first, tmp_path, pending["scanId"], binding, workers)
 
     for documents in (first, replay):
         surfaces = documents[2]["surfaces"]
@@ -3104,9 +3040,7 @@ def test_parent_closure_cannot_discard_reopened_worker_same_id(
     for draft, modified in ((closed, 100), (pending, 200)):
         write_checkpoint(output / "checkpoints", draft, mtime_ns=modified)
     workers = [saved_discovery_worker(output, "worker", 1)]
-    first = module.merge_saved_results(
-        tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
-    )
+    first = merge_interrupted_results(module, tmp_path, pending["scanId"], binding, workers)
     assert first is not None
     assert pending["coverage"]["deferred"][0] in first[2]["deferred"]
 
@@ -3149,15 +3083,8 @@ def test_parent_head_preserves_newer_and_frozen_observations(
     assert (pending["coverage"]["deferred"][0] in first[2]["deferred"]) is expected_pending
     preserved = first[0]["scan"]["preservedSources"]
     assert any(path.startswith("checkpoint-heads/") for path in preserved) is (layout != "legacy")
-    replay = module.merge_saved_results(
-        tmp_path,
-        pending["scanId"],
-        binding,
-        [],
-        [],
-        stopped=True,
-        reason="interrupted",
-        frozen_source_digests=preserved,
+    replay = merge_interrupted_results(
+        module, tmp_path, pending["scanId"], binding, frozen_source_digests=preserved
     )
     assert replay is not None
     assert (pending["coverage"]["deferred"][0] in replay[2]["deferred"]) is expected_pending
@@ -3172,7 +3099,7 @@ def test_generic_surface_recovery_preserves_unresolved_evidence(
     tmp_path: Path, generic_review_recovery, later: str, idless: bool
 ) -> None:
     module, pending, closed, binding = generic_review_recovery
-    old_surface = {"id": "api", "label": "API", "disposition": "needs_follow_up", "receiptRefs": []}
+    old_surface = saved_surface("api", "API", "needs_follow_up")
     pending["coverage"]["surfaces"] = [old_surface]
     pending["coverage"]["deferred"][0]["surfaceIds"] = ["api"]
     if idless:
@@ -3209,14 +3136,10 @@ def test_generic_surface_recovery_preserves_unresolved_evidence(
         workers = [saved_discovery_worker(output, "worker", 1)]
     if later != "other_worker":
         write_checkpoint(tmp_path / "checkpoints", latest, mtime_ns=300)
-    result = module.merge_saved_results(
-        tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
-    )
+    result = merge_interrupted_results(module, tmp_path, pending["scanId"], binding, workers)
     assert result is not None
     assert any(row["disposition"] == "needs_follow_up" for row in result[2]["surfaces"])
-    replay = replay_saved_results(
-        module, result, tmp_path, pending["scanId"], binding, workers, stopped=True
-    )
+    replay = replay_saved_results(module, result, tmp_path, pending["scanId"], binding, workers)
     assert replay is not None
     assert any(row["disposition"] == "needs_follow_up" for row in replay[2]["surfaces"])
 
@@ -3250,25 +3173,15 @@ def test_worker_head_candidate_outcome_respects_newer_pending(
     terminal = copy.deepcopy(closed)
     terminal["coverage"].pop("resolvedDeferred")
     terminal["coverage"]["surfaces"] = [
-        {
-            "id": "outcome",
-            "candidateId": "review",
-            "label": "API",
-            "disposition": "rejected",
-            "receiptRefs": [],
-        }
+        saved_surface("outcome", "API", "rejected", candidate_id="review")
     ]
     selected = write_checkpoint(output / "checkpoints", terminal, mtime_ns=150)
     select_checkpoint(output, selected, mtime_ns=300)
     workers = [saved_discovery_worker(output, "worker", 1)]
-    first = module.merge_saved_results(
-        tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
-    )
+    first = merge_interrupted_results(module, tmp_path, pending["scanId"], binding, workers)
     assert first is not None
     assert (candidate in first[2]["deferred"]) is (pending_time >= 300)
-    replay = replay_saved_results(
-        module, first, tmp_path, pending["scanId"], binding, workers, stopped=True
-    )
+    replay = replay_saved_results(module, first, tmp_path, pending["scanId"], binding, workers)
     assert replay is not None
     assert (candidate in replay[2]["deferred"]) is (pending_time >= 300)
 
@@ -3285,23 +3198,15 @@ def test_frozen_parent_keeps_unrelated_candidate_outcome(
     pending["coverage"]["deferred"].append(candidate)
     write_checkpoint(tmp_path / "checkpoints", pending, mtime_ns=100)
     closed["coverage"]["surfaces"] = [
-        {
-            "id": "candidate-outcome",
-            "candidateId": "candidate-review",
-            "label": "Other review",
-            "disposition": "rejected",
-            "receiptRefs": [],
-        }
+        saved_surface(
+            "candidate-outcome", "Other review", "rejected", candidate_id="candidate-review"
+        )
     ]
     write_saved_parent(tmp_path, closed, 300)
-    first = module.merge_saved_results(
-        tmp_path, pending["scanId"], binding, [], [], stopped=True, reason="interrupted"
-    )
+    first = merge_interrupted_results(module, tmp_path, pending["scanId"], binding)
     assert first is not None
     assert candidate not in first[2]["deferred"]
-    replay = replay_saved_results(
-        module, first, tmp_path, pending["scanId"], binding, [], stopped=True
-    )
+    replay = replay_saved_results(module, first, tmp_path, pending["scanId"], binding)
     assert replay is not None
     assert candidate not in replay[2]["deferred"]
     assert replay[2]["surfaces"] == closed["coverage"]["surfaces"]
@@ -3330,14 +3235,10 @@ def test_equal_time_parent_and_head_preserve_pending_on_replay(
     checkpoint = write_checkpoint(old.parent, previous, mtime_ns=100)
     select_checkpoint(tmp_path, checkpoint, mtime_ns=200)
     write_saved_parent(tmp_path, canonical, 200)
-    first = module.merge_saved_results(
-        tmp_path, pending["scanId"], binding, [], [], stopped=True, reason="interrupted"
-    )
+    first = merge_interrupted_results(module, tmp_path, pending["scanId"], binding)
     assert first is not None
     assert pending["coverage"]["deferred"][0] in first[2]["deferred"]
-    replay = replay_saved_results(
-        module, first, tmp_path, pending["scanId"], binding, [], stopped=True
-    )
+    replay = replay_saved_results(module, first, tmp_path, pending["scanId"], binding)
     assert replay is not None
     assert pending["coverage"]["deferred"][0] in replay[2]["deferred"]
     assert old.stat().st_mtime_ns == 100
@@ -3391,12 +3292,7 @@ def test_selected_candidate_outcome_keeps_its_evidence(
         "candidate": candidate["candidate"],
         "receiptRefs": [],
     }
-    unrelated = {
-        "id": "other",
-        "label": "Other",
-        "disposition": "no_issue_found",
-        "receiptRefs": [],
-    }
+    unrelated = saved_surface("other", "Other", "no_issue_found")
     terminal["coverage"]["surfaces"] = [rejection, unrelated]
     if outcome == "reported":
         contract = tmp_path / "contract"
@@ -3415,8 +3311,8 @@ def test_selected_candidate_outcome_keeps_its_evidence(
         parent = copy.deepcopy(closed)
         parent["coverage"].pop("resolvedDeferred")
         write_saved_parent(tmp_path, parent, 100)
-    result = module.merge_saved_results(
-        tmp_path, pending["scanId"], binding, workers, [], stopped=stopped, reason="interrupted"
+    result = merge_interrupted_results(
+        module, tmp_path, pending["scanId"], binding, workers, stopped=stopped
     )
     assert result is not None
     assert candidate not in result[2]["deferred"]
@@ -3455,13 +3351,9 @@ def test_interrupted_worker_reopening_preserves_candidate_identity(
         checkpoint = write_checkpoint(output / "checkpoints", draft, mtime_ns=modified)
     select_checkpoint(output, checkpoint, mtime_ns=200)
     workers = [saved_discovery_worker(output, "worker", 1)]
-    result = module.merge_saved_results(
-        tmp_path, pending["scanId"], binding, workers, [], stopped=True, reason="interrupted"
-    )
+    result = merge_interrupted_results(module, tmp_path, pending["scanId"], binding, workers)
     assert result is not None
     assert all(row in result[2]["deferred"] for row in pending["coverage"]["deferred"])
-    replay = replay_saved_results(
-        module, result, tmp_path, pending["scanId"], binding, workers, stopped=True
-    )
+    replay = replay_saved_results(module, result, tmp_path, pending["scanId"], binding, workers)
     assert replay is not None
     assert all(row in replay[2]["deferred"] for row in pending["coverage"]["deferred"])

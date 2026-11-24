@@ -15,6 +15,7 @@ from workbench_test_support import (
     saved_binding,
     saved_discovery_worker,
     saved_draft,
+    saved_surface,
     select_checkpoint,
     write_checkpoint,
     write_completed_contract,
@@ -34,10 +35,9 @@ def worker(root: Path, name: str, draft: dict):
     return saved_discovery_worker(output, name, 1)
 
 
-def recover(root, workers, *, project=False, frozen=None, warnings=None):
-    expected_warnings = warnings is not None
-    warnings = [] if warnings is None else warnings
-    result = saved.merge_saved_results(
+def merge_review(root, workers, warnings, *, project=False, frozen=None):
+    """Return the stopped review before the finalizer normalizes its coverage."""
+    return saved.merge_saved_results(
         root,
         "coverage-scan",
         saved_binding("deep_repository", repository="synthetic"),
@@ -48,11 +48,21 @@ def recover(root, workers, *, project=False, frozen=None, warnings=None):
         project_worker_coverage=project,
         frozen_source_digests=frozen,
     )
+
+
+def recover_coverage(root, coverage, warnings):
+    finalizer._recover_unsealed_coverage(
+        coverage, Path(saved.__file__).resolve().parent.parent / "schemas", root, warnings, []
+    )
+
+
+def recover(root, workers, *, project=False, frozen=None, warnings=None):
+    expected_warnings = warnings is not None
+    warnings = [] if warnings is None else warnings
+    result = merge_review(root, workers, warnings, project=project, frozen=frozen)
     assert result is not None
     finalizer._normalize_unsealed_open_questions(result[2])
-    finalizer._recover_unsealed_coverage(
-        result[2], Path(saved.__file__).resolve().parent.parent / "schemas", root, warnings, []
-    )
+    recover_coverage(root, result[2], warnings)
     if not expected_warnings:
         assert not warnings
     return result
@@ -68,12 +78,12 @@ def test_worker_projection_retains_independent_links_receipts_and_frozen_replay(
             "coverage-scan",
             complete=False,
             surfaces=[
-                {
-                    "id": "api",
-                    "label": "API" if identical_labels else name,
-                    "disposition": "no_issue_found",
-                    "receiptRefs": ["artifacts/review.md"],
-                }
+                saved_surface(
+                    "api",
+                    "API" if identical_labels else name,
+                    "no_issue_found",
+                    receipts=["artifacts/review.md"],
+                )
             ],
             deferred=[{"id": "review", "reason": "Review remains.", "surfaceIds": ["api"]}],
         )
@@ -129,12 +139,9 @@ def test_partial_root_rejections_close_worker_local_candidates_independently(tmp
 
 
 def test_accepted_attempt_reconciles_legacy_parent_worker_projection(tmp_path):
-    surface = {
-        "id": "api",
-        "label": "Worker review",
-        "disposition": "no_issue_found",
-        "receiptRefs": ["artifacts/review.md"],
-    }
+    surface = saved_surface(
+        "api", "Worker review", "no_issue_found", receipts=["artifacts/review.md"]
+    )
     task = {"id": "review", "reason": "Review remains.", "surfaceIds": ["api"]}
     source = worker(
         tmp_path,
@@ -181,7 +188,7 @@ def test_accepted_attempt_reconciles_legacy_parent_worker_projection(tmp_path):
 
 
 def test_partial_parent_without_arrays_retains_closed_worker_surface_and_frozen_replay(tmp_path):
-    surface = {"id": "api", "label": "API", "disposition": "needs_follow_up", "receiptRefs": []}
+    surface = saved_surface("api", "API", "needs_follow_up")
     pending = saved_draft(
         "coverage-scan",
         surfaces=[surface],
@@ -226,7 +233,7 @@ def test_partial_parent_without_arrays_retains_closed_worker_surface_and_frozen_
 
 def test_finding_only_reducer_preserves_earlier_partial_root_coverage(tmp_path):
     scan_id = "coverage-scan"
-    surface = {"id": "route", "label": "Route", "disposition": "no_issue_found", "receiptRefs": []}
+    surface = saved_surface("route", "Route", "no_issue_found")
     question = {"question": "Which routes are public?"}
     earlier = saved_draft(scan_id, surfaces=[surface])
     earlier["coverage"]["openQuestions"] = [question]
@@ -362,12 +369,9 @@ def test_aggregate_copies_reconcile_once_and_later_worker_closure_removes_pendin
 def test_parent_surface_fallback_uses_current_snapshot(
     tmp_path, old_label, selected_parent, complete_worker
 ):
-    current_surface = {
-        "id": "api",
-        "label": "Current review",
-        "disposition": "needs_follow_up",
-        "receiptRefs": ["artifacts/new.md"],
-    }
+    current_surface = saved_surface(
+        "api", "Current review", "needs_follow_up", receipts=["artifacts/new.md"]
+    )
     current = saved_draft("coverage-scan", complete=complete_worker, surfaces=[current_surface])
     source = worker(tmp_path, "first", current)
     output = Path(source["artifact_dir"])
@@ -423,12 +427,9 @@ def test_fallback_receipts_take_precedence_over_historical_repairs(tmp_path, mod
     current_name, historical_name = (
         ("review.md", "Review.md") if reverse else ("Review.md", "review.md")
     )
-    surface = {
-        "id": "api",
-        "label": "Current review",
-        "disposition": "no_issue_found",
-        "receiptRefs": [f"artifacts/{current_name}"],
-    }
+    surface = saved_surface(
+        "api", "Current review", "no_issue_found", receipts=[f"artifacts/{current_name}"]
+    )
     writer = {
         **surface,
         "id": "writer",
@@ -754,15 +755,7 @@ def test_parent_link_recovery_leaves_malformed_collection_for_existing_finalizer
     )
     select_checkpoint(output, selected, mtime_ns=400)
 
-    result = saved.merge_saved_results(
-        tmp_path,
-        "coverage-scan",
-        saved_binding("deep_repository", repository="synthetic"),
-        [source],
-        [],
-        stopped=True,
-        reason="Source review stopped.",
-    )
+    result = merge_review(tmp_path, [source], [])
 
     assert result is not None
     assert result[2]["surfaces"] == {"malformed": True}
@@ -847,17 +840,7 @@ def test_parent_link_follows_replaced_anonymous_surface(tmp_path, repair_only):
     frozen = None
     for _ in range(2):
         warnings = []
-        result = saved.merge_saved_results(
-            tmp_path,
-            "coverage-scan",
-            saved_binding("deep_repository", repository="synthetic"),
-            [source],
-            warnings,
-            stopped=True,
-            reason="Source review stopped.",
-            project_worker_coverage=True,
-            frozen_source_digests=frozen,
-        )
+        result = merge_review(tmp_path, [source], warnings, project=True, frozen=frozen)
         assert result is not None
         frozen = result[0]["scan"]["preservedSources"]
         coverage = result[2]
@@ -1008,9 +991,7 @@ def test_projection_normalizes_surface_receipts_without_rewriting_extension_meta
     draft = saved_draft(
         "coverage-scan",
         complete=True,
-        surfaces=[
-            {"id": "api", "label": "API", "disposition": "no_issue_found", "receiptRefs": [receipt]}
-        ],
+        surfaces=[saved_surface("api", "API", "no_issue_found", receipts=[receipt])],
         deferred=[
             {
                 "id": "review",
@@ -1108,12 +1089,7 @@ def test_current_receipt_spelling_precedes_historical_receipts(
     originals = {path: path.read_bytes() for path in directory.iterdir()}
 
     def surface(identity, disposition, receipt):
-        return {
-            "id": identity,
-            "label": identity,
-            "disposition": disposition,
-            "receiptRefs": [prefix + receipt],
-        }
+        return saved_surface(identity, identity, disposition, receipts=[prefix + receipt])
 
     old = {
         "reviewState": {
@@ -1204,30 +1180,13 @@ def test_stopped_publication_recovers_unrepaired_failed_worker_receipt_collision
         "coverage-scan",
         complete=True,
         findings=[finding],
-        surfaces=[
-            {
-                "id": "reviewed",
-                "label": "Reviewed surface",
-                "disposition": "reported",
-                "receiptRefs": [],
-            }
-        ],
+        surfaces=[saved_surface("reviewed", "Reviewed surface", "reported")],
     )
     accepted = worker(root, "accepted", good)
     accepted["status"] = "succeeded"
     failed_rows = [
-        {
-            "id": "reader",
-            "label": "Reader",
-            "disposition": "no_issue_found",
-            "receiptRefs": ["artifacts/review.md"],
-        },
-        {
-            "id": "writer",
-            "label": "Writer",
-            "disposition": "no_issue_found",
-            "receiptRefs": ["artifacts/Review.md"],
-        },
+        saved_surface("reader", "Reader", "no_issue_found", receipts=["artifacts/review.md"]),
+        saved_surface("writer", "Writer", "no_issue_found", receipts=["artifacts/Review.md"]),
     ]
     if not split_surfaces:
         failed_rows[0]["receiptRefs"].extend(failed_rows.pop()["receiptRefs"])
@@ -1342,18 +1301,8 @@ def test_historical_receipt_repair_preserves_valid_evidence(tmp_path, historical
 @pytest.mark.parametrize("projected_parent", [False, True])
 @pytest.mark.parametrize("reverse", [False, True])
 def test_superseded_surface_cannot_reserve_historical_receipt(tmp_path, projected_parent, reverse):
-    reader = {
-        "id": "reader",
-        "label": "Reader",
-        "disposition": "needs_follow_up",
-        "receiptRefs": ["artifacts/review.md"],
-    }
-    writer = {
-        "id": "writer",
-        "label": "Writer",
-        "disposition": "no_issue_found",
-        "receiptRefs": ["artifacts/Review.md"],
-    }
+    reader = saved_surface("reader", "Reader", "needs_follow_up", receipts=["artifacts/review.md"])
+    writer = saved_surface("writer", "Writer", "no_issue_found", receipts=["artifacts/Review.md"])
     task = {"id": "review-reader", "reason": "Review reader.", "surfaceIds": ["reader"]}
     surfaces = [writer, reader] if reverse else [reader, writer]
     old = saved_draft("coverage-scan", complete=True, surfaces=surfaces, deferred=[task])
@@ -1399,16 +1348,7 @@ def test_superseded_surface_cannot_reserve_historical_receipt(tmp_path, projecte
         write_saved_parent(tmp_path, parent, 200)
     originals = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
     warnings = []
-    documents = saved.merge_saved_results(
-        tmp_path,
-        "coverage-scan",
-        saved_binding("deep_repository", repository="synthetic"),
-        [source],
-        warnings,
-        stopped=True,
-        reason="Source review stopped.",
-        project_worker_coverage=not projected_parent,
-    )
+    documents = merge_review(tmp_path, [source], warnings, project=not projected_parent)
     assert documents is not None
     retained = documents[2]["surfaces"]
     assert [row["id"] for row in retained] == ["first/reader"]
@@ -1496,16 +1436,7 @@ def test_receipt_repair_preserves_selected_surface_metadata(tmp_path, scenario, 
     if not missing:
         missing_path.write_text("Existing historical receipt.\n")
     originals = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
-    documents = saved.merge_saved_results(
-        tmp_path,
-        "coverage-scan",
-        saved_binding("deep_repository", repository="synthetic"),
-        [source],
-        [],
-        stopped=True,
-        reason="Source review stopped.",
-        project_worker_coverage=True,
-    )
+    documents = merge_review(tmp_path, [source], [], project=True)
     assert documents is not None
     surfaces = documents[2]["surfaces"]
     if scenario == "superseded-omitted":
@@ -1526,12 +1457,9 @@ def test_receipt_repair_preserves_selected_surface_metadata(tmp_path, scenario, 
 def test_receipt_repair_does_not_promote_unselected_checkpoint_evidence(
     tmp_path, accepted_receipt_exists
 ):
-    surface = {
-        "id": "api",
-        "label": "Accepted review",
-        "disposition": "no_issue_found",
-        "receiptRefs": ["artifacts/accepted.md"],
-    }
+    surface = saved_surface(
+        "api", "Accepted review", "no_issue_found", receipts=["artifacts/accepted.md"]
+    )
     accepted = saved_draft("coverage-scan", complete=True, surfaces=[surface])
     source = worker(tmp_path, "first", accepted)
     output = Path(source["artifact_dir"])
@@ -1563,26 +1491,10 @@ def test_receipt_repair_does_not_promote_unselected_checkpoint_evidence(
     frozen = None
     for _ in range(2):
         warnings = []
-        documents = saved.merge_saved_results(
-            tmp_path,
-            "coverage-scan",
-            saved_binding("deep_repository", repository="synthetic"),
-            [source],
-            warnings,
-            stopped=True,
-            reason="Source review stopped.",
-            project_worker_coverage=True,
-            frozen_source_digests=frozen,
-        )
+        documents = merge_review(tmp_path, [source], warnings, project=True, frozen=frozen)
         assert documents is not None
         frozen = documents[0]["scan"]["preservedSources"]
-        finalizer._recover_unsealed_coverage(
-            documents[2],
-            Path(saved.__file__).resolve().parent.parent / "schemas",
-            tmp_path,
-            warnings,
-            [],
-        )
+        recover_coverage(tmp_path, documents[2], warnings)
         retained = documents[2]["surfaces"]
         assert len(retained) == 1
         assert retained[0]["disposition"] == (
@@ -1604,12 +1516,9 @@ def test_unselected_receipt_spelling_cannot_replace_accepted_evidence(
     accepted_name, unselected_name = (
         ("Review.md", "review.md") if reverse else ("review.md", "Review.md")
     )
-    surface = {
-        "id": "api",
-        "label": "Accepted review",
-        "disposition": "no_issue_found",
-        "receiptRefs": [f"artifacts/{accepted_name}"],
-    }
+    surface = saved_surface(
+        "api", "Accepted review", "no_issue_found", receipts=[f"artifacts/{accepted_name}"]
+    )
     accepted = saved_draft("coverage-scan", complete=True, surfaces=[surface])
     source = worker(tmp_path, "first", accepted)
     output = Path(source["artifact_dir"])
@@ -1658,12 +1567,9 @@ def test_unselected_receipt_spelling_cannot_replace_accepted_evidence(
 @pytest.mark.parametrize("unselected", [False, True])
 def test_non_emitted_repair_cannot_reserve_another_surfaces_receipt(tmp_path, unselected):
     def surface(identity, names):
-        return {
-            "id": identity,
-            "label": identity,
-            "disposition": "no_issue_found",
-            "receiptRefs": [f"artifacts/{name}" for name in names],
-        }
+        return saved_surface(
+            identity, identity, "no_issue_found", receipts=[f"artifacts/{name}" for name in names]
+        )
 
     accepted = saved_draft(
         "coverage-scan",
@@ -1689,16 +1595,7 @@ def test_non_emitted_repair_cannot_reserve_another_surfaces_receipt(tmp_path, un
         )
     originals = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
     warnings = []
-    documents = saved.merge_saved_results(
-        tmp_path,
-        "coverage-scan",
-        saved_binding("deep_repository", repository="synthetic"),
-        [source],
-        warnings,
-        stopped=True,
-        reason="Source review stopped.",
-        project_worker_coverage=True,
-    )
+    documents = merge_review(tmp_path, [source], warnings, project=True)
     assert documents is not None
     surfaces = {row["id"]: row for row in documents[2]["surfaces"]}
     prefix = output.relative_to(tmp_path).as_posix() + "/artifacts/"
@@ -1730,12 +1627,12 @@ def test_only_recoverable_surface_metadata_reserves_receipt_spelling(tmp_path, r
     current_name, historical_name = (
         ("review.md", "Review.md") if reverse else ("Review.md", "review.md")
     )
-    selected = {
-        "id": "selected",
-        "label": "Current selected review",
-        "disposition": "no_issue_found",
-        "receiptRefs": [f"artifacts/{current_name}"],
-    }
+    selected = saved_surface(
+        "selected",
+        "Current selected review",
+        "no_issue_found",
+        receipts=[f"artifacts/{current_name}"],
+    )
     if metadata in {"anonymous", "anonymous-candidate"}:
         selected.pop("id")
         if metadata == "anonymous-candidate":
@@ -1750,12 +1647,9 @@ def test_only_recoverable_surface_metadata_reserves_receipt_spelling(tmp_path, r
         selected["disposition"] = "unverified"
     elif metadata == "receipt":
         selected["receiptRefs"].append(7)
-    writer = {
-        "id": "writer",
-        "label": "Retained review",
-        "disposition": "no_issue_found",
-        "receiptRefs": ["artifacts/replacement.md"],
-    }
+    writer = saved_surface(
+        "writer", "Retained review", "no_issue_found", receipts=["artifacts/replacement.md"]
+    )
     surfaces = [selected, writer]
     if metadata == "duplicate-id":
         surfaces.insert(
@@ -1784,24 +1678,9 @@ def test_only_recoverable_surface_metadata_reserves_receipt_spelling(tmp_path, r
     os.utime(output / "result.json", ns=(300, 300))
     originals = {p: p.read_bytes() for p in output.rglob("*") if p.is_file()}
     warnings = []
-    documents = saved.merge_saved_results(
-        tmp_path,
-        "coverage-scan",
-        saved_binding("deep_repository", repository="synthetic"),
-        [source],
-        warnings,
-        stopped=True,
-        reason="Source review stopped.",
-        project_worker_coverage=True,
-    )
+    documents = merge_review(tmp_path, [source], warnings, project=True)
     assert documents is not None
-    finalizer._recover_unsealed_coverage(
-        documents[2],
-        Path(saved.__file__).resolve().parent.parent / "schemas",
-        tmp_path,
-        warnings,
-        [],
-    )
+    recover_coverage(tmp_path, documents[2], warnings)
     rows = {row["id"]: row for row in documents[2]["surfaces"]}
     prefix = output.relative_to(tmp_path).as_posix() + "/artifacts/"
     expected = {prefix + "replacement.md"}
@@ -1816,25 +1695,15 @@ def test_only_recoverable_surface_metadata_reserves_receipt_spelling(tmp_path, r
             assert selected_row["disposition"] == "no_issue_found"
     assert set(rows["first/writer"]["receiptRefs"]) == expected
     replay_warnings = []
-    replay = saved.merge_saved_results(
+    replay = merge_review(
         tmp_path,
-        "coverage-scan",
-        saved_binding("deep_repository", repository="synthetic"),
         [source],
         replay_warnings,
-        stopped=True,
-        reason="Source review stopped.",
-        project_worker_coverage=True,
-        frozen_source_digests=documents[0]["scan"]["preservedSources"],
+        project=True,
+        frozen=documents[0]["scan"]["preservedSources"],
     )
     assert replay is not None
-    finalizer._recover_unsealed_coverage(
-        replay[2],
-        Path(saved.__file__).resolve().parent.parent / "schemas",
-        tmp_path,
-        replay_warnings,
-        [],
-    )
+    recover_coverage(tmp_path, replay[2], replay_warnings)
     assert replay[2] == documents[2]
     assert all(path.read_bytes() == content for path, content in originals.items())
 

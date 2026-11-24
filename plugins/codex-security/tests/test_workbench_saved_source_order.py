@@ -19,10 +19,12 @@ from workbench_test_support import (
     cancel_scan,
     fail_deep_scan,
     get_scan,
+    merge_interrupted_results,
     preserve_scan_results,
     saved_binding,
     saved_discovery_worker,
     saved_draft,
+    saved_surface,
     scan_command,
     select_checkpoint,
     write_checkpoint,
@@ -315,15 +317,8 @@ def test_frozen_times_cover_sources_without_checkpoint_heads(
     binding = saved_binding("deep_repository", repository="synthetic")
 
     def merge(frozen=None):
-        return saved.merge_saved_results(
-            tmp_path,
-            scan_id,
-            binding,
-            workers,
-            [],
-            stopped=True,
-            reason="interrupted",
-            frozen_source_digests=frozen,
+        return merge_interrupted_results(
+            saved, tmp_path, scan_id, binding, workers, frozen_source_digests=frozen
         )
 
     first = merge()
@@ -367,25 +362,13 @@ def test_restored_head_uses_its_captured_observation(tmp_path: Path, head_time: 
         findings=[finding],
         complete=True,
         surfaces=[
-            {
-                "id": "candidate-a",
-                "candidateId": "candidate-a",
-                "label": "Candidate",
-                "disposition": "reported",
-                "receiptRefs": [],
-            }
+            saved_surface("candidate-a", "Candidate", "reported", candidate_id="candidate-a")
         ],
     )
     rejected = saved_draft(
         scan_id,
         surfaces=[
-            {
-                "id": "candidate-a",
-                "candidateId": "candidate-a",
-                "label": "Candidate",
-                "disposition": "rejected",
-                "receiptRefs": [],
-            }
+            saved_surface("candidate-a", "Candidate", "rejected", candidate_id="candidate-a")
         ],
         complete=True,
     )
@@ -405,9 +388,7 @@ def test_restored_head_uses_its_captured_observation(tmp_path: Path, head_time: 
     workers = [saved_discovery_worker(output)]
     binding = saved_binding("deep_repository", repository="synthetic")
     binding["target"]["targetId"] = "synthetic-target"
-    first = saved.merge_saved_results(
-        tmp_path, scan_id, binding, workers, [], stopped=True, reason="interrupted"
-    )
+    first = merge_interrupted_results(saved, tmp_path, scan_id, binding, workers)
     for _ in range(2):
         assert len(first[1]["findings"]) == int(head_time < 200)
         first = saved.merge_saved_results(
@@ -437,13 +418,7 @@ def test_first_stop_freezes_sources_before_report_preparation(
         findings=[finding],
         complete=True,
         surfaces=[
-            {
-                "id": "candidate-a",
-                "candidateId": "candidate-a",
-                "label": "Candidate",
-                "disposition": "reported",
-                "receiptRefs": [],
-            }
+            saved_surface("candidate-a", "Candidate", "reported", candidate_id="candidate-a")
         ],
     )
     write_result_draft(result, reported, mtime_ns=100)
@@ -467,13 +442,7 @@ def test_first_stop_freezes_sources_before_report_preparation(
     rejection = saved_draft(
         scan_id,
         surfaces=[
-            {
-                "id": "candidate-a",
-                "candidateId": "candidate-a",
-                "label": "Candidate",
-                "disposition": "rejected",
-                "receiptRefs": [],
-            }
+            saved_surface("candidate-a", "Candidate", "rejected", candidate_id="candidate-a")
         ],
         complete=True,
     )

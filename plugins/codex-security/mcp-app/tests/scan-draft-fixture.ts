@@ -1,3 +1,5 @@
+import type { SurfaceDisposition } from "../src/models.js";
+
 export const scanId = "7fc17317-9594-49e0-b06a-d72fd7e14bba";
 
 export function workerDraft<Finding extends Record<string, unknown>>(
@@ -14,6 +16,15 @@ export function workerDraft<Finding extends Record<string, unknown>>(
     },
     ...extra,
   };
+}
+
+export function reviewSurface(
+  id: string,
+  label: string,
+  disposition: SurfaceDisposition,
+  receipts: readonly string[] = [],
+) {
+  return { id, label, disposition, receiptRefs: [...receipts] };
 }
 
 export function finding(id: string, repositoryPath: string) {

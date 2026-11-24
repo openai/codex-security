@@ -39,6 +39,19 @@ def recipe(target: Path) -> str:
     )
 
 
+def archive_args(target: Path, output: Path) -> argparse.Namespace:
+    return argparse.Namespace(
+        repository=str(target),
+        scan_dir=str(output),
+        archive_existing=True,
+        archived_scan_dir=None,
+        recipe_json=recipe(target),
+        recipe_json_stdin=False,
+        registration_json_stdin=False,
+        parent_scan_id=None,
+    )
+
+
 def register(state: Path, target: Path, output: Path, *args: str) -> dict:
     return run_workbench(
         state,
@@ -307,16 +320,7 @@ def test_generate_waits_for_the_archive_transaction(
         assert start_archive.wait(10)
         with sqlite3.connect(database, factory=PausedArchive) as connection:
             connection.row_factory = sqlite3.Row
-            args = argparse.Namespace(
-                repository=str(target),
-                scan_dir=str(output),
-                archive_existing=True,
-                archived_scan_dir=None,
-                recipe_json=recipe(target),
-                recipe_json_stdin=False,
-                registration_json_stdin=False,
-                parent_scan_id=None,
-            )
+            args = archive_args(target, output)
             if rollback:
                 with pytest.raises(sqlite3.OperationalError, match="fixture archive rollback"):
                     workbench_api["register_cli_scan"](connection, args)
@@ -474,16 +478,7 @@ def test_registration_waits_for_in_progress_archive_rename(workflow_scan, monkey
     module = runpy.run_path(str(SCRIPT))
     connection = module["connect"]()
     ready, renamed, attempted = Event(), Event(), Event()
-    args = argparse.Namespace(
-        repository=str(target),
-        scan_dir=str(output),
-        archive_existing=True,
-        archived_scan_dir=None,
-        recipe_json=recipe(target),
-        recipe_json_stdin=False,
-        registration_json_stdin=False,
-        parent_scan_id=None,
-    )
+    args = archive_args(target, output)
 
     def competing_registration():
         other = module["connect"]()
@@ -540,16 +535,7 @@ def test_commit_failure_restores_archived_output(workflow_scan, monkeypatch):
         def commit(self):
             raise sqlite3.OperationalError("fixture commit failed")
 
-    args = argparse.Namespace(
-        repository=str(target),
-        scan_dir=str(output),
-        archive_existing=True,
-        archived_scan_dir=None,
-        recipe_json=recipe(target),
-        recipe_json_stdin=False,
-        registration_json_stdin=False,
-        parent_scan_id=None,
-    )
+    args = archive_args(target, output)
     try:
         with pytest.raises(sqlite3.OperationalError, match="fixture commit failed"):
             module["register_cli_scan"](FailedCommit(), args)
@@ -598,16 +584,7 @@ def test_interrupted_commit_keeps_files_at_their_saved_paths(previous_scan, monk
                 connection.rollback()
             signal.raise_signal(signal.SIGINT)
 
-    args = argparse.Namespace(
-        repository=str(target),
-        scan_dir=str(output),
-        archive_existing=True,
-        archived_scan_dir=None,
-        recipe_json=recipe(target),
-        recipe_json_stdin=False,
-        registration_json_stdin=False,
-        parent_scan_id=None,
-    )
+    args = archive_args(target, output)
     try:
         with pytest.raises(KeyboardInterrupt):
             module["register_cli_scan"](InterruptedCommit(), args)

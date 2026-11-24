@@ -1,5 +1,10 @@
 import { writeJsonLine as writeResult } from "./support/json.ts";
-import { finding, scanId, workerDraft as draft } from "./scan-draft-fixture.ts";
+import {
+  finding,
+  reviewSurface,
+  scanId,
+  workerDraft as draft,
+} from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import {
@@ -142,12 +147,7 @@ async function testDiscoveryReceipts(root: string) {
   const result = draft([], {
     reviewState: {
       surfaces: [
-        {
-          id: "api",
-          label: "API",
-          disposition: "no_issue_found",
-          receiptRefs: ["artifacts/review.md"],
-        },
+        reviewSurface("api", "API", "no_issue_found", ["artifacts/review.md"]),
       ],
       explicitExclusions: [],
       deferred: [],
@@ -481,12 +481,9 @@ async function testMissingReceiptRepair(
         explicitExclusions: [],
         deferred: [],
         surfaces: [
-          {
-            id: "api",
-            label: "API",
-            disposition: "no_issue_found",
-            receiptRefs: ["artifacts/replacement.md"],
-          },
+          reviewSurface("api", "API", "no_issue_found", [
+            "artifacts/replacement.md",
+          ]),
         ],
         resolvedDeferred: [
           { id: "review", reason: "Source review completed." },
@@ -679,12 +676,7 @@ async function testCoveragePublicationParity(root: string) {
       explicitExclusions: [],
       deferred: [],
       surfaces: [
-        {
-          id: "api",
-          label: "API",
-          disposition: "no_issue_found",
-          receiptRefs: ["artifacts/review.md"],
-        },
+        reviewSurface("api", "API", "no_issue_found", ["artifacts/review.md"]),
       ],
     },
   }) as ScanDraftInput & {
@@ -1153,12 +1145,9 @@ async function testCurrentAnonymousReceiptSelection(
     reviewState: {
       explicitExclusions: [],
       surfaces: [
-        {
-          id: "writer",
-          label: "Retained review",
-          disposition: "needs_follow_up",
-          receiptRefs: [historicalRef],
-        },
+        reviewSurface("writer", "Retained review", "needs_follow_up", [
+          historicalRef,
+        ]),
       ],
       deferred: [
         { id: "review", reason: "Review remains.", surfaceIds: ["writer"] },
@@ -1204,12 +1193,9 @@ async function testCurrentAnonymousReceiptSelection(
       deferred: [],
       resolvedDeferred: [{ id: "review", reason: "Review completed." }],
       surfaces: [
-        {
-          id: "writer",
-          label: "Retained review",
-          disposition: "no_issue_found",
-          receiptRefs: ["artifacts/replacement.md"],
-        },
+        reviewSurface("writer", "Retained review", "no_issue_found", [
+          "artifacts/replacement.md",
+        ]),
         {
           ...(candidate ? { candidateId: "anonymous" } : {}),
           label: "Current anonymous review",
@@ -1338,12 +1324,9 @@ async function testCurrentReceiptSelectionBeforeArchivedHistory(
               surfaces: candidate
                 ? []
                 : [
-                    {
-                      id: repairId,
-                      label: repairId,
-                      disposition: "no_issue_found",
-                      receiptRefs: ["artifacts/replacement.md"],
-                    },
+                    reviewSurface(repairId, repairId, "no_issue_found", [
+                      "artifacts/replacement.md",
+                    ]),
                   ],
               resolvedDeferred: candidate
                 ? []

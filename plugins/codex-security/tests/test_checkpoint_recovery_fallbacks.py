@@ -13,6 +13,7 @@ from workbench_test_support import (
     interrupt_publication,
     read_review_state,
     saved_draft,
+    saved_surface,
     select_checkpoint,
     write_checkpoint,
     write_result_draft,
@@ -97,9 +98,7 @@ def test_early_head_error_keeps_captured_records_during_sibling_capture(
     for directory, anchor in [(first, "before"), (second, "second")]:
         finding = copy.deepcopy(scan.findings[0])
         finding["identity"]["anchor"] = anchor
-        checkpoint = write_checkpoint(
-            directory / "checkpoints", saved_draft(scan.scan_id, complete=True, findings=[finding])
-        )
+        checkpoint = scan.checkpoint(directory, complete=True, findings=[finding])
         head = select_checkpoint(directory, checkpoint, mtime_ns=100)
         if directory == first:
             original = head.read_bytes()
@@ -115,9 +114,7 @@ def test_early_head_error_keeps_captured_records_during_sibling_capture(
             changed = True
             finding = copy.deepcopy(scan.findings[0])
             finding["identity"]["anchor"] = "after"
-            checkpoint = write_checkpoint(
-                first / "checkpoints", saved_draft(scan.scan_id, complete=True, findings=[finding])
-            )
+            checkpoint = scan.checkpoint(first, complete=True, findings=[finding])
             (first / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
             os.utime(first / "checkpoint-head.json", ns=(200, 200))
         return write(root, relative, contents)
@@ -387,9 +384,7 @@ def test_early_head_failure_keeps_frozen_model_choice(
             saved._capture_saved_source(scan.scan_dir, "checkpoint-head.json", scan.scan_id)
     if failure == "worker-head":
         directory = scan.add_worker(status="canceled").parent
-        worker_checkpoint = write_checkpoint(
-            directory / "checkpoints", saved_draft(scan.scan_id, complete=True)
-        )
+        worker_checkpoint = scan.checkpoint(directory, complete=True)
         select_checkpoint(directory, worker_checkpoint, mtime_ns=200)
     write = saved.write_scan_local_bytes
 
@@ -622,14 +617,7 @@ def test_partial_head_retains_previous_terminal_coverage_boundary(
         draft["coverage"] = {**coverage, **draft["coverage"]}
         if label != "Partial":
             draft["coverage"].update(
-                surfaces=[
-                    {
-                        "id": label,
-                        "label": label,
-                        "disposition": "no_issue_found",
-                        "receiptRefs": [],
-                    }
-                ],
+                surfaces=[saved_surface(label, label, "no_issue_found")],
                 explicitExclusions=[{"pattern": label + "/**", "reason": label}],
                 openQuestions=[{"question": label}],
             )
@@ -824,12 +812,7 @@ def test_restored_terminal_keeps_surfaces_for_surviving_deferred_work(
     task = {"id": "review-task", "reason": "Review remains pending."}
     if pending != "unlinked":
         task["surfaceIds"] = ["pending-surface"]
-    surface = {
-        "id": "pending-surface",
-        "label": "Unfinished authorization review",
-        "disposition": "needs_follow_up",
-        "receiptRefs": [],
-    }
+    surface = saved_surface("pending-surface", "Unfinished authorization review", "needs_follow_up")
     partial = saved_draft(scan.scan_id, complete=False, deferred=[task], surfaces=[surface])
     partial["coverage"] = {**coverage, **partial["coverage"]}
     sequence = [(terminal, 100), (partial, 200)]

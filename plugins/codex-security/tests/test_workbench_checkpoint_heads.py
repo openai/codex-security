@@ -19,6 +19,7 @@ from workbench_test_support import (
     create_saved_workspace,
     fail_deep_scan,
     get_scan,
+    merge_interrupted_results,
     preserve_scan_results,
     read_draft_documents,
     read_review_state,
@@ -27,6 +28,7 @@ from workbench_test_support import (
     saved_binding,
     saved_discovery_worker,
     saved_draft,
+    saved_surface,
     scan_command,
     select_checkpoint,
     start_delivered_scan,
@@ -170,10 +172,8 @@ def test_recovery_keeps_one_surface_with_optional_empty_receipts(
         canonical = copy.deepcopy(draft)
         canonical["coverage"]["surfaces"][0]["receiptRefs"] = []
         write_saved_parent(tmp_path, canonical, 100)
-    first = saved.merge_saved_results(
-        tmp_path, scan_id, binding, [], [], stopped=True, reason="interrupted"
-    )
-    replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, [], stopped=True)
+    first = merge_interrupted_results(saved, tmp_path, scan_id, binding)
+    replay = replay_saved_results(saved, first, tmp_path, scan_id, binding)
     for result in (first, replay):
         assert result[2]["surfaces"] == [{**surface, "receiptRefs": []}]
     assert checkpoint.read_bytes() == original
@@ -295,9 +295,7 @@ def test_recovery_preserves_accepted_generic_surface_closeout(
         else [saved_discovery_worker(output, "worker", 1 if layout == "worker" else 2)]
     )
     original = {path: path.read_bytes() for path in directory.rglob("*.json")}
-    first = saved.merge_saved_results(
-        tmp_path, scan_id, binding, workers, [], stopped=True, reason="interrupted"
-    )
+    first = merge_interrupted_results(saved, tmp_path, scan_id, binding, workers)
     for result in (
         first,
         replay_saved_results(saved, first, tmp_path, scan_id, binding, workers),
@@ -324,9 +322,7 @@ def test_malformed_parent_deferred_id_reaches_existing_recovery_diagnostics(
             {"id": "finished", "reason": "Independent review completed."}
         ]
     write_saved_parent(tmp_path, current, 200)
-    first = saved.merge_saved_results(
-        tmp_path, scan_id, binding, [], [], stopped=True, reason="interrupted"
-    )
+    first = merge_interrupted_results(saved, tmp_path, scan_id, binding)
     replay = replay_saved_results(saved, first, tmp_path, scan_id, binding)
     for result in (first, replay):
         coverage = result[2]
@@ -372,9 +368,7 @@ def test_recovery_preserves_distinct_legacy_tasks_with_one_id(
         if layout == "parent"
         else [saved_discovery_worker(output, "worker", 1 if layout == "worker" else 2)]
     )
-    first = saved.merge_saved_results(
-        tmp_path, scan_id, binding, workers, [], stopped=True, reason="interrupted"
-    )
+    first = merge_interrupted_results(saved, tmp_path, scan_id, binding, workers)
     replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, workers)
     repeated = replay_saved_results(saved, replay, tmp_path, scan_id, binding, workers)
     assert first[2] == replay[2] == repeated[2]
@@ -446,9 +440,7 @@ def test_recovery_keeps_generic_work_that_collides_with_candidate_aliases(
         if layout == "parent"
         else [saved_discovery_worker(output, "worker", 1 if layout == "worker" else 2)]
     )
-    first = saved.merge_saved_results(
-        tmp_path, scan_id, binding, workers, [], stopped=True, reason="interrupted"
-    )
+    first = merge_interrupted_results(saved, tmp_path, scan_id, binding, workers)
     replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, workers)
     repeated = replay_saved_results(saved, replay, tmp_path, scan_id, binding, workers)
     assert first[2] == replay[2] == repeated[2]
@@ -482,9 +474,7 @@ def test_selected_parent_replaces_stale_completion_marker(
         progress.pop("complete")
     checkpoint = write_checkpoint(tmp_path / "checkpoints", progress, mtime_ns=200)
     select_checkpoint(tmp_path, checkpoint, mtime_ns=300)
-    first = saved.merge_saved_results(
-        tmp_path, scan_id, binding, [], [], stopped=True, reason="interrupted"
-    )
+    first = merge_interrupted_results(saved, tmp_path, scan_id, binding)
     replay = replay_saved_results(saved, first, tmp_path, scan_id, binding)
     for result in (first, replay):
         assert result[0]["scan"].get("complete", True) is (complete is not False)
@@ -539,9 +529,7 @@ def test_reported_surface_requires_its_own_valid_candidate_finding(
     else:
         select_checkpoint(directory, completed, mtime_ns=300)
     workers = [saved_discovery_worker(output, "worker", 2 if layout == "archived" else 1)]
-    first = saved.merge_saved_results(
-        tmp_path, scan_id, binding, workers, [], stopped=True, reason="interrupted"
-    )
+    first = merge_interrupted_results(saved, tmp_path, scan_id, binding, workers)
     replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, workers)
     repeated = replay_saved_results(saved, replay, tmp_path, scan_id, binding, workers)
     for result in (first, replay, repeated):
@@ -661,9 +649,7 @@ def test_selected_parent_retains_semantic_context_through_frozen_recovery(
         os.utime(tmp_path / name, ns=(100, 100))
     checkpoint = write_checkpoint(tmp_path / "checkpoints", selected, mtime_ns=200)
     select_checkpoint(tmp_path, checkpoint, mtime_ns=300)
-    first = saved.merge_saved_results(
-        tmp_path, scan_id, binding, [], [], stopped=stopped, reason="interrupted"
-    )
+    first = merge_interrupted_results(saved, tmp_path, scan_id, binding, stopped=stopped)
     replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, stopped=stopped)
     repeated = replay_saved_results(saved, replay, tmp_path, scan_id, binding, stopped=stopped)
     for result in (first, replay, repeated):
@@ -693,15 +679,8 @@ def test_frozen_observations_survive_live_head_changes(
     )
 
     def merge(frozen=None):
-        return saved.merge_saved_results(
-            tmp_path,
-            scan_id,
-            binding,
-            workers,
-            [],
-            stopped=True,
-            reason="interrupted",
-            frozen_source_digests=frozen,
+        return merge_interrupted_results(
+            saved, tmp_path, scan_id, binding, workers, frozen_source_digests=frozen
         )
 
     first = merge()
@@ -738,16 +717,12 @@ def test_multiple_parent_observations_keep_latest_selection_and_pending_ties(
     for checkpoint, observed in ((completed, 300), (reopened, 400), (completed, 500)):
         select_checkpoint(tmp_path, checkpoint, mtime_ns=observed)
         saved._capture_saved_source(tmp_path, "checkpoint-head.json", scan_id)
-    first = saved.merge_saved_results(
-        tmp_path, scan_id, binding, [], [], stopped=True, reason="interrupted"
-    )
+    first = merge_interrupted_results(saved, tmp_path, scan_id, binding)
     assert pending["coverage"]["deferred"][0] not in first[2]["deferred"]
     select_checkpoint(tmp_path, reopened, mtime_ns=500)
-    tied = saved.merge_saved_results(
-        tmp_path, scan_id, binding, [], [], stopped=True, reason="interrupted"
-    )
+    tied = merge_interrupted_results(saved, tmp_path, scan_id, binding)
     assert pending["coverage"]["deferred"][0] in tied[2]["deferred"]
-    replay = replay_saved_results(saved, tied, tmp_path, scan_id, binding, [], stopped=True)
+    replay = replay_saved_results(saved, tied, tmp_path, scan_id, binding)
     assert replay[2] == tied[2]
 
 
@@ -789,15 +764,8 @@ def test_legacy_live_head_sources_convert_their_recorded_observation(
     select_checkpoint(tmp_path, checkpoint, mtime_ns=200)
     paths = [checkpoint.relative_to(tmp_path).as_posix(), "checkpoint-head.json"]
     frozen = {path: saved._read_saved_result(tmp_path, path, scan_id)[1] for path in paths}
-    first = saved.merge_saved_results(
-        tmp_path,
-        scan_id,
-        binding,
-        [],
-        [],
-        stopped=True,
-        reason="interrupted",
-        frozen_source_digests=frozen,
+    first = merge_interrupted_results(
+        saved, tmp_path, scan_id, binding, frozen_source_digests=frozen
     )
     assert first is not None
     assert pending["coverage"]["deferred"][0] not in first[2]["deferred"]
@@ -817,17 +785,8 @@ def test_legacy_live_head_sources_convert_their_recorded_observation(
     with pytest.raises(
         saved.ContractError, match="Frozen stopped-scan checkpoint set is incomplete"
     ):
-        saved.merge_saved_results(
-            tmp_path,
-            scan_id,
-            binding,
-            [],
-            [],
-            stopped=True,
-            reason="interrupted",
-            frozen_source_digests=frozen,
-        )
-    replayed = replay_saved_results(saved, first, tmp_path, scan_id, binding, [], stopped=True)
+        merge_interrupted_results(saved, tmp_path, scan_id, binding, frozen_source_digests=frozen)
+    replayed = replay_saved_results(saved, first, tmp_path, scan_id, binding)
     assert replayed[2] == first[2]
 
 
@@ -995,12 +954,7 @@ def test_selected_worker_checkpoint_preserves_terminal_coverage(
     tmp_path: Path, checkpoint_scan, head_time: int
 ) -> None:
     scan_id, _, _, binding = checkpoint_scan
-    surface = {
-        "id": "existing",
-        "label": "Existing",
-        "disposition": "no_issue_found",
-        "receiptRefs": [],
-    }
+    surface = saved_surface("existing", "Existing", "no_issue_found")
     result = saved_draft(scan_id, surfaces=[surface], complete=True)
     selected = copy.deepcopy(result)
     additions = {
@@ -1029,10 +983,8 @@ def test_selected_worker_checkpoint_preserves_terminal_coverage(
         path: path.read_bytes() for path in (result_path, checkpoint, head, unselected)
     }
     workers = [saved_discovery_worker(output)]
-    first = saved.merge_saved_results(
-        tmp_path, scan_id, binding, workers, [], stopped=True, reason="interrupted"
-    )
-    replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, workers, stopped=True)
+    first = merge_interrupted_results(saved, tmp_path, scan_id, binding, workers)
+    replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, workers)
     for documents in (first, replay):
         coverage = documents[2]
         assert surface in coverage["surfaces"]
@@ -1050,7 +1002,7 @@ def test_selected_worker_checkpoint_preserves_terminal_coverage(
 def test_terminal_selected_checkpoint_replaces_result_coverage(tmp_path, head_time):
     scan_id = "selected-terminal"
     binding = saved_binding("deep_repository", repository="synthetic")
-    before = {"id": "api", "label": "API", "disposition": "needs_follow_up", "receiptRefs": []}
+    before = saved_surface("api", "API", "needs_follow_up")
     after = {**before, "disposition": "no_issue_found"}
     old_question = {"question": "Is the API review complete?"}
     old_exclusion = {"id": "excluded", "pattern": "vendor/**", "reason": "Awaiting review."}
@@ -1067,10 +1019,8 @@ def test_terminal_selected_checkpoint_replaces_result_coverage(tmp_path, head_ti
     checkpoint = write_checkpoint(output / "checkpoints", selected, mtime_ns=head_time)
     select_checkpoint(output, checkpoint, mtime_ns=head_time)
     workers = [saved_discovery_worker(output)]
-    first = saved.merge_saved_results(
-        tmp_path, scan_id, binding, workers, [], stopped=True, reason="interrupted"
-    )
-    replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, workers, stopped=True)
+    first = merge_interrupted_results(saved, tmp_path, scan_id, binding, workers)
+    replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, workers)
     for observed in (first, replay):
         coverage = observed[2]
         assert coverage["surfaces"] == ([after] if head_time >= 200 else [before])
@@ -1084,7 +1034,7 @@ def test_terminal_selected_checkpoint_replaces_result_coverage(tmp_path, head_ti
 def test_multiple_selected_terminal_observations(tmp_path, complete):
     scan_id = "selected-history"
     binding = saved_binding("deep_repository", repository="synthetic")
-    before = {"id": "api", "label": "API", "disposition": "needs_follow_up", "receiptRefs": []}
+    before = saved_surface("api", "API", "needs_follow_up")
     after = {**before, "disposition": "no_issue_found"}
     output = tmp_path / "worker"
     output.mkdir()
@@ -1095,15 +1045,11 @@ def test_multiple_selected_terminal_observations(tmp_path, complete):
     intermediate_checkpoint = write_checkpoint(output / "checkpoints", intermediate, mtime_ns=250)
     select_checkpoint(output, intermediate_checkpoint, mtime_ns=250)
     workers = [saved_discovery_worker(output)]
-    saved.merge_saved_results(
-        tmp_path, scan_id, binding, workers, [], stopped=True, reason="interrupted"
-    )
+    merge_interrupted_results(saved, tmp_path, scan_id, binding, workers)
     terminal = saved_draft(scan_id, surfaces=[after], complete=complete)
     checkpoint = write_checkpoint(output / "checkpoints", terminal, mtime_ns=300)
     select_checkpoint(output, checkpoint, mtime_ns=300)
-    first = saved.merge_saved_results(
-        tmp_path, scan_id, binding, workers, [], stopped=True, reason="interrupted"
-    )
+    first = merge_interrupted_results(saved, tmp_path, scan_id, binding, workers)
     replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, workers)
     for result in (first, replay):
         if complete:
@@ -1116,12 +1062,7 @@ def test_multiple_selected_terminal_observations(tmp_path, complete):
 def test_older_attempt_selected_head_cannot_supersede_current_result(tmp_path):
     scan_id = "selected-archive"
     binding = saved_binding("deep_repository", repository="synthetic")
-    current = {
-        "id": "api",
-        "label": "Current review",
-        "disposition": "no_issue_found",
-        "receiptRefs": [],
-    }
+    current = saved_surface("api", "Current review", "no_issue_found")
     outdated = {**current, "label": "Old attempt"}
     output = tmp_path / "worker"
     output.mkdir()
@@ -1138,9 +1079,7 @@ def test_older_attempt_selected_head_cannot_supersede_current_result(tmp_path):
     )
     select_checkpoint(archived, checkpoint, mtime_ns=300)
     workers = [saved_discovery_worker(output, attempt=2)]
-    first = saved.merge_saved_results(
-        tmp_path, scan_id, binding, workers, [], stopped=True, reason="interrupted"
-    )
+    first = merge_interrupted_results(saved, tmp_path, scan_id, binding, workers)
     replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, workers)
     for result in (first, replay):
         assert result[2]["surfaces"] == [current]
@@ -1164,12 +1103,7 @@ def test_generic_worker_closeout_preserves_receipt_owners(
     current_path = output / current_ref
     current_path.parent.mkdir(parents=True, exist_ok=True)
     current_path.write_text("Synthetic current evidence.\n")
-    surface = {
-        "id": "api",
-        "label": "API",
-        "disposition": "needs_follow_up",
-        "receiptRefs": [previous_ref],
-    }
+    surface = saved_surface("api", "API", "needs_follow_up", receipts=[previous_ref])
     pending = saved_draft(
         scan_id,
         surfaces=[surface],
@@ -1192,9 +1126,7 @@ def test_generic_worker_closeout_preserves_receipt_owners(
         "result_manifest_path": str(output / "result.json"),
     }
     source_bytes = {path: path.read_bytes() for path in tmp_path.rglob("*.json")}
-    first = saved.merge_saved_results(
-        tmp_path, scan_id, binding, [worker], [], stopped=True, reason="interrupted"
-    )
+    first = merge_interrupted_results(saved, tmp_path, scan_id, binding, [worker])
     expected = {
         previous_path.relative_to(tmp_path).as_posix(),
         current_path.relative_to(tmp_path).as_posix(),
@@ -1326,17 +1258,10 @@ def test_legacy_tied_worker_heads_keep_pending_work_on_replay(tmp_path: Path, sc
             }
         )
     workers = [saved_discovery_worker(output, "worker", 1)]
-    first = saved.merge_saved_results(
-        tmp_path,
-        scan_id,
-        binding,
-        workers,
-        [],
-        stopped=True,
-        reason="interrupted",
-        frozen_source_digests=frozen,
+    first = merge_interrupted_results(
+        saved, tmp_path, scan_id, binding, workers, frozen_source_digests=frozen
     )
-    replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, workers, stopped=True)
+    replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, workers)
     repeated = saved.merge_saved_results(
         tmp_path,
         scan_id,

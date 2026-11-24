@@ -16,6 +16,7 @@ from test_saved_deferred_identity import recover, save_worker
 from workbench_test_support import (
     read_review_state,
     saved_draft,
+    saved_surface,
     select_checkpoint,
     write_checkpoint,
 )
@@ -28,12 +29,7 @@ def test_unselected_pending_checkpoint_links_to_accepted_worker_surface(
 ):
     import workbench_saved_results as saved
 
-    surface = {
-        "id": "api",
-        "label": "API boundary",
-        "disposition": "needs_follow_up",
-        "receiptRefs": [],
-    }
+    surface = saved_surface("api", "API boundary", "needs_follow_up")
     surfaces = (
         [{**surface, "id": "other", "label": "Other boundary"}, surface] if reordered else [surface]
     )

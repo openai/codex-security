@@ -16,31 +16,17 @@ import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { assertFlagPair } from "./assertions.ts";
 import { readJson } from "./support/json.ts";
-import type {
-  CodexSdkWorkerExecutor as WorkerExecutor,
-  resolveCodexPath as ResolveCodexPath,
-} from "../src/deep-scan/executor.js";
-import type { DeepWorkerParentSandbox } from "../src/deep-scan/parent-sandbox.js";
+import {
+  CodexSdkWorkerExecutor,
+  type FakeCodexFixture,
+  fakeCodexFixture,
+  resolveCodexPath,
+} from "./deep_scan_executor_fixture.ts";
+import { trustedParentSandbox as parentSandbox } from "./support/fake-codex-fixture.ts";
+import type { CodexSdkWorkerExecutor as WorkerExecutor } from "../src/deep-scan/executor.js";
 import type { CodexWorkerRequest } from "../src/deep-scan/types.js";
 
-interface Fixture {
-  root: string;
-  markerPath: string;
-  preflightMarkerPath: string;
-  executablePath: string;
-}
-
-export async function testExecutorExecutablePinning({
-  CodexSdkWorkerExecutor,
-  fakeCodexFixture,
-  parentSandbox,
-  resolveCodexPath,
-}: {
-  CodexSdkWorkerExecutor: typeof WorkerExecutor;
-  fakeCodexFixture: () => Promise<Fixture>;
-  parentSandbox: DeepWorkerParentSandbox;
-  resolveCodexPath: typeof ResolveCodexPath;
-}) {
+export async function testExecutorExecutablePinning() {
   const originalSpawn = childProcess.spawn;
   const nativeScripts = new Map<string, string>();
   const nativeLaunches: string[] = [];
@@ -455,7 +441,7 @@ export async function testExecutorExecutablePinning({
 
   async function withWorkerFixture(
     action: (
-      fixture: Fixture,
+      fixture: FakeCodexFixture,
       promptPath: string,
       workingDirectory: string,
     ) => Promise<void>,

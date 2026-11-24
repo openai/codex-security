@@ -18,6 +18,7 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { isDeepStrictEqual, promisify } from "node:util";
+import { reviewSurface } from "./scan-draft-fixture.ts";
 import {
   draftApi,
   fixture,
@@ -388,12 +389,9 @@ for (const layout of ["standard", "diff"] as const) {
       path.join(f.root, "artifacts/current.md"),
       "Current review.",
     );
-    const surface = {
-      id: "api",
-      label: "API review",
-      disposition: "needs_follow_up",
-      receiptRefs: ["artifacts/original.md"],
-    };
+    const surface = reviewSurface("api", "API review", "needs_follow_up", [
+      "artifacts/original.md",
+    ]);
     await f.writeReviewState({
       surfaces: [surface],
       deferred: [
@@ -589,12 +587,7 @@ for (const observation of ["checkpoint head", "worker result"]) {
 for (const headTime of [1, 2, 3]) {
   test(`worker: stopped recovery retains accepted reviewState with head time ${headTime}`, async (t) => {
     const f = await fixture(t, "worker");
-    const surface = (id: string) => ({
-      id,
-      label: id,
-      disposition: "no_issue_found",
-      receiptRefs: [],
-    });
+    const surface = (id: string) => reviewSurface(id, id, "no_issue_found");
     await f.writeReviewState({ surfaces: [surface("existing")] }, true);
     const added = {
       surfaces: [surface("newly-reviewed")],
@@ -699,12 +692,7 @@ for (const updateSavedSurface of [false, true]) {
       remediation: "Complete the independent review.",
     };
     const surfaces: (Record<string, unknown> & { id: string })[] = [
-      {
-        id: "api",
-        label: "API",
-        disposition: "needs_follow_up",
-        receiptRefs: [],
-      },
+      reviewSurface("api", "API", "needs_follow_up"),
       {
         id: "new-finding",
         candidateId: "new-finding",
@@ -1261,12 +1249,9 @@ for (const layout of ["standard", "diff", "worker"] as const) {
   for (const submittedId of [undefined, "api", "other-api"]) {
     test(`${layout}: surface closeout requires matching ID ${submittedId ?? "omitted"}`, async (t) => {
       const f = await fixture(t, layout);
-      const surface = {
-        id: "api",
-        label: "API",
-        disposition: "needs_follow_up",
-        receiptRefs: ["artifacts/api-review.md"],
-      };
+      const surface = reviewSurface("api", "API", "needs_follow_up", [
+        "artifacts/api-review.md",
+      ]);
       const other = {
         ...surface,
         id: "another-api",
@@ -1372,12 +1357,9 @@ for (const layout of ["standard", "diff", "worker"] as const) {
     test(`${layout}: explicit surface follow-up survives ${observation} checkpoint recovery`, async (t) => {
       const f = await fixture(t, layout);
       const pending = { id: "api-review", ...generic, surfaceIds: ["api"] };
-      const surface = {
-        id: "api",
-        label: "API",
-        disposition: "needs_follow_up",
-        receiptRefs: ["artifacts/original.md"],
-      };
+      const surface = reviewSurface("api", "API", "needs_follow_up", [
+        "artifacts/original.md",
+      ]);
       await f.writeReviewState({ deferred: [pending], surfaces: [surface] });
       const closed = f.draft(
         {
@@ -1605,12 +1587,9 @@ for (const layout of ["standard", "diff"] as const) {
 for (const layout of ["standard", "diff"] as const) {
   test(`${layout}: a staged explicit surface closeout survives omitted and repeated retries`, async (t) => {
     const f = await fixture(t, layout);
-    const surface = {
-      id: "api",
-      label: "API",
-      disposition: "needs_follow_up",
-      receiptRefs: ["artifacts/api-review.md"],
-    };
+    const surface = reviewSurface("api", "API", "needs_follow_up", [
+      "artifacts/api-review.md",
+    ]);
     await f.writeReviewState({
       surfaces: [surface],
       deferred: [{ id: "review", ...generic, surfaceIds: [surface.id] }],
@@ -2194,12 +2173,11 @@ for (const layout of ["standard", "diff", "worker"] as const) {
           ...generic,
           surfaceIds: [surfaceId],
         };
-        const followUp = {
-          id: surfaceId,
-          label: "Independent review",
-          disposition: "needs_follow_up",
-          receiptRefs: [],
-        };
+        const followUp = reviewSurface(
+          surfaceId,
+          "Independent review",
+          "needs_follow_up",
+        );
         await f.checkpoint(
           f.draft({
             deferred: [
@@ -2390,12 +2368,7 @@ for (const layout of ["standard", "diff", "worker"] as const) {
 for (const additional of ["none", "surface", "task", "completed-surface"]) {
   test(`worker: resolved linked candidate replay preserves completion (${additional})`, async (t) => {
     const f = await fixture(t, "worker");
-    const surface = {
-      id: "api",
-      label: "API",
-      disposition: "needs_follow_up",
-      receiptRefs: [],
-    };
+    const surface = reviewSurface("api", "API", "needs_follow_up");
     const progress = f.draft({
       surfaces: [surface],
       deferred: [

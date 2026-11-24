@@ -18,7 +18,7 @@ from unittest import main, mock, skipIf
 
 import pytest
 from finalize_sarif_cases import FINALIZER, FinalizerSarifCases
-from workbench_test_support import ScanFixtureTestCase, windows_file_backend
+from workbench_test_support import ScanFixtureTestCase, saved_surface, windows_file_backend
 
 EXAMPLE_DIR = Path(__file__).resolve().parent.parent / "examples" / "legacy-completed-scan"
 CANONICAL_FILES = ("scan-manifest.json", "findings.json", "coverage.json")
@@ -2003,14 +2003,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
                     self.findings["findings"] = []
 
                     self.coverage["surfaces"] = (
-                        [
-                            {
-                                "id": "import",
-                                "label": "import",
-                                "disposition": "reported",
-                                "receiptRefs": [source_ref],
-                            }
-                        ]
+                        [saved_surface("import", "import", "reported", receipts=[source_ref])]
                         if with_surface
                         else []
                     )

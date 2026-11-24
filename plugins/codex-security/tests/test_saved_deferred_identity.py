@@ -25,6 +25,7 @@ from workbench_test_support import (
     run_workbench,
     saved_discovery_worker,
     saved_draft,
+    saved_surface,
     select_checkpoint,
     write_checkpoint,
     write_result_draft,
@@ -696,12 +697,7 @@ def test_generic_surface_recovery_uses_resolved_candidate_identity(
     if candidate_identity == "alias":
         candidate["id"] = "pending-caller"
     generic = {"id": "generic-review", "reason": "Source review remains.", "surfaceIds": ["api"]}
-    pending_surface = {
-        "id": "api",
-        "label": "API",
-        "disposition": "needs_follow_up",
-        "receiptRefs": [],
-    }
+    pending_surface = saved_surface("api", "API", "needs_follow_up")
     rejection = {
         "id": "candidate-outcome",
         "label": "Caller review",

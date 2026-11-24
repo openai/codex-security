@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 from workbench_test_support import (
+    merge_interrupted_results,
     replay_saved_results,
     saved_binding,
     saved_discovery_worker,
@@ -58,9 +59,7 @@ def parent_copy(root: Path, closures: list[dict]) -> None:
 
 def recover(root: Path, module, workers):
     binding = saved_binding("deep_repository", repository="synthetic")
-    documents = module.merge_saved_results(
-        root, SCAN_ID, binding, workers, [], stopped=True, reason="interrupted"
-    )
+    documents = merge_interrupted_results(module, root, SCAN_ID, binding, workers)
     assert documents is not None
     replay = replay_saved_results(module, documents, root, SCAN_ID, binding, workers)
     assert replay is not None

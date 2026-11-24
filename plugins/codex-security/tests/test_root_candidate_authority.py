@@ -12,6 +12,7 @@ import pytest
 from workbench_test_support import (
     read_review_state,
     saved_draft,
+    saved_surface,
     select_checkpoint,
     sort_checkpoint_entries,
     write_checkpoint,
@@ -29,13 +30,12 @@ def canonical_disposition(scan, disposition, complete_marker):
     coverage = {
         **scan.coverage,
         "surfaces": [
-            {
-                "id": "reviewed-surface",
-                "candidateId": "candidate-review",
-                "label": "Reviewed surface",
-                "disposition": disposition.removeprefix("provenance-"),
-                "receiptRefs": [],
-            }
+            saved_surface(
+                "reviewed-surface",
+                "Reviewed surface",
+                disposition.removeprefix("provenance-"),
+                candidate_id="candidate-review",
+            )
         ],
         "deferred": [],
     }
@@ -260,12 +260,9 @@ def test_root_outcome_uses_its_own_completion_marker(
         saved.fail_scan(context, workbench_db, stop_args)
     selected = write_checkpoint(scan.scan_dir / "checkpoints", root_draft, mtime_ns=100)
     select_checkpoint(scan.scan_dir, selected, mtime_ns=200)
-    pending = write_checkpoint(
-        scan.scan_dir / "checkpoints",
-        saved_draft(
-            scan.scan_id,
-            deferred=[{"candidateId": "candidate-review", "reason": "Validation is pending."}],
-        ),
+    pending = scan.checkpoint(
+        scan.scan_dir,
+        deferred=[{"candidateId": "candidate-review", "reason": "Validation is pending."}],
         mtime_ns=200,
     )
     originals = {path: path.read_bytes() for path in [selected, pending, *results]}
@@ -334,13 +331,9 @@ def test_legacy_tied_root_parent_preserves_accepted_pending_evidence(
         scan.scan_id,
         complete=True,
         surfaces=[
-            {
-                "id": "reviewed-surface",
-                "candidateId": "candidate-review",
-                "label": "Reviewed surface",
-                "disposition": "rejected",
-                "receiptRefs": [],
-            }
+            saved_surface(
+                "reviewed-surface", "Reviewed surface", "rejected", candidate_id="candidate-review"
+            )
         ],
     )
     pending = saved_draft(
@@ -487,13 +480,9 @@ def test_legacy_pending_ties_aggregate_accepted_provenance(
         scan.scan_id,
         complete=True,
         surfaces=[
-            {
-                "id": "reviewed-surface",
-                "candidateId": "candidate-review",
-                "label": "Reviewed surface",
-                "disposition": "rejected",
-                "receiptRefs": [],
-            }
+            saved_surface(
+                "reviewed-surface", "Reviewed surface", "rejected", candidate_id="candidate-review"
+            )
         ],
     )
     observations = [

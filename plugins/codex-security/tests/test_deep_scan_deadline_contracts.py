@@ -11,6 +11,7 @@ from publication_fixtures import worker_finding
 from workbench_test_support import (
     read_review_state,
     saved_draft,
+    saved_surface,
     select_checkpoint,
     write_checkpoint,
 )
@@ -39,13 +40,10 @@ def test_deadline_requires_boolean_completion_before_superseding_worker_history(
     earlier = worker_finding(scan, "earlier-worker-finding")
     rejected = worker_finding(scan, "rejected-worker-finding")
     rejected["provenance"]["candidateId"] = "rejected-worker-finding"
-    checkpoint = write_checkpoint(
-        output / "checkpoints",
-        saved_draft(
-            scan.scan_id,
-            findings=[earlier, rejected],
-            deferred=[{"id": "review", "reason": "Review remains."}],
-        ),
+    checkpoint = scan.checkpoint(
+        output,
+        findings=[earlier, rejected],
+        deferred=[{"id": "review", "reason": "Review remains."}],
         mtime_ns=100,
     )
     sibling = worker_finding(scan, "latest-valid-sibling")
@@ -54,13 +52,12 @@ def test_deadline_requires_boolean_completion_before_superseding_worker_history(
         complete=marker,
         findings=[sibling],
         surfaces=[
-            {
-                "id": "rejected-outcome",
-                "candidateId": "rejected-worker-finding",
-                "label": "Rejected after review",
-                "disposition": "rejected",
-                "receiptRefs": [],
-            }
+            saved_surface(
+                "rejected-outcome",
+                "Rejected after review",
+                "rejected",
+                candidate_id="rejected-worker-finding",
+            )
         ],
         closures=[{"id": "review", "reason": "Review completed."}],
     )
@@ -122,16 +119,13 @@ def test_deadline_validates_each_recovered_finding_against_the_completed_contrac
     earlier = worker_finding(scan, "earlier-worker-finding")
     rejected = worker_finding(scan, "rejected-worker-finding")
     rejected["provenance"]["candidateId"] = "rejected-worker-finding"
-    checkpoint = write_checkpoint(
-        output / "checkpoints",
-        saved_draft(
-            scan.scan_id,
-            findings=[earlier, rejected],
-            deferred=[
-                {"id": "review", "reason": "Review remains."},
-                {"id": "finished", "reason": "Separate review remains."},
-            ],
-        ),
+    checkpoint = scan.checkpoint(
+        output,
+        findings=[earlier, rejected],
+        deferred=[
+            {"id": "review", "reason": "Review remains."},
+            {"id": "finished", "reason": "Separate review remains."},
+        ],
         mtime_ns=100,
     )
     sibling = worker_finding(scan, "valid-worker-sibling")
@@ -148,20 +142,18 @@ def test_deadline_validates_each_recovered_finding_against_the_completed_contrac
         complete=True,
         findings=[malformed, sibling],
         surfaces=[
-            {
-                "id": "reported-outcome",
-                "candidateId": "malformed-worker-finding",
-                "label": "Unverified finding",
-                "disposition": "reported",
-                "receiptRefs": [],
-            },
-            {
-                "id": "rejected-outcome",
-                "candidateId": "rejected-worker-finding",
-                "label": "Rejected after review",
-                "disposition": "rejected",
-                "receiptRefs": [],
-            },
+            saved_surface(
+                "reported-outcome",
+                "Unverified finding",
+                "reported",
+                candidate_id="malformed-worker-finding",
+            ),
+            saved_surface(
+                "rejected-outcome",
+                "Rejected after review",
+                "rejected",
+                candidate_id="rejected-worker-finding",
+            ),
         ],
         closures=[{"id": "finished", "reason": "Separate review completed."}],
     )
@@ -247,7 +239,7 @@ def test_deadline_still_rejects_malformed_canonical_model(deadline_scan):
     manifest["scan"]["threatModel"] = {"assets": []}
     manifest_file.write_text(json.dumps(manifest))
     _, output = scan.canceled_discovery_output()
-    write_checkpoint(output / "checkpoints", saved_draft(scan.scan_id))
+    scan.checkpoint(output)
     with pytest.raises(ContractError, match="threatModel"):
         scan.finish(terminal_reason="capped")
 
@@ -262,10 +254,7 @@ def test_deadline_still_rejects_canonical_findings_outside_the_completed_contrac
     findings_path.write_text(json.dumps({"findings": scan.findings}))
     original = findings_path.read_bytes()
     _, output = scan.canceled_discovery_output()
-    write_checkpoint(
-        output / "checkpoints",
-        saved_draft(scan.scan_id, findings=[finding]),
-    )
+    scan.checkpoint(output, findings=[finding])
 
     with pytest.raises(ContractError, match="rationale"):
         scan.finish(terminal_reason="capped")
@@ -279,15 +268,10 @@ def test_deadline_applies_existing_nonblank_surface_label_contract(
 ):
     scan = deadline_scan
     worker_id, output = scan.canceled_discovery_output()
-    checkpoint = write_checkpoint(
-        output / "checkpoints",
-        saved_draft(
-            scan.scan_id,
-            findings=[worker_finding(scan, "worker-label-finding")],
-            surfaces=[
-                {"id": "entry", "label": label, "disposition": "reported", "receiptRefs": []}
-            ],
-        ),
+    checkpoint = scan.checkpoint(
+        output,
+        findings=[worker_finding(scan, "worker-label-finding")],
+        surfaces=[{"id": "entry", "label": label, "disposition": "reported", "receiptRefs": []}],
     )
     original = checkpoint.read_bytes()
 
@@ -335,10 +319,8 @@ def test_deadline_applies_existing_unicode_contract_per_worker_record(
         draft["coverage"][field] = [{"id": "review", "reason": text}]
     if field == "resolvedDeferred":
         draft["complete"] = True
-        write_checkpoint(
-            output / "checkpoints",
-            saved_draft(scan.scan_id, deferred=[{"id": "review", "reason": "Review pending."}]),
-            mtime_ns=100,
+        scan.checkpoint(
+            output, deferred=[{"id": "review", "reason": "Review pending."}], mtime_ns=100
         )
     checkpoint = write_checkpoint(output / "checkpoints", draft, mtime_ns=200)
     if field == "resolvedDeferred":
@@ -371,15 +353,12 @@ def test_deadline_recovers_historical_closure_text_without_losing_a_valid_siblin
 ):
     scan = deadline_scan
     _, output = scan.canceled_discovery_output()
-    previous = write_checkpoint(
-        output / "checkpoints",
-        saved_draft(
-            scan.scan_id,
-            deferred=[
-                {"id": "review", "reason": "First review pending."},
-                {"id": "sibling", "reason": "Valid sibling review pending."},
-            ],
-        ),
+    previous = scan.checkpoint(
+        output,
+        deferred=[
+            {"id": "review", "reason": "First review pending."},
+            {"id": "sibling", "reason": "Valid sibling review pending."},
+        ],
         mtime_ns=100,
     )
     draft = saved_draft(
@@ -463,23 +442,15 @@ def test_malformed_terminal_coverage_preserves_only_earlier_coverage(
     finding = worker_finding(scan, "earlier-worker-finding")
     rejected = worker_finding(scan, "rejected-sibling")
     rejected["provenance"]["candidateId"] = "rejected-sibling"
-    surface = {
-        "id": "entry",
-        "label": "Unfinished review",
-        "disposition": "needs_follow_up",
-        "receiptRefs": [],
-    }
-    checkpoint = write_checkpoint(
-        output / "checkpoints",
-        saved_draft(
-            scan.scan_id,
-            findings=[finding, rejected],
-            surfaces=[surface],
-            deferred=[
-                {"id": "review", "reason": "Review remains.", "surfaceIds": ["entry"]},
-                {"id": "finished", "reason": "Separate review remains."},
-            ],
-        ),
+    surface = saved_surface("entry", "Unfinished review", "needs_follow_up")
+    checkpoint = scan.checkpoint(
+        output,
+        findings=[finding, rejected],
+        surfaces=[surface],
+        deferred=[
+            {"id": "review", "reason": "Review remains.", "surfaceIds": ["entry"]},
+            {"id": "finished", "reason": "Separate review remains."},
+        ],
         mtime_ns=100,
     )
     invalid_surface = copy.deepcopy(surface)
@@ -501,13 +472,9 @@ def test_malformed_terminal_coverage_preserves_only_earlier_coverage(
         complete=True,
         findings=[finding] if terminal_findings else [],
         surfaces=[
-            {
-                "id": "sibling-outcome",
-                "candidateId": "rejected-sibling",
-                "label": "Sibling reviewed",
-                "disposition": "rejected",
-                "receiptRefs": [],
-            },
+            saved_surface(
+                "sibling-outcome", "Sibling reviewed", "rejected", candidate_id="rejected-sibling"
+            ),
             *([invalid_surface] if malformed not in (None, "closure") else []),
         ],
         closures=closures,
@@ -561,10 +528,7 @@ def test_optional_export_failure_does_not_block_deadline(
     export.symlink_to(sentinel)
     if canceled_worker:
         _, output = scan.canceled_discovery_output()
-        write_checkpoint(
-            output / "checkpoints",
-            saved_draft(scan.scan_id, findings=[worker_finding(scan, "saved-worker-finding")]),
-        )
+        scan.checkpoint(output, findings=[worker_finding(scan, "saved-worker-finding")])
 
     scan.finish(terminal_reason="capped")
     completed = scan.complete()

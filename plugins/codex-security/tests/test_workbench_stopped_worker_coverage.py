@@ -19,6 +19,7 @@ from workbench_test_support import (
     preserve_scan_results,
     read_review_state,
     saved_draft,
+    saved_surface,
     select_checkpoint,
     upsert_deep_worker,
     worker_paths,
@@ -73,12 +74,9 @@ def test_stopped_deep_scan_projects_worker_coverage_without_parent_aggregate(
                     complete=accepted,
                     findings=[finding] if name == "first" else [],
                     surfaces=[
-                        {
-                            "id": "api",
-                            "label": name,
-                            "disposition": "no_issue_found",
-                            "receiptRefs": ["artifacts/review.md"],
-                        }
+                        saved_surface(
+                            "api", name, "no_issue_found", receipts=["artifacts/review.md"]
+                        )
                     ],
                     deferred=[
                         {
@@ -246,12 +244,7 @@ def test_pending_worker_surface_receipt_precedes_historical_receipt_repair(tmp_p
     historical_receipt.write_text("Historical writer review.\n")
     other_receipt = artifacts / "other.md"
     other_receipt.write_text("Current writer review.\n")
-    surface = {
-        "id": "api",
-        "label": "API",
-        "disposition": "no_issue_found",
-        "receiptRefs": ["artifacts/Review.md"],
-    }
+    surface = saved_surface("api", "API", "no_issue_found", receipts=["artifacts/Review.md"])
     writer = {
         **surface,
         "id": "writer",
