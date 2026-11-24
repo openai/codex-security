@@ -1,5 +1,7 @@
-import { renderPreparedDependencyReportMarkdown } from "../src/dependency-report-markdown.js";
-import { summarizeDependencyReport } from "../src/dependency-report-summary.js";
+import {
+  renderPreparedDependencyReportMarkdown,
+  summarizeDependencyReport,
+} from "../src/dependency-report-text.js";
 import { expect, test } from "bun:test";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";

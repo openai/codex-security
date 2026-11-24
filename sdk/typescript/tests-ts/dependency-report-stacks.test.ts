@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { readStackReport } from "../src/dependency-report-reader.js";
 import { renderDependencyReport } from "../src/dependency-report-renderer.js";
-import { renderDependencyReportMarkdown } from "../src/dependency-report-markdown.js";
+import { renderDependencyReportMarkdown } from "../src/dependency-report-text.js";
 import { dependencyClaimHash } from "../src/dependency-stack-claims.js";
 import { stackReport } from "./support/dependency-stack-report-fixture.js";
 

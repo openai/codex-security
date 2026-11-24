@@ -1,7 +1,7 @@
 import { realpath } from "node:fs/promises";
 import { z } from "zod";
 import type { JsonObject } from "./config.js";
-import { effectiveStackSinks } from "./dependency-stack-advisory.js";
+import { effectiveStackSinks } from "./dependency-advisory.js";
 import { DependencyAttemptStore } from "./dependency-attempt-store.js";
 import {
   createDependencyClaims,

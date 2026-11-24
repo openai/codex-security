@@ -15,14 +15,14 @@ import { z } from "zod";
 import { CodexSecurityError } from "./errors.js";
 import type { DependencyProgressSink } from "./dependency-check-output.js";
 import { MAX_FRESH_SUBMISSIONS } from "./dependency-investigation-session.js";
-import { analyzeStackAdvisory } from "./dependency-stack-advisory.js";
+import { analyzeStackAdvisory } from "./dependency-advisory.js";
 import {
   stackInvestigationReportSchema,
   stackReviewDecisionSchema,
   type StackInvestigationReport,
 } from "./dependency-stack-assessment.js";
 import { dependencyClaimHash } from "./dependency-stack-claims.js";
-import type { DependencyCliContext } from "./dependency-stack-cli.js";
+import type { DependencyCliContext } from "./dependency-cli.js";
 import { prepareStackCheckPacket } from "./dependency-stack-packet.js";
 import {
   executeStackRun,

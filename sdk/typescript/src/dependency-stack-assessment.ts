@@ -1,6 +1,3 @@
-import semverSatisfies from "semver/functions/satisfies.js";
-import semverValid from "semver/functions/valid.js";
-import semverValidRange from "semver/ranges/valid.js";
 import { z } from "zod";
 import {
   dependencyClaimReferenceSchema,
@@ -8,9 +5,9 @@ import {
   type DependencyClaimReference,
 } from "./dependency-stack-claims.js";
 import {
-  aggregateDependencyVerdict,
+  type DependencyVerdict,
   dependencyUseSchema,
-} from "./dependency-stack-use.js";
+} from "./dependency-reachability.js";
 import {
   sampledStacksSchema,
   stackManifestSchema,
@@ -18,8 +15,10 @@ import {
   type StackPacket,
   type StackWorkItem,
 } from "./dependency-stack-packet.js";
-import { effectiveStackSinks } from "./dependency-stack-advisory.js";
-import { comparePythonReleases } from "./dependency-advisory-version.js";
+import {
+  affectedStackVersion,
+  effectiveStackSinks,
+} from "./dependency-advisory.js";
 import { dependencyGitCommitSchema } from "./dependency-source-identity.js";
 import {
   inventoryReceiptSelectionSchema,
@@ -36,17 +35,7 @@ const text = z.string().trim().min(1);
 const digest = z.string().regex(/^[a-f0-9]{64}$/u);
 const status = z.enum(["observed", "no_match", "no_coverage"]);
 const verdict = dependencyUseSchema.shape.verdict;
-const useFields = dependencyUseSchema.shape;
-const stackUse = z.strictObject({
-  location: useFields.location,
-  component: useFields.component,
-  version: useFields.version,
-  verdict,
-  deployment: useFields.deployment,
-  reason: useFields.reason,
-  evidence: useFields.evidence,
-  proof: useFields.proof,
-});
+const stackUse = z.strictObject(dependencyUseSchema.shape);
 const questionCheck = z.strictObject({
   question: text.describe("Exact deciding question from remainingQuestions."),
   checked: text.describe(
@@ -340,15 +329,9 @@ export function collectStackAssessmentClaims(
   return [...selected.values()].sort((a, b) => a.id.localeCompare(b.id));
 }
 
-interface SourceRange {
-  path: string;
-  startLine: number;
-  endLine: number;
-  commit?: string | undefined;
-}
 function coversRange(
   excerpts: readonly DependencyExcerpt[],
-  range: SourceRange,
+  range: Pick<DependencyExcerpt, "path" | "startLine" | "endLine">,
   sha: string,
 ): boolean {
   let cursor = range.startLine;
@@ -368,63 +351,14 @@ function coversRange(
   return false;
 }
 
-/** Compare stable numeric PEP 440 releases. Leave other Python versions to cited source proof. */
-function pythonReleaseMatches(
-  version: string,
-  specifier: string,
-): boolean | undefined {
-  let unknown = false;
-  for (const term of specifier.split(",")) {
-    const match = /^\s*(<=|>=|==|!=|<|>)\s*(\d+(?:\.\d+)*)\s*$/u.exec(term);
-    if (!match) {
-      unknown = true;
-      continue;
-    }
-    const order = comparePythonReleases(version, match[2]!);
-    if (order === undefined) return;
-    const result = {
-      "<": order < 0,
-      ">": order > 0,
-      "<=": order <= 0,
-      ">=": order >= 0,
-      "==": order === 0,
-      "!=": order !== 0,
-    }[match[1]!];
-    if (!result) return false;
-  }
-  return unknown ? undefined : true;
-}
-type StackSink = StackPacket["sinks"]["sinks"][number];
-function affectedVersion(
-  sink: StackSink,
-  version: string,
-): boolean | undefined {
-  if (!sink.affectedVersions.length) return;
-  const results = sink.affectedVersions.map((range) => {
-    if (sink.versionScheme.toLowerCase() === "semver") {
-      if (!semverValid(version) || !semverValidRange(range)) return;
-      return semverSatisfies(version, range, { includePrerelease: true });
-    }
-    if (sink.versionScheme.toLowerCase() === "pep440")
-      return pythonReleaseMatches(version, range);
-    return undefined;
-  });
-  return results.includes(true)
-    ? true
-    : results.includes(undefined)
-      ? undefined
-      : false;
-}
-
-function assessProof(
+function verifyStackEvidence(
   row: StackAssessment,
   work: StackWorkItem,
   packet: StackPacket,
   records: readonly DependencyClaimRecord[],
 ) {
   const observation = work.observation;
-  const frames = row.frameIndices ?? [];
-  if (frames.some((index) => !observation?.frames[index]))
+  if (row.frameIndices?.some((index) => !observation?.frames[index]))
     fail("An assessment cites a frame outside its original observation.");
   if (row.verdict === "unknown" && !row.remainingQuestions.length)
     fail("An unknown assessment must name the deciding fact still missing.");
@@ -437,57 +371,55 @@ function assessProof(
   const excerpts = records.flatMap((claim) => claim.excerpts);
   const sha = packet.manifest.target.sha;
   const receipts = records.flatMap((claim) => claim.receipts);
-  for (const claim of records) {
-    for (const receipt of claim.receipts) {
-      if (isRuntimeReceipt(receipt)) {
-        const conflict = runtimeScopeConflict(receipt, work);
-        if (row.verdict !== "unknown" && conflict)
-          fail(
-            `Runtime import ${receipt.receiptId} conflicts with this work item's ${conflict}.`,
-          );
-        continue;
-      }
-      const args = receipt.origin.arguments;
+  for (const receipt of receipts) {
+    if (isRuntimeReceipt(receipt)) {
+      const conflict = runtimeScopeConflict(receipt, work);
+      if (row.verdict !== "unknown" && conflict)
+        fail(
+          `Runtime import ${receipt.receiptId} conflicts with this work item's ${conflict}.`,
+        );
+      continue;
+    }
+    const args = receipt.origin.arguments;
+    if (
+      args["inputDigest"] !== packet.manifest.inputDigest ||
+      !isCaptureReceipt(receipt) ||
+      (receipt.server === "stack-packet" &&
+        receipt.originalPayloadSha256 !==
+          packet.manifest.files.stacks.sha256) ||
+      (receipt.server === "stack-observation" &&
+        !/^[a-f0-9]{64}$/u.test(receipt.originalPayloadSha256))
+    )
+      fail("A supporting capture receipt belongs to a different input packet.");
+    if (receipt.server === "stack-observation") {
+      const sourceId = args["sourceReceiptId"];
       if (
-        args["inputDigest"] !== packet.manifest.inputDigest ||
-        !isCaptureReceipt(receipt) ||
-        (receipt.server === "stack-packet" &&
-          receipt.originalPayloadSha256 !==
-            packet.manifest.files.stacks.sha256) ||
-        (receipt.server === "stack-observation" &&
-          !/^[a-f0-9]{64}$/u.test(receipt.originalPayloadSha256))
+        typeof sourceId !== "string" ||
+        !receipts.some(
+          (source) => source.receiptId === sourceId && isRuntimeReceipt(source),
+        )
       )
         fail(
-          "A supporting capture receipt belongs to a different input packet.",
-        );
-      if (receipt.server === "stack-observation") {
-        const sourceId = args["sourceReceiptId"];
-        if (
-          typeof sourceId !== "string" ||
-          !receipts.some(
-            (source) =>
-              source.receiptId === sourceId && isRuntimeReceipt(source),
-          )
-        )
-          fail(
-            "A supplemental observation claim must include its original runtime import receipt.",
-          );
-      }
-    }
-  }
-  if (row.use) {
-    for (const range of row.use.evidence) {
-      if (range.commit !== sha || !coversRange(excerpts, range, sha))
-        fail(
-          `Source ${range.path}:${range.startLine}-${range.endLine} must be pinned and covered by a supporting claim.`,
+          "A supplemental observation claim must include its original runtime import receipt.",
         );
     }
   }
-  if (row.verdict === "unknown")
-    return verifyQuestionChecks(row, work, records);
+  for (const range of row.use?.evidence ?? []) {
+    if (range.commit !== sha || !coversRange(excerpts, range, sha))
+      fail(
+        `Source ${range.path}:${range.startLine}-${range.endLine} must be pinned and covered by a supporting claim.`,
+      );
+  }
+  return { sha, excerpts, receipts };
+}
+
+function matchSinkFrames(
+  work: StackWorkItem,
+  packet: StackPacket,
+  { sha, excerpts, receipts }: ReturnType<typeof verifyStackEvidence>,
+) {
+  const observation = work.observation;
   if (!observation) fail("A decided stack assessment needs an observed sink.");
-  if (!records.length)
-    fail("A decided assessment needs at least one exact supporting claim.");
   const mapped = stackSinkMatches(observation);
   if (!mapped.length)
     fail(
@@ -515,21 +447,17 @@ function assessProof(
       source.every((range) => coversRange(excerpts, range, sha))
     )
       return true;
-    return records.some((claim) =>
-      claim.receipts.some((receipt) => {
-        const path = receipt.selection?.record;
-        return (
-          isCaptureReceipt(receipt, work.id) &&
-          receipt.origin.arguments["inputDigest"] ===
-            packet.manifest.inputDigest &&
-          receipt.selection?.textBlock === null &&
-          path?.length === 3 &&
-          path[0] === "observation" &&
-          path[1] === "bindings" &&
-          path[2] === i
-        );
-      }),
-    );
+    return receipts.some((receipt) => {
+      const path = receipt.selection?.record;
+      return (
+        isCaptureReceipt(receipt, work.id) &&
+        receipt.selection?.textBlock === null &&
+        path?.length === 3 &&
+        path[0] === "observation" &&
+        path[1] === "bindings" &&
+        path[2] === i
+      );
+    });
   };
   const bindingEvidence = bindings.map((binding, index) => ({
     binding,
@@ -548,36 +476,10 @@ function assessProof(
       copies.length > 0 &&
       copies.every(
         ({ binding, cited }) =>
-          cited && affectedVersion(sink, binding.version) === false,
+          cited && affectedStackVersion(sink, binding.version) === false,
       );
     return { sink, rawIndex, copies, fixed };
   });
-  if (row.verdict === "ruled_out" && matches.every(({ fixed }) => fixed)) {
-    const use = row.use;
-    if (
-      use &&
-      !matches.some(
-        ({ sink, copies }) =>
-          sink.package === use.component &&
-          (!use.proof?.sink || sink.function === use.proof.sink.function) &&
-          (use.version === null ||
-            copies.some(({ binding }) => binding.version === use.version)),
-      )
-    )
-      fail(
-        "The reported component and version disagree with the cited fixed-version binding.",
-      );
-    return;
-  }
-
-  const use = row.use;
-  const selectedFrames = matches.filter(
-    ({ sink }) =>
-      sink.package === use?.component &&
-      sink.function === use?.proof?.sink?.function,
-  );
-  if (!use || !selectedFrames.length)
-    fail("Supply an evidence-backed use and proof for the mapped sink.");
   const sourceMatchesBuild = ({
     sink,
     rawIndex,
@@ -592,13 +494,12 @@ function assessProof(
     );
     // A source-based exclusion can use an observation-wide build binding to
     // verify the caller even when the dependency copy has no frame attribution.
-    const builds =
-      row.verdict === "ruled_out" && !copies.length
-        ? bindingEvidence.filter(
-            ({ binding }) =>
-              binding.package === sink.package && !binding.frameIndices?.length,
-          )
-        : copies;
+    const builds = !copies.length
+      ? bindingEvidence.filter(
+          ({ binding }) =>
+            binding.package === sink.package && !binding.frameIndices?.length,
+        )
+      : copies;
     if (!builds.length)
       return (
         work.scope.image_digest !== undefined &&
@@ -622,13 +523,59 @@ function assessProof(
       );
     });
   };
-  const conditions = use.proof!.conditions;
-  if (new Set(conditions.map((c) => c.label)).size !== conditions.length)
+  return { matches, sourceMatchesBuild };
+}
+
+function assessProof(
+  row: StackAssessment,
+  work: StackWorkItem,
+  packet: StackPacket,
+  records: readonly DependencyClaimRecord[],
+) {
+  const evidence = verifyStackEvidence(row, work, packet, records);
+  if (row.verdict === "unknown")
+    return verifyQuestionChecks(row, work, records);
+  if (!records.length)
+    fail("A decided assessment needs at least one exact supporting claim.");
+  const { matches, sourceMatchesBuild } = matchSinkFrames(
+    work,
+    packet,
+    evidence,
+  );
+  const { use } = row;
+
+  // A version exclusion must cover every matching frame.
+  if (row.verdict === "ruled_out" && matches.every(({ fixed }) => fixed)) {
+    if (
+      use &&
+      !matches.some(
+        ({ sink, copies }) =>
+          sink.package === use.component &&
+          (!use.proof?.sink || sink.function === use.proof.sink.function) &&
+          (use.version === null ||
+            copies.some(({ binding }) => binding.version === use.version)),
+      )
+    )
+      fail(
+        "The reported component and version disagree with the cited fixed-version binding.",
+      );
+    return;
+  }
+
+  const selectedFrames = matches.filter(
+    ({ sink }) =>
+      sink.package === use?.component &&
+      sink.function === use?.proof?.sink?.function,
+  );
+  if (!use?.proof || !selectedFrames.length)
+    fail("Supply an evidence-backed use and proof for the mapped sink.");
+  const conditions = new Map(
+    use.proof.conditions.map((c) => [c.label, c.status]),
+  );
+  if (conditions.size !== use.proof.conditions.length)
     fail("Each advisory condition must have one disposition.");
-  const disproved = (sink: StackSink) =>
-    sink.preconditions.some((p) =>
-      conditions.some((c) => c.label === p && c.status === "ruled_out"),
-    );
+  const disproved = (sink: StackPacket["sinks"]["sinks"][number]) =>
+    sink.preconditions.some((name) => conditions.get(name) === "ruled_out");
   if (row.verdict === "ruled_out") {
     if (matches.length === 1 && disproved(matches[0]!.sink)) {
       if (!sourceMatchesBuild(matches[0]!))
@@ -641,6 +588,7 @@ function assessProof(
       "An exclusion requires a cited fixed-version binding for every matched sink frame or a disproved advisory condition.",
     );
   }
+  // A positive finding needs one path that satisfies all the requirements.
   const applicable = selectedFrames.filter(({ sink }) => !disproved(sink));
   if (!applicable.length)
     fail("A required advisory condition was ruled out for this path.");
@@ -651,7 +599,9 @@ function assessProof(
   if (row.verdict === "potentially_exploitable") {
     if (
       version !== null &&
-      possible.every(({ sink }) => affectedVersion(sink, version) === false)
+      possible.every(
+        ({ sink }) => affectedStackVersion(sink, version) === false,
+      )
     )
       fail(
         "The reported dependency version falls outside the affected ranges.",
@@ -665,7 +615,7 @@ function assessProof(
   const affectedFrames = possible.filter(
     ({ sink, copies }) =>
       version !== null &&
-      affectedVersion(sink, version) === true &&
+      affectedStackVersion(sink, version) === true &&
       copies.length > 0 &&
       copies.every(
         ({ binding, cited }) => cited && binding.version === version,
@@ -691,7 +641,9 @@ function assessProof(
         r.id === control.id &&
         r.revision === control.revision &&
         r.hash === control.hash &&
-        accessCitations.some((range) => coversRange(r.excerpts, range, sha)),
+        accessCitations.some((range) =>
+          coversRange(r.excerpts, range, evidence.sha),
+        ),
     )
   )
     fail(
@@ -699,13 +651,32 @@ function assessProof(
     );
   if (
     !confirmed.some(({ sink }) =>
-      sink.preconditions.every((p) =>
-        conditions.some((c) => c.label === p && c.status === "met"),
-      ),
+      sink.preconditions.every((p) => conditions.get(p) === "met"),
     )
   )
     fail(
       "Each advisory precondition needs a cited, met condition on this path.",
+    );
+}
+
+// Check the use before saving it. Finalization rechecks the supporting claims
+// against the current capture.
+function verifyDeploymentFacts(use: NonNullable<StackAssessment["use"]>) {
+  dependencyUseSchema.parse(use);
+  const facts = new Set(use.evidence.flatMap((range) => range.supports));
+  if (use.deployment === "confirmed" && !facts.has("running"))
+    use.deployment = "unknown";
+  if (use.verdict === "unknown" || use.verdict === "ruled_out") return;
+  if (!facts.has("affected_copy") || !facts.has("affected_use"))
+    fail(
+      "The supplied evidence must establish the affected copy and applicable use in code.",
+    );
+  if (
+    use.verdict === "exploitable" &&
+    (use.deployment !== "confirmed" || !facts.has("access"))
+  )
+    fail(
+      "The supplied evidence must establish the running revision and caller access.",
     );
 }
 
@@ -784,28 +755,9 @@ export function prepareStackAssessment(
       ...r,
       commit: r.commit ?? packet.manifest.target.sha,
     }));
-    assessProof(row, work, packet, records);
-    dependencyUseSchema.parse(row.use);
-    const facts = new Set(row.use.evidence.flatMap((range) => range.supports));
-    if (row.use.deployment === "confirmed" && !facts.has("running"))
-      row.use.deployment = "unknown";
-    if (
-      row.verdict === "exploitable" ||
-      row.verdict === "potentially_exploitable"
-    ) {
-      if (!facts.has("affected_copy") || !facts.has("affected_use"))
-        fail(
-          "The supplied evidence must establish the affected copy and applicable use in code.",
-        );
-      if (
-        row.verdict === "exploitable" &&
-        (row.use.deployment !== "confirmed" || !facts.has("access"))
-      )
-        fail(
-          "The supplied evidence must establish the running revision and caller access.",
-        );
-    }
-  } else assessProof(row, work, packet, records);
+  }
+  assessProof(row, work, packet, records);
+  if (row.use) verifyDeploymentFacts(row.use);
   return row;
 }
 
@@ -833,6 +785,26 @@ export function summarizeStackCoverage(
       (w) => w.truncated === null || w.observation?.framesTruncated === null,
     ),
   };
+}
+
+function stackVerdict(
+  paths: readonly { verdict: DependencyVerdict }[],
+  coverage: ReturnType<typeof summarizeStackCoverage>,
+): DependencyVerdict {
+  if (paths.some((p) => p.verdict === "exploitable")) return "exploitable";
+  if (paths.some((p) => p.verdict === "potentially_exploitable"))
+    return "potentially_exploitable";
+  if (
+    !paths.length ||
+    paths.some((p) => p.verdict === "unknown") ||
+    coverage.truncated.length ||
+    coverage.truncationUnknown.length ||
+    coverage.noMatch.length ||
+    coverage.noCoverage.length ||
+    coverage.scopeConflicts.length
+  )
+    return "unknown";
+  return "ruled_out";
 }
 
 export function finalizeStackReport(
@@ -904,15 +876,7 @@ export function finalizeStackReport(
     ...(packet.manifest.triggerAnalysis && {
       triggerAnalysis: packet.manifest.triggerAnalysis,
     }),
-    verdict: aggregateDependencyVerdict(paths, {
-      unresolved: !!(
-        coverage.truncated.length ||
-        coverage.truncationUnknown.length ||
-        coverage.noMatch.length ||
-        coverage.noCoverage.length ||
-        coverage.scopeConflicts.length
-      ),
-    }),
+    verdict: stackVerdict(paths, coverage),
     assessments: paths,
     coverage,
     remainingQuestions: [

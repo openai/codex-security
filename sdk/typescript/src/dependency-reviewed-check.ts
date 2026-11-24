@@ -5,10 +5,6 @@ import {
   type GraphCandidates,
 } from "./dependency-graph-candidates.js";
 import { dependencyReceiptSelectionSchema } from "./dependency-graph-evidence.js";
-import {
-  dependencyLookupScope,
-  dependencyLookupSearch,
-} from "./dependency-search-audit.js";
 import { createDependencyBlockEvidence } from "./dependency-blocked-evidence.js";
 import {
   MAX_FRESH_SUBMISSIONS,
@@ -42,7 +38,7 @@ import {
 } from "./dependency-verdict-progress.js";
 import { isRecord } from "./record.js";
 import { addTokenUsage } from "./cost.js";
-import type { DependencyAgentRequest } from "./dependency-stack-cli.js";
+import type { DependencyAgentRequest } from "./dependency-cli.js";
 import type { ScanTokenUsage } from "./cost-model.js";
 import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
@@ -56,13 +52,13 @@ import {
   dependencyExclusions,
   type DependencyEndpointConfiguration,
 } from "./dependency-caller-scope.js";
-import { affectedByFrozenVersion } from "./dependency-advisory-version.js";
 import {
   DependencyAttemptStore,
   dependencyRecordHash,
 } from "./dependency-attempt-store.js";
 import {
   advisoryTriggerInstructions,
+  affectedByFrozenVersion,
   lookupDependencyAdvisory,
   lookupPackageAdvisories,
   parseDependencyPackage,
@@ -94,9 +90,11 @@ import {
   type VerifiedUse,
   type DecidingPremiseEvidence,
 } from "./dependency-reviewed-claims.js";
-import type {
-  DependencyEvidenceRecord,
-  DependencyEvidenceSource,
+import {
+  dependencyLookupScope,
+  dependencyLookupSearch,
+  type DependencyEvidenceRecord,
+  type DependencyEvidenceSource,
 } from "./dependency-evidence-sources.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 

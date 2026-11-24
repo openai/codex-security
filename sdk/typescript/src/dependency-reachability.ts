@@ -5,31 +5,161 @@ import {
   dependencyTargetSchema,
 } from "./dependency-source-identity.js";
 import {
-  dependencyUseSchema,
-  dependencyUseProofSchema,
-} from "./dependency-stack-use.js";
-import {
   dependencyReceiptSelectionSchema,
   stackJsonValue,
 } from "./dependency-stack-evidence.js";
 
-const identity = z.string().trim().min(1);
+const text = z.string().trim().min(1);
+const lineReference = z.strictObject({
+  path: z.string().min(1),
+  line: z.number().int().positive(),
+});
+
+const condition = z
+  .strictObject({
+    label: z.string().trim().min(1),
+    status: z.enum(["met", "unknown", "ruled_out"]),
+    explanation: z.string().trim().min(1),
+    citations: z.array(lineReference),
+  })
+  .refine(
+    ({ status, citations }) => status === "unknown" || citations.length > 0,
+    {
+      path: ["citations"],
+      message: "A met or ruled-out condition requires at least one cited line.",
+    },
+  );
+
+const dependencyUseProofSchema = z.strictObject({
+  sink: z
+    .strictObject({
+      function: text.describe(
+        "Affected function or wrapper operation established for this use. Do not present an unresolved native target as established.",
+      ),
+      callSite: lineReference,
+    })
+    .optional(),
+  conditions: z.array(condition),
+});
+
+export function assertDependencyUseProofCitations(
+  proof: z.infer<typeof dependencyUseProofSchema>,
+  evidence: readonly {
+    path: string;
+    startLine: number;
+    endLine: number;
+    commit?: string;
+  }[],
+  context = "this use",
+): void {
+  const refs: { path: string; line: number; commit?: string }[] =
+    proof.conditions.flatMap(({ citations }) => citations);
+  if (proof.sink) refs.push(proof.sink.callSite);
+  for (const { path, line, commit } of refs) {
+    if (
+      !evidence.some(
+        (cite) =>
+          cite.path === path &&
+          (commit === undefined || cite.commit === commit) &&
+          cite.startLine <= line &&
+          line <= cite.endLine,
+      )
+    )
+      throw new Error(
+        `Proof line ${path}:${line} is outside the citations for ${context}.`,
+      );
+  }
+}
+
+const verdict = z.enum([
+  "exploitable",
+  "potentially_exploitable",
+  "ruled_out",
+  "unknown",
+]);
 const inventoryFact = z.enum(["affected_copy", "running", "access"]);
+const fact = z.enum([...inventoryFact.options, "affected_use"]);
+const evidence = z.strictObject({
+  path: z.string().min(1).describe("Repository-relative source path."),
+  commit: dependencyGitCommitSchema.optional(),
+  startLine: z.number().int().positive(),
+  endLine: z.number().int().positive(),
+  supports: z
+    .array(fact)
+    .prefault([])
+    .describe(
+      "Facts these lines establish for this use. affected_copy identifies the affected build, including local patches; affected_use shows the operation and its advisory prerequisites in this code. running requires an observation of this deployed revision. access requires observed evidence that the relevant caller can reach that deployment under the advisory's conditions. A desired deployment or route alone cannot establish either runtime fact. Use [] for other citations.",
+    ),
+});
+export const dependencyUseSchema = z
+  .strictObject({
+    location: z
+      .string()
+      .min(1)
+      .describe("Consumer, service or build that uses this dependency."),
+    component: z
+      .string()
+      .min(1)
+      .describe("Name of the dependency covered by the advisory."),
+    version: z
+      .string()
+      .nullable()
+      .describe(
+        "Version selected for this use by a bound import, package, build, artifact or runtime record, including a package revision when verified. A matching runtime record can establish the loaded dependency's upstream version even when package revision and patch are unknown. A bound configured selection does not require a live observation. Keep an unbound version declaration in reason and use null here. Explain packaging and patches in reason.",
+      ),
+    verdict: verdict.describe(
+      "potentially_exploitable requires proof of the affected copy and source evidence of its applicable use. exploitable also requires confirmation of the running revision and relevant caller access. Use unknown if a deciding fact about the copy or use is missing.",
+    ),
+    deployment: z
+      .enum(["confirmed", "configured", "unknown"])
+      .describe(
+        "Confirmed requires evidence that this use is running. Build or deployment configuration alone is configured.",
+      ),
+    reason: z.string().min(1),
+    evidence: z
+      .array(evidence)
+      .min(1)
+      .describe(
+        "Cite the lines that tie the dependency to this use and support its version, deployment and verdict. Keep supporting build and package citations with the use they establish.",
+      ),
+    proof: dependencyUseProofSchema
+      .optional()
+      .describe(
+        "The actual sink and advisory conditions for this use, checked against its own evidence. State each condition as met, unknown, or ruled_out with an explanation; do not infer statuses from the overall verdict. Every sink or condition reference must fall within this use's cited source ranges.",
+      ),
+  })
+  .superRefine((use, context) => {
+    if (!use.proof) return;
+    try {
+      assertDependencyUseProofCitations(use.proof, use.evidence);
+    } catch (error) {
+      context.addIssue({
+        code: "custom",
+        path: ["proof"],
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
+
+export type DependencyUse = z.infer<typeof dependencyUseSchema>;
+export type DependencyVerdict = DependencyUse["verdict"];
+
+export const dependencyVerdictLabels = {
+  exploitable: "Exploitable",
+  potentially_exploitable: "Potentially exploitable",
+  unknown: "Requires more information",
+  ruled_out: "Ruled out",
+} satisfies Record<DependencyVerdict, string>;
+
 // The first independently reviewed reports included only the server, quoted record and facts.
 // Some saved reports additionally identified the receipt here. Keep those records readable.
 const observation = z.strictObject({
-  server: z
-    .string()
-    .trim()
-    .min(1)
-    .describe("Configured inventory MCP server that returned the observation."),
-  record: z
-    .string()
-    .trim()
-    .min(1)
-    .describe(
-      "Specific returned record, record identifier, or lookup result. For an empty result, identify the lookup and its scope. Identify the unit, revision, environment and observation time when supplied.",
-    ),
+  server: text.describe(
+    "Configured inventory MCP server that returned the observation.",
+  ),
+  record: text.describe(
+    "Specific returned record, record identifier, or lookup result. For an empty result, identify the lookup and its scope. Identify the unit, revision, environment and observation time when supplied.",
+  ),
   tool: z.string().optional(),
   sha256: z
     .string()
@@ -41,7 +171,7 @@ const observation = z.strictObject({
       "Facts this record establishes for the same affected use. affected_copy requires build evidence identifying the dependency version and applicable patch state in the same artifact proven to be running. running identifies the observed running revision. access requires actual access by the relevant caller. Use [] when the record establishes none of these facts.",
     ),
 });
-const placeText = z.string().trim().min(1).nullable();
+const placeText = text.nullable();
 const dependencyPlaceSchema = z.strictObject({
   kind: z
     .enum([
@@ -75,14 +205,14 @@ const dependencyPlaceSchema = z.strictObject({
   patch: placeText.describe(
     "Advisory-specific patch or override status for the selected copy. Use null when unresolved or immaterial to a source exclusion.",
   ),
-  workload: z.string().trim().min(1).optional(),
-  variant: z.string().trim().min(1).optional(),
-  role: z.string().trim().min(1).optional(),
-  platform: z.string().trim().min(1).optional(),
-  imageIndex: z.string().trim().min(1).optional(),
-  platformManifest: z.string().trim().min(1).optional(),
+  workload: text.optional(),
+  variant: text.optional(),
+  role: text.optional(),
+  platform: text.optional(),
+  imageIndex: text.optional(),
+  platformManifest: text.optional(),
   unresolvedQuestions: z
-    .array(z.string().trim().min(1))
+    .array(text)
     .describe(
       "Deciding questions still open for this place, including the missing fact or unavailable check. Use [] for a decisive scoped exclusion.",
     ),
@@ -110,15 +240,12 @@ const reviewReference = z.discriminatedUnion("kind", [
 ]);
 export type DependencyReviewReference = z.infer<typeof reviewReference>;
 
-const findingText = z.string().trim().min(1);
 const serviceAssociation = z.strictObject({
-  id: findingText.describe(
+  id: text.describe(
     "Stable service identity from the identified mapping source.",
   ),
-  name: findingText.describe(
-    "Readable service name or verified display alias.",
-  ),
-  source: findingText.describe(
+  name: text.describe("Readable service name or verified display alias."),
+  source: text.describe(
     "The catalog or other explicitly identified mapping source.",
   ),
   evidence: z
@@ -129,15 +256,15 @@ const serviceAssociation = z.strictObject({
     ),
 });
 const openCondition = z.strictObject({
-  question: findingText,
-  target: findingText.describe(
+  question: text,
+  target: text.describe(
     "The caller, workload, artifact or environment to which this question applies.",
   ),
-  decidingCheck: findingText.optional(),
-  ruledOutIf: findingText.optional(),
+  decidingCheck: text.optional(),
+  ruledOutIf: text.optional(),
   assignee: z
     .strictObject({
-      name: findingText,
+      name: text,
       evidence: z.array(reviewReference).min(1),
     })
     .optional(),
@@ -148,7 +275,7 @@ const inputSource = z.strictObject({
     .describe(
       "Internet exposure of the actual input source for this caller, not of the source code or merely of the service.",
     ),
-  endpoint: findingText
+  endpoint: text
     .optional()
     .describe("Exact URL, route, or input endpoint when established."),
   evidence: z.array(reviewReference).min(1),
@@ -156,7 +283,7 @@ const inputSource = z.strictObject({
 const runtimeContext = z.strictObject({
   launch: z
     .strictObject({
-      command: findingText,
+      command: text,
       basis: z.enum(["observed", "configured"]),
     })
     .optional(),
@@ -164,36 +291,36 @@ const runtimeContext = z.strictObject({
     .strictObject({
       state: z.enum(["enabled", "disabled", "unknown"]),
       basis: z.enum(["observed", "configured", "unknown"]),
-      detail: findingText,
+      detail: text,
     })
     .optional(),
-  containerUrl: findingText.optional(),
-  traceUrl: findingText.optional(),
+  containerUrl: text.optional(),
+  traceUrl: text.optional(),
   evidence: z.array(reviewReference).min(1),
 });
 const findingTag = z.strictObject({
-  name: findingText,
+  name: text,
   evidence: z.array(reviewReference).min(1),
 });
 const inspectionTarget = z.strictObject({
-  label: findingText,
+  label: text,
   relationship: z.enum(["target", "shared_artifact", "comparison"]),
-  environment: findingText.optional(),
-  workload: findingText.optional(),
-  variant: findingText.optional(),
-  role: findingText.optional(),
-  revision: findingText.optional(),
-  artifact: findingText.optional(),
-  imageIndex: findingText.optional(),
-  platformManifest: findingText.optional(),
-  platform: findingText.optional(),
-  observationWindow: findingText.optional(),
+  environment: text.optional(),
+  workload: text.optional(),
+  variant: text.optional(),
+  role: text.optional(),
+  revision: text.optional(),
+  artifact: text.optional(),
+  imageIndex: text.optional(),
+  platformManifest: text.optional(),
+  platform: text.optional(),
+  observationWindow: text.optional(),
 });
 const inspection = z
   .strictObject({
-    question: findingText,
+    question: text,
     target: inspectionTarget,
-    source: findingText
+    source: text
       .optional()
       .describe(
         "The tool or source actually used, not a proposed future lookup.",
@@ -211,7 +338,7 @@ const inspection = z
       "insufficient_symbols",
       "not_attempted",
     ]),
-    result: findingText
+    result: text
       .optional()
       .describe(
         "The scoped observation and what it establishes, without raw payloads or credentials.",
@@ -222,10 +349,10 @@ const inspection = z
       .strictObject({
         unit: z.enum(["cpu_samples", "calls"]),
         count: z.number().int().nonnegative(),
-        frameTypes: z.array(findingText).optional(),
+        frameTypes: z.array(text).optional(),
       })
       .optional(),
-    transferBasis: findingText
+    transferBasis: text
       .optional()
       .describe(
         "Why an immutable artifact observation can transfer to this target; never transfer workload-specific measurements.",
@@ -273,24 +400,19 @@ const site = dependencyUseProofSchema.shape.sink
   .shape.callSite.extend({
     commit: dependencyGitCommitSchema.optional(),
   });
-const argument = z
-  .string()
-  .trim()
-  .min(1)
-  .describe(
-    "Exact single-line expression carrying the input at the cited site. Omit when ambiguous.",
-  );
-const label = z.string().trim().min(1);
+const argument = text.describe(
+  "Exact single-line expression carrying the input at the cited site. Omit when ambiguous.",
+);
 export const dependencyTraceSchema = z
   .array(
     z.discriminatedUnion("kind", [
       z.strictObject({
         kind: z.enum(["source", "handoff"]),
-        label,
+        label: text,
         site,
         argument: argument.optional(),
       }),
-      z.strictObject({ kind: z.literal("gap"), label }),
+      z.strictObject({ kind: z.literal("gap"), label: text }),
     ]),
   )
   .refine(
@@ -324,8 +446,8 @@ export const dependencyFindingDetailsShape = {
   tags: z.array(findingTag).optional(),
 };
 export const dependencyCoverageHandoffSchema = z.strictObject({
-  verified: findingText,
-  missing: findingText,
+  verified: text,
+  missing: text,
 });
 export { dependencyPlaceSchema };
 
@@ -342,7 +464,7 @@ export const dependencyTestScopeClassification = z.literal(
 export const dependencyCoverageDispositionSchema = z.strictObject({
   kind: z.enum(["dismissed", "unresolved"]),
   reason: z.string().min(1),
-  location: findingText.optional(),
+  location: text.optional(),
   place: dependencyPlaceSchema.optional(),
   handoff: dependencyCoverageHandoffSchema.optional(),
   ...dependencyFindingDetailsShape,
@@ -366,28 +488,28 @@ export const dependencyCoverageDispositionSchema = z.strictObject({
 export const dependencyApprovedClaimSchema =
   dependencyClaimReferenceSchema.extend({
     state: z.literal("approved"),
-    contextHash: identity,
+    contextHash: text,
     payload: stackJsonValue,
     scope: stackJsonValue,
     dependencies: z.array(dependencyClaimReferenceSchema),
     application: z
-      .strictObject({ assessmentId: identity, fingerprint: identity })
+      .strictObject({ assessmentId: text, fingerprint: text })
       .optional(),
     decision: z.strictObject({
       accepted: z.literal(true),
-      reason: identity,
-      evidenceKeys: z.array(identity),
+      reason: text,
+      evidenceKeys: z.array(text),
       citedVersion: z.string().nullable().optional(),
     }),
     evidence: z.strictObject({
-      sourceIds: z.array(identity),
-      receiptIds: z.array(identity),
+      sourceIds: z.array(text),
+      receiptIds: z.array(text),
     }),
   });
 
 export const dependencyClaimEvidenceSchema = z.strictObject({
-  sources: z.record(identity, stackJsonValue),
-  receipts: z.record(identity, stackJsonValue),
+  sources: z.record(text, stackJsonValue),
+  receipts: z.record(text, stackJsonValue),
 });
 
 const tokens = z.number().int().nonnegative();
@@ -470,61 +592,60 @@ export const dependencyCheckOutputSchema = z.union([
   dependencyPackageCheckOutputSchema,
 ]);
 
-const blockedLabel = z.string().trim().min(1);
 const requiredRecordCheck = z.strictObject({
-  requiredRecord: blockedLabel,
+  requiredRecord: text,
   selection: dependencyReceiptSelectionSchema,
   missing: z.boolean(),
 });
 const unavailableDataCoverage = z.discriminatedUnion("basis", [
   z.strictObject({
     basis: z.literal("observed_scope"),
-    scope: blockedLabel,
+    scope: text,
     checked: z.number().int().min(2),
     missing: z.number().int().min(2),
     checks: z.array(requiredRecordCheck).min(2),
-    representativeness: blockedLabel,
+    representativeness: text,
   }),
   z.strictObject({
     basis: z.literal("provider_declared"),
-    scope: blockedLabel,
-    declaration: blockedLabel,
+    scope: text,
+    declaration: text,
     selection: dependencyReceiptSelectionSchema,
-    representativeness: blockedLabel,
+    representativeness: text,
   }),
   z.strictObject({
     basis: z.literal("server_startup"),
-    server: blockedLabel,
-    receiptId: blockedLabel,
-    requiredCheck: blockedLabel,
+    server: text,
+    receiptId: text,
+    requiredCheck: text,
   }),
 ]);
 export const dependencyAbortInputSchema = z.strictObject({
-  reason: blockedLabel,
+  reason: text,
   category: z.literal("widespread_required_data_unavailable"),
-  tool: z.strictObject({ server: blockedLabel, name: blockedLabel }).optional(),
-  affectedScope: blockedLabel,
+  tool: z.strictObject({ server: text, name: text }).optional(),
+  affectedScope: text,
   coverage: unavailableDataCoverage,
-  scopeImpact: blockedLabel,
-  unblockCondition: blockedLabel,
-  evidenceReferences: z.array(blockedLabel).default([]),
+  scopeImpact: text,
+  unblockCondition: text,
+  evidenceReferences: z.array(text).default([]),
 });
 const retainedEvidence = z.strictObject({
   assessmentRevisions: z.array(
     z.strictObject({
-      id: blockedLabel,
+      id: text,
       revision: z.number().int().positive(),
-      status: blockedLabel,
+      status: text,
     }),
   ),
-  inventoryReceiptIds: z.array(blockedLabel),
+  inventoryReceiptIds: z.array(text),
 });
 export const dependencyScopedBlockedSchema = dependencyAbortInputSchema.extend({
   status: z.literal("blocked"),
   code: z.literal("INVESTIGATION_BLOCKED"),
-  cve: blockedLabel.optional(),
+  cve: text.optional(),
   target: dependencyTargetSchema.optional(),
-  nativeThreadId: blockedLabel,
+  nativeThreadId: text,
   retainedEvidence,
 });
 export type DependencyBlockDetails = Omit<

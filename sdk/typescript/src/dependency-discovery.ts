@@ -1,23 +1,51 @@
-import { posix } from "node:path";
+import { execFile } from "node:child_process";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { extname, join, posix } from "node:path";
+import { promisify } from "node:util";
+import { satisfies, valid, validRange } from "semver";
+import { isScalar, LineCounter, parseDocument } from "yaml";
+import { z } from "zod";
 import {
   dependencyPathExcluded,
   type DependencyDiscoveryBoundary,
 } from "./dependency-caller-scope.js";
 import type { DependencyPackage } from "./dependency-advisory.js";
-import {
-  readNpmManifests,
-  readPythonRequirements,
-  type DependencyManifest,
-} from "./dependency-manifests.js";
-import {
-  traceDependencyCalls,
-  type DependencyTrace,
-  type TraceSource,
-} from "./dependency-source-trace.js";
+import { errorMessage } from "./errors.js";
+import { resolveTrustedExecutable } from "./trusted-executable.js";
 import { gitOutput } from "./targets.js";
 import { isRecord } from "./record.js";
 
-export interface DependencyCaller {
+interface DependencyManifest {
+  path: string;
+  project: string;
+  name?: string;
+  requested: string;
+  declaration?: string;
+  line: number;
+  selection?: {
+    kind: "npm-lock" | "requirements-pin";
+    version: string;
+    lockfile: string;
+    packagePath: string;
+    line: number;
+  };
+}
+
+interface DependencyTrace {
+  path: string;
+  startLine: number;
+  endLine: number;
+  rule: string;
+}
+
+interface TraceSource {
+  path: string;
+  bytes: Buffer;
+  bindings: string[];
+}
+
+interface DependencyCaller {
   path: string;
   line: number;
   project?: string;
@@ -247,9 +275,8 @@ export async function discoverDependencyRepository(options: {
       symbols,
     );
     if (!lines.length) continue;
-    let directory = posix.dirname(path);
     let owner: DependencyManifest | undefined;
-    while (true) {
+    for (const directory of ancestors(posix.dirname(path))) {
       const manifest = posix.join(directory, "package.json");
       if (pkg.ecosystem === "npm" && paths.has(manifest)) {
         owner = projects.get(manifest);
@@ -267,8 +294,6 @@ export async function discoverDependencyRepository(options: {
           break;
         }
       }
-      if (directory === ".") break;
-      directory = posix.dirname(directory);
     }
     if (!owner)
       gaps.push(
@@ -322,15 +347,15 @@ export async function discoverDependencyRepository(options: {
         evidencePaths.some((source) => source.startsWith(directory + "/"))
       );
     });
-  const { traces, gaps: traceGaps } = await traceDependencyCalls(
+  const traces = await traceDependencyCalls(
     repository,
     sources,
     symbols,
     options.environment ?? process.env,
+    gaps,
     signal,
   );
   gaps.push(
-    ...traceGaps,
     "No runtime observations were supplied.",
     "Static import and call candidates do not establish dynamic callers, argument flow or deployment.",
   );
@@ -349,4 +374,376 @@ export async function discoverDependencyRepository(options: {
       gaps,
     },
   };
+}
+
+const sections = [
+  "optionalDependencies",
+  "dependencies",
+  "peerDependencies",
+  "devDependencies",
+] as const;
+
+function jsonSource(text: string) {
+  const value: unknown = JSON.parse(text);
+  if (!isRecord(value)) throw new Error("Expected a JSON object");
+  const lines = new LineCounter();
+  const doc = parseDocument(text, { lineCounter: lines, schema: "json" });
+  if (doc.errors.length) throw doc.errors[0];
+  return {
+    value,
+    line(keys: string[]) {
+      const node = doc.getIn(keys, true);
+      if (!isScalar(node) || !node.range) return undefined;
+      return lines.linePos(node.range[0]).line;
+    },
+  };
+}
+
+function* ancestors(directory: string) {
+  for (;;) {
+    yield directory;
+    if (directory === ".") return;
+    directory = posix.dirname(directory);
+  }
+}
+
+/** Resolve npm's installed path in the nearest v2/v3 lock, relative to the requesting project. */
+async function readNpmManifests(
+  paths: ReadonlySet<string>,
+  candidates: string[],
+  name: string,
+  read: (path: string) => Promise<string>,
+  gaps: string[],
+): Promise<DependencyManifest[]> {
+  const result: DependencyManifest[] = [];
+  const cache = new Map<string, ReturnType<typeof jsonSource>>();
+  async function json(path: string) {
+    let source = cache.get(path);
+    if (!source) {
+      source = jsonSource(await read(path));
+      cache.set(path, source);
+    }
+    return source;
+  }
+  for (const path of candidates) {
+    const project = posix.dirname(path);
+    let reading = path;
+    try {
+      const manifest = await json(path);
+      const section = sections.find((key) => {
+        const deps = manifest.value[key];
+        return isRecord(deps) && Object.hasOwn(deps, name);
+      });
+      if (!section) continue;
+      const requested = (manifest.value[section] as Record<string, unknown>)[
+        name
+      ];
+      const line = manifest.line([section, name]);
+      if (typeof requested !== "string" || !line) {
+        gaps.push(`Unrecognized dependency declaration in ${path}.`);
+        continue;
+      }
+      const item: DependencyManifest = {
+        path,
+        project,
+        requested,
+        declaration: section,
+        line,
+        ...(typeof manifest.value["name"] === "string" && {
+          name: manifest.value["name"],
+        }),
+      };
+      result.push(item);
+      // A file, Git or alias specification can refer to a different package.
+      const range = validRange(requested);
+      if (!range && !/^[A-Za-z][A-Za-z0-9_-]*$/u.test(requested)) continue;
+      for (const parent of ancestors(project)) {
+        const lock = ["npm-shrinkwrap.json", "package-lock.json"]
+          .map((base) => posix.join(parent, base))
+          .find((candidate) => paths.has(candidate));
+        if (!lock) {
+          if (
+            ["pnpm-lock.yaml", "yarn.lock", "bun.lock", "bun.lockb"].some(
+              (base) => paths.has(posix.join(parent, base)),
+            )
+          )
+            break;
+          continue;
+        }
+        reading = lock;
+        const source = await json(lock);
+        const entries = source.value["packages"];
+        const relative = posix.relative(parent, project);
+        if (
+          !isRecord(entries) ||
+          (source.value["lockfileVersion"] !== 2 &&
+            source.value["lockfileVersion"] !== 3)
+        )
+          break;
+        const requester = entries[relative];
+        // A root workspace lock must actually describe this manifest's request.
+        if (
+          !isRecord(requester) ||
+          !sections.some((key) => {
+            const declarations = requester[key];
+            return isRecord(declarations) && declarations[name] === requested;
+          })
+        )
+          break;
+        for (const directory of ancestors(relative || ".")) {
+          const installed = posix.join(directory, "node_modules", name);
+          const entry = entries[installed];
+          if (!isRecord(entry)) continue;
+          const version = entry["version"];
+          const versionLine = source.line(["packages", installed, "version"]);
+          if (
+            typeof version === "string" &&
+            valid(version) &&
+            (!range || satisfies(version, range)) &&
+            versionLine &&
+            !entry["link"] &&
+            (!entry["name"] || entry["name"] === name)
+          ) {
+            item.selection = {
+              kind: "npm-lock",
+              version,
+              lockfile: lock,
+              packagePath: installed,
+              line: versionLine,
+            };
+          }
+          break;
+        }
+        break;
+      }
+    } catch (error) {
+      if (
+        !(error instanceof SyntaxError) &&
+        !(
+          error instanceof Error &&
+          (error.name === "YAMLParseError" ||
+            error.message === "Expected a JSON object")
+        )
+      )
+        throw error;
+      gaps.push(`Could not parse the manifest or lockfile at ${reading}.`);
+    }
+  }
+  for (const manifest of result) {
+    if (!manifest.selection)
+      gaps.push(
+        `The installed copy selected by ${manifest.path} was not established from a lockfile.`,
+      );
+  }
+  return result;
+}
+
+function pythonDistributionName(name: string) {
+  return name.replace(/[-_.]+/gu, "-").toLowerCase();
+}
+
+/** A literal pip requirement is a configured selection. Environment markers and includes remain open. */
+async function readPythonRequirements(
+  paths: string[],
+  name: string,
+  read: (path: string) => Promise<string>,
+  gaps: string[],
+): Promise<DependencyManifest[]> {
+  const result: DependencyManifest[] = [];
+  const normalized = pythonDistributionName(name);
+  for (const path of paths.filter((p) =>
+    /^requirements[^/]*\.(?:txt|lock|in)$/iu.test(posix.basename(p)),
+  )) {
+    const lines = (await read(path))
+      .split(/\r?\n/u)
+      .map((line) => line.replace(/(?:^|\s+)#.*$/u, "").trim());
+    const matches = lines.flatMap((line, index) => {
+      const match = /^([A-Za-z0-9][A-Za-z0-9_.-]*)(.*)$/u.exec(line);
+      return match && pythonDistributionName(match[1]!) === normalized
+        ? [{ requested: match[2]!.trim(), line: index + 1 }]
+        : [];
+    });
+    if (!matches.length) continue;
+    const input = matches[0]!;
+    const version =
+      /^==\s*([0-9]+(?:[.!][0-9]+)*(?:(?:a|b|rc|\.post|\.dev)[0-9]+)*(?:\+[a-z0-9]+(?:[.-][a-z0-9]+)*)?)(?:\s+--hash=[A-Za-z0-9]+:[a-fA-F0-9]+)*$/iu.exec(
+        input.requested,
+      )?.[1];
+    const unconditional =
+      matches.length === 1 &&
+      !lines.some((line) =>
+        /^(?:-r|-c|--requirement|--constraint)(?:\s|=|[^-])/u.test(line),
+      );
+    const project = posix.dirname(path);
+    const manifest: DependencyManifest = { ...input, path, project };
+    if (version && unconditional) {
+      manifest.selection = {
+        kind: "requirements-pin",
+        version,
+        lockfile: path,
+        packagePath: name,
+        line: input.line,
+      };
+    } else
+      gaps.push(
+        `The active version from ${path} depends on unresolved requirements or installation conditions.`,
+      );
+    result.push(manifest);
+  }
+  return result;
+}
+
+const execute = promisify(execFile);
+const traceOutput = z.object({
+  results: z.array(
+    z.object({
+      path: z.string(),
+      check_id: z.string(),
+      start: z.object({ line: z.number().int().positive() }),
+      end: z.object({ line: z.number().int().positive() }),
+    }),
+  ),
+  paths: z.object({ scanned: z.array(z.string()) }),
+  errors: z.array(z.unknown()),
+});
+
+/** Matches are syntactic call candidates. The investigator still has to establish value flow. */
+async function traceDependencyCalls(
+  repository: string,
+  sources: TraceSource[],
+  symbols: readonly string[],
+  environment: NodeJS.ProcessEnv,
+  gaps: string[],
+  signal?: AbortSignal,
+): Promise<DependencyTrace[]> {
+  const traces: DependencyTrace[] = [];
+  if (!sources.length) return traces;
+  const command = await resolveTrustedExecutable(
+    "opengrep",
+    environment,
+    repository,
+  );
+  if (!command) {
+    gaps.push("OpenGrep is unavailable; source call matching is incomplete.");
+    return traces;
+  }
+  const identifiers = new Set<string>();
+  for (const symbol of symbols) {
+    const leaf = symbol
+      .replace(/\(\)$/u, "")
+      .split(/\.|::|#/u)
+      .at(-1);
+    if (leaf && /^[A-Za-z_][A-Za-z_0-9]*$/u.test(leaf)) identifiers.add(leaf);
+  }
+  for (const source of sources) {
+    for (const binding of source.bindings) {
+      if (/^[A-Za-z_][A-Za-z_0-9]*$/u.test(binding)) identifiers.add(binding);
+    }
+  }
+  if (!identifiers.size) {
+    gaps.push("No call symbol was identified for source tracing.");
+    return traces;
+  }
+  const root = await mkdtemp(join(tmpdir(), "dependency-calls-"));
+  try {
+    const names = new Map<string, string>();
+    const languages = new Set<string>();
+    await mkdir(join(root, "input"));
+    for (const [index, source] of sources.entries()) {
+      const extension = extname(source.path).toLowerCase();
+      languages.add(extension === ".py" ? "python" : "javascript");
+      const name = `input/file-${index}${extension}`;
+      names.set(name, source.path);
+      await writeFile(join(root, name), source.bytes, { signal });
+    }
+    const calls = [...languages].flatMap((language) =>
+      [...identifiers].map((id, i) => ({
+        id: `${language}-call-${i}`,
+        message: id,
+        severity: "INFO",
+        languages:
+          language === "javascript" ? ["javascript", "typescript"] : ["python"],
+        "pattern-either": [
+          { pattern: `${id}(...)` },
+          { pattern: `$RECEIVER.${id}(...)` },
+          ...(language === "javascript" ? [{ pattern: `new ${id}(...)` }] : []),
+        ],
+      })),
+    );
+    const instances = languages.has("javascript")
+      ? [...identifiers].map((name, i) => ({
+          id: `javascript-instance-${i}`,
+          message: `method on ${name}`,
+          severity: "INFO",
+          languages: ["javascript", "typescript"],
+          patterns: [
+            {
+              "pattern-either": [
+                { "pattern-inside": `const $OBJ = new ${name}(...); ...` },
+                { "pattern-inside": `const $OBJ = ${name}(...); ...` },
+              ],
+            },
+            { pattern: "$OBJ.$METHOD(...)" },
+          ],
+        }))
+      : [];
+    const rules = [...calls, ...instances];
+    const ruleNames = new Map(rules.map((rule) => [rule.id, rule.message]));
+    await writeFile(join(root, "rules.json"), JSON.stringify({ rules }));
+    const { stdout } = await execute(
+      command.executable,
+      [
+        "scan",
+        "--json",
+        "--quiet",
+        "--no-git-ignore",
+        "--no-rewrite-rule-ids",
+        "--config",
+        "rules.json",
+        "--",
+        "input",
+      ],
+      {
+        cwd: root,
+        signal,
+        maxBuffer: Infinity,
+        env: {
+          ...command.environment,
+          OPENGREP_ENABLE_VERSION_CHECK: "0",
+          SEMGREP_SEND_METRICS: "off",
+        },
+      },
+    );
+    const report = traceOutput.parse(JSON.parse(stdout));
+    function originalPath(name: string) {
+      return names.get(name.replaceAll("\\", "/").replace(/^\.\//u, ""));
+    }
+    const scanned = new Set(report.paths.scanned.map(originalPath));
+    for (const name of names.values())
+      if (!scanned.has(name)) gaps.push(`OpenGrep did not scan ${name}.`);
+    if (report.errors.length)
+      gaps.push(`OpenGrep reported ${report.errors.length} analysis errors.`);
+    for (const match of report.results) {
+      const path = originalPath(match.path);
+      const rule = ruleNames.get(match.check_id);
+      if (path && rule && match.end.line >= match.start.line) {
+        traces.push({
+          path,
+          startLine: match.start.line,
+          endLine: match.end.line,
+          rule,
+        });
+      } else {
+        gaps.push(
+          "OpenGrep returned a match without a recognized source path, symbol or line range.",
+        );
+      }
+    }
+  } catch (error) {
+    signal?.throwIfAborted();
+    gaps.push(`OpenGrep call matching failed: ${errorMessage(error)}`);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+  return traces;
 }

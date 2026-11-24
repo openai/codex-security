@@ -5,8 +5,10 @@ import { Readable } from "node:stream";
 import { main, runCodexSkillCommand } from "../src/cli.js";
 import { parse as parseToml } from "smol-toml";
 import { DependencyAttemptStore } from "../src/dependency-attempt-store.js";
-import { lookupDependencyAdvisory } from "../src/dependency-advisory.js";
-import { analyzeStackAdvisory } from "../src/dependency-stack-advisory.js";
+import {
+  analyzeStackAdvisory,
+  lookupDependencyAdvisory,
+} from "../src/dependency-advisory.js";
 import { prepareStackPacket } from "../src/stack-packet.js";
 import { sqliteDatabaseOpener } from "../src/runtime.js";
 import {

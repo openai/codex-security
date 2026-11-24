@@ -25,6 +25,8 @@ import {
   dependencyCoverageDispositionSchema,
   dependencyPlaceSchema,
   type DependencyReviewReference,
+  assertDependencyUseProofCitations,
+  dependencyUseSchema,
 } from "./dependency-reachability.js";
 import {
   dependencyGitCommitSchema,
@@ -45,10 +47,6 @@ import {
 } from "./dependency-graph-evidence.js";
 import { isRecord } from "./record.js";
 import { CodexSecurityError } from "./errors.js";
-import {
-  assertDependencyUseProofCitations,
-  dependencyUseSchema,
-} from "./dependency-stack-use.js";
 
 const text = z.string().trim().min(1);
 const source = z.strictObject({

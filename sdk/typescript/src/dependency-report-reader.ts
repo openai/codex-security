@@ -17,11 +17,9 @@ import {
 export type {
   ReviewedDependencyUse,
   DependencyReviewReference,
-} from "./dependency-reachability.js";
-export type {
   DependencyUse,
   DependencyVerdict,
-} from "./dependency-stack-use.js";
+} from "./dependency-reachability.js";
 export type DependencyCoverageDisposition = z.infer<
   typeof dependencyCoverageDispositionSchema
 >;

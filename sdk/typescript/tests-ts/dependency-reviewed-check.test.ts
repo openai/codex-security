@@ -15,7 +15,7 @@ import {
   type PremiseRef,
 } from "../src/dependency-review-queue";
 import { evidencePreviews } from "../src/dependency-investigation-session";
-import { affectedByFrozenVersion } from "../src/dependency-advisory-version";
+import { affectedByFrozenVersion } from "../src/dependency-advisory";
 import { dependencyCheckOutputSchema } from "../src/dependency-reachability";
 import { withDependencyCheckOutput } from "../src/dependency-check-output";
 import {

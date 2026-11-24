@@ -17,7 +17,7 @@ import {
 } from "./dependency-report-reader.js";
 import type { DependencyTarget } from "./dependency-source-identity.js";
 import { isRecord } from "./record.js";
-import { dependencyVerdictLabels } from "./dependency-stack-use.js";
+import { dependencyVerdictLabels } from "./dependency-reachability.js";
 
 export type {
   StackReport,

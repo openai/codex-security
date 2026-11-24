@@ -5,14 +5,12 @@ import { z } from "zod";
 import {
   frozenDependencyAdvisorySchema,
   lookupDependencyAdvisory,
+  stackTriggerAnalysisSchema,
+  validateStackTriggerAnalysis,
   type FrozenDependencyAdvisory,
 } from "./dependency-advisory.js";
 import type { DependencyProgressSink } from "./dependency-check-output.js";
 import { errorMessage } from "./errors.js";
-import {
-  stackTriggerAnalysisSchema,
-  validateStackTriggerAnalysis,
-} from "./dependency-stack-advisory.js";
 import { stackJsonValue } from "./dependency-stack-evidence.js";
 import {
   dependencyGitCommitSchema,

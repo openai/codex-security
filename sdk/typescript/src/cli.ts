@@ -9,7 +9,7 @@ import type {
   DependencyCoordinatorRecovery,
   DependencyResourceEvents,
 } from "./dependency-resource-session.js";
-import type { DependencyAgentRequest } from "./dependency-stack-cli.js";
+import type { DependencyAgentRequest } from "./dependency-cli.js";
 import {
   providerPreflightCommand,
   restoreProviderProfile,
@@ -8297,8 +8297,7 @@ export async function main(
       "CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY",
     ) === "1"
   ) {
-    const { createExploitabilityCli } =
-      await import("./dependency-stack-cli.js");
+    const { createExploitabilityCli } = await import("./dependency-cli.js");
     cli.command(
       createExploitabilityCli({
         hasOutputFilter: () => frameworkFlags.filters.length > 0,
