@@ -97609,33 +97609,26 @@ function resultSummary(result, inputs, target, artifactUrl) {
       remaining -= bytes;
       return true;
     };
+    function take(items, format, separatorBytes = 2) {
+      const kept = [];
+      for (const item of items) {
+        const block = format(item, kept.length);
+        if (!fits(block, kept.length ? separatorBytes : 2)) break;
+        kept.push(block);
+      }
+      return kept;
+    }
     const blocks2 = parts.filter((part) => fits(part));
-    const errors = [];
-    for (const error2 of result.errors.slice(0, 10)) {
-      const block = `<pre>${esc(error2)}</pre>`;
-      if (!fits(block)) break;
-      errors.push(block);
-    }
-    const notes = [];
-    for (const note of result.scopeLimitations ?? []) {
-      const line = (notes.length ? "" : "**Scope limitations**\n\n") + `- ${esc(note)}`;
-      if (!fits(line, notes.length ? 1 : 2)) break;
-      notes.push(line);
-    }
-    if (notes.length) blocks2.push(notes.join("\n"));
-    blocks2.push(...statusNotes, ...errors);
-    let displayed = 0;
-    for (const finding of result.findings.slice(0, 30)) {
-      const block = `<h3>${finding.severity.toUpperCase()}: ${esc(finding.title, 200)}</h3>
+    const errors = take(result.errors.slice(0, 10), (error2) => `<pre>${esc(error2)}</pre>`);
+    const notes = take(result.scopeLimitations ?? [], (note, index) => (index ? "" : "**Scope limitations**\n\n") + `- ${esc(note)}`, 1);
+    const findings = take(result.findings.slice(0, 30), (finding) => `<h3>${finding.severity.toUpperCase()}: ${esc(finding.title, 200)}</h3>
 
 <code>${esc(finding.path ?? "No source location")}:${finding.startLine ?? "?"}</code>
 
-<pre>${esc(finding.summary, 1200)}</pre>`;
-      if (!fits(block)) break;
-      blocks2.push(block);
-      displayed += 1;
-    }
-    if (displayed < findingCount) blocks2.push(omittedFindings(findingCount - displayed));
+<pre>${esc(finding.summary, 1200)}</pre>`);
+    if (notes.length) blocks2.push(notes.join("\n"));
+    blocks2.push(...statusNotes, ...errors, ...findings);
+    if (findings.length < findingCount) blocks2.push(omittedFindings(findingCount - findings.length));
     return [...blocks2, footer].join("\n\n");
   };
   const summary2 = render(0);

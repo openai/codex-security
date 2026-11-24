@@ -63,30 +63,26 @@ export function resultSummary(result: ScanResults, inputs: Inputs, target: Targe
       remaining -= bytes;
       return true;
     };
+    // Keep a prefix of complete items. Lines within one list use a single newline.
+    function take<T>(items: T[], format: (item: T, index: number) => string, separatorBytes = 2): string[] {
+      const kept: string[] = [];
+      for (const item of items) {
+        const block = format(item, kept.length);
+        if (!fits(block, kept.length ? separatorBytes : 2)) break;
+        kept.push(block);
+      }
+      return kept;
+    }
     const blocks = parts.filter(part => fits(part));
     // Budget diagnostics before scope notes without changing the display order.
-    const errors: string[] = [];
-    for (const error of result.errors.slice(0, 10)) {
-      const block = `<pre>${esc(error)}</pre>`;
-      if (!fits(block)) break;
-      errors.push(block);
-    }
-    const notes: string[] = [];
-    for (const note of result.scopeLimitations ?? []) {
-      const line = (notes.length ? '' : '**Scope limitations**\n\n') + `- ${esc(note)}`;
-      if (!fits(line, notes.length ? 1 : 2)) break;
-      notes.push(line);
-    }
+    const errors = take(result.errors.slice(0, 10), error => `<pre>${esc(error)}</pre>`);
+    const notes = take(result.scopeLimitations ?? [], (note, index) =>
+      (index ? '' : '**Scope limitations**\n\n') + `- ${esc(note)}`, 1);
+    const findings = take(result.findings.slice(0, 30), finding =>
+      `<h3>${finding.severity.toUpperCase()}: ${esc(finding.title, 200)}</h3>\n\n<code>${esc(finding.path ?? 'No source location')}:${finding.startLine ?? '?'}</code>\n\n<pre>${esc(finding.summary, 1200)}</pre>`);
     if (notes.length) blocks.push(notes.join('\n'));
-    blocks.push(...statusNotes, ...errors);
-    let displayed = 0;
-    for (const finding of result.findings.slice(0, 30)) {
-      const block = `<h3>${finding.severity.toUpperCase()}: ${esc(finding.title, 200)}</h3>\n\n<code>${esc(finding.path ?? 'No source location')}:${finding.startLine ?? '?'}</code>\n\n<pre>${esc(finding.summary, 1200)}</pre>`;
-      if (!fits(block)) break;
-      blocks.push(block);
-      displayed += 1;
-    }
-    if (displayed < findingCount) blocks.push(omittedFindings(findingCount - displayed));
+    blocks.push(...statusNotes, ...errors, ...findings);
+    if (findings.length < findingCount) blocks.push(omittedFindings(findingCount - findings.length));
     return [...blocks, footer].join('\n\n');
   };
 
