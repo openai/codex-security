@@ -66,15 +66,6 @@ function approvedReview(claims: ReviewClaim[]) {
 }
 
 const signal = new AbortController().signal;
-
-function checkInput(
-  directory: string,
-  subject: string,
-  vulnDescription: string,
-) {
-  return { directory, subject, vulnDescription, signal };
-}
-
 async function fixture(extraFiles: Record<string, string> = {}) {
   const path = await mkdtemp(join(tmpdir(), "dependency-reviewed-test-"));
   const git = (...args: string[]) =>
@@ -158,6 +149,7 @@ async function fixture(extraFiles: Record<string, string> = {}) {
     revision,
     discovery,
     use,
+    packageOptions: { directory: path, subject: "npm:fixture-parser", signal },
     [Symbol.asyncDispose]: () => rm(path, { recursive: true, force: true }),
   };
 }
@@ -225,7 +217,7 @@ test("repository investigators share pinned source notes without promoting asser
   let noteId = "";
   let reviewerRead = false;
   const result = await runReviewedDependencyCheck(
-    checkInput(f.path, "npm:fixture-parser", "Parser issue"),
+    { ...f.packageOptions, vulnDescription: "Parser issue" },
     {
       discover: async ({ revision }) => {
         expect(revision).toBe(f.revision);
@@ -336,10 +328,8 @@ for (const late of ["assessment", "candidate", "roster"] as const) {
     let coverageReviews = 0;
     const checked = await runReviewedDependencyCheck(
       {
-        subject: "npm:fixture-parser",
+        ...f.packageOptions,
         vulnDescription: "Check calls to the parser.",
-        directory: f.path,
-        signal,
         evidenceSources: [
           { server: "catalog", instructions: "Check deployed callers." },
         ],
@@ -465,7 +455,7 @@ test.each(["incomplete", "complete"] as const)(
     const tool = "update_codex_security_graph";
     let reviewedLimitations: string[] = [];
     const result = await runReviewedDependencyCheck(
-      checkInput(f.path, "npm:fixture-parser", "Parser issue"),
+      { ...f.packageOptions, vulnDescription: "Parser issue" },
       {
         discover: async () => f.discovery,
         async runAgent(req) {
@@ -613,9 +603,7 @@ test("package checks freeze each advisory independently and verify exact source 
   }[] = [];
   const result = await runReviewedDependencyCheck(
     {
-      directory: f.path,
-      subject: "npm:fixture-parser",
-      signal,
+      ...f.packageOptions,
       onProgress(type, subject, fields) {
         events.push({ type, subject, fields });
       },
@@ -712,7 +700,7 @@ test("caller descriptions stay scoped and a source-only positive is blocked", as
   await using f = await fixture();
   await expect(
     runReviewedDependencyCheck(
-      checkInput(f.path, "npm:fixture-parser", "Incorrect length validation."),
+      { ...f.packageOptions, vulnDescription: "Incorrect length validation." },
       {
         lookupPackage: async () => {
           throw Error("Unexpected registry lookup");
@@ -732,7 +720,7 @@ test("caller descriptions stay scoped and a source-only positive is blocked", as
   ).rejects.toThrow("running workload");
   await expect(
     runReviewedDependencyCheck(
-      checkInput(f.path, "npm:fixture-parser", "Incorrect length validation."),
+      { ...f.packageOptions, vulnDescription: "Incorrect length validation." },
       {
         discover: async () => f.discovery,
         runAgent: async () => {
@@ -749,10 +737,8 @@ test("a positive use requires an endpoint on each explicitly bounded side", asyn
     await expect(
       runReviewedDependencyCheck(
         {
-          directory: f.path,
-          subject: "npm:fixture-parser",
+          ...f.packageOptions,
           vulnDescription: "Incorrect length validation.",
-          signal,
           ...boundary,
         },
         {
@@ -949,9 +935,7 @@ test("independent approvals cannot be carried to a newer revision", async () => 
         [first],
         [
           {
-            id: first.id,
-            revision: first.revision,
-            hash: first.hash,
+            ...reference(first),
             evidenceKeys: [],
             approved: true,
             reason: "Original coverage only.",
@@ -1015,6 +999,7 @@ test("replacing an approved premise invalidates transitive users and preserves i
       "select the deciding evidence",
     );
     approve(base, [evidence]);
+
     const parent = submit("caller", [reference(base)], []);
     approve(parent, [premiseKey(base)]);
     const leaf = submit("service", [reference(parent)], []);
@@ -1093,11 +1078,10 @@ test("host feedback repairs a bad citation and an independent rejection requires
   let investigations = 0,
     reviews = 0;
   const report = await runReviewedDependencyCheck(
-    checkInput(
-      f.path,
-      "npm:fixture-parser",
-      "Untrusted input reaches the parser.",
-    ),
+    {
+      ...f.packageOptions,
+      vulnDescription: "Untrusted input reaches the parser.",
+    },
     {
       discover: async () => f.discovery,
       runAgent: async ({ prompt }) => {
@@ -1144,7 +1128,7 @@ test.each(["corrected", "exhausted"] as const)(
     let coordinatorStarts = 0;
     let submissions = 0;
     const result = runReviewedDependencyCheck(
-      checkInput(f.path, "npm:fixture-parser", "Parser input"),
+      { ...f.packageOptions, vulnDescription: "Parser input" },
       {
         discover: async () => f.discovery,
         async runAgent(req) {
@@ -1236,7 +1220,7 @@ test("bind discovered owners to their own source and retain uncovered callers", 
     project: "notes",
   });
   const report = await runReviewedDependencyCheck(
-    checkInput(f.path, "npm:fixture-parser", "Parser failure."),
+    { ...f.packageOptions, vulnDescription: "Parser failure." },
     {
       discover: async () => f.discovery,
       runAgent: async ({ prompt }) => {
@@ -1334,8 +1318,7 @@ test("the reviewer corrects an omitted direct access citation without repeating 
   let reviews = 0;
   const result = await runReviewedDependencyCheck(
     {
-      directory: f.path,
-      subject: "npm:fixture-parser",
+      ...f.packageOptions,
       vulnDescription: "A parser issue.",
       evidenceSources: [
         {
@@ -1343,7 +1326,6 @@ test("the reviewer corrects an omitted direct access citation without repeating 
           instructions: "Look up release details and external caller access.",
         },
       ],
-      signal,
     },
     {
       discover: async () => f.discovery,
@@ -1599,20 +1581,17 @@ test("a failed model invocation retains prior results and identifies unattempted
   await using f = await fixture();
   const ids = ["CVE-2099-0001", "CVE-2099-0002", "CVE-2099-0003"];
   try {
-    await runReviewedDependencyCheck(
-      { directory: f.path, subject: "npm:fixture-parser", signal },
-      {
-        discover: async () => f.discovery,
-        lookupPackage: async () => ids.map((id) => ({ id, advisories: [] })),
-        runAgent: async ({ prompt }) => {
-          const input = JSON.parse(prompt.split("\n\n").at(-1)!);
-          if (input.issue.id === ids[1]) throw Error("Model unavailable.");
-          return input.claims
-            ? approvedReview(input.claims)
-            : JSON.stringify({ uses: [f.use], limitations: [] });
-        },
+    await runReviewedDependencyCheck(f.packageOptions, {
+      discover: async () => f.discovery,
+      lookupPackage: async () => ids.map((id) => ({ id, advisories: [] })),
+      runAgent: async ({ prompt }) => {
+        const input = JSON.parse(prompt.split("\n\n").at(-1)!);
+        if (input.issue.id === ids[1]) throw Error("Model unavailable.");
+        return input.claims
+          ? approvedReview(input.claims)
+          : JSON.stringify({ uses: [f.use], limitations: [] });
       },
-    );
+    });
     throw Error("Expected a partial package outcome.");
   } catch (error) {
     if (!(error instanceof DependencyInvestigationBlockedError)) throw error;
@@ -1638,31 +1617,28 @@ test("a package continues with independent advisories after a scoped block or ex
     affectedScope: "worker",
     evidenceReferences: ["record-1"],
   };
-  const result = runReviewedDependencyCheck(
-    { directory: f.path, subject: "npm:fixture-parser", signal },
-    {
-      discover: async () => f.discovery,
-      lookupPackage: async () => ids.map((id) => ({ id, advisories: [] })),
-      runAgent: async ({ prompt }) => {
-        const input = JSON.parse(prompt.split("\n\n").at(-1)!);
-        if (input.issue.id === ids[1])
-          throw new DependencyInvestigationBlockedError(scoped, undefined);
-        if (!input.claims)
-          return JSON.stringify({ uses: [f.use], limitations: [] });
-        return JSON.stringify({
-          decisions: input.claims.map((claim: ReviewClaim) => ({
-            ...reference(claim),
-            evidenceKeys: claim.availableEvidenceKeys,
-            approved: input.issue.id !== ids[2],
-            reason:
-              input.issue.id === ids[2]
-                ? "No proof for this release."
-                : "Verified.",
-          })),
-        });
-      },
+  const result = runReviewedDependencyCheck(f.packageOptions, {
+    discover: async () => f.discovery,
+    lookupPackage: async () => ids.map((id) => ({ id, advisories: [] })),
+    runAgent: async ({ prompt }) => {
+      const input = JSON.parse(prompt.split("\n\n").at(-1)!);
+      if (input.issue.id === ids[1])
+        throw new DependencyInvestigationBlockedError(scoped, undefined);
+      if (!input.claims)
+        return JSON.stringify({ uses: [f.use], limitations: [] });
+      return JSON.stringify({
+        decisions: input.claims.map((claim: ReviewClaim) => ({
+          ...reference(claim),
+          evidenceKeys: claim.availableEvidenceKeys,
+          approved: input.issue.id !== ids[2],
+          reason:
+            input.issue.id === ids[2]
+              ? "No proof for this release."
+              : "Verified.",
+        })),
+      });
     },
-  );
+  });
   try {
     await result;
     throw Error("Expected a partial package outcome.");
@@ -2102,13 +2078,11 @@ test("native investigators share asynchronous reviews, immutable premises and pa
     release = Promise.withResolvers<void>();
   const result = await runReviewedDependencyCheck(
     {
-      directory: f.path,
-      subject: "npm:fixture-parser",
+      ...f.packageOptions,
       vulnDescription: "Wrong parser input.",
       evidenceSources: [
         { server: "builds", instructions: "Inspect the recorded build." },
       ],
-      signal,
     },
     {
       discover: async () => f.discovery,
@@ -2355,13 +2329,11 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
     tool = "lookup";
   const result = await runReviewedDependencyCheck(
     {
-      directory: f.path,
-      subject: "npm:fixture-parser",
+      ...f.packageOptions,
       vulnDescription: "Parser behavior",
       evidenceSources: [
         { server, instructions: "Look up an exact checkout path." },
       ],
-      signal,
     },
     {
       discover: async () => f.discovery,
@@ -2536,7 +2508,7 @@ test.each([
     const batches: string[][] = [];
     let coordinators = 0;
     const run = runReviewedDependencyCheck(
-      checkInput(f.path, "npm:fixture-parser", "Parser behavior"),
+      { ...f.packageOptions, vulnDescription: "Parser behavior" },
       {
         discover: async () => f.discovery,
         async runAgent(req) {
@@ -2653,10 +2625,8 @@ test("a reviewed premise retains independently selected rows of the historical m
   }));
   const checked = await runReviewedDependencyCheck(
     {
-      directory: f.path,
-      subject: "npm:fixture-parser",
+      ...f.packageOptions,
       vulnDescription: "Review the parser.",
-      signal,
       evidenceSources: [
         {
           server: "deployed",
@@ -2845,7 +2815,7 @@ test.each(["ledger", "identical", "additional", "invalid"] as const)(
     const reviewCounts = new Map<string, number>();
     let rounds = 0;
     const result = runReviewedDependencyCheck(
-      checkInput(f.path, "npm:fixture-parser", "Parser behavior"),
+      { ...f.packageOptions, vulnDescription: "Parser behavior" },
       {
         discover: async () => f.discovery,
         async runAgent(req) {
@@ -2952,7 +2922,7 @@ test("a correction in a live review batch preserves its independent sibling appr
   const seen: string[][] = [];
   const previous = new Map<string, string[]>();
   await runReviewedDependencyCheck(
-    checkInput(f.path, "npm:fixture-parser", "Parser issue"),
+    { ...f.packageOptions, vulnDescription: "Parser issue" },
     {
       discover: async () => f.discovery,
       async runAgent(req) {
@@ -3010,6 +2980,7 @@ test("a correction in a live review batch preserves its independent sibling appr
         expect(seen).toHaveLength(2);
         expect(seen[0]).toHaveLength(2);
         expect(seen[1]).toHaveLength(1);
+
         await call("submit_dependency_claims", {
           claims: [
             { ...submit("derived"), dependencies: [reference(claims[0]!)] },
@@ -3076,7 +3047,7 @@ test.each(["approved", "rejected", "racing", "changed premise"] as const)(
     let coverageRefs: PremiseRef[] = [];
     const reviewedReplacements: number[] = [];
     const checked = await runReviewedDependencyCheck(
-      checkInput(f.path, "npm:fixture-parser", "Parser issue"),
+      { ...f.packageOptions, vulnDescription: "Parser issue" },
       {
         discover: async () => ({
           ...f.discovery,
@@ -3391,10 +3362,8 @@ test("independently verifies candidate dispositions and publishes their selected
   };
   const checked = await runReviewedDependencyCheck(
     {
-      directory: f.path,
-      subject: "npm:fixture-parser",
+      ...f.packageOptions,
       vulnDescription: "Review the parser.",
-      signal,
       evidenceSources: [
         { server: "catalog", instructions: "Identify the deployed consumer." },
       ],
@@ -3627,10 +3596,8 @@ test("accounts for native graph candidate lines in their pinned package and pres
   await writeFile(join(f.path, "dirty.js"), "different();\n");
   const checked = await runReviewedDependencyCheck(
     {
-      directory: f.path,
-      subject: "npm:fixture-parser",
+      ...f.packageOptions,
       vulnDescription: "Check parser call paths.",
-      signal,
       evidenceSources: [
         { server: "catalog", instructions: "Check deployments." },
       ],
@@ -3800,10 +3767,8 @@ test("reports the scope and outcome of original evidence lookups across MCP resp
   ];
   const result = await runReviewedDependencyCheck(
     {
-      directory: f.path,
-      subject: "npm:fixture-parser",
+      ...f.packageOptions,
       vulnDescription: "Parser input.",
-      signal,
       evidenceSources: [
         { server: "inventory", instructions: "Look up deployed copies." },
         { server: "offline", instructions: "Look up release records." },

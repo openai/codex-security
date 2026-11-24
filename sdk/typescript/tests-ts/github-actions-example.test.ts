@@ -3,16 +3,8 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { parse } from "yaml";
+import type { Workflow, WorkflowStep } from "./support/workflow.js";
 import { runWorkflowScript } from "./support/workflow-script.js";
-
-interface Step {
-  id?: string;
-  uses?: string;
-  if?: string;
-  run?: string;
-  env?: Record<string, string>;
-  with?: Record<string, unknown>;
-}
 
 const workflow = parse(
   readFileSync(
@@ -22,24 +14,16 @@ const workflow = parse(
     ),
     "utf8",
   ),
-) as {
-  on: Record<string, unknown>;
-  jobs: {
-    scan: {
-      if: string;
-      env: Record<string, string>;
-      steps: Step[];
-    };
-  };
-};
-const job = workflow.jobs.scan;
-const scan = job.steps.find((step) => step.id === "scan")!;
-const sarif = job.steps.find((step) => step.id === "sarif")!;
+) as Workflow;
+const job = workflow.jobs["scan"]!;
+const steps = job.steps!;
+const scan = steps.find((step) => step.id === "scan")!;
+const sarif = steps.find((step) => step.id === "sarif")!;
 const temporaryDirectories = createTemporaryDirectoriesSync();
 
 afterEach(temporaryDirectories.cleanup);
 
-function runStep(step: Step, overrides: Record<string, string> = {}) {
+function runStep(step: WorkflowStep, overrides: Record<string, string> = {}) {
   const directory = temporaryDirectories.create("codex actions example ");
   // Git Bash accepts forward-slash drive paths on Windows.
   const root = directory.replaceAll("\\", "/");
@@ -76,7 +60,7 @@ test("scans PR changes at the default merge checkout with literal arguments", ()
     `${result.root}/repository with spaces`,
   ]);
   expect(result.args.slice(-2)).toEqual(["--diff", base]);
-  const checkout = job.steps.find((step) =>
+  const checkout = steps.find((step) =>
     step.uses?.startsWith("actions/checkout@"),
   )!;
   expect(checkout.with?.["fetch-depth"]).toBe(0);
@@ -90,7 +74,7 @@ for (const event of ["workflow_dispatch", "schedule"]) {
     expect(result.status).toBe(0);
     expect(result.args).not.toContain("--diff");
     expect(result.args).not.toContain("--fail-on-severity");
-    expect(job.env["FAIL_ON_SEVERITY"]).toBe("");
+    expect(job.env!["FAIL_ON_SEVERITY"]).toBe("");
   });
 }
 
@@ -132,7 +116,7 @@ test("exports the completed scan with source-root fingerprints outside the check
   expect(sarif.if).toBe(
     "${{ !cancelled() && (steps.scan.outputs.exit-code == '0' || steps.scan.outputs.exit-code == '1') }}",
   );
-  const upload = job.steps.find((step) =>
+  const upload = steps.find((step) =>
     step.uses?.startsWith("github/codeql-action/upload-sarif@"),
   )!;
   expect(upload.if).toBe(
@@ -147,11 +131,11 @@ test("keeps credentials scoped and skips untrusted PR workflows", () => {
     "github.event.pull_request.head.repo.full_name == github.repository",
   );
   expect(job.if).toContain("github.actor != 'dependabot[bot]'");
-  const aws = job.steps.find((step) => step.id === "aws")!;
+  const aws = steps.find((step) => step.id === "aws")!;
   expect(aws.with?.["output-env-credentials"]).toBe(false);
   expect(aws.with?.["output-credentials"]).toBe(true);
   expect(scan.env).toHaveProperty("AWS_SESSION_TOKEN");
-  for (const step of job.steps) {
+  for (const step of steps) {
     expect(step.env ?? {}).not.toHaveProperty("GH_TOKEN");
     expect(step.env ?? {}).not.toHaveProperty("GITHUB_TOKEN");
     if (step.uses) expect(step.uses).toMatch(/@[a-f0-9]{40}$/);

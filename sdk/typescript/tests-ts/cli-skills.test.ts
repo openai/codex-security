@@ -54,6 +54,12 @@ async function runCodexSkillCommand(
   );
 }
 
+function fixedFindingJson(evidence: string) {
+  return JSON.stringify({
+    results: [{ id: "finding-1", status: "fixed", evidence }],
+  });
+}
+
 function linearIssue(identifier: string, comments: string[] = []) {
   const nodes = comments.map((body, index) => ({
     body,
@@ -1114,19 +1120,8 @@ describe("CLI skill commands", () => {
           model_providers: { synthetic: providerConfiguration },
         });
         expect(environment?.["SYNTHETIC_GATEWAY_KEY"]).toBe("SYNTHETIC_VALUE");
-        if (command === "verify-fix") {
-          output?.stdout.write(
-            JSON.stringify({
-              results: [
-                {
-                  id: "finding-1",
-                  status: "fixed",
-                  evidence: "Synthetic verification",
-                },
-              ],
-            }),
-          );
-        }
+        if (command === "verify-fix")
+          output?.stdout.write(fixedFindingJson("Synthetic verification"));
         return 0;
       });
       expect(
@@ -1186,19 +1181,12 @@ describe("CLI skill commands", () => {
             dependencies({
               onCodex: (args, output) => {
                 invocation = args;
-                if (command === "verify-fix") {
+                if (command === "verify-fix")
                   output?.stdout.write(
-                    JSON.stringify({
-                      results: [
-                        {
-                          id: "finding-1",
-                          status: "fixed",
-                          evidence: "The original issue no longer reproduces.",
-                        },
-                      ],
-                    }),
+                    fixedFindingJson(
+                      "The original issue no longer reproduces.",
+                    ),
                   );
-                }
                 return 0;
               },
             }),
@@ -1264,19 +1252,8 @@ describe("CLI skill commands", () => {
             dependencies({
               onCodex: (args, output) => {
                 invocation = args;
-                if (command === "verify-fix") {
-                  output?.stdout.write(
-                    JSON.stringify({
-                      results: [
-                        {
-                          id: "finding-1",
-                          status: "fixed",
-                          evidence: "The fix is present.",
-                        },
-                      ],
-                    }),
-                  );
-                }
+                if (command === "verify-fix")
+                  output?.stdout.write(fixedFindingJson("The fix is present."));
                 return 0;
               },
             }),
@@ -1583,99 +1560,91 @@ process.stdout.write(JSON.stringify({
     });
   });
 
+  const skills = ["validate", "patch", "verify-fix"] as const;
+  async function failedSkill(command: (typeof skills)[number], detail: string) {
+    const stdout = capture();
+    const stderr = capture();
+    const source = `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n");process.exitCode=7`;
+    expect(
+      await runCodexSkillCommand(
+        ["-e", source],
+        { command, stdout: stdout.stream, stderr: stderr.stream },
+        { command: process.execPath },
+      ),
+    ).toBe(7);
+    expect(stdout.text()).toBe("");
+    return stderr;
+  }
+  function skillCases<T>(cases: readonly (readonly [string, T])[]) {
+    return skills.flatMap((command) =>
+      cases.map(([detail, value]) => [command, detail, value] as const),
+    );
+  }
+  const unavailable =
+    "The selected model is unavailable for the current credentials.";
+  const authentication = "Authentication failed.";
+  const metadata = "Codex could not load its model metadata.";
+  const rateLimit = "The request was rate limited. Wait and retry.";
   test.each([
-    ...(["validate", "patch", "verify-fix"] as const).map(
-      (command) =>
-        [
-          command,
-          "insufficient permissions to use this model sk-proj-SYNTHETIC_KEEP",
-          "The selected model is unavailable for the current credentials.",
-        ] as const,
-    ),
-    ...(["validate", "patch", "verify-fix"] as const).flatMap((command) =>
+    ...skillCases([
       [
-        "model 'gpt-5' not found",
-        'model "synthetic/provider-v2" not found',
-        "model `synthetic-v2` not found",
-        "model `synthetic/provider-v2` not found",
-      ].map(
-        (detail) =>
-          [
-            command,
-            detail,
-            "The selected model is unavailable for the current credentials.",
-          ] as const,
-      ),
-    ),
-    ...(["validate", "patch", "verify-fix"] as const).flatMap((command) =>
+        "insufficient permissions to use this model sk-proj-SYNTHETIC_KEEP",
+        unavailable,
+      ],
+    ]),
+    ...skillCases([
+      ["model 'gpt-5' not found", unavailable],
+      ['model "synthetic/provider-v2" not found', unavailable],
+      ["model `synthetic-v2` not found", unavailable],
+      ["model `synthetic/provider-v2` not found", unavailable],
+    ]),
+    ...skillCases([
+      ["model metadata file not found", null],
+      ["model 'synthetic'\nconfiguration entry not found", null],
+      ["Safety policy: request refused.", null],
       [
-        "model metadata file not found",
-        "model 'synthetic'\nconfiguration entry not found",
-        "Safety policy: request refused.",
         "Error loading configuration: config.toml:4:2: model 'gpt-5' not found",
+        null,
+      ],
+      [
         "Error loading configuration: config.toml:4:2: responseStatus=401",
-        "/synthetic/model 'gpt-5' not found",
-        "model 'gpt-5' not found.log",
-        "permission denied opening /synthetic/response_status=403/cache",
-      ].map((detail) => [command, detail, null] as const),
-    ),
-    ...(["validate", "patch", "verify-fix"] as const).flatMap((command) =>
-      ["model cache not found", "permission denied opening model cache"].map(
-        (detail) =>
-          [
-            command,
-            detail,
-            "Codex could not load its model metadata.",
-          ] as const,
-      ),
-    ),
-    ...(["validate", "patch", "verify-fix"] as const).flatMap((command) =>
-      (
-        [
-          [
-            "error sending request for url (https://example.test/v1?source=config.toml:1:2:) HTTP 401 Unauthorized",
-            "Authentication failed.",
-          ],
-          [
-            "error sending request for url (https://example.test/v1#config.toml:1:2:) HTTP 403 Forbidden",
-            "The selected model is unavailable for the current credentials.",
-          ],
-        ] as const
-      ).map(([detail, advice]) => [command, detail, advice] as const),
-    ),
-    ...(["validate", "patch", "verify-fix"] as const).flatMap((command) =>
-      (
-        [
-          ["response_code=401", "Authentication failed."],
-          ["response.status=401", "Authentication failed."],
-          ["response.status_code=401", "Authentication failed."],
-          ["http.response.status_code=401", "Authentication failed."],
-          ["HTTP 401: model 'gpt-5' not found", "Authentication failed."],
-          [
-            "response-code=403",
-            "The selected model is unavailable for the current credentials.",
-          ],
-          ["responseCode=429", "The request was rate limited. Wait and retry."],
-          ["responseStatus=401", "Authentication failed."],
-          [
-            "response_status=403",
-            "The selected model is unavailable for the current credentials.",
-          ],
-          [
-            "HTTP responseStatus=429",
-            "The request was rate limited. Wait and retry.",
-          ],
-          [
-            '{"response_status":"429"}',
-            "The request was rate limited. Wait and retry.",
-          ],
-        ] as const
-      ).map(([detail, advice]) => [command, detail, advice] as const),
-    ),
+        null,
+      ],
+      ["/synthetic/model 'gpt-5' not found", null],
+      ["model 'gpt-5' not found.log", null],
+      ["permission denied opening /synthetic/response_status=403/cache", null],
+    ]),
+    ...skillCases([
+      ["model cache not found", metadata],
+      ["permission denied opening model cache", metadata],
+    ]),
+    ...skillCases([
+      [
+        "error sending request for url (https://example.test/v1?source=config.toml:1:2:) HTTP 401 Unauthorized",
+        authentication,
+      ],
+      [
+        "error sending request for url (https://example.test/v1#config.toml:1:2:) HTTP 403 Forbidden",
+        unavailable,
+      ],
+    ]),
+    ...skillCases([
+      ["response_code=401", authentication],
+      ["response.status=401", authentication],
+      ["response.status_code=401", authentication],
+      ["http.response.status_code=401", authentication],
+      ["HTTP 401: model 'gpt-5' not found", authentication],
+      ["response-code=403", unavailable],
+      ["responseCode=429", rateLimit],
+      ["responseStatus=401", authentication],
+      ["response_status=403", unavailable],
+      ["HTTP responseStatus=429", rateLimit],
+      ['{"response_status":"429"}', rateLimit],
+    ]),
     [
       "validate",
       "Provider configured in config.toml returned 401 Unauthorized",
-      "Authentication failed.",
+      authentication,
     ],
     [
       "validate",
@@ -1685,17 +1654,7 @@ process.stdout.write(JSON.stringify({
   ] as const)(
     "retains failure advice and diagnostics from the %s child: %s",
     async (command, detail, advice) => {
-      const stdout = capture();
-      const stderr = capture();
-      const source = `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n");process.exitCode=7`;
-      expect(
-        await runCodexSkillCommand(
-          ["-e", source],
-          { command, stdout: stdout.stream, stderr: stderr.stream },
-          { command: process.execPath },
-        ),
-      ).toBe(7);
-      expect(stdout.text()).toBe("");
+      const stderr = await failedSkill(command, detail);
       if (advice === null) {
         expect(stderr.text()).toBe(
           `codex-security: ${command} failed with exit code 7.\n${detail}\n`,
@@ -1708,33 +1667,16 @@ process.stdout.write(JSON.stringify({
   );
 
   test.each(
-    (["validate", "patch", "verify-fix"] as const).flatMap((command) =>
-      (
-        [
-          ["database model 'User' not found", false],
-          ['sqlite3 model "User" not found', false],
-          ["workbench model `User` not found", false],
-          [
-            "model 'synthetic' not found https://synthetic.invalid/database",
-            true,
-          ],
-        ] as const
-      ).map(([detail, modelAccess]) => [command, detail, modelAccess] as const),
-    ),
+    skillCases([
+      ["database model 'User' not found", false],
+      ['sqlite3 model "User" not found', false],
+      ["workbench model `User` not found", false],
+      ["model 'synthetic' not found https://synthetic.invalid/database", true],
+    ]),
   )(
     "distinguishes local and service named-model failures from the %s child: %s",
     async (command, detail, modelAccess) => {
-      const stdout = capture();
-      const stderr = capture();
-      const source = `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n");process.exitCode=7`;
-      expect(
-        await runCodexSkillCommand(
-          ["-e", source],
-          { command, stdout: stdout.stream, stderr: stderr.stream },
-          { command: process.execPath },
-        ),
-      ).toBe(7);
-      expect(stdout.text()).toBe("");
+      const stderr = await failedSkill(command, detail);
       expect(stderr.text()).toBe(
         `codex-security: ${command} failed with exit code 7.${modelAccess ? " The selected model is unavailable for the current credentials." : ""}\n${detail}\n`,
       );
@@ -1742,37 +1684,23 @@ process.stdout.write(JSON.stringify({
   );
 
   test.each(
-    (["validate", "patch", "verify-fix"] as const).flatMap((command) =>
-      (
-        [
-          ["SQLite database request timed_out waiting for lock", false],
-          ["sqlite3.OperationalError: timeout waiting for lock", false],
-          ["workbench request timed-out waiting for lock", false],
-          ["database network_error reading local state", false],
-          ['{"code":"request-timed-out"}', true],
-          ['{"code":"request.timed.out"}', true],
-          ["ENOENT: open /synthetic/request-timed-out/result.json", false],
-          ["request timed_out", true],
-          ["network.error", true],
-          ["ECONNABORTED", true],
-          ["request timed_out https://synthetic.invalid/database", true],
-        ] as const
-      ).map(([detail, network]) => [command, detail, network] as const),
-    ),
+    skillCases([
+      ["SQLite database request timed_out waiting for lock", false],
+      ["sqlite3.OperationalError: timeout waiting for lock", false],
+      ["workbench request timed-out waiting for lock", false],
+      ["database network_error reading local state", false],
+      ['{"code":"request-timed-out"}', true],
+      ['{"code":"request.timed.out"}', true],
+      ["ENOENT: open /synthetic/request-timed-out/result.json", false],
+      ["request timed_out", true],
+      ["network.error", true],
+      ["ECONNABORTED", true],
+      ["request timed_out https://synthetic.invalid/database", true],
+    ]),
   )(
     "preserves local and service timeout diagnostics from the %s child: %s",
     async (command, detail, network) => {
-      const stdout = capture();
-      const stderr = capture();
-      const source = `process.stdout.write(JSON.stringify({type:"turn.failed",error:{message:${JSON.stringify(detail)}}})+"\\n");process.exitCode=7`;
-      expect(
-        await runCodexSkillCommand(
-          ["-e", source],
-          { command, stdout: stdout.stream, stderr: stderr.stream },
-          { command: process.execPath },
-        ),
-      ).toBe(7);
-      expect(stdout.text()).toBe("");
+      const stderr = await failedSkill(command, detail);
       expect(stderr.text()).toBe(
         `codex-security: ${command} failed with exit code 7.${network ? " Codex could not connect to the model service. Check the network and retry." : ""}\n${detail}\n`,
       );

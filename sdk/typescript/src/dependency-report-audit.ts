@@ -1,4 +1,7 @@
-import { renderDependencyCode } from "./dependency-report-code.js";
+import {
+  escapeHtml as esc,
+  renderDependencyCode,
+} from "./dependency-report-code.js";
 import {
   citationKey,
   inputFor,
@@ -16,19 +19,6 @@ import {
 } from "./dependency-report-model.js";
 import { isRecord } from "./record.js";
 import { claimKey } from "./dependency-report-proof.js";
-const esc = (value: string) =>
-  value.replace(
-    /[&<>"'\r]/gu,
-    (ch) =>
-      ({
-        "&": "&amp;",
-        "<": "&lt;",
-        ">": "&gt;",
-        '"': "&quot;",
-        "'": "&#39;",
-        "\r": "&#13;",
-      })[ch]!,
-  );
 const code = (value: string) => `<code>${esc(value)}</code>`;
 const n = (count: number, noun: string) =>
   `${count.toLocaleString("en-US")} ${noun}${count === 1 ? "" : "s"}`;
@@ -228,12 +218,7 @@ function target(f: Finding) {
     ["Observation window", p?.observationWindow],
     ["Selected copy", p?.dependencySelection],
     ["Patch or backport", p?.patch],
-    [
-      "Tags",
-      tagsFor(f)
-        .map((t) => t.name)
-        .join(" · "),
-    ],
+    ["Tags", tagsFor(f).join(" · ")],
   ]);
   const services = servicesFor(f.item);
   const rows = list(

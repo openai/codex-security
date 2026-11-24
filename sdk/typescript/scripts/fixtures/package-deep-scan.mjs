@@ -20,6 +20,7 @@ import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 import { startRpc } from "./package-rpc.mjs";
 import { packageSmokeTimeouts } from "../package-smoke-timeouts.mjs";
+import { packageEnvironment } from "./package-environment.mjs";
 
 const installedRoot = await realpath(process.argv[2]);
 const { resolvePluginPython } = await import(
@@ -126,26 +127,8 @@ async function fixture(name, pluginRoot, executable) {
     join(home, "codex-security", "config.toml"),
     "[deep_scan]\nworkers = 1\nsubagents = 0\nstop_after_no_new = 2\nmax_discovery_runs = 2\n",
   );
-  const env = Object.fromEntries(
-    [
-      "PATH",
-      "Path",
-      "SystemRoot",
-      "WINDIR",
-      "ComSpec",
-      "PATHEXT",
-      "TMP",
-      "TEMP",
-      "TMPDIR",
-      "PYTHON",
-    ]
-      .filter((key) => process.env[key] !== undefined)
-      .map((key) => [key, process.env[key]]),
-  );
-  Object.assign(env, {
-    HOME: home,
-    USERPROFILE: home,
-    CODEX_HOME: home,
+  const env = {
+    ...packageEnvironment(home, ["PYTHON"]),
     CODEX_CLI_PATH: executable,
     CODEX_SECURITY_PLUGIN_ROOT: pluginRoot,
     CODEX_SECURITY_STATE_DIR: join(directory, "state"),
@@ -158,7 +141,7 @@ async function fixture(name, pluginRoot, executable) {
         }
       : {}),
     PACKAGE_DEEP_TRACE: join(directory, "executions.jsonl"),
-  });
+  };
   env.PYTHON = await resolvePluginPython({
     environment: env,
     protectedRoot: target,

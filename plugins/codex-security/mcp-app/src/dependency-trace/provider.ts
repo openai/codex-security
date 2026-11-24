@@ -27,6 +27,7 @@ import {
 import {
   isWithin,
   resolveTrustedExecutable,
+  type TraceTool,
   type TrustedExecutable,
 } from "../trusted-executable.ts";
 import { catalogEvidence, catalogNames, maxCatalogBytes } from "./catalog.ts";
@@ -489,9 +490,9 @@ export function localProvider(
   root: string,
   discoveryScope?: DiscoveryScope,
 ): TraceProvider {
-  const tools = new Map<string, Promise<TrustedExecutable | null>>();
+  const tools = new Map<TraceTool, Promise<TrustedExecutable | null>>();
   let inheritedDescriptors = true;
-  function tool(name: string) {
+  function tool(name: TraceTool) {
     const existing = tools.get(name);
     if (existing) return existing;
     const found = resolveTrustedExecutable(name, process.env, root);

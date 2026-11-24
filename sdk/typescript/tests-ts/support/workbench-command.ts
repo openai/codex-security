@@ -21,6 +21,7 @@ export function workbenchCommand(
 export function scanRegistrationArguments(
   repository: string,
   scanDirectory: string,
+  mode: "standard" | "deep" = "standard",
 ): string[] {
   return [
     "register-cli-scan",
@@ -31,7 +32,7 @@ export function scanRegistrationArguments(
     "--recipe-json",
     JSON.stringify({
       config: {},
-      mode: "standard",
+      mode,
       repository,
       target: { kind: "repository", paths: [] },
     }),
