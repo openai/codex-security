@@ -1,7 +1,10 @@
 import { responding } from "./support/responses.js";
 import { expect, test, mock } from "bun:test";
 import { workflowDestination } from "../src/finding-workflow.js";
-import { FindingsClient } from "../src/findings-client.js";
+import {
+  FindingsClient,
+  type FindingsRequest,
+} from "../src/findings-client.js";
 import { rejecting } from "./support/errors.js";
 
 const scope = { repositoryId: "synthetic-repository" };
@@ -9,6 +12,29 @@ const neighborhood = {
   finding: { findingId: "synthetic" },
   potentialDuplicates: [],
 };
+
+function syntheticClient(
+  request: FindingsRequest,
+  retries?: ConstructorParameters<typeof FindingsClient>[3],
+) {
+  return new FindingsClient(
+    "http://synthetic.test",
+    undefined,
+    request,
+    retries,
+  );
+}
+
+function clientRecordingDelays(request: FindingsRequest) {
+  const delays: number[] = [];
+  const client = syntheticClient(request, {
+    wait: async (delay) => {
+      delays.push(delay);
+    },
+    random: () => 0,
+  });
+  return { client, delays };
+}
 
 const errorMediaTypes = [
   "Application/JSON; charset=utf-8",
@@ -85,17 +111,14 @@ test.each(["lookup", "publish", "groups"] as const)(
 
 test.each(errorMediaTypes)("lookup retains %s errors", async (mediaType) => {
   const message = "No current embedding exists in the requested repository. 🧪";
-  const client = new FindingsClient(
-    "http://synthetic.test",
-    undefined,
-    async () =>
-      Response.json(
-        { error: "finding_not_indexed", message },
-        {
-          status: 404,
-          headers: { "Content-Type": mediaType },
-        },
-      ),
+  const client = syntheticClient(async () =>
+    Response.json(
+      { error: "finding_not_indexed", message },
+      {
+        status: 404,
+        headers: { "Content-Type": mediaType },
+      },
+    ),
   );
   await expect(
     client.potentialDuplicates("synthetic", scope),
@@ -109,17 +132,13 @@ test.each(errorMediaTypes)("lookup retains %s errors", async (mediaType) => {
 test("publishing preserves conflict details without retrying", async () => {
   const message = "The finding belongs to another repository.";
   let requests = 0;
-  const client = new FindingsClient(
-    "http://synthetic.test",
-    undefined,
-    async () => {
-      requests++;
-      return Response.json(
-        { error: "finding_conflict", message },
-        { status: 409 },
-      );
-    },
-  );
+  const client = syntheticClient(async () => {
+    requests++;
+    return Response.json(
+      { error: "finding_conflict", message },
+      { status: 409 },
+    );
+  });
   await expect(client.publish([], scope.repositoryId)).rejects.toMatchObject({
     code: "finding_conflict",
     status: 409,
@@ -160,9 +179,7 @@ test.each([
 ])(
   "keeps the HTTP diagnostic for a non-contract response: %s",
   async (body) => {
-    const client = new FindingsClient(
-      "http://synthetic.test",
-      undefined,
+    const client = syntheticClient(
       async () => new Response(body, { status: 409 }),
     );
     await expect(client.storeDedupeGroups([["a", "b"]])).rejects.toMatchObject({
@@ -174,10 +191,8 @@ test.each([
 );
 
 test("preserves an error code when the service omits a message", async () => {
-  const client = new FindingsClient(
-    "http://synthetic.test",
-    undefined,
-    async () => Response.json({ error: "not_found" }, { status: 404 }),
+  const client = syntheticClient(async () =>
+    Response.json({ error: "not_found" }, { status: 404 }),
   );
   await expect(client.publish([], scope.repositoryId)).rejects.toMatchObject({
     code: "not_found",
@@ -187,26 +202,15 @@ test("preserves an error code when the service omits a message", async () => {
 });
 
 test("structured errors preserve retries and Retry-After", async () => {
-  const delays: number[] = [];
   let requests = 0;
   const message = "Embedding credentials are unavailable.";
-  const client = new FindingsClient(
-    "http://synthetic.test",
-    undefined,
-    async () => {
-      requests++;
-      return Response.json(
-        { error: "embedding_unavailable", message },
-        { status: 503, headers: { "Retry-After": "12" } },
-      );
-    },
-    {
-      wait: async (delay) => {
-        delays.push(delay);
-      },
-      random: () => 0,
-    },
-  );
+  const { client, delays } = clientRecordingDelays(async () => {
+    requests++;
+    return Response.json(
+      { error: "embedding_unavailable", message },
+      { status: 503, headers: { "Retry-After": "12" } },
+    );
+  });
   await expect(client.storeDedupeGroups([["a", "b"]])).rejects.toMatchObject({
     code: "embedding_unavailable",
     status: 503,
@@ -219,50 +223,30 @@ test("structured errors preserve retries and Retry-After", async () => {
 
 test("lookup retries rate limits and honors Retry-After before continuing", async () => {
   let requests = 0;
-  const delays = mock(async (_delay: number) => {});
-  const client = new FindingsClient(
-    "http://synthetic.test",
-    undefined,
-    async () => {
-      requests++;
-      return requests === 1
-        ? new Response("busy", {
-            status: 429,
-            headers: { "Retry-After": "12" },
-          })
-        : Response.json(neighborhood);
-    },
-    {
-      wait: delays,
-      random: () => 0,
-    },
-  );
+  const { client, delays } = clientRecordingDelays(async () => {
+    requests++;
+    return requests === 1
+      ? new Response("busy", {
+          status: 429,
+          headers: { "Retry-After": "12" },
+        })
+      : Response.json(neighborhood);
+  });
   expect(
     (await client.potentialDuplicates("synthetic", scope)).finding.findingId,
   ).toBe("synthetic");
   expect(requests).toBe(2);
-  expect(delays.mock.calls.map(([value]) => value)).toEqual([12000]);
+  expect(delays).toEqual([12000]);
 });
 
 test("lookup retries network and truncated JSON responses within the attempt budget", async () => {
   let requests = 0;
-  const delays: number[] = [];
-  const client = new FindingsClient(
-    "http://synthetic.test",
-    undefined,
-    async () => {
-      requests++;
-      if (requests === 1) throw new TypeError("fetch failed");
-      if (requests === 2) return new Response('{"finding":');
-      return Response.json(neighborhood);
-    },
-    {
-      wait: async (delay) => {
-        delays.push(delay);
-      },
-      random: () => 0,
-    },
-  );
+  const { client, delays } = clientRecordingDelays(async () => {
+    requests++;
+    if (requests === 1) throw new TypeError("fetch failed");
+    if (requests === 2) return new Response('{"finding":');
+    return Response.json(neighborhood);
+  });
   expect(
     (await client.potentialDuplicates("synthetic", scope)).finding.findingId,
   ).toBe("synthetic");
@@ -275,14 +259,9 @@ test.each([400, 401, 403, 404, 409, 501])(
   "lookup does not retry HTTP %i",
   async (status) => {
     const observeRequests = mock(responding("failed", status));
-    const client = new FindingsClient(
-      "http://synthetic.test",
-      undefined,
-      observeRequests,
-      {
-        wait: rejecting("Unexpected retry"),
-      },
-    );
+    const client = syntheticClient(observeRequests, {
+      wait: rejecting("Unexpected retry"),
+    });
     await expect(
       client.potentialDuplicates("synthetic", scope),
     ).rejects.toThrow(`HTTP ${status}`);
@@ -295,14 +274,7 @@ test.each([408, 429, 500, 502, 503, 504])(
   async (status) => {
     const observeRequests = mock(responding("unavailable", status));
     const wait = mock(async () => {});
-    const client = new FindingsClient(
-      "http://synthetic.test",
-      undefined,
-      observeRequests,
-      {
-        wait,
-      },
-    );
+    const client = syntheticClient(observeRequests, { wait });
     await expect(
       client.potentialDuplicates("synthetic", scope),
     ).rejects.toThrow(`HTTP ${status}`);
@@ -314,9 +286,7 @@ test.each([408, 429, 500, 502, 503, 504])(
 test("group write retries the identical payload after a lost acknowledgement", async () => {
   const bodies: unknown[] = [];
   const groups = [["synthetic-a", "synthetic-b"]];
-  const client = new FindingsClient(
-    "http://synthetic.test",
-    undefined,
+  const client = syntheticClient(
     async (_url, init) => {
       bodies.push(init.body);
       if (bodies.length === 1) throw new TypeError("fetch failed");
@@ -354,9 +324,7 @@ test("Retry-After accepts an HTTP date", async () => {
   const until = "Fri, 01 Jan 2100 00:00:00 GMT";
   let requests = 0;
   const sleep = mock(async (_value: number) => {});
-  const client = new FindingsClient(
-    "http://synthetic.test",
-    undefined,
+  const client = syntheticClient(
     async () => {
       requests++;
       return requests === 1
@@ -378,9 +346,7 @@ test.each(["lookup", "publish", "groups"] as const)(
   "%s delivers HTTP failures without waiting for response cleanup",
   async (operation) => {
     const cancel = mock(() => new Promise<void>(() => {}));
-    const client = new FindingsClient(
-      "http://synthetic.test",
-      undefined,
+    const client = syntheticClient(
       async () => new Response(new ReadableStream({ cancel }), { status: 503 }),
       { wait: async () => {} },
     );

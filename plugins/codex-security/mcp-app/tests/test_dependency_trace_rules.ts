@@ -1,11 +1,9 @@
+import { available } from "./support/native-trace-rules.ts";
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { writeFile, chmod, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import test, { type TestContext } from "node:test";
-import { promisify } from "node:util";
-import { pathToFileURL } from "node:url";
-import { buildServer, applicationRoot } from "./build-server.ts";
+import { loadGraphSession } from "./build-server.ts";
 import { traceInputSchema } from "../src/dependency-trace/schema.ts";
 import { createDependencyTracer } from "../src/dependency-trace/trace.ts";
 import { localProvider } from "../src/dependency-trace/provider.ts";
@@ -34,9 +32,7 @@ const input = (files: string[], rules?: Record<string, unknown>[]) =>
     time_budget_ms: 60000,
   });
 async function setup(t: TestContext, files: Record<string, string>) {
-  try {
-    await promisify(execFile)("opengrep", ["--version"]);
-  } catch {
+  if (!(await available("opengrep"))) {
     t.skip("opengrep required");
     return;
   }
@@ -512,13 +508,7 @@ test("normal graph session accepts rules and retains full host proof before proj
   const dirs = createTemporaryDirectories(true);
   t.after(() => dirs.cleanup());
   const runtime = await dirs.create("trace-custom-session-");
-  const bundle = join(runtime, "session.cjs");
-  await buildServer(bundle, {
-    entryPoints: [join(applicationRoot, "src/dependency-trace/session.ts")],
-  });
-  const { createDependencyGraphSession } = (
-    await import(pathToFileURL(bundle).href)
-  ).default;
+  const { createDependencyGraphSession } = await loadGraphSession(runtime);
   const session = await createDependencyGraphSession(s.root, false, {
     fullTraceReply: true,
   });
@@ -528,12 +518,15 @@ test("normal graph session accepts rules and retains full host proof before proj
     "trace_codex_security_code",
     input(["calls.py"], rules),
   );
+  assert.ok(Array.isArray(raw.ruleExecutions));
+  assert.ok(Array.isArray(raw.trace));
   assert.deepEqual(raw.ruleExecutions[0].config, { rules });
   assert.equal(raw.trace.length, 1);
   const bounded = session.boundTraceResponse(raw);
   assert.equal(JSON.stringify(bounded).includes('"pattern"'), false);
   const summary = await session.call("query_codex_security_graph", {});
   assert.equal(summary.code_paths_found, 1);
+  assert.ok(Array.isArray(summary.ruleExecutions));
   assert.equal(summary.ruleExecutions.length, 1);
   assert.deepEqual(summary.ruleExecutions[0].ruleIds, ["session-rule"]);
   assert.equal(summary.ruleExecutions[0].config, undefined);
