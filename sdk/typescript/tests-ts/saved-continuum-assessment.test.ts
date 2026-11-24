@@ -829,6 +829,96 @@ test.each(["duplicate", "invalid"])(
   },
 );
 
+const moved = {
+  ...completed,
+  issueId: "next",
+  issueArn: prefix + "/code-issues/next",
+  verdict: "NOT_EXPLOITABLE" as const,
+  scoringArtifactId: undefined,
+  scoringPending: true,
+  freshness: { ...completed.freshness, validatedAt: "2026-11-21T01:30:00Z" },
+};
+const validationTie = {
+  ...completed,
+  verdict: "UNKNOWN",
+  terminalStatus: undefined,
+  resultScope: "issue" as const,
+  validationArtifactId: undefined,
+  scoringArtifactId: undefined,
+  freshness: {
+    stale: false,
+    reasons: [],
+    evidenceCreatedAt: completed.freshness.validatedAt,
+  },
+};
+
+test("a confirmed issue move supersedes the old verdict and score in CLI request order", async () => {
+  await rm(path);
+  const scored = {
+    ...completed,
+    providerSeverity: "critical",
+    reachableFromAttacker: true,
+    freshness: { ...completed.freshness, scoredAt: "2026-11-21T03:00:00Z" },
+  };
+  // The old poll finishes late and has newer evidence for a different issue.
+  await saveCli([moved], "env", root, 2);
+  expect(await saveCli([scored], "env", root, 1)).toContain("occ_a");
+  const selected = (await read()).get("occ_a");
+  expect(selected?.verdict).toBe("NOT_EXPLOITABLE");
+  expect(selected?.issueSeverity).toBeUndefined();
+  expect(selected?.issueReachableFromAttacker).toBeUndefined();
+
+  // A failed lookup on the way back cannot revive either verdict.
+  await saveCli([{ ...completed, verdict: "UNAVAILABLE" }], "env", root, 3);
+  expect((await read()).size).toBe(0);
+  const back = {
+    ...completed,
+    scoringArtifactId: undefined,
+    scoringPending: true,
+  };
+  expect(await saveCli([back], "env", root, 4)).toBeUndefined();
+  expect((await read()).get("occ_a")).toEqual({
+    ...expectedCompleted,
+    scoringPending: true,
+  });
+  await writeFile(path, JSON.stringify(config));
+  await save([scored]);
+  expect((await read()).get("occ_a")?.issueSeverity).toBeUndefined();
+});
+
+test("returning to an issue does not settle a disputed verdict", async () => {
+  await saveCli([validationTie]);
+  await saveCli([moved]);
+  await saveCli([completed]);
+  expect((await read()).size).toBe(0);
+  const newer = {
+    ...completed,
+    validationArtifactId: "resolved",
+    freshness: { ...completed.freshness, validatedAt: "2026-11-21T02:01:00Z" },
+  };
+  await saveCli([newer]);
+  expect((await read()).get("occ_a")?.verdict).toBe("EXPLOITABLE");
+});
+
+test("undated evidence from a detached issue cannot mask a dated confirmation", async () => {
+  await saveCli([{ ...completed, freshness: { stale: false, reasons: [] } }]);
+  await saveCli([
+    { ...completed, verdict: "UNAVAILABLE", issueUnlinked: true },
+  ]);
+  await saveCli([completed]);
+  expect((await read()).get("occ_a")).toEqual(expectedCompleted);
+});
+
+test("issue moves require ordered CLI evidence and agreement with the workbench", async () => {
+  await saveCli([completed, moved], "env", root, 1);
+  expect((await read()).size).toBe(0);
+  await save([completed]);
+  expect(await saveCli([moved], "env", root, 2)).toContain("occ_a");
+  expect((await read()).size).toBe(0);
+  await save([moved]);
+  expect((await read()).get("occ_a")?.verdict).toBe("NOT_EXPLOITABLE");
+});
+
 test("a confirmed unlink suppresses previous verdicts until the issue is established again", async () => {
   const unlinked = {
     itemId: completed.itemId,
@@ -850,21 +940,100 @@ test("a confirmed unlink suppresses previous verdicts until the issue is establi
   await rm(path + ".result");
   await saveCli([unlinked]);
   expect((await read()).get("occ_a")?.verdict).toBe("UNAVAILABLE");
-  await saveCli([
-    {
-      ...completed,
-      issueId: "next",
-      issueArn: prefix + "/code-issues/next",
-      verdict: "NOT_EXPLOITABLE",
-    },
-  ]);
+  await saveCli([moved]);
   expect((await read()).get("occ_a")?.verdict).toBe("NOT_EXPLOITABLE");
+});
+
+function pluginRetries(disputed: ValidationProviderAssessment) {
+  let previous = [disputed];
+  return async (update: ValidationProviderAssessment) => {
+    const result = await assessPluginFindings(
+      config,
+      [{ occurrenceId: completed.itemId }],
+      { repositoryPath: repo },
+      () => ({
+        name: "continuum",
+        version: "1",
+        async validate() {
+          return update;
+        },
+      }),
+      previous,
+    );
+    if (result.retry) previous = JSON.parse(JSON.stringify(result.retry));
+    return result;
+  };
+}
+
+test("plugin retries require newer validation to resolve a dispute on the same issue", async () => {
+  const disputedAt = completed.freshness.validatedAt;
+  const record = {
+    ...completed,
+    severityBefore: "high",
+    severityAfter: "high",
+  };
+  const diagnostic = "Conflicting validation artifacts (first, second)";
+  const disputed: ValidationProviderAssessment = {
+    disposition: "deferred",
+    report: diagnostic,
+    unavailable: diagnostic,
+    provenance: { provider: "continuum", providerVersion: "1" },
+    record: { ...record, ...validationTie, unavailable: diagnostic },
+  };
+  const retry = pluginRetries(disputed);
+  const resolved = (
+    evidenceCreatedAt: string,
+    issueId = record.issueId,
+  ): ValidationProviderAssessment => ({
+    disposition: "reportable",
+    report: record.verdict,
+    provenance: disputed.provenance,
+    record: {
+      ...record,
+      issueId,
+      issueArn: prefix + "/code-issues/" + issueId,
+      issueFindingCount: 3,
+      providerSeverity: "high",
+      freshness: {
+        ...record.freshness,
+        evidenceCreatedAt,
+        validatedAt: evidenceCreatedAt,
+      },
+    },
+  });
+  await retry({
+    ...disputed,
+    unavailable: "Association pending",
+    record: {
+      ...record,
+      verdict: "UNAVAILABLE",
+      terminalStatus: undefined,
+      issueUnlinked: true,
+    },
+  });
+  for (const time of [disputedAt, "2026-11-21T01:59:00Z"]) {
+    const result = await retry(resolved(time));
+    expect(result.status).toBe("incomplete");
+    expect(result.records.items[0]).toMatchObject({
+      verdict: "UNKNOWN",
+      issueFindingCount: 3,
+      providerSeverity: "high",
+    });
+    expect(result.report).toContain(diagnostic);
+    expect(result.report).not.toContain(record.verdict);
+  }
+  expect((await retry(resolved("2026-11-21T02:00:00.000001Z"))).status).toBe(
+    "complete",
+  );
+  expect((await retry(resolved(disputedAt, "issue-b"))).status).toBe(
+    "complete",
+  );
 });
 
 test("plugin retries require a strictly newer score after a dispute", async () => {
   const pending = {
     disposition: "deferred" as const,
-    report: "Waiting for score",
+    report: "Score lookup failed",
     provenance: { provider: "continuum", providerVersion: "1" },
     record: {
       ...completed,
@@ -877,60 +1046,98 @@ test("plugin retries require a strictly newer score after a dispute", async () =
   };
   const disputed = {
     ...pending,
+    report: "Conflicting scores",
     record: {
       ...pending.record,
       freshness: { ...completed.freshness, scoredAt: "2026-11-21T03:00:00Z" },
     },
   };
   const disputedAt = disputed.record.freshness.scoredAt;
-  let previous: ValidationProviderAssessment[] = [disputed];
-  const newer = "2026-11-21T03:00:00.000001Z";
-  for (const scoredAt of [
-    undefined,
-    "2026-11-21T02:59:00Z",
-    disputedAt,
-    newer,
-  ]) {
-    const result = await assessPluginFindings(
-      config,
-      [{ occurrenceId: "occ_a" }],
-      { repositoryPath: repo },
-      () => ({
-        name: "continuum",
-        version: "1",
-        async validate() {
-          if (!scoredAt) return pending;
-          return {
-            ...pending,
-            disposition: "reportable" as const,
-            record: {
-              ...pending.record,
-              scoringPending: undefined,
-              scoringArtifactId: "score",
-              providerSeverity: "critical",
-              reachableFromAttacker: true,
-              freshness: { ...completed.freshness, scoredAt },
-            },
-          };
-        },
-      }),
-      previous,
-    );
-    await save(result.records.items, { retry: result.retry });
-    const assessment = (await read()).get("occ_a");
-    expect(assessment?.verdict).toBe("EXPLOITABLE");
-    if (scoredAt === newer) {
-      expect(result.retry).toBeNull();
-      expect(assessment?.issueSeverity).toBe("critical");
-      expect(assessment?.issueReachableFromAttacker).toBe(true);
-    } else {
-      expect(result.retry).not.toBeNull();
-      previous = result.retry!;
-      expect(assessment?.freshness.scoredAt).toBe(disputedAt);
-      expect(assessment?.issueSeverity).toBeUndefined();
-      expect(assessment?.issueReachableFromAttacker).toBeUndefined();
-    }
-  }
+  const retry = pluginRetries(disputed);
+  const scored = (scoredAt: string): ValidationProviderAssessment => ({
+    ...pending,
+    disposition: "reportable",
+    record: {
+      ...pending.record,
+      scoringPending: undefined,
+      scoringArtifactId: "score",
+      providerSeverity: "critical",
+      reachableFromAttacker: true,
+      freshness: { ...completed.freshness, scoredAt },
+    },
+  });
+
+  const failed = await retry({
+    ...pending,
+    unavailable: pending.report,
+    record: {
+      ...pending.record,
+      reasons: [{ basis: "INFERRED", reason: pending.report }],
+      unavailable: pending.report,
+      freshness: { ...completed.freshness },
+    },
+  });
+  expect(failed.report).toContain(pending.report);
+  expect(failed.records.items[0]?.freshness.scoredAt).toBe(disputedAt);
+  const recovered = await retry(scored("2026-11-21T02:59:00Z"));
+  expect(recovered.report).toContain("newer score");
+  expect(JSON.stringify(recovered.records)).not.toContain(pending.report);
+
+  const older = {
+    ...pending,
+    record: {
+      ...pending.record,
+      validationArtifactId: "earlier",
+      freshness: {
+        ...completed.freshness,
+        validatedAt: "2026-11-21T01:30:00Z",
+      },
+    },
+  };
+  expect((await retry(older)).records.items[0]?.verdict).toBe(
+    completed.verdict,
+  );
+  await retry({ ...pending, record: { ...pending.record, ...moved } });
+  const returned = await retry(older);
+  expect(returned.records.items[0]?.verdict).toBe("UNKNOWN");
+  const tied = await retry(scored(disputedAt));
+  expect(tied.retry).not.toBeNull();
+  await save(tied.records.items, { retry: tied.retry });
+  const assessment = (await read()).get("occ_a");
+  expect(assessment?.verdict).toBe("EXPLOITABLE");
+  expect(assessment?.freshness.scoredAt).toBe(disputedAt);
+  expect(assessment?.issueSeverity).toBeUndefined();
+  expect(assessment?.issueReachableFromAttacker).toBeUndefined();
+
+  const newer = await retry(scored("2026-11-21T03:00:00.000001Z"));
+  expect(newer.retry).toBeNull();
+  await save(newer.records.items);
+  expect((await read()).get("occ_a")).toMatchObject({
+    verdict: "EXPLOITABLE",
+    issueSeverity: "critical",
+    issueReachableFromAttacker: true,
+  });
+
+  // A CLI confirmation must start after the workbench saw the issue return.
+  await save(returned.records.items, { retry: returned.retry });
+  await saveCli(newer.records.items, "env", root, 1);
+  expect((await read()).get("occ_a")?.issueSeverity).toBeUndefined();
+  await saveCli(newer.records.items);
+  expect((await read()).get("occ_a")?.issueSeverity).toBe("critical");
+  const again = await pluginRetries(returned.retry![0]!)(older);
+  await save(again.records.items, { retry: again.retry });
+  expect((await read()).get("occ_a")?.issueSeverity).toBe("critical");
+
+  const split = pluginRetries(disputed);
+  const opposite = scored(disputedAt);
+  opposite.record!.validationArtifactId = "other";
+  opposite.record!.verdict = "NOT_EXPLOITABLE";
+  const ambiguous = await split(opposite);
+  expect(ambiguous.records.items[0]?.verdict).toBe("UNKNOWN");
+  expect(ambiguous.records.items[0]?.validationArtifactId).toBeUndefined();
+  expect((await split(scored("2026-11-21T03:01:00Z"))).status).toBe(
+    "incomplete",
+  );
 });
 
 test("a pending linked score survives transport failure unless the issue changed", async () => {

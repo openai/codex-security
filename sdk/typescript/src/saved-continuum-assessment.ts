@@ -201,17 +201,21 @@ export async function saveCliContinuumAssessments(
   );
   const skipped = accepted.filter((item) => {
     const selected = active.get(item.itemId);
-    return !selected || !sameAdmission(selected, item);
+    return (
+      !selected ||
+      !sameAdmission(selected, item) ||
+      (item.issueArn && item.issueArn !== selected.issueArn)
+    );
   });
   if (skipped.length)
-    return `Patch and verify cannot use this Continuum submission for ${skipped.map((item) => item.itemId).join(", ")}. A newer request, a different workbench submission, or conflicting assessments prevented selection. Check the original destination and submission before retrying. Local findings remain available.`;
+    return `Patch and verify cannot use this Continuum assessment for ${skipped.map((item) => item.itemId).join(", ")}. A newer request, a different workbench submission, or conflicting assessments prevented selection. Check the original destination and submission before retrying. Local findings remain available.`;
 }
 
 function sameAdmission(a: Admission, b: Admission) {
   return a.findingArn === b.findingArn && a.submittedAt === b.submittedAt;
 }
 
-function evidenceTime(item: Conclusion) {
+export function evidenceTime(item: Pick<Conclusion, "freshness">) {
   return item.freshness.evidenceCreatedAt ?? item.freshness.validatedAt ?? "";
 }
 
@@ -228,34 +232,98 @@ function withoutScore(item: Conclusion) {
   return { ...result, freshness: validationTime };
 }
 
-/** Compare validation first. A later scorer can update the same verdict.
- * Conflicting scores alone do not invalidate an undisputed verdict. */
-function selectConclusion(
-  records: Conclusion[],
-  plugin: Conclusion | undefined,
-) {
-  // A successful lookup without an issue supersedes earlier CLI verdicts.
-  // CLI polls and the workbench cache have no common ordering.
-  const unlink = records.findLastIndex((item) => item.issueUnlinked);
-  if (unlink >= 0) records = records.slice(unlink);
-  if (plugin?.issueUnlinked && records.some((item) => item.issueArn)) return;
+// The workbench saw older evidence on return to a disputed issue. Its
+// public UNKNOWN result alone cannot distinguish this from a validation tie.
+const disputedScore = z.object({
+  reconfirmAfter: z.number(),
+  record: conclusion,
+});
+function pendingScore(plugin: Conclusion | undefined, retry: unknown) {
   if (
-    plugin?.issueArn &&
-    unlink >= 0 &&
+    !plugin?.issueArn ||
+    plugin.verdict !== "UNKNOWN" ||
+    plugin.validationArtifactId
+  )
+    return;
+  const saved = retry as { disputes?: Record<string, unknown> } | undefined;
+  const pending = disputedScore.safeParse(
+    saved?.disputes?.[plugin.issueArn],
+  ).data;
+  const tied = pending?.record;
+  if (
+    tied?.scoringPending &&
+    tied.freshness.scoredAt &&
+    tied.validationArtifactId &&
+    tied.itemId === plugin.itemId &&
+    sameAdmission(tied, plugin) &&
+    tied.issueArn === plugin.issueArn &&
+    evidenceTime(tied) === evidenceTime(plugin)
+  )
+    return pending;
+}
+
+/** CLI requests establish membership in start order. Only compare artifacts
+ * within one issue. The workbench has no common ordering with CLI requests. */
+function selectConclusion(
+  cli: { item: Conclusion; requestedAt: number | undefined }[],
+  plugin: Conclusion | undefined,
+  retry: unknown,
+) {
+  const issue = cli.findLast(({ item }) => item.issueArn || item.issueUnlinked)
+    ?.item.issueArn;
+  const change = cli.findLast(
+    ({ item }) =>
+      item.issueUnlinked || (item.issueArn && item.issueArn !== issue),
+  );
+  if (plugin?.issueUnlinked && issue) return;
+  if (change && plugin?.issueArn && plugin.issueArn !== issue) return;
+
+  const pending = pendingScore(plugin, retry);
+  const cutoff = Math.max(
+    change ? (change.requestedAt ?? Infinity) : -Infinity,
+    pending?.reconfirmAfter ?? -Infinity,
+  );
+  const records: Conclusion[] = [];
+  const historical: Conclusion[] = [];
+  for (const entry of cli) {
+    if (
+      (!change && !pending) ||
+      (entry === change && !issue) ||
+      (entry.requestedAt !== undefined && entry.requestedAt > cutoff)
+    )
+      records.push(entry.item);
+    // Only dated evidence from an earlier visit can establish a tie.
+    else if (issue && entry.item.issueArn === issue && evidenceTime(entry.item))
+      historical.push(entry.item);
+  }
+  // A failed issue read can reveal a move but cannot confirm membership.
+  if (
+    (change || pending) &&
+    issue &&
     !records.some(
-      (item) =>
-        item.issueArn === plugin.issueArn && item.verdict !== "UNAVAILABLE",
+      (item) => item.issueArn === issue && item.verdict !== "UNAVAILABLE",
     )
   )
     return;
-  if (plugin) records.unshift(plugin);
+  // A matching workbench result might also predate the move.
+  if (pending && issue === pending.record.issueArn)
+    historical.push(pending.record);
+  else if (change && plugin?.issueArn) historical.push(plugin);
+  else if (plugin) records.unshift(plugin);
+  return selectEvidence(records, historical);
+}
+
+/** Older visits to the same issue can reveal a dispute, but cannot supply
+ * a verdict or score after membership changes. */
+function selectEvidence(records: Conclusion[], historical: Conclusion[]) {
   const terminal = records.filter((item) => item.verdict !== "UNAVAILABLE");
   if (!terminal.length) return records.at(-1);
   // A failed artifact read can still confirm that the finding changed issues.
   const issue = terminal[0]!.issueArn;
   if (records.some(({ issueArn }) => issueArn && issueArn !== issue)) return;
   let latest = [terminal[0]!];
-  for (const item of terminal.slice(1)) {
+  for (const item of terminal.slice(1).concat(historical)) {
+    if (item.verdict === "UNAVAILABLE") continue;
     const prev = latest[0]!;
     if (isDeepStrictEqual(prev, item)) continue;
     if (!prev.issueArn || prev.issueArn !== item.issueArn) return;
@@ -265,6 +333,7 @@ function selectConclusion(
     if (delta === 0) latest.push(item);
   }
   const first = latest[0]!;
+  if (historical.includes(first)) return;
   if (latest.length === 1) return first;
   const validation = withoutScore(first);
   if (
@@ -285,6 +354,7 @@ function selectConclusion(
   const best = scored[0];
   if (
     best &&
+    !historical.includes(best) &&
     !best.scoringPending &&
     !scored.some(
       (item) =>
@@ -318,7 +388,7 @@ async function readAssessments(
   )
     return assessments;
   const items = saved?.records.items ?? [];
-  const grouped = Map.groupBy(items, ({ itemId }) => itemId);
+  const grouped = Map.groupBy(items.keys(), (index) => items[index]!.itemId);
   const legacy =
     saved && saved.schemaVersion !== continuumAssessmentVersion
       ? verifiedAdmissions(items, config)
@@ -332,23 +402,29 @@ async function readAssessments(
     const group = grouped.get(occurrence);
     const entries = snapshots.get(occurrence);
     if ((group && group.length !== 1) || entries === null) continue;
-    const item = group?.[0];
+    const index = group?.[0];
+    const item = index === undefined ? undefined : items[index];
     if (item?.["admissionConflict"]) continue;
     const plugin =
       !legacy && destination && item ? project(item, destination) : undefined;
     const pin = plugin ?? legacy?.get(occurrence);
     if (item && !pin && !unsubmitted(item)) continue;
     const candidates = (entries ?? []).flatMap(
-      ({ record, environmentId }) =>
-        project(record, destination ?? { environment_id: environmentId }) ?? [],
+      ({ record, environmentId, requestedAt }) => {
+        const item = project(
+          record,
+          destination ?? { environment_id: environmentId },
+        );
+        return item ? [{ item, requestedAt }] : [];
+      },
     );
-    const selected = pin ?? candidates.at(-1);
+    const selected = pin ?? candidates.at(-1)?.item;
     if (!selected) continue;
     // Only a CLI-only scan can switch admissions on explicit validation.
     // Never pick between distinct AWS accounts, regions or environments.
     if (
       !pin &&
-      candidates.some((item) =>
+      candidates.some(({ item }) =>
         destination
           ? !sameAdmission(item, selected)
           : scopeOf(item) !== scopeOf(selected),
@@ -356,8 +432,9 @@ async function readAssessments(
     )
       continue;
     const active = selectConclusion(
-      candidates.filter((item) => sameAdmission(item, selected)),
+      candidates.filter(({ item }) => sameAdmission(item, selected)),
       plugin,
+      index === undefined ? undefined : saved?.retry?.[index],
     );
     if (active) assessments.set(occurrence, active);
   }
