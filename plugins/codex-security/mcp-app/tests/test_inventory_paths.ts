@@ -5,13 +5,10 @@ import childProcess from "node:child_process";
 import { createRequire, syncBuiltinESMExports } from "node:module";
 import { constants, tmpdir } from "node:os";
 import { join } from "node:path";
-import { importSource } from "./import-module.ts";
+import { bundledMcpUrl, importSource } from "./import-module.ts";
 import type { WindowsBinding } from "../../native/windows-binding.mjs";
 
-const helperUrl = new URL(
-  "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
-  import.meta.url,
-);
+const helperUrl = bundledMcpUrl("helpers");
 const { git, runTool } = await importSource("src/helpers/inventory-git.ts", {
   define: { "import.meta.url": JSON.stringify(helperUrl.href) },
 });

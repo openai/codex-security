@@ -10,19 +10,21 @@ import pytest
 from test_workbench_standard_deep_results import (
     accepted_standard_worker,
     deep_scan_fixture,
-    standard_finding,
 )
 from workbench_test_support import (
+    archive_finding,
     cancel_scan,
     fail_deep_scan,
     get_scan,
+    pending_review,
     preserve_scan_results,
     read_review_state,
+    review_surface,
     saved_draft,
     select_checkpoint,
     upsert_deep_worker,
     worker_paths,
-    write_checkpoint,
+    write_draft_checkpoint,
     write_result_draft,
 )
 
@@ -54,9 +56,9 @@ def coverage_worker(
 def test_stopped_deep_scan_projects_worker_coverage_without_parent_aggregate(
     tmp_path: Path, termination: str, accepted: bool
 ) -> None:
-    state_dir, codex_home, target, scan_dir, scan_id = deep_scan_fixture(tmp_path, workers=2)
+    state_dir, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path, workers=2)
     environment = {"CODEX_HOME": str(codex_home)}
-    finding = standard_finding(tmp_path, scan_id, target)
+    finding = archive_finding("app.py")
     workers = {}
     originals = {}
     for name in ("first", "second"):
@@ -73,20 +75,11 @@ def test_stopped_deep_scan_projects_worker_coverage_without_parent_aggregate(
                     complete=accepted,
                     findings=[finding] if name == "first" else [],
                     surfaces=[
-                        {
-                            "id": "api",
-                            "label": name,
-                            "disposition": "no_issue_found",
-                            "receiptRefs": ["artifacts/review.md"],
-                        }
+                        review_surface(
+                            "api", name, "no_issue_found", receipts=["artifacts/review.md"]
+                        )
                     ],
-                    deferred=[
-                        {
-                            "id": "review",
-                            "reason": f"Review {name} remains.",
-                            "surfaceIds": ["api"],
-                        }
-                    ],
+                    deferred=[pending_review("review", f"Review {name} remains.", "api")],
                 )
             )
         )
@@ -162,14 +155,7 @@ def test_stopped_worker_rejects_receipts_outside_its_artifacts_directory(
             saved_draft(
                 scan_id,
                 complete=accepted,
-                surfaces=[
-                    {
-                        "id": "api",
-                        "label": "API",
-                        "disposition": "no_issue_found",
-                        "receiptRefs": ["result.json"],
-                    }
-                ],
+                surfaces=[review_surface("api", "API", "no_issue_found", receipts=["result.json"])],
             )
         )
     )
@@ -211,7 +197,7 @@ def test_stopped_worker_links_follow_explicit_surface_identity_through_collision
                 scan_id,
                 complete=True,
                 surfaces=[anonymous, explicit] if anonymous_first else [explicit, anonymous],
-                deferred=[{"id": "review", "reason": "Review remains.", "surfaceIds": ["api"]}],
+                deferred=[pending_review("review", "Review remains.", "api")],
             )
         )
     )
@@ -246,42 +232,33 @@ def test_pending_worker_surface_receipt_precedes_historical_receipt_repair(tmp_p
     historical_receipt.write_text("Historical writer review.\n")
     other_receipt = artifacts / "other.md"
     other_receipt.write_text("Current writer review.\n")
-    surface = {
-        "id": "api",
-        "label": "API",
-        "disposition": "no_issue_found",
-        "receiptRefs": ["artifacts/Review.md"],
-    }
+    surface = review_surface("api", "API", "no_issue_found", receipts=["artifacts/Review.md"])
     writer = {
         **surface,
         "id": "writer",
         "label": "Writer",
         "receiptRefs": ["artifacts/other.md"],
     }
-    task = {"id": "review-api", "reason": "Review remains.", "surfaceIds": ["api"]}
+    task = pending_review("review-api", "Review remains.", "api")
     write_result_draft(
         result,
         saved_draft(scan_id, complete=True, surfaces=[surface, writer], deferred=[task]),
         mtime_ns=100,
     )
-    historical = write_checkpoint(
-        output / "checkpoints",
-        saved_draft(
-            scan_id,
-            complete=True,
-            surfaces=[
-                {
-                    **writer,
-                    "receiptRefs": ["artifacts/review.md", "artifacts/missing.md"],
-                }
-            ],
-        ),
+    historical = write_draft_checkpoint(
+        output,
+        scan_id,
+        complete=True,
+        surfaces=[
+            {
+                **writer,
+                "receiptRefs": ["artifacts/review.md", "artifacts/missing.md"],
+            }
+        ],
         mtime_ns=50,
     )
-    selected = write_checkpoint(
-        output / "checkpoints",
-        saved_draft(scan_id, complete=True, surfaces=[writer]),
-        mtime_ns=300,
+    selected = write_draft_checkpoint(
+        output, scan_id, complete=True, surfaces=[writer], mtime_ns=300
     )
     head = select_checkpoint(output, selected, mtime_ns=400)
     originals = {
