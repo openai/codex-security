@@ -153,7 +153,9 @@ until validation can confirm the link again. An issue ID shown with that
 flag identifies the issue reported by the finding. Its evidence is withheld.
 
 For a CLI retry, repeat `validate --scan` with the same ID, project file
-and affected occurrence IDs.
+and affected occurrence IDs. Read the new result on stdout. The CLI saves
+accepted assessments in private host state for patch and verify. It leaves
+the scan's original `validation.md` and `validation.json` unchanged.
 
 A finding still marked `SUBMITTED` may be waiting for a build. For `FAILED`,
 open `issueUrl` and check the run or ask AWS privately for worker logs.
@@ -168,6 +170,12 @@ scans, the most recently started validation with an accepted submission
 for a single destination takes precedence, even if an earlier request
 finishes later. Conflicting destinations or ambiguous evidence can leave
 an occurrence without supplemental context.
+
+If AWS moves a finding to another issue, repeat `validate --scan` to
+confirm membership and retrieve evidence for that issue. Patch and verify
+withhold the old issue's verdict and score once the CLI sees the move.
+A conflicting issue in the workbench also prevents selection. Returning
+to an earlier issue does not resolve a dispute over its evidence.
 
 If two linked scores share a timestamp, `scoringPending` and
 `freshness.scoredAt` identify the conflict. Patch and verify keep the

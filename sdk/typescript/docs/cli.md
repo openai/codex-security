@@ -1000,8 +1000,10 @@ codex-security export --scan SCAN_ID --export-format json --output -
 codex-security validate --scan SCAN_ID -c codex-security.yaml OCCURRENCE_ID --format json
 ```
 
-The command writes results to stdout and exits with code 1 if any assessment
-is unavailable. Check `status` and each item's `disposition` in JSON.
+The command writes results to stdout and saves accepted assessments in
+private host state for patch and verify. It leaves the scan's original
+`validation.md` and `validation.json` unchanged and exits with code 1 if
+any assessment is unavailable. Check `status` and each item's `disposition` in JSON.
 An inconclusive assessment can return `incomplete` with exit code 0. JSON
 also includes the AWS finding ID and ARN after acceptance and the issue ID
 and ARN when found.
