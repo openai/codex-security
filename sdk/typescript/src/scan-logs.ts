@@ -84,7 +84,7 @@ export function readSavedScanLogs(
 type SessionLog = NonNullable<Awaited<ReturnType<typeof findScanSession>>>;
 
 async function* scanSessions(codexHome: string, directory = "sessions") {
-  for await (const path of sessionFiles(join(codexHome, directory), true)) {
+  for await (const path of sessionFiles(join(codexHome, directory))) {
     const first = await firstSessionEvent(path);
     if (first?.["type"] !== "session_meta" || !isRecord(first["payload"]))
       continue;

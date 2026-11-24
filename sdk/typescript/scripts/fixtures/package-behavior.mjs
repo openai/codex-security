@@ -3,6 +3,7 @@ import { cp, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Writable } from "node:stream";
 import { pathToFileURL } from "node:url";
+import { packageEnvironment } from "./package-environment.mjs";
 
 const [installedRoot, consumer] = process.argv.slice(2);
 const sdk = await import(
@@ -26,24 +27,7 @@ await mkdir(codexHome, { mode: 0o700 });
 await mkdir(bootstrapWorkspace, { mode: 0o700 });
 await writeFile(join(repository, "README.md"), "# Synthetic repository\n");
 const environment = {
-  ...Object.fromEntries(
-    [
-      "PATH",
-      "Path",
-      "SystemRoot",
-      "WINDIR",
-      "ComSpec",
-      "PATHEXT",
-      "TMP",
-      "TEMP",
-      "TMPDIR",
-    ]
-      .filter((name) => process.env[name] !== undefined)
-      .map((name) => [name, process.env[name]]),
-  ),
-  HOME: codexHome,
-  USERPROFILE: codexHome,
-  CODEX_HOME: codexHome,
+  ...packageEnvironment(codexHome),
   CODEX_SECURITY_STATE_DIR: join(consumer, "behavior-state"),
   OPENAI_API_KEY: "synthetic-package-behavior-key",
 };

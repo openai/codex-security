@@ -4,25 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test } from "bun:test";
+import { workflow } from "./support/workflow.js";
 
-const ci = Bun.YAML.parse(
-  await readFile(
-    new URL("../../../.github/workflows/node-ci.yml", import.meta.url),
-    "utf8",
-  ),
-) as {
-  on: { pull_request: { types: string[] } };
-  concurrency: { group: string; "cancel-in-progress": string };
-  jobs: Record<
-    string,
-    {
-      name: string;
-      needs?: string | string[];
-      if?: string;
-      steps: { name: string; if?: string; run: string }[];
-    }
-  >;
-};
+const ci = workflow("node-ci");
 
 // These workflow expressions use boolean/string operators shared with JavaScript.
 // Evaluate the YAML itself so routing and check-name regressions are exercised.
@@ -73,27 +57,27 @@ test.each([
     const context = eventContext(action, changes);
     const classifier = ci.jobs["classify-changes"]!;
     expect(classifier.if).toBeUndefined();
-    const proof = classifier.steps.find(
+    const proof = classifier.steps!.find(
       ({ name }) => name === "Verify pull request source",
     )!;
     expect(expression(proof.if!, context)).toBe(!sourceEvent);
     const gate = ci.jobs["ci"]!;
     expect(gate.name).toBe("ci");
     expect(expression(gate.if!, context)).toBe(true);
-    const confirmation = gate.steps.at(-1)!;
+    const confirmation = gate.steps!.at(-1)!;
     expect(confirmation.run).toBe(
       "node .github/scripts/verify-pr-source.mjs confirm-target",
     );
     expect(expression(confirmation.if!, context)).toBe(!sourceEvent);
     const sourceGroup = interpolate(
-      ci.concurrency.group,
+      ci.concurrency!.group,
       eventContext("synchronize"),
     );
-    const group = interpolate(ci.concurrency.group, context);
+    const group = interpolate(ci.concurrency!.group, context);
     expect(group === sourceGroup).toBe(sourceEvent && action !== "push");
-    expect(interpolate(ci.concurrency["cancel-in-progress"], context)).toBe(
-      action === "push" ? "false" : "true",
-    );
+    expect(
+      interpolate(ci.concurrency!["cancel-in-progress"] as string, context),
+    ).toBe(action === "push" ? "false" : "true");
     const sdkGate = ci.jobs["test"]!.if!;
     expect(ci.jobs["windows-test"]!.if).toBe(sdkGate);
     const needs = {
@@ -116,7 +100,7 @@ test.each([
 );
 
 test("all source jobs depend on classification and titles cannot block source checks", () => {
-  expect(ci.on.pull_request.types).toEqual([
+  expect(ci.on.pull_request!.types).toEqual([
     "opened",
     "edited",
     "reopened",
@@ -133,27 +117,14 @@ test("all source jobs depend on classification and titles cannot block source ch
   expect(classifier.if).toBeUndefined();
 });
 
-const musl = Bun.YAML.parse(
-  await readFile(
-    new URL("../../../.github/workflows/native-musl.yml", import.meta.url),
-    "utf8",
-  ),
-) as {
-  jobs: {
-    primitives: {
-      strategy: {
-        matrix: {
-          include: {
-            arch: string;
-            "rust-image": string;
-            "node22-image": string;
-            "node20-image": string;
-          }[];
-        };
-      };
-      steps: { name: string; run: string }[];
-    };
-  };
+const primitives = workflow("native-musl").jobs["primitives"]!;
+const matrix = primitives.strategy!.matrix as {
+  include: {
+    arch: string;
+    "rust-image": string;
+    "node22-image": string;
+    "node20-image": string;
+  }[];
 };
 
 // These scripts run in Ubuntu Bash in CI, independent of the CLI platform.
@@ -162,20 +133,12 @@ const bashTest = test.skipIf(process.platform === "win32");
 bashTest(
   "title corrections validate independently on every target branch",
   async () => {
-    const titleWorkflow = Bun.YAML.parse(
-      await readFile(
-        new URL(
-          "../../../.github/workflows/validate-pr-title.yml",
-          import.meta.url,
-        ),
-        "utf8",
-      ),
-    ) as typeof ci;
+    const titleWorkflow = workflow("validate-pr-title");
     expect(titleWorkflow.on.pull_request).not.toHaveProperty("branches");
-    expect(titleWorkflow.on.pull_request.types).toEqual(
-      ci.on.pull_request.types,
+    expect(titleWorkflow.on.pull_request!.types).toEqual(
+      ci.on.pull_request!.types,
     );
-    const step = titleWorkflow.jobs["validate-pr-title"]!.steps.find(
+    const step = titleWorkflow.jobs["validate-pr-title"]!.steps!.find(
       (candidate) => candidate.name === "Check conventional title",
     )!;
     for (const [title, expected] of [
@@ -184,7 +147,7 @@ bashTest(
       ["test(ci): valid title\nInvalid continuation", 1],
       ["test(ci): corrected title", 0],
     ] as const) {
-      const result = spawnSync("bash", ["-c", step.run], {
+      const result = spawnSync("bash", ["-c", step.run!], {
         encoding: "utf8",
         env: { ...process.env, PR_TITLE: title },
       });
@@ -194,10 +157,10 @@ bashTest(
 );
 
 test("classification uses the PR merge diff and validates retargeted merge parents", async () => {
-  const scope = ci.jobs["classify-changes"]!.steps.find(
+  const scope = ci.jobs["classify-changes"]!.steps!.find(
     (step) => step.name === "Select required checks",
   )!;
-  const [command, script] = scope.run.split(" ");
+  const [command, script] = scope.run!.split(" ");
   expect(command).toBe("node");
   const directory = await mkdtemp(join(tmpdir(), "ci-merge-diff-"));
   const repository = join(directory, "repository");
@@ -302,7 +265,7 @@ test("classification uses the PR merge diff and validates retargeted merge paren
   }
 });
 
-for (const target of musl.jobs.primitives.strategy.matrix.include) {
+for (const target of matrix.include) {
   for (const scenario of ["ecr-success", "ecr-failure", "both-fail"] as const) {
     bashTest(`musl ${target.arch} image pulls: ${scenario}`, async () => {
       const directory = await mkdtemp(join(tmpdir(), "musl-image-pulls-"));
@@ -314,7 +277,7 @@ for (const target of musl.jobs.primitives.strategy.matrix.include) {
         NODE20_IMAGE: target["node20-image"],
       };
       const run = (name: string) =>
-        musl.jobs.primitives.steps.find((step) => step.name === name)!.run;
+        primitives.steps!.find((step) => step.name === name)!.run;
       try {
         const result = spawnSync(
           "bash",
