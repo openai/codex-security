@@ -360,7 +360,7 @@ describe("call site report", () => {
     expect(html).toContain("SHA-256");
     expect(html).not.toContain("DO_NOT_EMBED");
   });
-  test("preserves original use IDs and source bindings after priority sorting", () => {
+  test("preserves links, dismissed coverage and source bindings after priority sorting", () => {
     const a = reviewed(1, {
         verdict: "ruled_out",
         reason: "Excluded by a source guard.",
@@ -371,25 +371,42 @@ describe("call site report", () => {
     b.evidence = a.evidence;
     b.decidingEvidence = a.decidingEvidence;
     b.services = [service("svc:b", "Beta", b.decidingEvidence[0]!)];
-    const html = renderDependencyReport(
-      withExcerpts(report([a, b]), ["const mode = 'safe';"]),
+    const input = report(
+      [a, b],
+      [unresolved(1), unresolved(2, { kind: "dismissed" }), unresolved(3)],
     );
-    expect(html.indexOf('id="use-1-2"')).toBeLessThan(
-      html.indexOf('id="use-1-1"'),
-    );
-    expect(panel(html, "use-1-1")).toContain("tok-keyword");
-    expect(panel(html, "use-1-2")).not.toContain("tok-keyword");
-    expect(html).toContain('value="unknown"');
-    expect(html).toContain('href="#use-1-1"');
+    const html = renderDependencyReport(withExcerpts(input, ["safeMode();"]));
+    expect(
+      elements(html, "a[data-entry]", ["href"]).map((l) => l.attrs["href"]),
+    ).toEqual(["#use-1-2", "#use-1-1", "#coverage-1-1", "#coverage-1-3"]);
+    expect(elements(html, "details#coverage-1-2")).toHaveLength(1);
+    expect(panel(html, "use-1-1")).toContain("safeMode");
+    expect(panel(html, "use-1-2")).not.toContain("safeMode");
   });
-  test("does not display excerpts from the wrong claim revision or source revision", () => {
-    const input = withExcerpts(report([reviewed(1)]), ["hiddenExcerpt()"]);
-    expect(renderDependencyReport(input)).toContain("hiddenExcerpt");
-    input.claims[0]!.revision = 2;
-    expect(renderDependencyReport(input)).not.toContain("hiddenExcerpt");
-    input.claims[0]!.revision = 1;
+  test("shows a premise excerpt only for the cited claim revision and source commit", () => {
+    const use = reviewed(1);
+    use.evidence[0]!.commit = "a".repeat(40);
+    const input = withExcerpts(report([use]), ["hiddenExcerpt()"]);
+    const premise = input.uses[0]!.supportingClaims![0]!;
+    const ref = { ...premise, id: "conclusion" };
+    const conclusion = {
+      ...input.claims[0]!,
+      ...ref,
+      dependencies: [premise],
+      evidence: { sourceIds: [], receiptIds: [] },
+    };
+    const render = () =>
+      renderDependencyReport({
+        ...input,
+        uses: [{ ...use, conclusionClaim: ref }],
+        claims: [conclusion, ...input.claims],
+      });
+    expect(render()).toContain("hiddenExcerpt");
+    conclusion.revision++;
+    expect(render()).not.toContain("hiddenExcerpt");
+    conclusion.revision--;
     input.claimEvidence.sources["cite-0-0"]!.commit = "f".repeat(40);
-    expect(renderDependencyReport(input)).not.toContain("hiddenExcerpt");
+    expect(render()).not.toContain("hiddenExcerpt");
   });
   test("renders advisory description, affected package versions and vulnerable functions with safe links", () => {
     const u = reviewed(1),
@@ -501,8 +518,9 @@ describe("call site report", () => {
       excerpt: "const unused = 3;",
     };
     const html = renderDependencyReport(r);
-    expect(html).toContain("data-highlighted");
-    expect(html).toContain("tok-keyword");
+    expect(
+      elements(html, '.frame .code-row[data-highlighted][data-line="2"]'),
+    ).toHaveLength(1);
     expect(html).toContain("decodeFrame(input)");
     expect(text(html)).toContain("const input");
     expect(html).not.toContain("const unused");

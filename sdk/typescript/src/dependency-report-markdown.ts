@@ -1,4 +1,5 @@
 import {
+  captureLimits,
   counts,
   inputFor,
   matchTraceFrame,
@@ -19,7 +20,7 @@ import {
   sourceFrames,
   type PathFrame,
 } from "./dependency-report-path.js";
-import { dependencyVerdictLabels } from "./dependency-verdict-labels.js";
+import { dependencyVerdictLabels } from "./dependency-stack-use.js";
 
 // Saved report text can contain Markdown or HTML. Keep it in the paragraph
 // where it was cited, without turning a source string into a link or block.
@@ -99,9 +100,10 @@ function stackEvidence(f: Extract<Finding, { kind: "stack" }>) {
   if (actual !== query)
     context.push(`${obs ? "Assessment" : "Group"} scope: ${actual}`);
   const limits: string[] = [];
-  if (a.status === "no_match") limits.push("No matching sample in this query.");
+  if (a.status === "no_match")
+    limits.push("The query returned no matching sample.");
   if (a.status === "no_coverage")
-    limits.push("No sampling coverage for this query.");
+    limits.push("Sampling did not cover this query.");
   if (a.truncated)
     limits.push("The query returned only part of the matching stacks.");
   if (a.truncated === null) limits.push("Query completeness unknown.");
@@ -185,7 +187,7 @@ const conditionLabels = {
 function conditions(f: Finding) {
   if (f.kind === "coverage") return;
   return list(
-    (f.proof?.conditions ?? []).map((c) => {
+    (f.item.proof?.conditions ?? []).map((c) => {
       const refs = c.citations
         .map((s) => code(s.path + ":" + s.line))
         .join(", ");
@@ -300,7 +302,7 @@ function callPath(f: Finding, target?: Report["target"]) {
     gap: "",
   };
   const steps: string[] = [];
-  const site = f.proof?.sink?.callSite;
+  const site = f.item.proof?.sink?.callSite;
   const reviewed = site && matchTraceFrame(f, "sink", site);
   let includesReviewedCall = false;
   for (const frame of frames) {
@@ -320,7 +322,7 @@ function callPath(f: Finding, target?: Report["target"]) {
       "index" in reviewed &&
       excerpt?.citationIndex === reviewed.index &&
       site?.line === line
-        ? f.proof?.sink
+        ? f.item.proof?.sink
         : undefined;
     if (sink) includesReviewedCall = true;
     const role = join(
@@ -358,7 +360,7 @@ function callPath(f: Finding, target?: Report["target"]) {
 function title(f: Finding, path?: string) {
   const status =
     f.kind === "coverage"
-      ? "Unresolved coverage"
+      ? "Unresolved candidate"
       : dependencyVerdictLabels[f.item.verdict];
   const site = f.anchor;
   if (!site) return prose(f.label) + " — " + status;
@@ -406,7 +408,7 @@ function finding(f: Finding, heading: string, target?: Report["target"]) {
   const explainInDetails =
     f.kind === "stack" &&
     f.assessment.verdict === "unknown" &&
-    f.proof?.conditions?.some((check) => check.status === "unknown") &&
+    f.item.proof?.conditions?.some((check) => check.status === "unknown") &&
     !!firstQuestion;
   const evidence = blocks(
     explainInDetails && prose(f.item.reason),
@@ -492,23 +494,15 @@ function sectionBody(section: Section, heading: string) {
   const stack = section.stack;
   const totals = stack
     ? `**${dependencyVerdictLabels[stack.verdict]}** · ${stack.review ? "Independently reviewed" : "Finalized offline"} · ${stack.coverage.assessed}/${stack.coverage.total} work items assessed · ${stack.coverage.observed} observed`
-    : `${c.reviewed} reviewed ${c.reviewed === 1 ? "use" : "uses"} · ${c.unresolved} unresolved coverage ${c.unresolved === 1 ? "item" : "items"}`;
+    : `${c.reviewed} reviewed ${c.reviewed === 1 ? "use" : "uses"} · ${c.unresolved} unresolved ${c.unresolved === 1 ? "candidate" : "candidates"}`;
   const outcomes = verdictOrder
     .filter((v) => c.breakdown[v])
     .map((v) => dependencyVerdictLabels[v] + ": " + c.breakdown[v]);
-  const notes: string[] = [];
-  if (stack) {
-    const s = stack.coverage;
-    for (const [label, ids] of [
-      ["No matching sample", s.noMatch],
-      ["No coverage", s.noCoverage],
-      ["Conflicting scope", s.scopeConflicts],
-      ["Truncated", s.truncated],
-      ["Truncation unknown", s.truncationUnknown],
-      ["Outstanding", s.outstanding],
-    ] as const)
-      if (ids.length) notes.push(label + ": " + ids.length);
-  }
+  const notes = stack
+    ? captureLimits(stack)
+        .filter(([, ids]) => ids.length)
+        .map(([label, ids]) => label + ": " + ids.length)
+    : [];
   const check = section.check;
   const { details, urls } = sectionAdvisories(section);
   const advisory = details.map((a) =>

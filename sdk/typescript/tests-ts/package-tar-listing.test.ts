@@ -99,7 +99,6 @@ function packageTar({
     "package/schemas/hosted-scan-v2.fixture.json",
     "package/schemas/project-config.schema.json",
     "package/schemas/external-findings.schema.json",
-    "package/resources/dependency-stack-investigation.md",
     "package/schemas/dependency-stack-inputs-v1.schema.json",
     "package/schemas/stack-investigation-report-v1.schema.json",
     "package/LICENSE",

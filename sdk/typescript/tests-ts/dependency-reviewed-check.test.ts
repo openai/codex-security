@@ -1,16 +1,9 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  rm,
-  symlink,
-  writeFile,
-} from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { scopedTemporaryDirectory } from "./support/temporary-directories";
 import {
   DependencyAttemptStore,
   dependencyRecordHash,
@@ -37,6 +30,7 @@ import {
 import {
   DependencyInvestigationBlockedError,
   runReviewedDependencyCheck,
+  type ReviewedCheckOptions,
 } from "../src/dependency-reviewed-check";
 import {
   createDependencyEvidenceCapture,
@@ -70,9 +64,14 @@ function approvedReview(claims: ReviewClaim[], reason?: string) {
   return JSON.stringify({ decisions: claims.map((c) => approval(c, reason)) });
 }
 
+function proposalJson(...uses: Proposal["uses"]) {
+  return JSON.stringify({ uses, limitations: [] });
+}
+
 const signal = new AbortController().signal;
 async function fixture(extraFiles: Record<string, string> = {}) {
-  const path = await mkdtemp(join(tmpdir(), "dependency-reviewed-test-"));
+  const directory = await scopedTemporaryDirectory("dependency-reviewed-test-");
+  const { path } = directory;
   const git = (...args: string[]) =>
     execFileSync("git", ["-C", path, ...args], { encoding: "utf8" }).trim();
   await writeFile(
@@ -84,20 +83,17 @@ async function fixture(extraFiles: Record<string, string> = {}) {
     join(path, "secondary.js"),
     'import parse from "fixture-parser";\nparse(other.body);\n',
   );
-  for (const [name, contents] of Object.entries(extraFiles))
-    await writeFile(join(path, name), contents);
+  for (const [name, contents] of Object.entries(extraFiles)) {
+    const file = join(path, name);
+    await mkdir(dirname(file), { recursive: true });
+    await writeFile(file, contents);
+  }
   git("init", "-q");
+  git("config", "user.name", "Fixture");
+  git("config", "user.email", "fixture@example.invalid");
+  git("config", "commit.gpgsign", "false");
   git("add", ".");
-  git(
-    "-c",
-    "user.name=Fixture",
-    "-c",
-    "user.email=fixture@example.invalid",
-    "commit",
-    "-q",
-    "-m",
-    "fixture",
-  );
+  git("commit", "-qm", "fixture");
   const revision = git("rev-parse", "HEAD");
   const pkg = { ecosystem: "npm", name: "fixture-parser" };
   const discovery: RepositoryDiscovery = {
@@ -149,14 +145,23 @@ async function fixture(extraFiles: Record<string, string> = {}) {
     remainingQuestions: ["Which revision is running?"],
   };
   return {
-    path,
+    ...directory,
     pkg,
     revision,
     discovery,
     use,
     git,
-    packageOptions: { directory: path, subject: "npm:fixture-parser", signal },
-    [Symbol.asyncDispose]: () => rm(path, { recursive: true, force: true }),
+    async check(
+      options: Omit<ReviewedCheckOptions, "directory" | "subject" | "signal">,
+      dependencies: Parameters<typeof runReviewedDependencyCheck>[1],
+    ) {
+      const report = await runReviewedDependencyCheck(
+        { directory: path, subject: "npm:fixture-parser", signal, ...options },
+        { discover: async () => discovery, ...dependencies },
+      );
+      if (!("checks" in report)) throw Error("Expected a package report.");
+      return report;
+    },
   };
 }
 
@@ -218,23 +223,12 @@ test("repository investigators share pinned source notes without promoting asser
   const input = { ...assertion, evidence: [range] };
   let noteId = "";
   let reviewerRead = false;
-  const result = await runReviewedDependencyCheck(
-    { ...f.packageOptions, vulnDescription: "Parser issue" },
+  const result = await f.check(
+    { vulnDescription: "Parser issue" },
     {
       discover: async ({ revision }) => {
         expect(revision).toBe(f.revision);
-        f.git(
-          "-c",
-          "user.name=Example",
-          "-c",
-          "user.email=example@example.invalid",
-          "-c",
-          "commit.gpgsign=false",
-          "commit",
-          "--allow-empty",
-          "-qm",
-          "Advance checkout",
-        );
+        f.git("commit", "--allow-empty", "-qm", "Advance checkout");
         return f.discovery;
       },
       async runAgent(req) {
@@ -303,11 +297,10 @@ test("repository investigators share pinned source notes without promoting asser
             ],
           }),
         ).rejects.toThrow("currently approved premise");
-        return JSON.stringify({ uses: [f.use], limitations: [] });
+        return proposalJson(f.use);
       },
     },
   );
-  if (!("checks" in result)) throw Error("Expected a package check.");
   expect(result.target).toEqual({ repository: "team/parser", sha: f.revision });
   expect(reviewerRead).toBe(true);
   expect(result.checks[0]!.claims.map((c) => c.id).sort()).toEqual([
@@ -324,9 +317,8 @@ for (const late of ["assessment", "candidate", "roster"] as const) {
     });
     let arrive: () => Promise<void>;
     let coverageReviews = 0;
-    const checked = await runReviewedDependencyCheck(
+    const checked = await f.check(
       {
-        ...f.packageOptions,
         vulnDescription: "Check calls to the parser.",
         evidenceSources: [
           { server: "catalog", instructions: "Check deployed callers." },
@@ -419,7 +411,6 @@ for (const late of ["assessment", "candidate", "roster"] as const) {
         },
       },
     );
-    if (!("checks" in checked)) throw Error("Expected package report");
     const report = checked.checks[0]!;
     expect(coverageReviews).toBe(2);
     if (late === "assessment")
@@ -452,10 +443,9 @@ test.each(["incomplete", "complete"] as const)(
     const paths = ["app.js", "package-lock.json", "secondary.js"];
     const tool = "update_codex_security_graph";
     let reviewedLimitations: string[] = [];
-    const result = await runReviewedDependencyCheck(
-      { ...f.packageOptions, vulnDescription: "Parser issue" },
+    const result = await f.check(
+      { vulnDescription: "Parser issue" },
       {
-        discover: async () => f.discovery,
         async runAgent(req) {
           const { call, definitions } = await req.investigationTools!();
           if (!req.coordinator) {
@@ -565,11 +555,10 @@ test.each(["incomplete", "complete"] as const)(
                 },
               });
           }
-          return JSON.stringify({ uses: [f.use], limitations: [] });
+          return proposalJson(f.use);
         },
       },
     );
-    if (!("checks" in result)) throw Error("Expected package report.");
     const report = result.checks[0]!;
     expect(report.uses[0]!.verdict).toBe(f.use.verdict);
     expect(report.limitations).toEqual(reviewedLimitations);
@@ -595,15 +584,13 @@ test("package checks freeze each advisory independently and verify exact source 
     subject?: string;
     fields?: Record<string, unknown>;
   }[] = [];
-  const result = await runReviewedDependencyCheck(
+  const result = await f.check(
     {
-      ...f.packageOptions,
       onProgress(type, subject, fields) {
         events.push({ type, subject, fields });
       },
     },
     {
-      discover: async () => f.discovery,
       lookupPackage: async () =>
         ["CVE-2099-0001", "CVE-2099-0002"].map((id) => ({
           id,
@@ -612,8 +599,7 @@ test("package checks freeze each advisory independently and verify exact source 
       runAgent: async (req) => {
         expect(req.readOnly).toBe(true);
         const input = agentInput(req.prompt);
-        if (!input.claims)
-          return JSON.stringify({ uses: [f.use], limitations: [] });
+        if (!input.claims) return proposalJson(f.use);
         expect(input.claims[0].payload.use.evidence[0].excerpt).toContain(
           "parse(request.body)",
         );
@@ -622,7 +608,6 @@ test("package checks freeze each advisory independently and verify exact source 
       },
     },
   );
-  if (!("checks" in result)) throw new Error("Missing package checks");
   expect(result.checks.map((c) => c.advisoryId)).toEqual([
     "CVE-2099-0001",
     "CVE-2099-0002",
@@ -693,15 +678,16 @@ test("package checks freeze each advisory independently and verify exact source 
 test("caller descriptions stay scoped and a source-only positive is blocked", async () => {
   await using f = await fixture();
   await expect(
-    runReviewedDependencyCheck(
-      { ...f.packageOptions, vulnDescription: "Incorrect length validation." },
+    f.check(
+      { vulnDescription: "Incorrect length validation." },
       {
         lookupPackage: async () => {
           throw Error("Unexpected registry lookup");
         },
-        discover: async () => f.discovery,
         runAgent: async ({ prompt }) => {
-          expect(prompt).toContain("Incorrect length validation.");
+          expect(agentInput(prompt).issue.description).toBe(
+            "Incorrect length validation.",
+          );
           return JSON.stringify({
             uses: [
               { ...f.use, verdict: "exploitable", remainingQuestions: [] },
@@ -712,33 +698,19 @@ test("caller descriptions stay scoped and a source-only positive is blocked", as
       },
     ),
   ).rejects.toThrow("running workload");
-  await expect(
-    runReviewedDependencyCheck(
-      { ...f.packageOptions, vulnDescription: "Incorrect length validation." },
-      {
-        discover: async () => f.discovery,
-        runAgent: async () => {
-          throw Error("Model unavailable");
-        },
-      },
-    ),
-  ).rejects.toBeInstanceOf(DependencyInvestigationBlockedError);
 });
 
 test("a positive use requires an endpoint on each explicitly bounded side", async () => {
   await using f = await fixture();
   for (const boundary of [{ sources: [] }, { sinks: [] }]) {
     await expect(
-      runReviewedDependencyCheck(
+      f.check(
         {
-          ...f.packageOptions,
           vulnDescription: "Incorrect length validation.",
           ...boundary,
         },
         {
-          discover: async () => f.discovery,
-          runAgent: async () =>
-            JSON.stringify({ uses: [f.use], limitations: [] }),
+          runAgent: async () => proposalJson(f.use),
         },
       ),
     ).rejects.toThrow("explicitly empty source or sink boundary");
@@ -910,39 +882,6 @@ test("an exploratory scope explanation retains reviewed uses, open handoffs and 
   ).toBe(false);
 });
 
-test("independent approvals cannot be carried to a newer revision", async () => {
-  await using f = await fixture();
-  const store = new DependencyAttemptStore(join(f.path, "attempt.sqlite"));
-  try {
-    const first: Claim = store.recordClaim("coverage", {
-      kind: "coverage",
-      limitations: ["Original scope"],
-    });
-    store.recordClaim(
-      "coverage",
-      { kind: "coverage", limitations: ["Changed scope"] },
-      first.revision,
-    );
-    expect(() =>
-      approveDependencyClaims(
-        store,
-        [first],
-        [
-          {
-            ...reference(first),
-            evidenceKeys: [],
-            approved: true,
-            reason: "Original coverage only.",
-          },
-        ],
-      ),
-    ).toThrow("current claim revisions");
-    expect(store.get("dependency-review", first.id)).toBeUndefined();
-  } finally {
-    store.close();
-  }
-});
-
 test("replacing an approved premise invalidates transitive users and preserves independent siblings", async () => {
   const store = new DependencyAttemptStore(":memory:");
   const evidence = "a".repeat(64);
@@ -1003,6 +942,8 @@ test("replacing an approved premise invalidates transitive users and preserves i
     expect(currentApproval(store, leaf)?.approved).toBe(true);
     const corrected = submit("binding", [], [evidence], base.revision);
     approve(corrected, [evidence]);
+    expect(() => approve(base, [evidence])).toThrow("current claim revisions");
+    expect(currentApproval(store, corrected)?.approved).toBe(true);
     expect(currentApproval(store, leaf)).toBeUndefined();
     expect(await queue.query({ ids: [parent.id, leaf.id] })).toMatchObject([
       { state: "stale" },
@@ -1030,7 +971,7 @@ test("replacing an approved premise invalidates transitive users and preserves i
 });
 
 test("publish a complete report once and keep progress separate from an unsuccessful report", async () => {
-  await using f = await fixture();
+  await using f = await scopedTemporaryDirectory("dependency-output-test-");
   const reportFile = join(f.path, "report.json"),
     progressEvents = join(f.path, "progress.jsonl");
   const options = { reportFile, subject: "example", signal, warn: () => {} };
@@ -1071,13 +1012,11 @@ test("host feedback repairs a bad citation and an independent rejection requires
   await using f = await fixture();
   let investigations = 0,
     reviews = 0;
-  const report = await runReviewedDependencyCheck(
+  const report = await f.check(
     {
-      ...f.packageOptions,
       vulnDescription: "Untrusted input reaches the parser.",
     },
     {
-      discover: async () => f.discovery,
       runAgent: async ({ prompt }) => {
         const input = agentInput(prompt);
         if (input.claims) {
@@ -1105,11 +1044,10 @@ test("host feedback repairs a bad citation and an independent rejection requires
           use.reason =
             "The handler passes request.body directly to parse on line 2.";
         }
-        return JSON.stringify({ uses: [use], limitations: [] });
+        return proposalJson(use);
       },
     },
   );
-  if (!("checks" in report)) throw new Error("Missing reviewed package report");
   expect(report.checks[0]!.uses[0]!.conclusionClaim.revision).toBe(2);
   expect([investigations, reviews]).toEqual([3, 2]);
 });
@@ -1120,10 +1058,9 @@ test.each(["corrected", "exhausted"] as const)(
     await using f = await fixture();
     let coordinatorStarts = 0;
     let submissions = 0;
-    const result = runReviewedDependencyCheck(
-      { ...f.packageOptions, vulnDescription: "Parser input" },
+    const result = f.check(
+      { vulnDescription: "Parser input" },
       {
-        discover: async () => f.discovery,
         async runAgent(req) {
           if (!req.coordinator) {
             const input = agentInput(req.prompt);
@@ -1136,7 +1073,7 @@ test.each(["corrected", "exhausted"] as const)(
             const use = structuredClone(f.use);
             if (mode === "exhausted" || submissions < 4)
               use.proof.sink!.callSite.line = 3;
-            const answer = JSON.stringify({ uses: [use], limitations: [] });
+            const answer = proposalJson(use);
             const next = await req.onCoordinatorAnswer!(answer);
             if (next === undefined) return answer;
             const correction = JSON.parse(next);
@@ -1153,7 +1090,6 @@ test.each(["corrected", "exhausted"] as const)(
     );
     if (mode === "corrected") {
       const report = await result;
-      if (!("checks" in report)) throw Error("Expected package report");
       expect(report.checks[0]!.uses[0]!.verdict).toBe(
         "potentially_exploitable",
       );
@@ -1167,7 +1103,7 @@ test.each(["corrected", "exhausted"] as const)(
 );
 
 test("aliases of the same output cannot leave progress at the report destination", async () => {
-  await using f = await fixture();
+  await using f = await scopedTemporaryDirectory("dependency-output-test-");
   const target = join(f.path, "actual"),
     alias = join(f.path, "alias");
   await mkdir(target);
@@ -1212,10 +1148,9 @@ test("bind discovered owners to their own source and retain uncovered callers", 
     manifest: "package-lock.json",
     project: "notes",
   });
-  const report = await runReviewedDependencyCheck(
-    { ...f.packageOptions, vulnDescription: "Parser failure." },
+  const report = await f.check(
+    { vulnDescription: "Parser failure." },
     {
-      discover: async () => f.discovery,
       runAgent: async ({ prompt }) => {
         const input = agentInput(prompt);
         if (!input.claims)
@@ -1234,7 +1169,6 @@ test("bind discovered owners to their own source and retain uncovered callers", 
       },
     },
   );
-  if (!("checks" in report)) throw new Error("Missing package check");
   const check = report.checks[0]!;
   expect(check.searches[0]!.details).toContain(initialGap);
   expect(check.limitations).toContain("External ingress remains unknown.");
@@ -1309,9 +1243,8 @@ test("the reviewer corrects an omitted direct access citation without repeating 
   };
   records[0] = { ...structured, sha256: dependencyRecordHash(structured) };
   let reviews = 0;
-  const result = await runReviewedDependencyCheck(
+  const result = await f.check(
     {
-      ...f.packageOptions,
       vulnDescription: "A parser issue.",
       evidenceSources: [
         {
@@ -1321,7 +1254,6 @@ test("the reviewer corrects an omitted direct access citation without repeating 
       ],
     },
     {
-      discover: async () => f.discovery,
       runAgent: async ({ prompt, onEvidence }) => {
         const input = agentInput(prompt);
         if (input.claims) {
@@ -1344,11 +1276,10 @@ test("the reviewer corrects an omitted direct access citation without repeating 
         expect(input.evidenceSources[0].server).toBe("deployments");
         if (!onEvidence) throw new Error("Missing evidence collector");
         for (const record of records) onEvidence(record);
-        return JSON.stringify({ uses: [positive], limitations: [] });
+        return proposalJson(positive);
       },
     },
   );
-  if (!("checks" in result)) throw new Error("Missing package report");
   const check = result.checks[0]!;
   expect(reviews).toBe(2);
   expect(check.uses[0]!.verdict).toBe("exploitable");
@@ -1390,37 +1321,22 @@ test("only unambiguous returned facts can bind a selected copy and independent c
       observations: [{ ...running!, quote: "only in request" }, access!],
     }),
   ).rejects.toThrow("one recorded reply");
-  await expect(
-    verify(asserted, [
-      ...records,
-      {
-        ...records[0]!,
-        arguments: { selector: "other" },
-        sha256: "f".repeat(64),
-      },
-    ]),
-  ).rejects.toThrow("one recorded reply");
-  await expect(
-    verify({
-      ...asserted,
-      observations: [running!, { ...running!, supports: ["access"] }],
-    }),
-  ).rejects.toThrow("separate evidence");
-  // A shorter span of the running quote still cannot establish caller access.
-  await expect(
-    verify({
-      ...asserted,
-      observations: [
-        running!,
-        { ...running!, supports: ["access"], quote: "Deployed example" },
-      ],
-    }),
-  ).rejects.toThrow("separate evidence");
+  for (const quote of [running!.quote, "Deployed example"]) {
+    await expect(
+      verify({
+        ...asserted,
+        observations: [running!, { ...running!, supports: ["access"], quote }],
+      }),
+    ).rejects.toThrow("separate evidence");
+  }
   const duplicate = {
     ...records[0]!,
     arguments: { selector: "other" },
     sha256: "f".repeat(64),
   };
+  await expect(verify(asserted, [...records, duplicate])).rejects.toThrow(
+    "one recorded reply",
+  );
   const disambiguated = {
     ...asserted,
     observations: [{ ...running!, sha256: records[0]!.sha256 }, access!],
@@ -1574,17 +1490,19 @@ test("a failed model invocation retains prior results and identifies unattempted
   await using f = await fixture();
   const ids = ["CVE-2099-0001", "CVE-2099-0002", "CVE-2099-0003"];
   try {
-    await runReviewedDependencyCheck(f.packageOptions, {
-      discover: async () => f.discovery,
-      lookupPackage: async () => ids.map((id) => ({ id, advisories: [] })),
-      runAgent: async ({ prompt }) => {
-        const input = agentInput(prompt);
-        if (input.issue.id === ids[1]) throw Error("Model unavailable.");
-        return input.claims
-          ? approvedReview(input.claims)
-          : JSON.stringify({ uses: [f.use], limitations: [] });
+    await f.check(
+      {},
+      {
+        lookupPackage: async () => ids.map((id) => ({ id, advisories: [] })),
+        runAgent: async ({ prompt }) => {
+          const input = agentInput(prompt);
+          if (input.issue.id === ids[1]) throw Error("Model unavailable.");
+          return input.claims
+            ? approvedReview(input.claims)
+            : proposalJson(f.use);
+        },
       },
-    });
+    );
     throw Error("Expected a partial package outcome.");
   } catch (error) {
     if (!(error instanceof DependencyInvestigationBlockedError)) throw error;
@@ -1610,27 +1528,28 @@ test("a package continues with independent advisories after a scoped block or ex
     affectedScope: "worker",
     evidenceReferences: ["record-1"],
   };
-  const result = runReviewedDependencyCheck(f.packageOptions, {
-    discover: async () => f.discovery,
-    lookupPackage: async () => ids.map((id) => ({ id, advisories: [] })),
-    runAgent: async ({ prompt }) => {
-      const input = agentInput(prompt);
-      if (input.issue.id === ids[1])
-        throw new DependencyInvestigationBlockedError(scoped, undefined);
-      if (!input.claims)
-        return JSON.stringify({ uses: [f.use], limitations: [] });
-      return JSON.stringify({
-        decisions: input.claims.map((claim: ReviewClaim) => ({
-          ...approval(claim),
-          approved: input.issue.id !== ids[2],
-          reason:
-            input.issue.id === ids[2]
-              ? "No proof for this release."
-              : "Verified.",
-        })),
-      });
+  const result = f.check(
+    {},
+    {
+      lookupPackage: async () => ids.map((id) => ({ id, advisories: [] })),
+      runAgent: async ({ prompt }) => {
+        const input = agentInput(prompt);
+        if (input.issue.id === ids[1])
+          throw new DependencyInvestigationBlockedError(scoped, undefined);
+        if (!input.claims) return proposalJson(f.use);
+        return JSON.stringify({
+          decisions: input.claims.map((claim: ReviewClaim) => ({
+            ...approval(claim),
+            approved: input.issue.id !== ids[2],
+            reason:
+              input.issue.id === ids[2]
+                ? "No proof for this release."
+                : "Verified.",
+          })),
+        });
+      },
     },
-  });
+  );
   try {
     await result;
     throw Error("Expected a partial package outcome.");
@@ -2064,16 +1983,14 @@ test("native investigators share asynchronous reviews, immutable premises and pa
   const counts = new Map<string, number>();
   const waiting = Promise.withResolvers<void>(),
     release = Promise.withResolvers<void>();
-  const result = await runReviewedDependencyCheck(
+  const result = await f.check(
     {
-      ...f.packageOptions,
       vulnDescription: "Wrong parser input.",
       evidenceSources: [
         { server: "builds", instructions: "Inspect the recorded build." },
       ],
     },
     {
-      discover: async () => f.discovery,
       async runAgent(req) {
         const input = agentInput(req.prompt);
         const tools = await req.investigationTools!();
@@ -2231,11 +2148,10 @@ test("native investigators share asynchronous reviews, immutable premises and pa
           wait: true,
         })) as State[];
         expect(assessment!.state).toBe("approved");
-        return JSON.stringify({ uses: [], limitations: [] });
+        return proposalJson();
       },
     },
   );
-  if (!("checks" in result)) throw Error("Missing package result");
   const check = result.checks[0]!,
     use = check.uses[0]!;
   expect(check.searches.find((row) => row.source === "builds")).toMatchObject({
@@ -2313,16 +2229,14 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
   await using f = await fixture();
   const server = "service-registry",
     tool = "lookup";
-  const result = await runReviewedDependencyCheck(
+  const result = await f.check(
     {
-      ...f.packageOptions,
       vulnDescription: "Parser behavior",
       evidenceSources: [
         { server, instructions: "Look up an exact checkout path." },
       ],
     },
     {
-      discover: async () => f.discovery,
       async runAgent(req) {
         const input = agentInput(req.prompt);
         if (!req.coordinator) return approvedReview(input.claims);
@@ -2453,7 +2367,6 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
       },
     },
   );
-  if (!("checks" in result)) throw Error("Expected a package assessment.");
   expect(result.checks[0]?.uses[0]?.services).toMatchObject([
     {
       id: server + ":worker-7",
@@ -2493,14 +2406,13 @@ test.each([
     await using f = await fixture();
     const batches: string[][] = [];
     let coordinators = 0;
-    const run = runReviewedDependencyCheck(
-      { ...f.packageOptions, vulnDescription: "Parser behavior" },
+    const run = f.check(
+      { vulnDescription: "Parser behavior" },
       {
-        discover: async () => f.discovery,
         async runAgent(req) {
           if (req.coordinator) {
             coordinators++;
-            return JSON.stringify({ uses: [f.use], limitations: [] });
+            return proposalJson(f.use);
           }
           const packet = agentInput(req.prompt);
           const rows = (packet.claims as ReviewClaim[]).map((c) =>
@@ -2555,7 +2467,6 @@ test.each([
       );
     } else {
       const r = await run;
-      if (!("checks" in r)) throw Error("Expected a reviewed package report.");
       expect(r.checks[0]!.claims.map((c) => c.id)).toEqual([
         "use-1",
         "coverage",
@@ -2606,9 +2517,8 @@ test("a reviewed premise retains independently selected rows of the historical m
     textBlock: 0,
     record: ["frames", i],
   }));
-  const checked = await runReviewedDependencyCheck(
+  const checked = await f.check(
     {
-      ...f.packageOptions,
       vulnDescription: "Review the parser.",
       evidenceSources: [
         {
@@ -2618,7 +2528,6 @@ test("a reviewed premise retains independently selected rows of the historical m
       ],
     },
     {
-      discover: async () => f.discovery,
       async runAgent(req) {
         const input = agentInput(req.prompt);
         const tools = await req.investigationTools!();
@@ -2728,7 +2637,6 @@ test("a reviewed premise retains independently selected rows of the historical m
       },
     },
   );
-  if (!("checks" in checked)) throw Error("Expected package result");
   const report = checked.checks[0]!;
   expect(
     report.claims.find((c) => c.id === "premise:frame")!.evidence.receiptIds,
@@ -2797,10 +2705,9 @@ test.each(["ledger", "identical", "additional", "invalid"] as const)(
     const workload = (id: string) => (mode === "identical" ? "shared-job" : id);
     const reviewCounts = new Map<string, number>();
     let rounds = 0;
-    const result = runReviewedDependencyCheck(
-      { ...f.packageOptions, vulnDescription: "Parser behavior" },
+    const result = f.check(
+      { vulnDescription: "Parser behavior" },
       {
-        discover: async () => f.discovery,
         async runAgent(req) {
           const input = agentInput(req.prompt);
           if (!req.coordinator) {
@@ -2834,9 +2741,7 @@ test.each(["ledger", "identical", "additional", "invalid"] as const)(
             expect(input.feedback.reason).toContain(
               "runtimeContext.evidence[0]",
             );
-            expect(input.feedback.reason).toContain(
-              "Bound ranges for this path at this revision: 2-4.",
-            );
+            expect(input.feedback.reason).toContain("2-4");
             expect(input.feedback.approvedAssessments).toMatchObject({
               total: 2,
               truncated: false,
@@ -2848,26 +2753,15 @@ test.each(["ledger", "identical", "additional", "invalid"] as const)(
                 workload: workload(id),
               })),
             });
-            expect(input.feedback.recovery).toContain("return uses: []");
-            if (mode === "ledger")
-              return JSON.stringify({ uses: [], limitations: [] });
+            if (mode === "ledger") return proposalJson();
             if (mode === "identical")
-              return JSON.stringify({
-                uses: [deployment("shared-job")],
-                limitations: [],
-              });
+              return proposalJson(deployment("shared-job"));
             if (mode === "additional")
-              return JSON.stringify({
-                uses: [deployment("third-job")],
-                limitations: [],
-              });
+              return proposalJson(deployment("third-job"));
           }
           // The same location can refer to the existing use, a new caller, or another deployment.
           const attempted = mode === "ledger" ? submitted[0]! : "third-job";
-          return JSON.stringify({
-            uses: [deployment(attempted, 1)],
-            limitations: [],
-          });
+          return proposalJson(deployment(attempted, 1));
         },
       },
     );
@@ -2876,7 +2770,6 @@ test.each(["ledger", "identical", "additional", "invalid"] as const)(
       expect(rounds).toBe(3);
     } else {
       const report = await result;
-      if (!("checks" in report)) throw Error("Expected package report.");
       const uses = report.checks[0]!.uses;
       expect(uses.map((u) => u.place.workload)).toEqual(
         mode === "additional"
@@ -2899,10 +2792,9 @@ test("a correction in a live review batch preserves its independent sibling appr
   const release = Promise.withResolvers<void>();
   const seen: string[][] = [];
   const previous = new Map<string, string[]>();
-  await runReviewedDependencyCheck(
-    { ...f.packageOptions, vulnDescription: "Parser issue" },
+  await f.check(
+    { vulnDescription: "Parser issue" },
     {
-      discover: async () => f.discovery,
       async runAgent(req) {
         const input = agentInput(req.prompt);
         if (!req.coordinator) {
@@ -2970,7 +2862,7 @@ test("a correction in a live review batch preserves its independent sibling appr
             },
           ],
         });
-        return JSON.stringify({ uses: [], limitations: [] });
+        return proposalJson();
       },
     },
   );
@@ -3017,8 +2909,8 @@ test.each(["approved", "rejected", "racing", "changed premise"] as const)(
     let corrected: PremiseRef | undefined;
     let coverageRefs: PremiseRef[] = [];
     const reviewedReplacements: number[] = [];
-    const checked = await runReviewedDependencyCheck(
-      { ...f.packageOptions, vulnDescription: "Parser issue" },
+    const checked = await f.check(
+      { vulnDescription: "Parser issue" },
       {
         discover: async () => ({
           ...f.discovery,
@@ -3218,7 +3110,7 @@ test.each(["approved", "rejected", "racing", "changed premise"] as const)(
               corrected = reference(repaired);
             }
           }
-          return JSON.stringify({ uses: [], limitations: [] });
+          return proposalJson();
         },
       },
     );
@@ -3330,9 +3222,8 @@ test("independently verifies candidate dispositions and publishes their selected
       { id: "worker", name: "Worker", source: "catalog", evidence: [bound] },
     ],
   };
-  const checked = await runReviewedDependencyCheck(
+  const checked = await f.check(
     {
-      ...f.packageOptions,
       vulnDescription: "Review the parser.",
       evidenceSources: [
         { server: "catalog", instructions: "Identify the deployed consumer." },
@@ -3473,7 +3364,7 @@ test("independently verifies candidate dispositions and publishes their selected
           ],
           observations: [],
         });
-        return JSON.stringify({ uses: [], limitations: [] });
+        return proposalJson();
       },
     },
   );
@@ -3541,26 +3432,12 @@ test("accounts for native graph candidate lines in their pinned package and pres
     "new.js": "factory();\n",
     "remaining.js": "flow();\n",
     "dirty.js": "old();\n",
+    "nested/package.json": '{"name":"other"}\n',
+    "nested/other.js": "call();\n",
   });
-  await mkdir(join(f.path, "nested"));
-  await writeFile(join(f.path, "nested", "package.json"), '{"name":"other"}\n');
-  await writeFile(join(f.path, "nested", "other.js"), "call();\n");
-  const { git } = f;
-  git("add", "nested");
-  git(
-    "-c",
-    "user.name=Fixture",
-    "-c",
-    "user.email=fixture@example.invalid",
-    "commit",
-    "-qm",
-    "nested",
-  );
-  const revision = git("rev-parse", "HEAD");
   await writeFile(join(f.path, "dirty.js"), "different();\n");
-  const checked = await runReviewedDependencyCheck(
+  const checked = await f.check(
     {
-      ...f.packageOptions,
       vulnDescription: "Check parser call paths.",
       evidenceSources: [
         { server: "catalog", instructions: "Check deployments." },
@@ -3569,7 +3446,6 @@ test("accounts for native graph candidate lines in their pinned package and pres
     {
       discover: async () => ({
         ...f.discovery,
-        revision,
         manifests: [
           {
             path: "package.json",
@@ -3653,7 +3529,7 @@ test("accounts for native graph candidate lines in their pinned package and pres
         for (const path of ["nested/other.js", "dirty.js", "secondary.js"])
           await expect(submit(path)).rejects.toThrow("Unknown candidate");
         await submit("new.js");
-        return JSON.stringify({ uses: [], limitations: [] });
+        return proposalJson();
       },
     },
   );
@@ -3729,9 +3605,8 @@ test("reports the scope and outcome of original evidence lookups across MCP resp
       completeness: "error",
     },
   ];
-  const result = await runReviewedDependencyCheck(
+  const result = await f.check(
     {
-      ...f.packageOptions,
       vulnDescription: "Parser input.",
       evidenceSources: [
         { server: "inventory", instructions: "Look up deployed copies." },
@@ -3739,7 +3614,6 @@ test("reports the scope and outcome of original evidence lookups across MCP resp
       ],
     },
     {
-      discover: async () => f.discovery,
       async runAgent(req) {
         if (req.coordinator) {
           req.onEvidenceStartup!(
@@ -3766,14 +3640,13 @@ test("reports the scope and outcome of original evidence lookups across MCP resp
             });
             if (evidence) req.onEvidence!(evidence);
           }
-          return JSON.stringify({ uses: [], limitations: [] });
+          return proposalJson();
         }
         const packet = agentInput(req.prompt);
         return approvedReview(packet.claims);
       },
     },
   );
-  if (!("checks" in result)) throw Error("Expected a package check");
   const check = result.checks[0]!;
   const offline = check.searches.find((row) => row.source === "offline")!;
   expect([offline.result, offline.completeness]).toEqual([

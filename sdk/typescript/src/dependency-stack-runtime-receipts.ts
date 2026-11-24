@@ -44,8 +44,6 @@ export const runtimeEvidenceInputSchema = z
     "Provide exactly one runtime result or resource.",
   );
 
-export type RuntimeEvidenceInput = z.input<typeof runtimeEvidenceInputSchema>;
-
 interface RuntimeReceiptRecord {
   server: string;
   tool: string;

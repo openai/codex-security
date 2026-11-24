@@ -42,164 +42,32 @@ including file names that begin with a dash.
 
 ## Experimental dependency investigations
 
-Set `CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1` to enable the experimental
-`exploitability` command group for an invocation. The group is hidden and unavailable
-by default. Use its help to see the commands available in your installed version.
+Run `cs exploitability check` from a Git checkout to assess a CVE or package. If you have captured call stacks, you can limit a CVE check to the observed workload and time window. To work offline without model review, use `cs exploitability run`.
 
-```sh
-CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1 cs exploitability --help
-```
-
-Supply one CVE and the three documents described by the package’s `schemas/dependency-stack-inputs-v1.schema.json`. Run the check in the repository at the exact Git commit identified by the stacks.
-
-```sh
-CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1 cs exploitability check CVE-2099-0001 \
-  --sources sources.json --sinks sinks.json --stacks stacks.json --report-file report.json
-```
-
-Add `--config project.yaml` with `exploitability.scope.instructions` to describe the callers to consider and the assumptions to use. The CLI saves this text as `callerScope` in the frozen packet and report. The investigator and independent reviewer use the same scope on every pass. Each verdict still needs evidence for the captured workload.
-
-The CLI looks up the CVE using the same OSV and alias resolution as a repository check. Before inspecting callers, it makes one model call to identify necessary trigger conditions for the supplied sinks. Each derived condition cites an exact passage in a resolved advisory. An investigator checks the supplied and derived conditions against the captured calls and the pinned source. The validator uses those same conditions for each verdict. The public lookup uses the CVE and associated advisory identifiers. The stack data stays out of the lookup.
-
-Open `report.json` to see the public records, their hashes and available revisions in `advisoryDetails`, and the per-sink conditions and supporting quotes in `triggerAnalysis`. If the public lookup fails, the CLI records `advisoryLookupError` and proceeds with the catalog advisory and its original preconditions. If the trigger analysis fails validation, the check stops before investigating callers.
-
-After validating the draft, the CLI asks a fresh read-only reviewer to check each verdict against the packet and pinned checkout. The reviewer looks for unanswered questions the available evidence could settle, such as which parser handles the input or how a downstream consumer uses the output. A missing deployment fact can still justify `unknown`.
-
-If the reviewer requests follow-up, the CLI reopens the specified work items and retains the evidence and other assessments. A fresh reviewer checks all assessments after each correction. Stack checks share the repository workflow’s allowance of two correction passes when each pass starts a fresh model call. Unresolved follow-up after that allowance or an invalid review causes the check to exit with an error. Each draft has `review: null`. After approval, the CLI fills `review` with the draft’s digest and the reviewer’s reason for each decision. The reviewer can approve an `unknown` verdict when the report identifies the specific missing evidence.
-
-To reuse a successful analysis with the same catalog and capture, copy both fields from the report to a new sink document.
-
-```sh
-jq -e --slurpfile r report.json '
-  select($r[0].advisoryDetails and $r[0].triggerAnalysis)
-  | . + ($r[0] | {advisoryDetails, triggerAnalysis})
-' sinks.json > sinks-replay.json
-```
-
-Pass `--sinks sinks-replay.json` and choose a new report filename. The CLI validates the supplied records and quotes, skips the public lookup and trigger extraction, and reruns the caller investigation and independent review. Treat a supplied snapshot as evidence from its producer. The hashes verify its contents against the saved hashes. Supplying only `advisoryDetails` skips the lookup and runs trigger extraction on those records.
-
-An external caller can freeze the same files with `prepareStackPacket` from `@openai/codex-security/stack-packet`. Set the opt-in for each invocation. `cs exploitability run init --inputs <packet-directory> --repo <checkout> --state <database>` creates or reopens an attempt from a prepared packet. For an interactive investigation, omit `--inputs` and initialize the checkout and state before collecting runtime evidence; optionally pass advisory or endpoint information as JSON with `--json-stdin`. `run tools --state <database>` lists operation schemas.
-
-Use `next` to select the outstanding work item and read its complete captured frames, original frame indices, bindings and capture receipt. `record-evidence` saves pinned source ranges or an original runtime result or resource; `record-observations` registers additional runtime queries and their work items as evidence becomes available. Use `record-claims` to save supported facts and `query-claims` to retrieve their exact references. Use `record-assessments`, `summarize-coverage` and `finalize` to produce the scoped report. Operations with a JSON input accept `--json-stdin`. Each `run` operation prints JSON by default. Use `--format` to select another representation. The investigation state is local to the supplied SQLite file. These lower-level operations run offline. A direct `run finalize` returns an immutable report with `review: null`.
-
-For example, start a run before its advisory or runtime information is complete:
+Enable these commands in your shell. They are hidden and disabled by default.
 
 ```sh
 export CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1
-cs exploitability run init --repo "$TARGET" --state "$STATE"
-cs exploitability run init --repo "$TARGET" --state "$STATE" --json-stdin < advisory.json
-cs exploitability run record-evidence --state "$STATE" --json-stdin < runtime.json
-cs exploitability run record-observations --state "$STATE" --json-stdin < observations.json
-cs exploitability run next --state "$STATE"
+cs exploitability --help
 ```
-
-`advisory.json` supplies the CVE, advisory and source/sink endpoints as they become known. A runtime evidence import names the operation and contains the original JSON result, or a path and SHA-256 for its original JSON bytes:
-
-```json
-{
-  "kind": "runtime",
-  "server": "example-runtime",
-  "tool": "profile.lookup",
-  "arguments": { "service": "example" },
-  "scope": { "service": "example" },
-  "resource": { "path": "/path/to/result.json", "sha256": "<original SHA-256>" }
-}
-```
-
-An original stack result can be a query in the shape from `schemas/dependency-stack-inputs-v1.schema.json`, or an object containing a `queries` array. A `codex-security-graph-evidence/v1` result can also be normalized when its metadata supplies the query identity, scope, window and sink selectors; root-first frames are reversed and their original index references are remapped. Use the returned `receiptId` to register the query results; the host derives the queries and work items from the recorded original:
-
-```json
-{ "receiptId": "<returned receipt ID>" }
-```
-
-If `queries` is also supplied to `record-observations`, it must exactly match the queries represented by the original receipt, including scope, status, frames and indices. Observed stacks and successful zero-match results require a receipt; a `no_coverage` query may be registered without one. A successful zero-match result also needs complete query coverage. Runtime imports preserve caller-supplied operation provenance and the original payload; they do not independently attest that a provider executed the named operation. Cite the original receipt when an assessment depends on its result.
-
-For graph evidence, a zero-match result requires metadata status `empty_matches`, `coverage.result_complete: true`, and `limits.truncated: false`. Missing telemetry or incomplete coverage becomes `no_coverage` instead.
-
-A graph resource can establish which frames appeared in a sample. Ruling out a vulnerability because a fixed package version ran requires the capture producer to tie that version to the matched frame. An image inventory alone establishes which packages the image contains. When the producer supplies a canonical stack query with frame-to-package bindings, the finalized claim includes the original import for review.
-
-Live or supplemented reports can include `effectiveInputDigest`, a hash of the versioned canonical effective source, sink and stack documents, target, and imported receipt IDs. The original `inputDigest` remains stable so existing claim identities continue to resolve.
-
-A stack group with `no_indexed_match` has zero observations from an indexed search whose coverage may be incomplete. The report uses `no_coverage` for the group’s status, `unknown` for its verdict, and lists its work item in `coverage.noCoverage`. Other stack groups are assessed independently.
-
-When the capture producer identifies the package copy that executed a frame, include its original zero-based index in the binding’s `frameIndices` array. For example, `"frameIndices": [0]` ties that binding’s package and version to the innermost frame. A binding without frame indices describes the workload or build. A version-based exclusion requires a cited fixed copy for each matched sink frame.
-
-A missing observation or a gap in the evidence can yield a completed `unknown` assessment. An `unknown` verdict on a matched stack with consistent scope requires one `questionChecks` entry per remaining question. Each entry records the exact question, what the investigator inspected, the supporting claim revisions and the specific missing evidence. Both `record-assessments` and `finalize` apply the same static checks. Only the high-level `exploitability check` adds independent model review. Reports retain the question checks. Execution errors produce a nonzero exit. The report schema is available at `@openai/codex-security/schemas/stack-investigation-report-v1.schema.json`.
-
-### Choose a report format
-
-Run `check` for a terminal summary. Add `--format html` to save a
-self-contained `exploitability_report_<timestamp>.html` in the current
-directory. The timestamp uses UTC, for example `20261119T213045123Z`.
-The terminal shows the summary and the path to the file. To choose
-a different destination, add `--report-file path/to/review.html`. Set
-`CVE_ID` to the advisory you want to check in your checkout.
-
-```sh
-export CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1
-cs exploitability check "$CVE_ID" --format html
-```
-
-Open the file in a browser. The header identifies the repository and commit
-assessed when those were recorded. Select a call site to read its verdict and
-the advisory conditions, then step through the path to see the code at each
-recorded line. **Expand all** shows the excerpts together. **Focus** opens
-the path across the workspace. For a sampled stack, the viewer shows gaps
-where the report omitted frames and identifies frames without matching source.
-
-For a stack investigation, use
-`cs exploitability run finalize --state investigation.sqlite --format html`.
-Each stack assessment applies to its captured workload and observation window.
-
-Use `--format md` with either command to print Markdown. Each sampled stack
-appears under its verdict, starting with the outermost recorded caller. Frames
-show the function and any recorded file and line. A code block shows the exact
-line when the saved source matches the frame and its build. Gaps mark omitted
-frames. A cited call that cannot be placed on the stack appears under
-**Source review**.
-
-Use `--json` to print the structured result. With Markdown, JSON, or the
-default terminal summary, `--report-file` saves the underlying JSON. A finding
-marked **Requires more information** corresponds to `unknown` in JSON.
 
 ### Reviewed repository and package checks
 
-From a Git checkout, use the same opt-in to investigate a published CVE or a package. The CLI freezes the public advisory, finds dependency selections and caller paths at the checked-out commit, and asks a fresh reviewer to approve each exact claim revision. The resulting JSON keeps each supported use and its source citations separate.
-
 ```sh
-export CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1
-cs exploitability check CVE-2019-10744 --json --report-file report.json
+cs exploitability check CVE-2019-10744 --json --report-file repository.json
 cs exploitability check npm:lodash --progress-events progress.jsonl
 cs exploitability check npm:example-parser --vuln-description "Suspected failure to validate the declared input length."
 ```
 
-Package checks return one `checks` entry per advisory. If an advisory is blocked or its conclusion fails independent review, the CLI continues with the remaining advisories. It returns the completed checks and individual blocked outcomes in order and exits with status 2. An execution failure stops the command and identifies the advisories it did not attempt. A supplied description produces a single assessment for that hypothesis. A completed `unknown` records the missing evidence. Progress is best effort. `--report-file` publishes the completed report atomically to a new file and preserves any existing destination.
+A package check returns one entry in `checks` per public advisory. Use `--vuln-description` with a package to check a single hypothesis. The investigator traces callers and package versions at the checked-out commit. An independent reviewer checks the claims and selects the evidence supporting each verdict.
 
-The investigator can delegate source searches while an independent reviewer evaluates proposed uses and the claims they rely on. Investigators share evidence collected during the check. The reviewer selects the citations that support each approved claim. A deciding MCP citation can identify a single JSON value. Its `receiptId` identifies the captured response, `originalPayloadSha256` identifies its contents, and `selection.record` gives the key and index path. A null `selection.textBlock` selects structured content. A numeric value selects a JSON text block by index. Whole-response citations omit `selection`. Open a use in the JSON report to see its component, version, verdict, and deciding evidence. The progress stream includes provisional verdicts that can change during review.
+A positive verdict requires evidence that the affected build ran, the caller had access and the advisory conditions held for that use. A lockfile can identify a build’s dependencies. You may need a deployment inventory to show which build ran.
 
-Both a terminal and redirected stderr show investigation stages, scoped source searches, reviewed verdicts and the final verdict counts. When you use `--report-file`, stderr also shows the absolute path to the saved report. With `--json`, stdout contains only the report or blocked outcome.
+An `unknown` verdict is a completed assessment that identifies missing evidence. If an advisory is blocked or fails review, the package check continues, returns completed and blocked outcomes in order and exits with status 2. An execution error stops the check and lists the advisories left to assess.
 
-Use `--progress-events FILE` for live JSON Lines. Each event carries `schemaVersion: 1`, `elapsedMs`, `subject` and `type`. Match `activity_started` and `activity_finished` by `id`. A finished trace includes the checkout-relative `searchedPaths` when the tracer reports them. A `reviewed` event can carry a `previousVerdict` when an assessment changes. The `access_program` event reports the program selected for the investigation turn, or `unconfirmed` when the transport does not expose it. The `report_ready` event includes verdict counts, the limitation count and the saved report path when requested. The final `finished` event records the command outcome.
+#### Configure scope and evidence
 
-For repository checks, the coordinator runs at high reasoning effort. Investigator subagents use the effort selected by `--effort` or the project profile unless `agents.default_subagent_reasoning_effort` sets their effort explicitly. Independent claim reviewers run at low effort. Review feedback returns to the same coordinator thread with the original plan, claims and evidence. If the native process exits unexpectedly, the CLI can resume that thread once when its last tool operations have a known outcome.
-
-The host includes every current approved assessment submitted during the investigation. The coordinator’s final `uses` array adds findings that have yet to be submitted and can be empty. To revise a submitted assessment, the coordinator uses its ID and current revision. Assessments for distinct call sites, package copies, or deployments can share a scope and location.
-
-Investigators use `update_codex_security_graph` to share a source note (`note`) or track files in a delegated search (`sourceWork`). A note can identify a newly discovered caller or sink and cite lines from the pinned Git revision. Other investigators can find it with `query_codex_security_graph({note:{search}})` and read the excerpts with `{note:{id}}`. Submitting a claim based on those lines starts independent review.
-
-Before creating an assessment, investigators query the existing uses. They submit new evidence for the same caller, copy and deployment under its existing ID. To withdraw a superseded use, an investigator submits a disposition under that ID with the latest `expectedRevision`, the approved use’s exact `{id, revision, hash}` in `replacesUse`, and evidence for the change. The reviewer receives the prior finding, its proof and the proposed reason. The original stays in effect while its evidence remains current, until a replacement passes review. An approved disposition’s `conclusionClaim` points to its current report entry. The claim payload’s `replacesUse` records the earlier revision in the investigation ledger.
-
-A repository use or disposition may include an ordered `trace` of cited
-source and handoff steps. Each step names the input or call, its file and
-line, and optionally the exact expression carrying the input. A gap names
-the missing link. The terminal function, call site, and optional argument
-live in `proof.sink` on a use. The reviewer checks these against the pinned
-source. Older reports can still show just the sink. The viewer never turns
-a location label into a call chain.
-
-When the investigation finds a caller but cannot establish which dependency operation it reaches, it can submit an unresolved coverage disposition. Its handoff records what the investigator verified and what evidence is still needed. A dismissal identifies the observed candidate and explains the evidence for excluding it. Each approved disposition in `coverage` links to its own reviewed claim revision, deciding source ranges or original receipt rows, and any selected supporting claims. Source tracing can add candidate lines after initial discovery. The host verifies their source against the checked-out Git revision and resolves the owning package before adding them to coverage. Other unassessed callers retain their own coverage gaps.
-
-A repository check can ask MCP servers for facts it cannot learn from the checkout. For example, a lockfile can identify the package selected by a build. A deployment inventory can show whether that build is running. In a project file, list the servers under `exploitability.evidence_sources` and describe when the investigator should use each one. Define the connection once under `codex.mcp_servers`. Configure read-only tools for the systems you want the investigator to query.
+To let the investigator query an inventory or other evidence source, configure read-only MCP tools in `project.yaml`.
 
 ```yaml
 exploitability:
@@ -213,11 +81,117 @@ codex:
       enabled_tools: [get_deployment]
 ```
 
-Run `cs exploitability check CVE-2019-10744 --config project.yaml` to use those sources. Repository checks default to production services, jobs, workers, and the code they deploy or import. Set `exploitability.scope.instructions` to replace that caller scope. Use `exploitability.scope.exclude_paths` for literal checkout-relative files or directories to omit from broad discovery. A nested `SECURITY.md` boundary or an exact source or build lead can bring a path back into the investigation.
+Run `cs exploitability check CVE-2019-10744 --config project.yaml`. The following settings under `exploitability` appear in the report’s `assumptions`.
 
-Repository checks also accept independent `exploitability.sources` and `exploitability.sinks` lists in the project file. Each endpoint names a `function` and can include its package, symbol, file, and line. Supply a list to describe all endpoints on that side of the scenario, including an empty list when the side has no endpoints. Omit the list to let the investigator discover endpoints. The reviewer checks cited tool replies alongside the source code. A positive verdict requires evidence that the affected build was running, that the caller had access, and that the advisory conditions held for that use. Missing evidence is reported as a gap.
+- `scope.instructions` replaces the default scope of production services, jobs, workers and the code they deploy or import.
+- `scope.exclude_paths` skips literal checkout-relative files or directories in broad searches. A nested `SECURITY.md` boundary or specific source or build evidence can bring an excluded path back into scope.
+- `sources` and `sinks` each specify a complete endpoint list. Omit either list to discover those endpoints. Set it to `[]` to declare there are none. Each endpoint requires a `function` and may include a package, symbol, file and line.
 
-The report's `assumptions` records the caller scope, supplied endpoint lists, and paths excluded from broad discovery. A runtime selector's source `line` requires its `location`. The selector retains additional JSON metadata supplied by the evidence source.
+The coordinator uses high reasoning effort, reviewers use low effort and investigators use `--effort` or the project profile. `agents.default_subagent_reasoning_effort` overrides the investigator setting. If the native process exits unexpectedly, the CLI can resume the coordinator thread once if the last tool operations have known outcomes.
+
+#### Read the evidence
+
+In `uses`, check the component, version, verdict and citations for each caller, package copy and deployment. `proof.sink` identifies the dependency call. An optional `trace` gives the ordered source references and marks missing links. In `coverage`, a dismissal explains why a candidate was excluded. An unresolved entry records what was verified and what remains open.
+
+Each approved assessment links to a reviewed claim revision. A replacement must pass review before it supersedes an assessment whose evidence is still current.
+
+An MCP citation identifies the response by `receiptId` and `originalPayloadSha256`. Without `selection`, it cites the whole response. Otherwise, `selection.record` is the path to the JSON value. `selection.textBlock` is either a JSON text block index or `null` for structured content.
+
+### Choose a report format
+
+By default, `check` prints a summary. Use `--json` for the structured result or `--format md` for Markdown. With any of these formats, `--report-file PATH` saves the JSON. **Requires more information** means `unknown` in JSON.
+
+```sh
+cs exploitability check CVE-2019-10744 --format html --report-file review.html
+```
+
+`--format html` saves a self-contained browser report and prints its path. The default filename is `exploitability_report_<timestamp>.html` in the current directory, with a UTC timestamp. Reports are saved atomically and never overwrite existing files.
+
+Select a call site in the browser to inspect the verdict, conditions and source excerpts. **Expand all** shows the excerpts together. **Focus** enlarges the call path. HTML and Markdown mark gaps in sampled stacks and show matching source when available. In Markdown, citations outside the stack appear under **Source review**.
+
+#### Follow progress
+
+`check` writes progress to stderr. With `--json`, stdout contains only the report or blocked outcome. Provisional verdicts can change during review.
+
+`--progress-events FILE` streams JSON Lines to a new file on a best-effort basis. Each event includes `schemaVersion` (1), `elapsedMs`, `subject` and `type`. Match `activity_started` and `activity_finished` by `id`. Finished searches can include `searchedPaths`. The `reviewed` event can include `previousVerdict`. `access_program` identifies the selected program or reports `unconfirmed`. `report_ready` gives verdict and limitation counts and any saved report path. `finished` records the command outcome.
+
+### Check captured stacks
+
+Check out the commit named in the capture. Supply one CVE and all three files from the [stack input schema](../schemas/dependency-stack-inputs-v1.schema.json). The sink file must include the catalog advisory.
+
+```sh
+cs exploitability check CVE-2099-0001 \
+  --sources sources.json --sinks sinks.json --stacks stacks.json --report-file report.json
+```
+
+To specify which callers and assumptions to consider, set `exploitability.scope.instructions` in a project file and pass `--config project.yaml`. The input packet and report save the instructions as `callerScope`. Both the investigator and reviewer apply them.
+
+The CLI queries OSV for the CVE and its aliases and can fetch missing GHSA records from GitHub. These lookups exclude stack data. In the [report](../schemas/stack-investigation-report-v1.schema.json), `advisoryDetails` contains the public records, their hashes and available revisions. `triggerAnalysis` lists the necessary conditions derived for each sink and quotes the supporting advisory passages. If lookup fails, the CLI records `advisoryLookupError` and uses the catalog preconditions. Invalid trigger analysis stops the check.
+
+The investigator checks the supplied and derived conditions against captured calls and source at the recorded commit. A fresh, read-only reviewer checks every verdict after each submission. The CLI allows two correction passes and exits with an error if review is invalid or follow-up remains unresolved. On approval, `review` records the draft digest and reasons for each decision.
+
+#### Reuse advisory records
+
+For the same catalog and capture, copy the records and conditions into a new sink file.
+
+```sh
+jq -e --slurpfile r report.json '
+  select($r[0].advisoryDetails and $r[0].triggerAnalysis)
+  | . + ($r[0] | {advisoryDetails, triggerAnalysis})
+' sinks.json > sinks-replay.json
+```
+
+Pass `--sinks sinks-replay.json` and choose a new report path. The CLI validates the hashes and quotes, then repeats the caller investigation and review. Supply only `advisoryDetails` to derive conditions again. Use a trusted snapshot. Matching hashes cannot authenticate its producer.
+
+### Investigate stacks offline
+
+`cs exploitability run` stores state in the SQLite file you specify. Operations print JSON by default. `run tools --state "$STATE"` lists their input schemas. Set `TARGET` to the checkout and `STATE` to the database path.
+
+```sh
+cs exploitability run init --repo "$TARGET" --state "$STATE"
+cs exploitability run init --repo "$TARGET" --state "$STATE" --json-stdin < advisory.json
+cs exploitability run record-evidence --state "$STATE" --json-stdin < runtime.json
+cs exploitability run record-observations --state "$STATE" --json-stdin < observations.json
+cs exploitability run next --state "$STATE"
+```
+
+`init` creates or reopens an investigation. Supply the CVE, advisory and endpoints in `advisory.json` as they become available. To start with a complete packet, prepare it with `prepareStackPacket` from `@openai/codex-security/stack-packet` and add `--inputs <packet-directory>` to `init`.
+
+#### Import runtime evidence
+
+`record-evidence` saves source ranges or an original runtime result. In `runtime.json`, identify the operation and supply its JSON result or a path and SHA-256 hash of the original bytes.
+
+```json
+{
+  "kind": "runtime",
+  "server": "example-runtime",
+  "tool": "profile.lookup",
+  "arguments": { "service": "example" },
+  "scope": { "service": "example" },
+  "resource": { "path": "/path/to/result.json", "sha256": "<original SHA-256>" }
+}
+```
+
+Put the returned receipt ID in `observations.json`. Cite it when an assessment relies on the result. The import preserves the payload and the operation you named. It cannot verify that the provider ran the operation.
+
+```json
+{ "receiptId": "<returned receipt ID>" }
+```
+
+`record-observations` reads a query or a `queries` array from the receipt. Any `queries` supplied separately must match exactly. A `codex-security-graph-evidence/v1` result must identify the query, scope, window and sink selectors. The CLI reverses root-first frames and remaps their index references. A runtime selector with a `line` requires a `location`.
+
+- Observed stacks and successful searches with zero matches require a receipt. Zero matches also require complete coverage. For graph evidence, this means status `empty_matches`, `coverage.result_complete: true` and `limits.truncated: false`.
+- A `no_coverage` query needs no receipt. A stack group marked `no_indexed_match` gets status `no_coverage` and verdict `unknown`. Its work item appears in `coverage.noCoverage`.
+- To rule out a vulnerability based on version, cite a fixed package copy for each matched sink frame. The producer’s binding must include the original zero-based `frameIndices`. Index 0 identifies the innermost frame. An image inventory alone cannot establish which copy ran.
+
+#### Complete the assessment
+
+1. Use `next` to read the outstanding work item’s frames, original indices, bindings and receipt.
+2. Save supported facts with `record-claims` and retrieve references with `query-claims`.
+3. Submit verdicts with `record-assessments`. For `unknown` on a matched stack with consistent scope, supply one `questionChecks` entry per open question. Include the question, what you inspected, supporting claim revisions and the missing evidence.
+4. Check `summarize-coverage`, then run `cs exploitability run finalize --state "$STATE"`. Add `--format md` or `--format html` to change the output format.
+
+`finalize` repeats the static assessment checks and returns an immutable report with `review: null`. Independent model review requires `exploitability check`. When inputs change, `effectiveInputDigest` can identify the updated inputs, target and receipt IDs. The original `inputDigest` stays stable so existing claim references resolve.
 
 ## Updating the CLI
 

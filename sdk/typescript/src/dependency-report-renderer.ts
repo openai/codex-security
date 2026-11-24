@@ -146,7 +146,8 @@ function inspector(path: PathInspector, id: string) {
    ${path.notes.length ? `<p class="inspector-notes">${esc(path.notes.join(" "))}</p>` : ""}</section>`;
 }
 function conditions(f: Finding) {
-  const conditions = f.kind === "coverage" ? [] : f.proof?.conditions || [];
+  const conditions =
+    f.kind === "coverage" ? [] : f.item.proof?.conditions || [];
   if (!conditions.length) return "";
   return `<section class="conditions"><h3>Advisory conditions</h3>
    <ul class="condition-list">${conditions
@@ -183,7 +184,7 @@ function decision(f: Finding) {
 // build binding for that frame. Display it independently of the sampled path.
 function citedCaller(f: Finding, path: PathInspector) {
   if (path.basis !== "sampled" || f.kind !== "stack") return "";
-  const site = f.proof?.sink?.callSite;
+  const site = f.item.proof?.sink?.callSite;
   if (!site) return "";
   const match = matchTraceFrame(f, "sink", site);
   if ("gap" in match) return "";
@@ -197,18 +198,18 @@ function citedCaller(f: Finding, path: PathInspector) {
     )
   )
     return "";
-  const excerpt = f.excerpts[citationKey(cite)];
-  if (!excerpt) return "";
+  const excerpt = f.excerpts.get(citationKey(cite));
+  if (excerpt === undefined) return "";
   return `<section class="inspector"><div class="inspector-head"><div><p class="eyebrow">Repository evidence</p><h3>Cited call site</h3></div></div>
-  <div class="frame-body"><div class="code-meta">${esc(line(site.path, site.line))}</div>${renderDependencyCode(excerpt.text, site.path, cite.startLine, new Set([site.line]))}</div>
+  <div class="frame-body"><div class="code-meta">${esc(line(site.path, site.line))}</div>${renderDependencyCode(excerpt, site.path, cite.startLine, new Set([site.line]))}</div>
   <p class="inspector-notes">The capture does not link this source line to a specific frame.</p></section>`;
 }
 function evidencePreview(f: Finding) {
   for (const c of f.item.evidence) {
-    const excerpt = f.excerpts[citationKey(c)];
-    if (!excerpt) continue;
+    const excerpt = f.excerpts.get(citationKey(c));
+    if (excerpt === undefined) continue;
     return `<section class="inspector"><div class="inspector-head"><h3>Cited evidence</h3></div>
-     <div class="frame-body"><div class="code-meta">${esc(line(c.path, c.startLine))}</div>${renderDependencyCode(excerpt.text, c.path, c.startLine)}</div></section>`;
+     <div class="frame-body"><div class="code-meta">${esc(line(c.path, c.startLine))}</div>${renderDependencyCode(excerpt, c.path, c.startLine)}</div></section>`;
   }
   return "";
 }
@@ -216,12 +217,12 @@ function content(section: Section, e: Entry) {
   const f = e.finding;
   if (!f) {
     if (section.pending)
-      return "<h2>Investigation pending</h2><p>The package investigation stopped before this advisory.</p>";
+      return "<h2>Investigation pending</h2><p>The package check stopped before it assessed this advisory.</p>";
     if (section.blocked) {
       const b = section.blocked;
       return `<h2>Investigation blocked</h2>${[b.reason, b.affectedScope, b.scopeImpact, b.unblockCondition].map(para).join("")}`;
     }
-    return `<h2>No findings</h2><p>${section.stack ? "No assessed stacks in this capture." : "No reviewed uses in this investigation."}</p>`;
+    return `<h2>No findings</h2><p>${section.stack ? "No stacks from this capture were assessed." : "No dependency use was reviewed."}</p>`;
   }
   const path = e.path!;
   const source = path.frames.find((fr) => fr.role === "source");

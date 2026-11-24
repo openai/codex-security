@@ -123,7 +123,6 @@ function validatePackagePaths(entries) {
     "package/dist/index.js",
     "package/dist/index.d.ts",
     "package/dist/cli.js",
-    "package/resources/dependency-stack-investigation.md",
     "package/schemas/dependency-stack-inputs-v1.schema.json",
     "package/schemas/stack-investigation-report-v1.schema.json",
     "package/schemas/project-config.schema.json",

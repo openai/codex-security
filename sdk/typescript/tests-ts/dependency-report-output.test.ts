@@ -8,7 +8,6 @@ import { prepareDependencyReport } from "../src/dependency-report-model.js";
 import { renderPreparedDependencyReport } from "../src/dependency-report-renderer.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 import {
-  unresolved,
   variantReport,
   reviewed,
   report,
@@ -52,80 +51,6 @@ test("failed rendering and concurrent saves preserve file publication semantics"
   await expect(save(variantReport())).rejects.toThrow();
   expect(await readFile(path, "utf8")).toBe(published);
   expect(await readdir(dir.path)).toEqual(["report.html"]);
-});
-
-test("sorting and separating dismissed coverage preserves report links", () => {
-  const data = report(
-    [reviewed(1, { verdict: "ruled_out" }), reviewed(2)],
-    [unresolved(1), unresolved(2, { kind: "dismissed" }), unresolved(3)],
-  );
-  const { findings, dismissed } =
-    prepareDependencyReport(data).sections[0]!.prepared!;
-  expect(findings.map((f) => f.id)).toEqual([
-    "use-1-2",
-    "coverage-1-1",
-    "coverage-1-3",
-    "use-1-1",
-  ]);
-  expect(dismissed.map((f) => f.id)).toEqual(["coverage-1-2"]);
-});
-
-test("excerpt follows only the cited claim revision and source commit for this use", () => {
-  const hash = "a".repeat(64),
-    commit = "a".repeat(40);
-  const site = { path: "src/read.ts", startLine: 4, endLine: 4, commit };
-  const source = { ...site, excerpt: "return read(data);\n" };
-  const ref = { id: "call", revision: 1, hash };
-  const premise = { ...ref, id: "source" };
-  const use = reviewed(1, {
-    conclusionClaim: ref,
-    evidence: [{ ...site, supports: ["affected_use"] }],
-    decidingEvidence: [{ kind: "source", ...site }],
-  });
-  const claim = {
-    ...ref,
-    state: "approved",
-    contextHash: hash,
-    payload: {},
-    scope: {},
-    decision: { accepted: true, reason: "Supported", evidenceKeys: [] },
-    dependencies: [premise],
-    evidence: { sourceIds: [], receiptIds: [] },
-  };
-  const base = {
-    ...report([use]),
-    claims: [
-      claim,
-      {
-        ...claim,
-        ...premise,
-        dependencies: [],
-        evidence: { sourceIds: ["src"], receiptIds: [] },
-      },
-    ],
-    claimEvidence: { sources: { src: source }, receipts: {} },
-  };
-  const texts = (data: unknown) =>
-    Object.values(
-      prepareDependencyReport(data).sections[0]!.prepared!.findings[0]!
-        .excerpts,
-    ).map((s) => s.text);
-  expect(texts(base)).toEqual(["return read(data);"]);
-  expect(
-    texts({
-      ...base,
-      uses: [{ ...use, conclusionClaim: { ...ref, revision: 2 } }],
-    }),
-  ).toEqual([]);
-  expect(
-    texts({
-      ...base,
-      claimEvidence: {
-        sources: { src: { ...source, commit: "b".repeat(40) } },
-        receipts: {},
-      },
-    }),
-  ).toEqual([]);
 });
 
 const checkout = {

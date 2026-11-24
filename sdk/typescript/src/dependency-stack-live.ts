@@ -6,6 +6,7 @@ import {
   dependencyRecordHash,
 } from "./dependency-attempt-store.js";
 import {
+  queryWorkItems,
   sampledStacksSchema,
   stackSinkMatches,
   stackSinksSchema,
@@ -64,12 +65,7 @@ export interface LiveRun {
   sinks: Sink[];
 }
 
-interface SupplementalQuery {
-  query: Query;
-  origin?: Origin;
-  receiptId?: string;
-  sha256: string;
-}
+type SupplementalQuery = SupplementalReceipt & { query: Query };
 
 interface SupplementalReceipt {
   sha256: string;
@@ -145,25 +141,25 @@ export async function initializeLive(
     "repository",
   );
   const target = { repository: logicalRepository ?? checkout, sha };
-  if (
-    existing &&
-    existing.target.repository !== target.repository &&
-    (store.claims().length > 0 || store.size("stack-assessment") > 0)
-  )
-    fail("Set the logical repository before recording claims or assessments.");
-  const runId = existing?.runId ?? update.runId ?? randomUUID();
-  const attemptId = existing?.attemptId ?? update.attemptId ?? randomUUID();
+  function checkRepositoryChange() {
+    if (
+      existing &&
+      existing.target.repository !== target.repository &&
+      (store.claims().length > 0 || store.size("stack-assessment") > 0)
+    )
+      fail(
+        "Set the logical repository before recording claims or assessments.",
+      );
+  }
+  checkRepositoryChange();
+  const runId =
+    immutable(existing?.runId, update.runId, "run ID") ?? randomUUID();
+  const attemptId =
+    immutable(existing?.attemptId, update.attemptId, "attempt ID") ??
+    randomUUID();
   const toolRevision =
-    existing?.toolRevision ??
-    update.toolRevision ??
+    immutable(existing?.toolRevision, update.toolRevision, "tool revision") ??
     `@openai/codex-security@${VERSION}`;
-  for (const [name, expected, supplied] of [
-    ["run ID", runId, update.runId],
-    ["attempt ID", attemptId, update.attemptId],
-    ["tool revision", toolRevision, update.toolRevision],
-  ] as const)
-    if (supplied !== undefined && supplied !== expected)
-      fail(`The investigation ${name} is already recorded differently.`);
   const identity = {
     format: "codex-security.live-investigation/v1" as const,
     checkout: { repository: checkout, sha },
@@ -210,14 +206,7 @@ export async function initializeLive(
       canonicalJson(existing) !== canonicalJson(next)
     )
       fail("This investigation has been finalized.");
-    if (
-      existing &&
-      existing.target.repository !== target.repository &&
-      (store.claims().length > 0 || store.size("stack-assessment") > 0)
-    )
-      fail(
-        "Set the logical repository before recording claims or assessments.",
-      );
+    checkRepositoryChange();
     store.bindIdentity(identity);
     store.set("live-run", "active", next);
     if (!existing) store.set("stack-protocol", "capture-origin", "next");
@@ -225,19 +214,22 @@ export async function initializeLive(
   });
 }
 
+function advisoryGaps(run: LiveRun) {
+  const gaps: string[] = [];
+  if (!run.cve) gaps.push("Supply the CVE identifier.");
+  if (!run.advisory) gaps.push("Supply the advisory URL and summary.");
+  return gaps;
+}
+
 export function liveMetadataGaps(store: DependencyAttemptStore): string[] {
   const run = getLiveRun(store);
   if (!run) return ["Initialize the interactive investigation first."];
-  return [
-    ...(!run.cve ? ["Supply the CVE identifier."] : []),
-    ...(!run.advisory ? ["Supply the advisory URL and summary."] : []),
-    ...(!run.sinks.length
-      ? ["Identify and register the vulnerable sink."]
-      : []),
-    ...(!store.size("supplemental-query")
-      ? ["Collect a runtime query or record a concrete coverage gap."]
-      : []),
-  ];
+  const gaps = advisoryGaps(run);
+  if (!run.sinks.length)
+    gaps.push("Identify and register the vulnerable sink.");
+  if (!store.size("supplemental-query"))
+    gaps.push("Collect a runtime query or record a concrete coverage gap.");
+  return gaps;
 }
 
 function fileIdentity(value: unknown) {
@@ -250,10 +242,7 @@ function fileIdentity(value: unknown) {
 export function livePacket(store: DependencyAttemptStore): StackPacket {
   const run = getLiveRun(store);
   if (!run) fail("Initialize the interactive investigation first.");
-  const gaps = [
-    ...(!run.cve ? ["Supply the CVE identifier."] : []),
-    ...(!run.advisory ? ["Supply the advisory URL and summary."] : []),
-  ];
+  const gaps = advisoryGaps(run);
   if (gaps.length)
     fail(`Interactive investigation metadata is incomplete. ${gaps.join(" ")}`);
   const sources: StackPacket["sources"] = {
@@ -293,19 +282,6 @@ export function livePacket(store: DependencyAttemptStore): StackPacket {
     sinks,
     stacks,
   };
-}
-
-function pointer(value: string) {
-  return value.replaceAll("~", "~0").replaceAll("/", "~1");
-}
-
-function queryWorkItemIds(query: Query) {
-  return query.groups.flatMap((group) => {
-    const prefix = `${pointer(query.id)}/${pointer(group.id)}`;
-    return group.observations.length
-      ? group.observations.map((row) => `${prefix}/${pointer(row.id)}`)
-      : [prefix];
-  });
 }
 
 function mergeQuery(queries: Query[], incoming: Query): Query[] {
@@ -376,14 +352,24 @@ function validateAddedQuery(query: Query, sinkIds: Set<string>) {
   }
 }
 
+function queryReceipt(
+  query: Query,
+  { origin, receiptId }: Omit<SupplementalReceipt, "sha256">,
+): SupplementalReceipt {
+  const provenance = {
+    ...(origin && { origin }),
+    ...(receiptId && { receiptId }),
+  };
+  return {
+    sha256: dependencyRecordHash({ query, ...provenance }),
+    ...provenance,
+  };
+}
+
 function supplementalQueries(store: DependencyAttemptStore) {
   const entries = store.values<SupplementalQuery>("supplemental-query");
   for (const entry of entries) {
-    const actual = dependencyRecordHash({
-      query: entry.query,
-      ...(entry.origin && { origin: entry.origin }),
-      ...(entry.receiptId && { receiptId: entry.receiptId }),
-    });
+    const actual = queryReceipt(entry.query, entry).sha256;
     if (actual !== entry.sha256)
       fail("Recorded supplemental observation evidence changed.");
   }
@@ -426,10 +412,8 @@ export function recordObservations(
   const live = getLiveRun(store);
   if (!base && !live)
     fail("Initialize the investigation before recording observations.");
-  const sinkIds = new Set(
-    (base?.sinks.sinks ?? live?.sinks ?? []).map((sink) => sink.id),
-  );
   const allSinks = base?.sinks.sinks ?? live?.sinks ?? [];
+  const sinkIds = new Set(allSinks.map((sink) => sink.id));
   const originalQueries = parsed.receiptId
     ? normalizeRuntimeObservationQueries(store, parsed.receiptId, allSinks)
     : undefined;
@@ -456,32 +440,18 @@ export function recordObservations(
     (current, entry) => mergeQuery(current, entry.query),
     [...(base?.stacks.queries ?? [])],
   );
-  const added: SupplementalQuery[] = [];
-  const workItemIds: string[] = [];
-  for (const query of requested) {
+  const added = requested.map((query) => {
     validateAddedQuery(query, sinkIds);
     queries = mergeQuery(queries, query);
-    const sha256 = dependencyRecordHash({
-      query,
-      ...(parsed.origin && { origin: parsed.origin }),
-      ...(parsed.receiptId && { receiptId: parsed.receiptId }),
-    });
-    added.push({
-      query,
-      sha256,
-      ...(parsed.origin && { origin: parsed.origin }),
-      ...(parsed.receiptId && { receiptId: parsed.receiptId }),
-    });
-    workItemIds.push(...queryWorkItemIds(query));
-  }
-  for (const entry of added) {
-    store.set("supplemental-query", randomUUID(), entry);
-    for (const id of queryWorkItemIds(entry.query))
-      store.set("supplemental-receipt", id, {
-        sha256: entry.sha256,
-        ...(entry.receiptId && { receiptId: entry.receiptId }),
-        ...(entry.origin && { origin: entry.origin }),
-      } satisfies SupplementalReceipt);
+    return { query, receipt: queryReceipt(query, parsed) };
+  });
+  const workItemIds: string[] = [];
+  for (const { query, receipt } of added) {
+    store.set("supplemental-query", randomUUID(), { query, ...receipt });
+    for (const { id } of queryWorkItems(query)) {
+      store.set("supplemental-receipt", id, receipt);
+      workItemIds.push(id);
+    }
   }
   return { workItemIds };
 }

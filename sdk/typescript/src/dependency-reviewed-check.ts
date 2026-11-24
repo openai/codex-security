@@ -10,8 +10,8 @@ import {
   dependencyLookupSearch,
 } from "./dependency-search-audit.js";
 import { createDependencyBlockEvidence } from "./dependency-blocked-evidence.js";
-import { finishOneShotInvestigation } from "./dependency-investigation-correction.js";
 import {
+  MAX_FRESH_SUBMISSIONS,
   createInvestigationSession,
   evidencePreviews,
   investigationServer,
@@ -1282,29 +1282,24 @@ async function investigateIssue(
         "The coordinator exited before correcting its final submission.",
       );
     }
-    return await finishOneShotInvestigation(
-      raw,
-      async (answer, canCorrect) => {
-        const result = await submit(answer, canCorrect);
-        return result.report
-          ? { status: "approved", report: result.report }
-          : { status: "correction", feedback: result.feedback };
-      },
-      (previousProposal, feedback) => {
-        options.onProgress?.("investigation", subject);
-        return run(
-          [
-            ...instructions,
-            JSON.stringify({
-              ...input,
-              feedback: { ...feedback, previousProposal },
-              evidence: evidencePreviews(records.values()),
-            }),
-          ].join("\n\n"),
-          true,
-        );
-      },
-    );
+    let answer = raw;
+    for (let attempt = 1; ; attempt++) {
+      // On the last submission, submit propagates the original rejection.
+      const result = await submit(answer, attempt < MAX_FRESH_SUBMISSIONS);
+      if (result.report) return result.report;
+      options.onProgress?.("investigation", subject);
+      answer = await run(
+        [
+          ...instructions,
+          JSON.stringify({
+            ...input,
+            feedback: { ...result.feedback, previousProposal: answer },
+            evidence: evidencePreviews(records.values()),
+          }),
+        ].join("\n\n"),
+        true,
+      );
+    }
   } catch (error) {
     if (controller.signal.aborted) throw controller.signal.reason;
     throw error;

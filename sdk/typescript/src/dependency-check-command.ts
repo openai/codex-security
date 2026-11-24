@@ -4,8 +4,8 @@ import { resolveConfigPath } from "./config-path.js";
 import {
   dependencyCheckOutputSchema,
   dependencyPackageCheckOutputSchema,
+  dependencyScopedBlockedSchema,
 } from "./dependency-reachability.js";
-import { dependencyScopedBlockedSchema } from "./dependency-blocked-schema.js";
 import {
   withDependencyCheckOutput,
   DependencyInvestigationBlockedError,

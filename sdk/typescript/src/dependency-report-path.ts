@@ -7,7 +7,6 @@ import {
   type Site,
   type StackReport,
 } from "./dependency-report-model.js";
-import { stackFrames } from "./dependency-report-stacks.js";
 
 type StackFinding = Extract<Finding, { kind: "stack" }>;
 type Target = StackReport["target"];
@@ -145,46 +144,46 @@ function sampledPath(
     first === null ||
     source < first ||
     (i >= first && i <= source);
-  const site = finding.proof?.sink?.callSite;
+  const site = finding.item.proof?.sink?.callSite;
   const byPath = Map.groupBy(
     a.claims.flatMap((c) => c.sources),
     (c) => c.path,
   );
-  const frames = stackFrames(o).map(
-    ({ frame, rawIndex, omittedBefore }): PathFrame => {
-      const { path, line } = locationOf(frame.location, frame.line);
-      const mapped = sampledCode(finding, target, byPath, rawIndex, path, line);
-      const callSite =
-        site &&
-        mapped.code &&
-        site.path === mapped.code.path &&
-        line === site.line;
-      const role = matches.has(rawIndex)
-        ? "sink"
-        : rawIndex === o.sinkIndex
-          ? "query_sink"
-          : rawIndex === source
-            ? "source"
-            : callSite
-              ? "call_site"
-              : "call";
-      const detail =
-        rawIndex === source && role !== "source"
-          ? "This is also the source frame."
-          : undefined;
-      return {
-        role,
-        rawIndex,
-        label: frame.name || frame.binary || "Unnamed frame",
-        path,
-        line,
-        detail,
-        ...mapped,
-        omittedBefore,
-        inRange: inside(rawIndex),
-      };
-    },
-  );
+  // Show callers first, keeping gaps between the capture's original indices.
+  const ordered = o.frames.toSorted((a, b) => b.rawIndex - a.rawIndex);
+  const frames = ordered.map(({ frame, rawIndex }, i): PathFrame => {
+    const { path, line } = locationOf(frame.location, frame.line);
+    const mapped = sampledCode(finding, target, byPath, rawIndex, path, line);
+    const callSite =
+      site &&
+      mapped.code &&
+      site.path === mapped.code.path &&
+      line === site.line;
+    const role = matches.has(rawIndex)
+      ? "sink"
+      : rawIndex === o.sinkIndex
+        ? "query_sink"
+        : rawIndex === source
+          ? "source"
+          : callSite
+            ? "call_site"
+            : "call";
+    const detail =
+      rawIndex === source && role !== "source"
+        ? "This is also the source frame."
+        : undefined;
+    return {
+      role,
+      rawIndex,
+      label: frame.name || frame.binary || "Unnamed frame",
+      path,
+      line,
+      detail,
+      ...mapped,
+      omittedBefore: i === 0 ? 0 : ordered[i - 1]!.rawIndex - rawIndex - 1,
+      inRange: inside(rawIndex),
+    };
+  });
   const notes: string[] = [];
   const retained = new Set(frames.map((f) => f.rawIndex));
   function checkFrame(label: string, index: number | null) {
@@ -223,7 +222,8 @@ const gap = (label: string): SourceFrame => ({ ...base, role: "gap", label });
 
 export function sourceFrames(finding: Finding): SourceFrame[] {
   const trail = finding.item.trace ?? [];
-  const sink = finding.kind === "coverage" ? undefined : finding.proof?.sink;
+  const sink =
+    finding.kind === "coverage" ? undefined : finding.item.proof?.sink;
   function frame(
     kind: StepKind,
     label: string,
@@ -234,7 +234,7 @@ export function sourceFrames(finding: Finding): SourceFrame[] {
     if ("gap" in match) return gap(match.gap);
     const { cite, index } = match;
     const { path, line } = site;
-    const text = finding.excerpts[citationKey(cite)]?.text;
+    const text = finding.excerpts.get(citationKey(cite));
     const { startLine, commit } = cite;
     const code =
       text?.split("\n")[line - startLine] !== undefined
@@ -268,7 +268,7 @@ function sourcePath(finding: Finding): PathInspector {
   const frames = sourceFrames(finding);
   const notes: string[] = [];
   const trail = finding.item.trace ?? [];
-  if (finding.kind !== "coverage" && finding.proof?.sink) {
+  if (finding.kind !== "coverage" && finding.item.proof?.sink) {
     const endpoint = inputFor(finding.item)?.endpoint;
     if (!trail.length)
       notes.push(

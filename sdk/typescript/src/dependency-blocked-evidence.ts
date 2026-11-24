@@ -14,7 +14,7 @@ import { isRecord } from "./record.js";
 import {
   dependencyAbortInputSchema,
   type DependencyBlockDetails,
-} from "./dependency-blocked-schema.js";
+} from "./dependency-reachability.js";
 
 export const dependencyAbortTool = {
   name: "abort_codex_security_investigation",

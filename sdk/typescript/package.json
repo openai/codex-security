@@ -62,8 +62,7 @@
     "docs/hosted-scans.md",
     "docs/validate-records.md",
     "docs/hosted-remediation.md",
-    "docs/telemetry.md",
-    "resources/dependency-stack-investigation.md"
+    "docs/telemetry.md"
   ],
   "publishConfig": {
     "access": "public",

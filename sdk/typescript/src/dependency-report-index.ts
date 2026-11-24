@@ -13,7 +13,7 @@ import {
 import { inspectPath, type PathInspector } from "./dependency-report-path.js";
 import { escapeHtml as esc } from "./dependency-report-code.js";
 import { code, safeLink, prose } from "./dependency-report-audit.js";
-import { dependencyVerdictLabels } from "./dependency-verdict-labels.js";
+import { dependencyVerdictLabels } from "./dependency-stack-use.js";
 
 export type State =
   DependencyVerdict | "unresolved" | "blocked" | "empty" | "pending";
@@ -78,13 +78,13 @@ function label(f: Finding, path: PathInspector): string {
     if (f.assessment.status === "no_coverage") return "No sampling coverage";
     return (
       path.frames.find((frame) => frame.role === "call_site")?.label ??
-      f.proof?.sink?.function ??
+      f.item.proof?.sink?.function ??
       path.frames.find((frame) => frame.role === "sink")?.label ??
       "Sampled call"
     );
   }
   if (f.kind === "coverage") return f.item.location ?? "Unresolved candidate";
-  return f.item.location || f.proof?.sink?.function || f.item.component;
+  return f.item.location || f.item.proof?.sink?.function || f.item.component;
 }
 
 export function sites(section: Section, index: number): Entry[][] {

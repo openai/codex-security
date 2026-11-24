@@ -95,7 +95,6 @@ const itemInput = z.strictObject({
 export const stackAssessmentInputSchema = z.strictObject({
   items: z.array(itemInput).min(1),
 });
-export type StackAssessmentInput = z.input<typeof itemInput>;
 export type StackAssessment = z.output<typeof itemInput>;
 export interface StackClaimReader {
   get(ref: DependencyClaimReference): DependencyClaimRecord | undefined;

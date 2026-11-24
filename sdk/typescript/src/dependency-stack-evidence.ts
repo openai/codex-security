@@ -19,11 +19,24 @@ export const stackJsonValue = z
     "Expected a JSON value.",
   );
 
-export const inventoryReceiptSelectionSchema = z.strictObject({
-  receiptId: z.string().trim().min(1),
-  textBlock: z.number().int().nonnegative().nullable(),
-  record: z.array(z.union([z.string(), z.number().int().nonnegative()])),
-});
+function receiptSelection(receiptId: z.ZodString) {
+  return z.strictObject({
+    receiptId,
+    textBlock: z.number().int().nonnegative().nullable(),
+    record: z.array(z.union([z.string(), z.number().int().nonnegative()])),
+  });
+}
+
+// Inventory imports normalize IDs. Graph selections retain the original ID.
+export const dependencyReceiptSelectionSchema = receiptSelection(
+  z.string().min(1),
+);
+export const inventoryReceiptSelectionSchema = receiptSelection(
+  z.string().trim().min(1),
+);
+export type DependencyReceiptSelection = z.infer<
+  typeof dependencyReceiptSelectionSchema
+>;
 export type DependencyInventoryReceiptSelection = z.infer<
   typeof inventoryReceiptSelectionSchema
 >;

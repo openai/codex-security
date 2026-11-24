@@ -36,6 +36,9 @@ import {
   type createPremiseQueue,
 } from "./dependency-review-queue.js";
 
+// Fresh calls get one initial submission and up to two corrections.
+export const MAX_FRESH_SUBMISSIONS = 3;
+
 type Definition = { name: string; description: string; inputSchema: object };
 type Tool = Definition & { run(input: unknown): unknown };
 interface Graph extends DependencyEvidenceGraph {

@@ -301,7 +301,6 @@ export const stackManifestSchema = manifestContent.extend({
 
 export type StackManifest = z.infer<typeof stackManifestSchema>;
 export type StackObservation = z.infer<typeof observation>;
-export type StackFrame = z.infer<typeof frame>;
 export interface StackPacket {
   manifest: StackManifest;
   sources: z.infer<typeof stackSourcesSchema>;
@@ -406,15 +405,28 @@ function scopeConflicts(
   return conflicts;
 }
 
+export function* queryWorkItems(
+  query: StackPacket["stacks"]["queries"][number],
+) {
+  for (const group of query.groups) {
+    const prefix = [query.id, group.id].map(pointerPart).join("/");
+    for (const observation of group.observations.length
+      ? group.observations
+      : [null]) {
+      const id = observation
+        ? prefix + "/" + pointerPart(observation.id)
+        : prefix;
+      yield { id, group, observation };
+    }
+  }
+}
+
 export function stackPacketWorkItems(packet: StackPacket): StackWorkItem[] {
-  return packet.stacks.queries.flatMap((query) =>
-    query.groups.flatMap((group) => {
-      const groupId = [query.id, group.id].map(pointerPart).join("/");
-      const observations = group.observations.length
-        ? group.observations
-        : [null];
-      return observations.map((observation): StackWorkItem => ({
-        id: observation ? groupId + "/" + pointerPart(observation.id) : groupId,
+  const items: StackWorkItem[] = [];
+  for (const query of packet.stacks.queries)
+    for (const { id, group, observation } of queryWorkItems(query))
+      items.push({
+        id,
         queryId: query.id,
         groupId: group.id,
         selectors: query.selectors,
@@ -427,9 +439,8 @@ export function stackPacketWorkItems(packet: StackPacket): StackWorkItem[] {
         status: group.status,
         truncated: group.truncated,
         observation,
-      }));
-    }),
-  );
+      });
+  return items;
 }
 
 export function stackFramesRootFirst(observation: StackObservation) {

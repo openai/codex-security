@@ -7,11 +7,8 @@ import { isRecord } from "./record.js";
 import {
   dependencyReceiptSelectionSchema,
   type DependencyReceiptSelection,
-} from "./dependency-receipt-selection.js";
-export {
-  dependencyReceiptSelectionSchema,
-  type DependencyReceiptSelection,
-} from "./dependency-receipt-selection.js";
+} from "./dependency-stack-evidence.js";
+export { dependencyReceiptSelectionSchema, type DependencyReceiptSelection };
 const { record: path, textBlock: block } =
   dependencyReceiptSelectionSchema.shape;
 const receipt = z.object({

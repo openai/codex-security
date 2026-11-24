@@ -3,6 +3,7 @@ import {
   renderDependencyCode,
 } from "./dependency-report-code.js";
 import {
+  captureLimits,
   citationKey,
   inputFor,
   refMatches,
@@ -18,7 +19,7 @@ import {
 } from "./dependency-report-model.js";
 import { asRecord, isRecord } from "./record.js";
 import type { DependencyClaimReference } from "./dependency-stack-claims.js";
-import { claimKey, walkClaims } from "./dependency-report-proof.js";
+import { claimKey, walkClaims } from "./dependency-report-reader.js";
 
 export const code = (value: string) => `<code>${esc(value)}</code>`;
 const n = (count: number, noun: string) =>
@@ -162,7 +163,7 @@ function originalEvidence(f: Finding, check?: Check) {
   const supports = (keys: string[]) =>
     para(keys.map((k) => factLabels[k] ?? k).join(" · "));
   const sources = f.item.evidence.map((cite) => {
-    const text = f.excerpts[citationKey(cite)]?.text;
+    const text = f.excerpts.get(citationKey(cite));
     return `${code(rangeLabel(cite))}${cite.commit ? " · " + code(cite.commit) : ""}${supports(cite.supports)}${text !== undefined ? `<details><summary>Source excerpt</summary>${renderDependencyCode(text, cite.path, cite.startLine)}</details>` : ""}`;
   });
   const receipts = check
@@ -435,7 +436,7 @@ function sampleRecords(finding: StackFinding) {
         const link = refLink(finding, ref);
         if (
           sourceIndex(finding.item, ref) >= 0 &&
-          finding.excerpts[citationKey(ref)]?.text === s.text
+          finding.excerpts.get(citationKey(ref)) === s.text
         )
           return `<p>${link} · ${code(s.commit)}</p>`;
         return `<details><summary>${link} · ${code(s.commit)}</summary>${renderDependencyCode(s.text, s.path, s.startLine)}</details>`;
@@ -538,7 +539,7 @@ function limitations(check: Check, findings: Finding[]) {
   return (
     list(rows) ||
     para(
-      "No additional report-wide limitations recorded. See individual findings for gaps.",
+      "Check each finding for missing evidence. No other limitations were recorded.",
     )
   );
 }
@@ -566,19 +567,10 @@ function searchRecords(check: Check, dismissed: Finding[]) {
       "Search records",
       list(searches) || para("No saved search records."),
     ) +
-    group("Dismissed coverage", list(ignored))
+    group("Dismissed candidates", list(ignored))
   );
 }
 function sampleLimits(stack: StackReport, findings: Finding[]) {
-  const c = stack.coverage;
-  const labels: [string, string[]][] = [
-    ["Outstanding", c.outstanding],
-    ["No matching sample", c.noMatch],
-    ["No sampling coverage", c.noCoverage],
-    ["Scope conflicts", c.scopeConflicts],
-    ["Truncated queries", c.truncated],
-    ["Truncation unknown", c.truncationUnknown],
-  ];
   const byWorkItem = new Map(
     findings.flatMap((f) =>
       f.kind === "stack" ? [[f.assessment.workItemId, f] as const] : [],
@@ -590,7 +582,7 @@ function sampleLimits(stack: StackReport, findings: Finding[]) {
     const name = f.anchor ? `${f.anchor.path}:${f.anchor.line}` : f.label;
     return `<a href="#${f.id}">${esc(name)}</a> · ${code(id)}`;
   };
-  const limits = labels
+  const limits = captureLimits(stack)
     .map(([label, ids]) => group(label, list(ids.map(workItemLink))))
     .join("");
   const asked = new Set(stack.assessments.flatMap((a) => a.remainingQuestions));

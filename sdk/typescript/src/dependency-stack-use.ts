@@ -141,6 +141,14 @@ export const dependencyUseSchema = z
 export type DependencyUse = z.infer<typeof dependencyUseSchema>;
 export type DependencyVerdict = DependencyUse["verdict"];
 
+/** Human-facing labels; serialized verdict keys are unchanged. */
+export const dependencyVerdictLabels = {
+  exploitable: "Exploitable",
+  potentially_exploitable: "Potentially exploitable",
+  unknown: "Requires more information",
+  ruled_out: "Ruled out",
+} satisfies Record<DependencyVerdict, string>;
+
 export interface DependencyAssessmentCoverage {
   /** Actual unresolved candidate/evidence gaps, not a descriptive scope note. */
   unresolved?: boolean;

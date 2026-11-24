@@ -1,3 +1,9 @@
+import {
+  stackInvestigationReportSchema,
+  type StackInvestigationReport,
+} from "./dependency-stack-assessment.js";
+import type { DependencyClaimReference } from "./dependency-stack-claims.js";
+import { isRecord } from "./record.js";
 import { z } from "zod";
 import { dependencyTargetSchema } from "./dependency-source-identity.js";
 import { dependencyAdvisoryDetailsSchema } from "./dependency-advisory.js";
@@ -6,8 +12,6 @@ import {
   reviewedDependencyCheckSchema as nativeCheck,
   dependencyCoverageDispositionSchema,
   dependencyPackageCheckOutputSchema,
-  dependencyFindingDetailsShape,
-  type DependencyReviewReference,
   type ReviewedDependencyUse,
 } from "./dependency-reachability.js";
 export type {
@@ -21,11 +25,6 @@ export type {
 export type DependencyCoverageDisposition = z.infer<
   typeof dependencyCoverageDispositionSchema
 >;
-export type DependencyFindingDetails = Pick<
-  ReviewedDependencyUse,
-  keyof typeof dependencyFindingDetailsShape
->;
-
 export const dependencyInvestigationBlockedSchema = z.object({
   target: dependencyTargetSchema.optional(),
   status: z.literal("blocked"),
@@ -95,9 +94,8 @@ const legacyReport = z.union([
   }),
 ]);
 
-function withReviewedPlace(
+function legacyUse(
   use: z.infer<typeof dependencyUseSchema>,
-  decidingEvidence: DependencyReviewReference[],
 ): ReviewedDependencyUse {
   return {
     ...use,
@@ -114,7 +112,7 @@ function withReviewedPlace(
       patch: null,
       unresolvedQuestions: use.verdict === "unknown" ? [use.reason] : [],
     },
-    decidingEvidence,
+    decidingEvidence: [],
   };
 }
 
@@ -130,7 +128,7 @@ export function readDependencyCheckOutput(
     return {
       ...rest,
       schemaVersion: 2 as const,
-      uses: uses.map((use) => withReviewedPlace(use, [])),
+      uses: uses.map(legacyUse),
       assumptions: [],
       searches: [],
     };
@@ -138,4 +136,105 @@ export function readDependencyCheckOutput(
   return "cve" in saved.data
     ? convert(saved.data)
     : { ...saved.data, checks: saved.data.checks.map(convert) };
+}
+
+export function claimKey(ref: DependencyClaimReference) {
+  return JSON.stringify([ref.id, ref.revision, ref.hash]);
+}
+
+// Visit each exact reference once, roots before premises. Keep missing
+// references in order so readers can show gaps alongside decisions.
+export function* walkClaims<
+  T extends { dependencies: DependencyClaimReference[] },
+>(roots: readonly DependencyClaimReference[], claims: ReadonlyMap<string, T>) {
+  const pending = [...roots];
+  const seen = new Set<string>();
+  for (const ref of pending) {
+    const key = claimKey(ref);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const claim = claims.get(key);
+    yield { ref, claim };
+    if (claim)
+      for (const dependency of claim.dependencies) pending.push(dependency);
+  }
+}
+
+// A claim payload may be free text or structured JSON. Only project readable
+// statements here. Packet receipts are deliberately excluded from the viewer.
+function statement(value: unknown): string | undefined {
+  return typeof value === "string" ? value : undefined;
+}
+function projectClaim({
+  id,
+  revision,
+  hash,
+  dependencies,
+  sources,
+  payload,
+}: StackInvestigationReport["claims"][number]) {
+  return {
+    id,
+    revision,
+    hash,
+    dependencies,
+    sources,
+    fact: isRecord(payload)
+      ? (statement(payload["fact"]) ??
+        statement(payload["statement"]) ??
+        statement(payload["comparison"]))
+      : statement(payload),
+    limits: isRecord(payload)
+      ? (statement(payload["limits"]) ?? statement(payload["limitations"]))
+      : undefined,
+  };
+}
+type Claim = ReturnType<typeof projectClaim>;
+export type StackAssessment =
+  StackInvestigationReport["assessments"][number] & {
+    reviewReason: string | undefined;
+    claims: Claim[];
+    missingClaims: DependencyClaimReference[];
+  };
+export type StackReport = Omit<
+  StackInvestigationReport,
+  "claims" | "assessments"
+> & {
+  assessments: StackAssessment[];
+};
+
+export function readStackReport(value: unknown): StackReport | undefined {
+  if (
+    !isRecord(value) ||
+    value["schemaVersion"] !==
+      stackInvestigationReportSchema.shape.schemaVersion.value
+  )
+    return;
+  const { claims, assessments, ...report } =
+    stackInvestigationReportSchema.parse(value);
+  const records = new Map<string, Claim>();
+  for (const record of claims) {
+    const id = claimKey(record);
+    if (records.has(id))
+      throw new Error("Duplicate stack claim reference: " + record.id);
+    records.set(id, projectClaim(record));
+  }
+  const reasons = new Map(
+    report.review?.decisions.map((d) => [d.workItemId, d.reason]),
+  );
+  const paths = assessments.map((item): StackAssessment => {
+    const claims: Claim[] = [];
+    const missingClaims: DependencyClaimReference[] = [];
+    for (const { ref, claim } of walkClaims(item.supportingClaims, records)) {
+      if (claim) claims.push(claim);
+      else missingClaims.push(ref);
+    }
+    return {
+      ...item,
+      reviewReason: reasons.get(item.workItemId),
+      claims,
+      missingClaims,
+    };
+  });
+  return { ...report, assessments: paths };
 }

@@ -4,7 +4,7 @@ import {
   type Finding,
   type Report,
 } from "./dependency-report-model.js";
-import { dependencyVerdictLabels } from "./dependency-verdict-labels.js";
+import { dependencyVerdictLabels } from "./dependency-stack-use.js";
 import { formatSecurityPolicyText } from "./security-policy.js";
 
 const quantity = (count: number, label: string) =>
@@ -74,8 +74,7 @@ export function summarizeDependencyReport(report: Report): string {
         continue;
       if (count) totals.push(`${dependencyVerdictLabels[verdict]}: ${count}`);
     }
-    if (unresolved)
-      totals.push(quantity(unresolved, "unresolved coverage item"));
+    if (unresolved) totals.push(quantity(unresolved, "unresolved candidate"));
     lines.push(totals.join(" · "));
     if (section.stack) {
       const { coverage: c, assessments } = section.stack;
@@ -89,10 +88,12 @@ export function summarizeDependencyReport(report: Report): string {
         groups.size && quantity(groups.size, "truncated capture group"),
         cutStacks && quantity(cutStacks, "stack") + " with truncated frames",
         c.truncationUnknown.length &&
-          c.truncationUnknown.length + " truncation unknown",
+          c.truncationUnknown.length + " with unknown truncation",
         c.noMatch.length && c.noMatch.length + " without a match",
-        c.noCoverage.length && c.noCoverage.length + " without coverage",
-        c.scopeConflicts.length && c.scopeConflicts.length + " scope conflicts",
+        c.noCoverage.length &&
+          c.noCoverage.length + " with missing or incomplete coverage",
+        c.scopeConflicts.length &&
+          quantity(c.scopeConflicts.length, "scope conflict"),
       ].filter(Boolean);
       if (limits.length) lines.push("Capture limits: " + limits.join(" · "));
     }
@@ -102,7 +103,7 @@ export function summarizeDependencyReport(report: Report): string {
     for (const [index, f] of findings.entries()) {
       const outcome =
         f.kind === "coverage"
-          ? "Unresolved coverage"
+          ? "Unresolved candidate"
           : dependencyVerdictLabels[f.item.verdict];
       const component =
         f.kind !== "coverage" && f.item.component

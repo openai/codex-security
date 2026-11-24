@@ -2,29 +2,22 @@ import { z } from "zod";
 import type { dependencyAdvisoryDetailsSchema } from "./dependency-advisory.js";
 import {
   claimKey,
-  savedSnippets,
-  citationKey,
-} from "./dependency-report-proof.js";
-import {
+  walkClaims,
+  readStackReport,
+  type StackReport,
+  type StackAssessment,
   dependencyInvestigationBlockedSchema,
   readDependencyCheckOutput,
   reviewedDependencyCheckSchema,
   type DependencyCoverageDisposition,
-  type DependencyFindingDetails,
   type DependencyReviewReference,
   type DependencyUse,
   type DependencyVerdict,
   type ReviewedDependencyUse,
 } from "./dependency-report-reader.js";
-import {
-  readStackReport,
-  type StackReport,
-  type StackAssessment,
-} from "./dependency-report-stacks.js";
 import type { DependencyTarget } from "./dependency-source-identity.js";
 import { isRecord } from "./record.js";
 
-export { citationKey };
 export type {
   StackReport,
   StackAssessment,
@@ -35,10 +28,10 @@ export type Check = z.infer<typeof reviewedDependencyCheckSchema>;
 export type Advisory = z.infer<typeof dependencyAdvisoryDetailsSchema>;
 export type Blocked = z.infer<typeof dependencyInvestigationBlockedSchema>;
 export type Citation = DependencyUse["evidence"][number];
-export type Service = NonNullable<DependencyFindingDetails["services"]>[number];
-export type InputSource = NonNullable<DependencyFindingDetails["inputSource"]>;
+export type Service = NonNullable<ReviewedDependencyUse["services"]>[number];
+export type InputSource = NonNullable<ReviewedDependencyUse["inputSource"]>;
 export type RuntimeContext = NonNullable<
-  DependencyFindingDetails["runtimeContext"]
+  ReviewedDependencyUse["runtimeContext"]
 >;
 type DependencyReportProof = NonNullable<ReviewedDependencyUse["proof"]>;
 export type Site = NonNullable<DependencyReportProof["sink"]>["callSite"];
@@ -52,7 +45,7 @@ type Entry = {
   id: string;
   anchor?: Anchor;
   label: string;
-  excerpts: Record<string, { text: string }>;
+  excerpts: Map<string, string | undefined>;
 };
 export type PreparedCheck = {
   findings: Finding[];
@@ -63,7 +56,6 @@ export type Finding = Entry &
     | {
         kind: "stack";
         assessment: StackAssessment;
-        proof?: DependencyReportProof;
         item: Partial<ReviewedDependencyUse> &
           Pick<
             ReviewedDependencyUse,
@@ -78,7 +70,6 @@ export type Finding = Entry &
     | {
         kind: "use";
         item: ReviewedDependencyUse;
-        proof?: DependencyReportProof;
       }
     | { kind: "coverage"; item: DependencyCoverageDisposition }
   );
@@ -268,7 +259,6 @@ function prepareCheck(check: Check, index: number) {
     id: `use-${index}-${i + 1}`,
     kind: "use",
     item,
-    proof: item.proof,
   }));
   const dismissed: Finding[] = [];
   for (const [i, item] of (check.coverage ?? []).entries()) {
@@ -292,6 +282,17 @@ function prepareFindings(
   findings.sort((a, b) => rank(a) - rank(b));
   return { findings, dismissed };
 }
+export function captureLimits({ coverage }: StackReport) {
+  return [
+    ["No matching sample", coverage.noMatch],
+    ["Missing or incomplete sampling coverage", coverage.noCoverage],
+    ["Conflicting scope", coverage.scopeConflicts],
+    ["Truncated results or frames", coverage.truncated],
+    ["Truncation unknown", coverage.truncationUnknown],
+    ["Awaiting assessment", coverage.outstanding],
+  ] as const;
+}
+
 export function counts(findings: readonly Finding[]) {
   const breakdown = Object.fromEntries(
     verdictOrder.map((v) => [v, 0]),
@@ -325,7 +326,10 @@ function identity(
     anchor = { kind: "reference", path: cite.path, line: cite.startLine };
   const label =
     item.location ?? proof?.sink?.function ?? anchor?.path ?? item.reason;
-  return { anchor, label, excerpts: {} };
+  const excerpts = new Map(
+    item.evidence.map((c) => [citationKey(c), undefined]),
+  );
+  return { anchor, label, excerpts };
 }
 function stackFinding(
   assessment: StackAssessment,
@@ -358,20 +362,56 @@ function stackFinding(
     kind: "stack",
     assessment,
     item,
-    proof,
     label,
   };
 }
+export const citationKey = ({
+  path,
+  commit,
+  startLine,
+  endLine,
+}: Pick<Citation, "path" | "commit" | "startLine" | "endLine">) =>
+  JSON.stringify(
+    commit ? [path, commit, startLine, endLine] : [path, startLine, endLine],
+  );
+// Only use excerpts from claims attached to this finding, including their premises.
 function loadExcerpts(
   section: Section,
   finding: Finding,
   claims: Map<string, Claims[number]>,
 ) {
-  const saved = savedSnippets(section, finding, claims);
-  for (const cite of finding.item.evidence) {
-    const key = citationKey(cite);
-    const text = saved.get(key);
-    if (text !== undefined) finding.excerpts[key] = { text };
+  const { excerpts } = finding;
+  if (!excerpts.size) return;
+  function save(key: string, text: string) {
+    if (excerpts.has(key)) excerpts.set(key, text);
+  }
+  if (finding.kind === "stack") {
+    for (const claim of finding.assessment.claims)
+      for (const source of claim.sources)
+        save(citationKey(source), source.text);
+    return;
+  }
+  const roots = [...(finding.item.supportingClaims ?? [])];
+  if (finding.item.conclusionClaim) roots.push(finding.item.conclusionClaim);
+  for (const { claim } of walkClaims(roots, claims)) {
+    if (!claim) continue;
+    for (const id of claim.evidence.sourceIds) {
+      const source = section.check?.claimEvidence?.sources[id];
+      if (!isRecord(source)) continue;
+      const { path, commit, startLine, endLine } = source;
+      const text = source["excerpt"] ?? source["text"];
+      if (
+        typeof text === "string" &&
+        typeof path === "string" &&
+        (commit === undefined || typeof commit === "string") &&
+        typeof startLine === "number" &&
+        typeof endLine === "number"
+      )
+        save(
+          citationKey({ path, commit, startLine, endLine }),
+          text.replace(/\n$/u, ""),
+        );
+    }
   }
 }
 
@@ -399,8 +439,8 @@ export function prepareDependencyReport(value: unknown): Report {
       )
     )
       report.contextHint = section.stack
-        ? "Have more context? Describe who controls the input in the relevant entry in your --sources JSON, then rerun cs exploitability check with the updated inputs."
-        : "Have more context? Set exploitability.scope.instructions in project.yaml to describe the callers and what they control, then rerun with --config project.yaml. This replaces the default caller scope.";
+        ? "If you know who controls the input, add that detail to the matching entry in --sources and rerun cs exploitability check."
+        : "To clarify who controls the input, describe the callers in exploitability.scope.instructions and rerun with --config project.yaml. These instructions replace the default caller scope.";
     const claims = new Map(section.check?.claims?.map((c) => [claimKey(c), c]));
     for (const finding of [...findings, ...dismissed])
       loadExcerpts(section, finding, claims);
@@ -427,7 +467,8 @@ export function matchTraceFrame(
   if (matches.some((c) => c.commit !== matches[0]?.commit))
     return { gap: "Sink revision is ambiguous across the cited copies." };
   const cite =
-    matches.find((c) => finding.excerpts[citationKey(c)]) ?? matches[0];
+    matches.find((c) => finding.excerpts.get(citationKey(c)) !== undefined) ??
+    matches[0];
   if (cite) {
     const ref = {
       kind: "source" as const,

@@ -10,11 +10,11 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { basename, dirname, join, relative } from "node:path";
-import type { DependencyBlockDetails } from "./dependency-blocked-schema.js";
+import type { DependencyBlockDetails } from "./dependency-reachability.js";
 import type { DependencyPackage } from "./dependency-advisory.js";
 import { formatSecurityPolicyText } from "./security-policy.js";
 import { asRecord, isRecord } from "./record.js";
-import { dependencyVerdictLabels } from "./dependency-verdict-labels.js";
+import { dependencyVerdictLabels } from "./dependency-stack-use.js";
 import { CodexSecurityError, errorMessage } from "./errors.js";
 import type { DependencyTarget } from "./dependency-source-identity.js";
 

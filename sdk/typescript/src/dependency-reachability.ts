@@ -8,7 +8,10 @@ import {
   dependencyUseSchema,
   dependencyUseProofSchema,
 } from "./dependency-stack-use.js";
-import { stackJsonValue } from "./dependency-stack-evidence.js";
+import {
+  dependencyReceiptSelectionSchema,
+  stackJsonValue,
+} from "./dependency-stack-evidence.js";
 
 const identity = z.string().trim().min(1);
 const inventoryFact = z.enum(["affected_copy", "running", "access"]);
@@ -466,3 +469,65 @@ export const dependencyCheckOutputSchema = z.union([
   dependencyReachabilityReportSchema,
   dependencyPackageCheckOutputSchema,
 ]);
+
+const blockedLabel = z.string().trim().min(1);
+const requiredRecordCheck = z.strictObject({
+  requiredRecord: blockedLabel,
+  selection: dependencyReceiptSelectionSchema,
+  missing: z.boolean(),
+});
+const unavailableDataCoverage = z.discriminatedUnion("basis", [
+  z.strictObject({
+    basis: z.literal("observed_scope"),
+    scope: blockedLabel,
+    checked: z.number().int().min(2),
+    missing: z.number().int().min(2),
+    checks: z.array(requiredRecordCheck).min(2),
+    representativeness: blockedLabel,
+  }),
+  z.strictObject({
+    basis: z.literal("provider_declared"),
+    scope: blockedLabel,
+    declaration: blockedLabel,
+    selection: dependencyReceiptSelectionSchema,
+    representativeness: blockedLabel,
+  }),
+  z.strictObject({
+    basis: z.literal("server_startup"),
+    server: blockedLabel,
+    receiptId: blockedLabel,
+    requiredCheck: blockedLabel,
+  }),
+]);
+export const dependencyAbortInputSchema = z.strictObject({
+  reason: blockedLabel,
+  category: z.literal("widespread_required_data_unavailable"),
+  tool: z.strictObject({ server: blockedLabel, name: blockedLabel }).optional(),
+  affectedScope: blockedLabel,
+  coverage: unavailableDataCoverage,
+  scopeImpact: blockedLabel,
+  unblockCondition: blockedLabel,
+  evidenceReferences: z.array(blockedLabel).default([]),
+});
+const retainedEvidence = z.strictObject({
+  assessmentRevisions: z.array(
+    z.strictObject({
+      id: blockedLabel,
+      revision: z.number().int().positive(),
+      status: blockedLabel,
+    }),
+  ),
+  inventoryReceiptIds: z.array(blockedLabel),
+});
+export const dependencyScopedBlockedSchema = dependencyAbortInputSchema.extend({
+  status: z.literal("blocked"),
+  code: z.literal("INVESTIGATION_BLOCKED"),
+  cve: blockedLabel.optional(),
+  target: dependencyTargetSchema.optional(),
+  nativeThreadId: blockedLabel,
+  retainedEvidence,
+});
+export type DependencyBlockDetails = Omit<
+  z.infer<typeof dependencyScopedBlockedSchema>,
+  "status" | "code" | "cve"
+>;
