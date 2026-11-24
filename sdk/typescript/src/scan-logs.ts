@@ -113,6 +113,21 @@ export async function findScanSession(codexHome: string, threadId: string) {
   return null;
 }
 
+export async function scanSessionModelSettings(
+  path: string,
+): Promise<JsonObject> {
+  for await (const event of sessionEvents(path)) {
+    const context = event["payload"];
+    if (event["type"] !== "turn_context" || !isRecord(context)) continue;
+    const { model, effort } = context;
+    if (typeof model !== "string" || !model.trim()) continue;
+    return typeof effort === "string" && effort.trim()
+      ? { model, model_reasoning_effort: effort }
+      : { model };
+  }
+  return {};
+}
+
 export async function readScanLogs(options: ScanLogOptions) {
   const logs = new Map<string, [SessionLog, ...SessionLog[]]>();
   const homes = new Set(

@@ -237,6 +237,7 @@ import {
   modelProviderConfigOverride,
   resolveCommandAuthConfig,
   resolveCodexProfile,
+  selectedScanProfile,
   mergedCodexConfig,
   readCodexAuthConfig,
   readCodexFileProfile,
@@ -390,6 +391,7 @@ import {
 import {
   findScanSession,
   readSavedScanLogs,
+  scanSessionModelSettings,
   type ScanLogSource,
 } from "./scan-logs.js";
 import { sendFeedback } from "./feedback.js";
@@ -8985,7 +8987,7 @@ async function runScanImport(
 }
 
 async function prepareScanArgumentsFromRecipe(
-  { recipe, userContext }: JsonObject,
+  { recipe, userContext, threadId, scanDir }: JsonObject,
   operation: "resume" | "rerun",
   directory: string,
   environment: CliDependencies["environment"],
@@ -9166,11 +9168,39 @@ async function prepareScanArgumentsFromRecipe(
       "This scan used additional instructions. The --scan-prompt-file must not be empty.",
     );
   }
-  const replayConfig = await restoreProviderProfile(
+  let replayConfig = await restoreProviderProfile(
     config,
     recipe["providerProfile"],
     environment,
   );
+  // File profiles reload on resume. Keep inherited launch defaults from
+  // the owning session so an upgrade cannot reprice cumulative usage.
+  if (
+    operation === "resume" &&
+    typeof threadId === "string" &&
+    typeof replayConfig["profile"] === "string" &&
+    !selectedScanProfile(replayConfig)
+  ) {
+    const profile = await readCodexFileProfile(
+      replayConfig,
+      scanCodexHome(environment),
+    );
+    const missing = ["model", "model_reasoning_effort"].filter(
+      (key) => !(key in replayConfig) && !(key in profile),
+    );
+    if (missing.length) {
+      const session = await findScanSession(
+        codexSecurityCredentialHome(environment),
+        threadId,
+      );
+      if (session && session.workingDirectory === scanDir) {
+        const original = await scanSessionModelSettings(session.path);
+        replayConfig = { ...replayConfig };
+        for (const key of missing)
+          if (original[key] !== undefined) replayConfig[key] = original[key];
+      }
+    }
+  }
   return {
     repository,
     auth: auth ?? DEFAULT_SCAN_AUTH,

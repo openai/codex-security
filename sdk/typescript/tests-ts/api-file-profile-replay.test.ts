@@ -2,6 +2,7 @@ import { afterEach, expect, onTestFinished, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import {
+  appendFile,
   cp,
   mkdir,
   readFile,
@@ -34,6 +35,7 @@ import { preparedRuntime } from "./support/api-events.js";
 import { rejecting } from "./support/errors.js";
 import { useTestPython } from "./support/python.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { writeSession } from "./support/usage-rollout.js";
 
 const pythonExecutable = useTestPython();
 
@@ -607,3 +609,58 @@ test("private replay preserves explicit clears over projected defaults and empty
     });
   }
 });
+
+test.each([true, false])(
+  "resuming a file profile keeps inherited model settings (budgeted: %p)",
+  async (budgeted) => {
+    const home = await temporaryDirectory();
+    const repository = await temporaryDirectory();
+    const scanDir = await temporaryDirectory();
+    const environment = { CODEX_HOME: home, CODEX_SECURITY_STATE_DIR: home };
+    await writeFile(
+      join(home, "review.config.toml"),
+      budgeted ? "" : 'model_reasoning_effort = "low"',
+    );
+    const threadId = "thread-1";
+    const path = await writeSession(
+      codexSecurityCredentialHome(environment),
+      threadId,
+      {},
+      { cwd: scanDir },
+    );
+    await appendFile(
+      path,
+      JSON.stringify({
+        type: "turn_context",
+        payload: { model: "gpt-5.6-sol", effort: "xhigh" },
+      }) + "\n",
+    );
+    const recipe = {
+      repository,
+      target: { kind: "repository", paths: [] },
+      mode: "deep",
+      config: { profile: "review" },
+      ...(budgeted ? { maxCostUsd: 3 } : {}),
+    };
+    let replay: JsonObject | undefined;
+    const status = await main(
+      ["scans", "resume", "saved", "--json"],
+      capture().stream,
+      capture().stream,
+      dependencies({
+        environment,
+        onWorkbench: () => ({ scanId: "saved", scanDir, threadId, recipe }),
+        onConfig: (config) => {
+          replay = config.codexOverrides;
+        },
+      }),
+    );
+    expect(status).toBe(0);
+    expect(
+      await mergedCodexConfig({ codexOverrides: replay }, home),
+    ).toMatchObject({
+      model: "gpt-5.6-sol",
+      model_reasoning_effort: budgeted ? "xhigh" : "low",
+    });
+  },
+);
