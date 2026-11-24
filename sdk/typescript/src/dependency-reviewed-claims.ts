@@ -831,8 +831,14 @@ export async function verifyProposedUse(
   const revision = scope.discovery.revision;
   const component = use.component ?? scope.component;
   const embedded = component !== scope.component;
+  // The sender's lockfile cannot select the copy beyond a missing handoff.
+  const unverifiedHandoff =
+    use.version === null &&
+    use.verdict === "unknown" &&
+    use.trace?.at(-1)?.kind === "gap";
   if (
     !embedded &&
+    !unverifiedHandoff &&
     scope.selectedVersion &&
     use.version !== scope.selectedVersion
   )

@@ -1798,6 +1798,31 @@ test("an unnamed root manifest binds a service through its observed revision and
   ).rejects.toThrow("this running service");
 });
 
+test("an unverified handoff can leave the version unknown despite a local lockfile", async () => {
+  await using f = await fixture();
+  const scope = {
+    ...reviewScopes([f.discovery])[0]!,
+    selectedVersion: "1.0.0",
+  };
+  const use: Proposal["uses"][number] = {
+    ...f.use,
+    version: null,
+    verdict: "unknown",
+    proof: { conditions: [] },
+    trace: [{ kind: "gap", label: "Receiver is outside the checkout." }],
+    remainingQuestions: ["Which copy does the receiver load?"],
+  };
+  const verify = (candidate: typeof use) =>
+    verifyProposedUse(f.path, scope, candidate, signal);
+  expect((await verify(use)).version).toBeNull();
+  await expect(verify({ ...use, version: "2.0.0" })).rejects.toThrow(
+    "selected dependency version",
+  );
+  await expect(verify({ ...use, trace: [] })).rejects.toThrow(
+    "selected dependency version",
+  );
+});
+
 test("an embedded component has its own selected version, deployment and deciding citations", async () => {
   await using f = await fixture({
     "wheel.json": JSON.stringify({
