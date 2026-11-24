@@ -15,6 +15,7 @@ import { execFile, fork } from "node:child_process";
 import { once } from "node:events";
 import { text } from "node:stream/consumers";
 import { createHash, randomUUID } from "node:crypto";
+import { existsSync } from "node:fs";
 import {
   chmod,
   cp,
@@ -183,7 +184,15 @@ service_tier = "ultrafast"
   );
   await writePythonWrapper(`${pythonWrapperPath}.mjs`);
   await symlink(`${pythonWrapperPath}.mjs`, pythonWrapperPath);
-  await buildServer(serverBundlePath, { target: "node20" });
+  await buildServer(serverBundlePath, {
+    target: "node20",
+    alias: {
+      "#validation-runtime": path.resolve(
+        mcpAppRoot,
+        "../../../sdk/typescript/src/plugin-validation.ts",
+      ),
+    },
+  });
 
   const environment = {
     ...process.env,
@@ -578,6 +587,10 @@ service_tier = "ultrafast"
     assert.equal((await readLogLines(startLogPath)).length, 1);
 
     const failureThreadId = "deep-scan-stdio-failure-thread";
+    await writeFile(
+      projectConfigPath,
+      "scan: {validation: {provider: continuum, continuum: {environment_id: synthetic, include_local_validation: true}}}\n",
+    );
     server.sendRequest(
       20,
       "tools/call",
@@ -587,6 +600,7 @@ service_tier = "ultrafast"
           targetPath: failedTargetPath,
           scope: ".",
           userContext: "stdio failure fixture",
+          projectConfigPath,
         },
         failureThreadId,
         {
@@ -652,6 +666,22 @@ service_tier = "ultrafast"
     assert.equal(activeFailureState.workers.length, 1);
     assert.equal(activeFailureState.workers[0].kind, "discovery");
     assert.equal(activeFailureState.workers[0].status, "running");
+    // Withdrawing permission must notify the joining caller before local work finishes.
+    await writeFile(projectConfigPath, "{}");
+    const conflict = await server.callSuccessfulTool(
+      201,
+      toolCall(
+        "start_codex_security_deep_scan",
+        { targetPath: failedTargetPath, projectConfigPath },
+        failureThreadId,
+      ),
+    );
+    assert.equal(conflict.structuredContent.scanId, failedScanId);
+    assert.match(
+      JSON.stringify(conflict.content),
+      /Automatic Continuum validation is disabled/,
+    );
+    assert.equal(server.response(20), undefined);
     assertProcessAlive(failedWorker.pid);
 
     const failureMessage = "fixture unrecoverable failure\0source";
@@ -1244,9 +1274,18 @@ async function testDetachedTargetReplay(
   targetPath: string,
 ) {
   const threadId = "detached-headless-owner";
+  const projectConfigPath = path.join(
+    path.dirname(targetPath),
+    "provider.yaml",
+  );
+  // The fixture returns no findings, so validation never contacts AWS.
+  await writeFile(
+    projectConfigPath,
+    "scan: {validation: {provider: continuum, continuum: {environment_id: synthetic}}}\n",
+  );
   const request = toolCall(
     "start_codex_security_deep_scan",
-    { targetPath },
+    { targetPath, projectConfigPath },
     threadId,
   );
   let server = startServer(serverBundlePath, environment);
@@ -1261,6 +1300,10 @@ async function testDetachedTargetReplay(
     }, "the detached target request to finalize");
     assert.equal(server.response(2)?.result?.structuredContent, undefined);
     const { scanDir } = await getDeepScan({ environment, scanId, threadId });
+    await waitFor(
+      () => existsSync(path.join(scanDir, "validation.json")),
+      "the detached coordinator to finish supplemental validation before rejoin",
+    );
     const report = await readFile(path.join(scanDir, "report.md"), "utf8");
     const launches = await readLogLines(environment.FAKE_CODEX_START_LOG!);
     await server.stop();
