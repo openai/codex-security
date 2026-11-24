@@ -1880,23 +1880,25 @@ def test_competing_native_launches_require_consent_for_the_current_scans(tmp_pat
     create_workspace(state, workspace_id, "--thread-id", "app-thread")
     save_workspace(state, workspace_id, str(targets[2]), ".", "deep")
 
-    def launch_app(*confirmed: str):
+    def launch_app(*confirmed: str, version: str | None = None):
         return start_scan_command(
             state,
             workspace_id,
             "--scan-root",
             str(root),
+            *(("--workspace-version", version) if version else ()),
             *(arg for scan_id in confirmed for arg in ("--confirmed-concurrent-scan-id", scan_id)),
         )
 
-    assert [scan["scanId"] for scan in launch_app()["otherRunningDeepScans"]] == [first]
+    pending = launch_app()
+    assert [scan["scanId"] for scan in pending["otherRunningDeepScans"]] == [first]
     assert not (root / targets[2].name).exists()
     second = launch(waiting, first)["deepScan"]["scanId"]
     assert launch(waiting)["startDisposition"] == "joined"
-    stale = launch_app(first)
+    stale = launch_app(first, version=pending["workspaceVersion"])
     assert stale["confirmationRequired"]
     assert {scan["scanId"] for scan in stale["otherRunningDeepScans"]} == {first, second}
-    app_scan_id = launch_app(first, second)["results"]["scanId"]
+    app_scan_id = launch_app(first, second, version=stale["workspaceVersion"])["results"]["scanId"]
     assert launch_app()["results"]["scanId"] == app_scan_id
 
 

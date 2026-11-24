@@ -740,6 +740,11 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             require_scan_checkout_owner(connection, active)
             return workspace_state(connection, workspace["id"], result_scan_id=active["id"])
         workspace_version = workspace["updated_at"]
+        confirmed = getattr(args, "confirmed_concurrent_scan_id", [])
+        if confirmed and getattr(args, "workspace_version", None) != workspace_version:
+            raise SystemExit(
+                "Concurrent scan confirmation requires the current workspace setup. Try again."
+            )
         scan_id = str(uuid.uuid4())
         timestamp = now()
         target = require_target(workspace["target_path"])
@@ -814,13 +819,11 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
                     "target and scope. Rejoin that scan instead of starting another one."
                 )
         if workspace["default_mode"] == "deep":
-            pending = deep_scan.concurrent_launch_confirmation(
-                connection, getattr(args, "confirmed_concurrent_scan_id", [])
-            )
+            pending = deep_scan.concurrent_launch_confirmation(connection, confirmed)
             if pending:
                 if manages_transaction:
                     connection.commit()
-                return pending
+                return {**pending, "workspaceVersion": workspace_version}
         registration = register_security_target(connection, str(current_target))
         if registration.target_id != workspace["target_id"]:
             raise SystemExit(

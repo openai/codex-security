@@ -102,7 +102,7 @@ describe("built SECURITY.md helper", () => {
     async () => {
       const { root, output } = fixture("repo %USERNAME% !EXPAND! 雪's");
       const launcher = windowsHelperFixture(dirname(root));
-      const scope = "-component %USERNAME% !EXPAND! 雪's";
+      const scope = "-component %USERNAME% !EXPAND! 雪's ‘team’s‚‛ $&";
       write(root, `${scope}/SECURITY.md`, "component policy\n");
       const args = { "<plugin_dir>": launcher.plugin, "<repo_root>": root };
       for (const powershell of launcher.powershells) {

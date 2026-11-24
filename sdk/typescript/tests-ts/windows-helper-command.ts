@@ -4,6 +4,10 @@ import { join } from "node:path";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { runCommand } from "./support/shell.js";
 
+function escapeSingleQuotes(value: string) {
+  return value.replace(/['\u2018-\u201b]/gu, (quote) => quote + quote);
+}
+
 export function windowsHelperFixture(
   root: string,
   environment: NodeJS.ProcessEnv = {},
@@ -46,15 +50,17 @@ export function windowsHelperFixture(
       if (command === undefined)
         throw new Error(`No PowerShell command for ${topic}`);
       for (const [placeholder, path] of Object.entries(paths))
-        command = command.replaceAll(placeholder, path.replaceAll("'", "''"));
+        command = command.replaceAll(placeholder, () =>
+          escapeSingleQuotes(path),
+        );
       if (pipelineInput !== undefined)
         command = command.replace(
           /^cmd\.exe/m,
-          `'${pipelineInput.replaceAll("'", "''")}' | cmd.exe`,
+          () => `'${escapeSingleQuotes(pipelineInput)}' | cmd.exe`,
         );
       command =
         "$ProgressPreference = 'SilentlyContinue'\n" +
-        `Set-Location -LiteralPath '${workingDirectory.replaceAll("'", "''")}' -ErrorAction Stop\n` +
+        `Set-Location -LiteralPath '${escapeSingleQuotes(workingDirectory)}' -ErrorAction Stop\n` +
         "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\n" +
         command;
       const fixtureEnvironment = {

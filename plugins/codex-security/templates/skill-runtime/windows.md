@@ -1,4 +1,4 @@
-Replace placeholders inside single quotes with literal values. Double each single quote. In CMD examples, `Convert-Path -LiteralPath` resolves existing paths against PowerShell's current location, including UNC shares. The temporary environment variables expand once, preserving literal `%` and `!`. Keep the shown `\.` suffixes on directory arguments to preserve drive roots.
+Replace placeholders inside single quotes with literal values. Double every PowerShell single-quote character in the value by repeating that same character (`'`, `‘`, `’`, `‚`, `‛`, or U+0027 and U+2018 through U+201B). In CMD examples, `Convert-Path -LiteralPath` resolves existing paths against PowerShell's current location, including UNC shares. The temporary environment variables expand once, preserving literal `%` and `!`. Keep the shown `\.` suffixes on directory arguments to preserve drive roots.
 
 ## build-explorer
 

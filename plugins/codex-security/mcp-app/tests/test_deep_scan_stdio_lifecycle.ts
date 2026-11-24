@@ -368,21 +368,24 @@ service_tier = "ultrafast"
       "--thread-id",
       appThread,
     ]);
-    await runWorkbench(environment, [
-      "save-workspace",
-      "--workspace-id",
-      competingWorkspace,
-      "--target-path",
-      targetPath,
-      "--scope",
-      ".",
-      "--mode",
-      "deep",
-    ]);
+    const saveCompetingWorkspace = (mode = "deep") =>
+      runWorkbench(environment, [
+        "save-workspace",
+        "--workspace-id",
+        competingWorkspace,
+        "--target-path",
+        targetPath,
+        "--scope",
+        ".",
+        "--mode",
+        mode,
+      ]);
+    await saveCompetingWorkspace();
     const formIds = new Set<string>();
-    for (const [requestId, choice] of [
+    for (const [requestId, choice, changeSetup] of [
       [6, "dismissed"],
       [7, "Cancel (Recommended)"],
+      [108, "Continue", true],
       [8, "Continue"],
     ] as const) {
       server.sendRequest(
@@ -400,6 +403,7 @@ service_tier = "ultrafast"
       );
       formIds.add(form.id);
       assert.ok(form.params.message.includes(targetPath));
+      if (changeSetup) await saveCompetingWorkspace("standard");
       server.sendResponse(
         form.id,
         choice === "dismissed"
@@ -407,6 +411,11 @@ service_tier = "ultrafast"
           : { action: "accept", content: { concurrent_deep_scan: choice } },
       );
       const answer = await server.waitForResponse(requestId);
+      if (changeSetup) {
+        assert.match(toolError(answer), /current workspace setup/);
+        await saveCompetingWorkspace();
+        continue;
+      }
       assertNoError(answer);
       const result = answer.result.structuredContent;
       if (choice === "Continue") {
@@ -417,6 +426,7 @@ service_tier = "ultrafast"
         ]);
       } else if (choice === "dismissed") {
         assert.equal(result.confirmationRequired, true);
+        assert.equal(typeof result.workspaceVersion, "string");
       } else {
         assert.equal(result.status, "cancelled");
       }

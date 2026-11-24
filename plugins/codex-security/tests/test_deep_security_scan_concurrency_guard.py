@@ -33,6 +33,7 @@ def test_scan_context_reports_only_other_running_deep_scans(
             workbench_db,
             Namespace(
                 workspace_id=workspace_id,
+                workspace_version=now,
                 scan_root=str(tmp_path / "scans"),
                 confirmed_concurrent_scan_id=[scan["scanId"] for scan in scans.values()],
                 model=None,

@@ -81,6 +81,7 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     add_user_context(save_workspace)
 
     start_scan = add_command("start-scan", "--workspace-id")
+    start_scan.add_argument("--workspace-version")
 
     start_prompt_only_scan = add_command(
         "start-prompt-only-scan", "--thread-id", "--target-path", "--scope"

@@ -13,7 +13,11 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from deep_scan_workbench import independent_review_progress, require_current_coordinator
 from finalize_scan_contract import open_scan_local_file_descriptor
-from workbench.handoff import require_current_continuation, require_tokenless_scan_owner
+from workbench.handoff import (
+    RECOVERY_HANDOFF_TOKEN_PREFIX,
+    require_current_continuation,
+    require_tokenless_scan_owner,
+)
 from workbench_constants import PHASES
 from workbench_validation import optional_text, require_uuid, user_context_argument
 
@@ -81,7 +85,12 @@ def update_context(
         else:
             thread_id = optional_text(args.thread_id, maximum=512)
             owning_thread_id = scan["continuation_thread_id"] or workspace["thread_id"]
-            if thread_id is None or thread_id != owning_thread_id:
+            recovery_allowance = (
+                not replace_context
+                and scan["handoff_status"] == "delivered"
+                and (args.claim_token or "").startswith(RECOVERY_HANDOFF_TOKEN_PREFIX)
+            )
+            if thread_id is None or (thread_id != owning_thread_id and not recovery_allowance):
                 raise SystemExit("This scan does not belong to the current Codex thread.")
             require_current_continuation(
                 scan,

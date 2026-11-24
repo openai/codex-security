@@ -181,6 +181,12 @@ const confirmedConcurrentScanIdsSchema = z
     "Pass the scan IDs in a confirmationRequired result only after the user explicitly chooses Continue.",
   );
 const startScanSchema = {
+  workspaceVersion: z
+    .string()
+    .optional()
+    .describe(
+      "Return the workspaceVersion from confirmationRequired with confirmedConcurrentScanIds.",
+    ),
   confirmedConcurrentScanIds: confirmedConcurrentScanIdsSchema,
   ...sessionSchema,
   model: requiredText.max(200).optional(),
@@ -931,7 +937,13 @@ export function createCodexSecurityServer(): McpServer {
       _meta: appMeta,
     },
     async (
-      { sessionId, model, reasoningEffort, confirmedConcurrentScanIds },
+      {
+        sessionId,
+        model,
+        reasoningEffort,
+        confirmedConcurrentScanIds,
+        workspaceVersion,
+      },
       extra,
     ) => {
       let confirmed = confirmedConcurrentScanIds;
@@ -945,11 +957,13 @@ export function createCodexSecurityServer(): McpServer {
         const result = await startWithValidation("start-scan", {
           ...fields,
           confirmedConcurrentScanId: confirmed,
+          workspaceVersion,
         });
         if (result.confirmationRequired !== true) {
           const workspace = result as WorkspaceState;
           return workspaceResult(workspace, workspace.results?.scanId);
         }
+        workspaceVersion = z.string().parse(result.workspaceVersion);
         const active = z
           .array(
             z.object({
@@ -995,7 +1009,8 @@ export function createCodexSecurityServer(): McpServer {
             { status: "cancelled" },
             "The new Deep Scan was cancelled.",
           );
-        if (choice !== "Continue") return concurrentDeepScanResult(active);
+        if (choice !== "Continue")
+          return concurrentDeepScanResult(active, workspaceVersion);
         confirmed = active.map((scan) => scan.scanId);
       }
     },
@@ -2148,10 +2163,17 @@ function withScanTarget<T extends CallToolResult>(result: T, scanId: unknown) {
   };
 }
 
-function concurrentDeepScanResult(activeScans: unknown[]) {
+function concurrentDeepScanResult(
+  activeScans: unknown[],
+  workspaceVersion?: string,
+) {
   return scanActionResult(
-    { confirmationRequired: true, otherRunningDeepScans: activeScans },
-    `Other Deep scans are running: ${JSON.stringify(activeScans)}. Show their targets, phases and start times. Another scan uses additional CPU, memory and tokens. Ask the user to choose Cancel (Recommended) or Continue using the host's question UI or chat. Only after explicit Continue, retry the same launch with the listed scan IDs as confirmedConcurrentScanIds. A dismissal leaves the decision pending. Cancel leaves the running scans alone.`,
+    {
+      confirmationRequired: true,
+      otherRunningDeepScans: activeScans,
+      ...(workspaceVersion && { workspaceVersion }),
+    },
+    `Other Deep scans are running: ${JSON.stringify(activeScans)}. Show their targets, phases and start times. Another scan uses additional CPU, memory and tokens. Ask the user to choose Cancel (Recommended) or Continue using the host's question UI or chat. Only after explicit Continue, retry the same launch with the listed scan IDs as confirmedConcurrentScanIds${workspaceVersion ? " and workspaceVersion " + workspaceVersion : ""}. A dismissal leaves the decision pending. Cancel leaves the running scans alone.`,
   );
 }
 
