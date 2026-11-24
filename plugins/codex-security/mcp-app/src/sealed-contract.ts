@@ -127,36 +127,35 @@ export async function loadSealedContract(
     throwIfAborted(options.signal);
 
     for (const { filename, schemaName, validate } of validators) {
-      let payload = payloads[filename];
       if (filename === "coverage.json" && !hasCoverage) {
         if (profile === "sdk") continue;
-        payload = trackingReviewState(
-          (payloads[manifestFile] as ScanManifest).scan,
+        // Inline coverage shares nested data with the returned manifest.
+        payloads[filename] = structuredClone(
+          trackingReviewState((payloads[manifestFile] as ScanManifest).scan),
         );
       }
+      const payload = payloads[filename];
       if (profile === "tracking" && filename === "findings.json") {
         // The tracking reader historically validates the normalized legacy view.
         // Seals continue to bind the original bytes read above.
-        payload = normalizePersistedFindings(payload, profile);
+        normalizePersistedFindings(payload, profile);
         validateParsedJson(payload, filename);
       } else if (profile === "tracking" && filename === "coverage.json") {
-        payload = normalizeTrackingCoverage(payload);
+        normalizeTrackingCoverage(payload);
       }
       let valid: boolean;
       try {
-        const validatePayload = (payload: unknown) => {
-          const result = validate(payload);
-          if (typeof result !== "boolean") {
-            throw new Error(
-              "asynchronous JSON Schema validation is unsupported",
-            );
-          }
-          return result;
-        };
-        valid = validatePayload(payload);
-        if (!valid && filename === "findings.json") {
-          payload = normalizePersistedFindings(payload);
-          valid = validatePayload(payload);
+        valid = validate(payload);
+        if (
+          valid === false &&
+          profile === "sdk" &&
+          filename === "findings.json"
+        ) {
+          normalizePersistedFindings(payload, profile);
+          valid = validate(payload);
+        }
+        if (typeof valid !== "boolean") {
+          throw new Error("asynchronous JSON Schema validation is unsupported");
         }
       } catch {
         throw new ContractSchemaError(`${schemaName}: invalid JSON Schema.`);
@@ -164,7 +163,6 @@ export async function loadSealedContract(
       if (!valid) {
         throw schemaError(filename, validate.errors ?? []);
       }
-      payloads[filename] = payload;
       throwIfAborted(options.signal);
     }
     const manifest = payloads["scan-manifest.json"] as ScanManifest;
@@ -260,29 +258,20 @@ function trackingReviewState(scan: ScanManifest["scan"]) {
   };
 }
 
-/** Normalize optional legacy details on a copy, without changing saved artifacts. */
+/** Normalize freshly parsed legacy details. Seals always cover the original bytes. */
 function normalizePersistedFindings(
   payload: unknown,
-  profile: ContractProfile = "sdk",
-): unknown {
-  const compatible = structuredClone(payload);
-  if (!isRecord(compatible) || !Array.isArray(compatible["findings"])) {
-    return compatible;
+  profile: ContractProfile,
+): void {
+  if (!isRecord(payload) || !Array.isArray(payload["findings"])) return;
+  for (const finding of payload["findings"]) {
+    if (isRecord(finding)) normalizePersistedFindingDetails(finding, profile);
   }
-  for (const finding of compatible["findings"]) {
-    if (!isRecord(finding)) continue;
-    normalizePersistedFindingDetails(finding, profile);
-  }
-  return compatible;
 }
 
-/** Tracking validates normalized receipt references but seals the original bytes. */
-function normalizeTrackingCoverage(payload: unknown): unknown {
-  const compatible = structuredClone(payload);
-  if (!isRecord(compatible) || !Array.isArray(compatible["surfaces"])) {
-    return compatible;
-  }
-  for (const [surfaceIndex, surface] of compatible["surfaces"].entries()) {
+function normalizeTrackingCoverage(payload: unknown): void {
+  if (!isRecord(payload) || !Array.isArray(payload["surfaces"])) return;
+  for (const [surfaceIndex, surface] of payload["surfaces"].entries()) {
     if (!isRecord(surface) || !Array.isArray(surface["receiptRefs"])) continue;
     for (const [refIndex, reference] of surface["receiptRefs"].entries()) {
       if (typeof reference !== "string") continue;
@@ -292,7 +281,6 @@ function normalizeTrackingCoverage(payload: unknown): unknown {
       );
     }
   }
-  return compatible;
 }
 
 function validateCanonicalContract(
@@ -935,7 +923,8 @@ function parseJson(
     });
   }
   let payload: unknown;
-  const decimalFields = new WeakMap<object, Set<string>>();
+  // Tracking must distinguish integer line tokens from 41.0 or 41e0.
+  const decimalFields = new Map<object, string>();
   try {
     payload = JSON.parse(
       text,
@@ -949,12 +938,11 @@ function parseJson(
           profile === "tracking" &&
           (key === "startLine" || key === "endLine") &&
           typeof value === "number" &&
-          context?.source !== undefined &&
-          /[.eE]/u.test(context.source)
+          /[.eE]/u.test(context?.source ?? "") &&
+          // Report startLine first regardless of JSON field order.
+          (key === "startLine" || !decimalFields.has(this))
         ) {
-          const fields = decimalFields.get(this) ?? new Set<string>();
-          fields.add(key);
-          decimalFields.set(this, fields);
+          decimalFields.set(this, key);
         }
         return value;
       },
@@ -971,35 +959,24 @@ function parseJson(
   if (!isRecord(payload)) {
     throw new ContractValidationError(`${path}: expected a JSON object.`);
   }
-  validateParsedJson(
-    payload,
-    path,
-    !(
-      profile === "tracking" &&
-      payload["documentType"] === "codex-security.findings"
-    ),
-  );
-  // Canonical line numbers are authored as JSON integers by the producer.
-  // JSON.parse otherwise loses the distinction between 41, 41.0, and 41e0.
-  if (
+  const trackingFindings =
     profile === "tracking" &&
-    payload["documentType"] === "codex-security.findings" &&
-    Array.isArray(payload["findings"])
-  ) {
-    for (const [findingIndex, finding] of payload["findings"].entries()) {
-      if (!isRecord(finding)) continue;
-      for (const field of ["locations", "codeEvidence"]) {
-        const rows = finding[field];
-        if (!Array.isArray(rows)) continue;
-        for (const [rowIndex, row] of rows.entries()) {
-          if (!isRecord(row)) continue;
-          for (const line of ["startLine", "endLine"]) {
-            if (decimalFields.get(row)?.has(line)) {
-              throw new ContractValidationError(
-                `${path}.findings[${findingIndex}].${field}[${rowIndex}].${line}: expected an integer JSON number.`,
-              );
-            }
-          }
+    payload["documentType"] === "codex-security.findings";
+  validateParsedJson(payload, path, !trackingFindings);
+  const findings = payload["findings"];
+  if (!trackingFindings || !decimalFields.size || !Array.isArray(findings))
+    return payload;
+  for (const [findingIndex, finding] of findings.entries()) {
+    if (!isRecord(finding)) continue;
+    for (const field of ["locations", "codeEvidence"]) {
+      const rows = finding[field];
+      if (!Array.isArray(rows)) continue;
+      for (const [rowIndex, row] of rows.entries()) {
+        const line = decimalFields.get(row);
+        if (line) {
+          throw new ContractValidationError(
+            `${path}.findings[${findingIndex}].${field}[${rowIndex}].${line}: expected an integer JSON number.`,
+          );
         }
       }
     }

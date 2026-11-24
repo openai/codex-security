@@ -136,6 +136,9 @@ import {
   scanProgress,
   legacyUsageRecord,
   progressMarker,
+  commandTail,
+  persistedCommandOutput,
+  commandOutput,
   nativeCommand,
   completedCommand,
   writeSession as writeUsageSession,
@@ -217,13 +220,6 @@ function holdSessionClose(
 function writeWorkerSession(codexHome: string, id = "worker-thread") {
   return writeUsageSession(codexHome, id, {}, { parent: "thread-1" });
 }
-
-// Exact ASCII fixture for the pinned native 64 KiB persistence representation.
-const commandHead = "h".repeat(32_743);
-const commandTail = "t".repeat(32_743);
-const persistedCommandOutput = `${commandHead}\n... command output truncated for persistence ...\n${commandTail}`;
-const commandOutput = (middle: string) =>
-  `${commandHead}\n${middle}\n${commandTail}`;
 
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "legacy-completed-scan");
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
@@ -372,7 +368,7 @@ describe("CodexSecurity orchestration", () => {
         ? environment.CODEX_STATE_DB
         : join(expectedHome, "state_5.sqlite");
       let measured: JsonObject | undefined;
-      const client = new TestClient(
+      await using client = new TestClient(
         {
           pluginPath: PLUGIN_ROOT,
           codexOverrides: { model: "synthetic-unpriced-model" },
@@ -439,20 +435,16 @@ describe("CodexSecurity orchestration", () => {
           },
         },
       );
-      try {
-        await expect(client.run(repository)).rejects.toThrow(
-          "workbench usage captured",
-        );
-        expect(measured).toMatchObject({
-          coverage: "partial",
-          warnings: ["turn_in_progress"],
-          inputTokens: 100,
-          outputTokens: 10,
-          totalTokens: 110,
-        });
-      } finally {
-        await client.close();
-      }
+      await expect(client.run(repository)).rejects.toThrow(
+        "workbench usage captured",
+      );
+      expect(measured).toMatchObject({
+        coverage: "partial",
+        warnings: ["turn_in_progress"],
+        inputTokens: 100,
+        outputTokens: 10,
+        totalTokens: 110,
+      });
     },
   );
 
@@ -1710,7 +1702,7 @@ describe("CodexSecurity orchestration", () => {
     };
     const observed: CodexOptions[] = [];
     const onAuthentication = mock<(selected: ScanAuthentication) => void>();
-    const client = new TestClient(
+    await using client = new TestClient(
       {
         pluginPath: PLUGIN_ROOT,
         codexOverrides: {
@@ -1729,51 +1721,47 @@ describe("CodexSecurity orchestration", () => {
         },
       },
     );
-    try {
-      await expect(
-        client.run(repository, { onAuthentication }),
-      ).rejects.toThrow("Bedrock environment captured");
-      expect(onAuthentication.mock.lastCall?.[0]).toMatchObject({
-        method: "aws_credentials",
-        source: "AWS_BEARER_TOKEN_BEDROCK",
-      });
-      delete environment["AWS_BEARER_TOKEN_BEDROCK"];
-      environment["AWS_ACCESS_KEY_ID"] = "synthetic-refreshed-access-key";
-      environment["AWS_SECRET_ACCESS_KEY"] = "synthetic-refreshed-secret-key";
-      environment["AWS_REGION"] = "us-west-2";
-      await expect(
-        client.run(repository, { onAuthentication }),
-      ).rejects.toThrow("Bedrock environment captured");
-      expect(onAuthentication.mock.lastCall?.[0]).toMatchObject({
-        method: "aws_credentials",
-        source: "AWS_ACCESS_KEY_ID",
-      });
-      expect(observed[1]?.env).toMatchObject({
-        AWS_ACCESS_KEY_ID: "synthetic-refreshed-access-key",
-        AWS_SECRET_ACCESS_KEY: "synthetic-refreshed-secret-key",
-        AWS_REGION: "us-west-2",
-        GIT_SSH_COMMAND: "synthetic-ssh --first",
-      });
-      expect(observed[1]?.env).not.toHaveProperty("AWS_BEARER_TOKEN_BEDROCK");
-      expect(observed[1]?.env).not.toHaveProperty("OPENAI_API_KEY");
-      environment["GIT_SSH_COMMAND"] = "synthetic-ssh --caller";
-      await expect(client.run(repository)).rejects.toThrow(
-        "Bedrock environment captured",
-      );
-      expect(observed[2]?.env?.["GIT_SSH_COMMAND"]).toBe(
-        "synthetic-ssh --caller",
-      );
-      expect(observed[2]?.env?.["CODEX_HOME"]).toBe(
-        observed[0]?.env?.["CODEX_HOME"],
-      );
-      expect(observed[0]?.env).toMatchObject({
-        AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer",
-        AWS_REGION: "us-east-2",
-        GIT_SSH_COMMAND: "synthetic-ssh --first",
-      });
-    } finally {
-      await client.close();
-    }
+    await expect(client.run(repository, { onAuthentication })).rejects.toThrow(
+      "Bedrock environment captured",
+    );
+    expect(onAuthentication.mock.lastCall?.[0]).toMatchObject({
+      method: "aws_credentials",
+      source: "AWS_BEARER_TOKEN_BEDROCK",
+    });
+    delete environment["AWS_BEARER_TOKEN_BEDROCK"];
+    environment["AWS_ACCESS_KEY_ID"] = "synthetic-refreshed-access-key";
+    environment["AWS_SECRET_ACCESS_KEY"] = "synthetic-refreshed-secret-key";
+    environment["AWS_REGION"] = "us-west-2";
+    await expect(client.run(repository, { onAuthentication })).rejects.toThrow(
+      "Bedrock environment captured",
+    );
+    expect(onAuthentication.mock.lastCall?.[0]).toMatchObject({
+      method: "aws_credentials",
+      source: "AWS_ACCESS_KEY_ID",
+    });
+    expect(observed[1]?.env).toMatchObject({
+      AWS_ACCESS_KEY_ID: "synthetic-refreshed-access-key",
+      AWS_SECRET_ACCESS_KEY: "synthetic-refreshed-secret-key",
+      AWS_REGION: "us-west-2",
+      GIT_SSH_COMMAND: "synthetic-ssh --first",
+    });
+    expect(observed[1]?.env).not.toHaveProperty("AWS_BEARER_TOKEN_BEDROCK");
+    expect(observed[1]?.env).not.toHaveProperty("OPENAI_API_KEY");
+    environment["GIT_SSH_COMMAND"] = "synthetic-ssh --caller";
+    await expect(client.run(repository)).rejects.toThrow(
+      "Bedrock environment captured",
+    );
+    expect(observed[2]?.env?.["GIT_SSH_COMMAND"]).toBe(
+      "synthetic-ssh --caller",
+    );
+    expect(observed[2]?.env?.["CODEX_HOME"]).toBe(
+      observed[0]?.env?.["CODEX_HOME"],
+    );
+    expect(observed[0]?.env).toMatchObject({
+      AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer",
+      AWS_REGION: "us-east-2",
+      GIT_SSH_COMMAND: "synthetic-ssh --first",
+    });
   });
 
   test("isolates resolved Deep settings across concurrent Bedrock scans", async () => {
@@ -2350,7 +2338,7 @@ describe("CodexSecurity orchestration", () => {
     async (store) => {
       const { repository, codexHome, scanDir } = await scanDirectories();
       const advisories: string[] = [];
-      const client = new TestClient(
+      await using client = new TestClient(
         { codexOverrides: { cli_auth_credentials_store: store } },
         {
           ...scanRuntimeDependencies(codexHome, scanDir),
@@ -2366,20 +2354,16 @@ describe("CodexSecurity orchestration", () => {
           }),
         },
       );
-      try {
-        for (const auth_mode of ["apikey", "chatgpt", "unknown"]) {
-          await writeFile(
-            join(codexHome, "auth.json"),
-            JSON.stringify({ auth_mode }),
-          );
-          await expect(client.run(repository)).rejects.toThrow(
-            "Standard prompt captured",
-          );
-        }
-        expect(new Set(advisories).size).toBe(1);
-      } finally {
-        await client.close();
+      for (const auth_mode of ["apikey", "chatgpt", "unknown"]) {
+        await writeFile(
+          join(codexHome, "auth.json"),
+          JSON.stringify({ auth_mode }),
+        );
+        await expect(client.run(repository)).rejects.toThrow(
+          "Standard prompt captured",
+        );
       }
+      expect(new Set(advisories).size).toBe(1);
     },
   );
 
@@ -2512,7 +2496,7 @@ describe("CodexSecurity orchestration", () => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       await writeFile(join(scanDir, "previous.txt"), "previous scan\n");
       const cancellation = new AbortController();
-      const client = new TestClient(
+      await using client = new TestClient(
         { pluginPath: PLUGIN_ROOT },
         {
           prepareRuntime: async () => preparedRuntime(codexHome),
@@ -2529,26 +2513,22 @@ describe("CodexSecurity orchestration", () => {
           createCodex: codexFactory(scanDidNotStart),
         },
       );
-      try {
-        await expect(
-          client.run(repository, {
-            outputDir: scanDir,
-            archiveExisting: true,
-            signal: cancellation.signal,
-            mock: failurePoint === "mock",
-          }),
-        ).rejects.toThrow();
-        expect(await readFile(join(scanDir, "previous.txt"), "utf8")).toBe(
-          "previous scan\n",
-        );
-        expect(
-          (await readdir(root)).filter((name) =>
-            name.startsWith("scan.previous-"),
-          ),
-        ).toEqual([]);
-      } finally {
-        await client.close();
-      }
+      await expect(
+        client.run(repository, {
+          outputDir: scanDir,
+          archiveExisting: true,
+          signal: cancellation.signal,
+          mock: failurePoint === "mock",
+        }),
+      ).rejects.toThrow();
+      expect(await readFile(join(scanDir, "previous.txt"), "utf8")).toBe(
+        "previous scan\n",
+      );
+      expect(
+        (await readdir(root)).filter((name) =>
+          name.startsWith("scan.previous-"),
+        ),
+      ).toEqual([]);
     },
   );
 
@@ -3511,7 +3491,7 @@ if __name__ == "__main__":
       let revision = "deadbeef";
       let completed = false;
       const details: unknown[] = [];
-      const client = TestClient.withDependencies({
+      await using client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         repositoryRevision: async () => revision,
         runWorkbench: async (_options, args, input) => {
@@ -3526,23 +3506,19 @@ if __name__ == "__main__":
           return { events: completedEvents() };
         }),
       });
-      try {
-        await client.run(repository, {
-          onWarning: (message, detail) => {
-            if (!message.startsWith("Repository HEAD changed")) return;
-            expect(completed).toBe(false);
-            details.push(detail);
-            if (observerFails) throw new Error("Synthetic observer failure");
-          },
-          onObserverError: () => {
-            throw new Error("Synthetic observer error handler failure");
-          },
-        });
-        completed = true;
-        expect(details).toEqual([undefined]);
-      } finally {
-        await client.close();
-      }
+      await client.run(repository, {
+        onWarning: (message, detail) => {
+          if (!message.startsWith("Repository HEAD changed")) return;
+          expect(completed).toBe(false);
+          details.push(detail);
+          if (observerFails) throw new Error("Synthetic observer failure");
+        },
+        onObserverError: () => {
+          throw new Error("Synthetic observer error handler failure");
+        },
+      });
+      completed = true;
+      expect(details).toEqual([undefined]);
     },
   );
 
@@ -3657,7 +3633,7 @@ if __name__ == "__main__":
       const readRevision = mock(async () =>
         kind === "unversioned" ? null : "deadbeef",
       );
-      const client = TestClient.withDependencies({
+      await using client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         repositoryRevision: readRevision,
         runWorkbench: async (_options, args, input) => {
@@ -3675,22 +3651,18 @@ if __name__ == "__main__":
           throw new Error("Synthetic scan boundary");
         },
       });
-      try {
-        await expect(
-          client.run(repository, {
-            onWarning: observed ? mock() : undefined,
-            target:
-              kind === "refs"
-                ? DiffTarget.refs({ base: "HEAD", head: "HEAD" })
-                : kind === "working_tree"
-                  ? DiffTarget.workingTree({ base: "HEAD" })
-                  : "repository",
-          }),
-        ).rejects.toThrow("Synthetic scan boundary");
-        expect(readRevision).toHaveBeenCalledTimes(expectedReads);
-      } finally {
-        await client.close();
-      }
+      await expect(
+        client.run(repository, {
+          onWarning: observed ? mock() : undefined,
+          target:
+            kind === "refs"
+              ? DiffTarget.refs({ base: "HEAD", head: "HEAD" })
+              : kind === "working_tree"
+                ? DiffTarget.workingTree({ base: "HEAD" })
+                : "repository",
+        }),
+      ).rejects.toThrow("Synthetic scan boundary");
+      expect(readRevision).toHaveBeenCalledTimes(expectedReads);
     },
   );
 
@@ -3904,7 +3876,7 @@ if __name__ == "__main__":
         planned: 2,
         started: 2,
       } as const;
-      const client = TestClient.withDependencies({
+      await using client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (options, args, input) => {
           if (args[0] === "register-cli-scan") {
@@ -3943,22 +3915,18 @@ if __name__ == "__main__":
           };
         }, "thread-1"),
       });
-      try {
-        const result = client.run(repository, {
-          postScanPrompt: "Review the synthetic fix.",
-          onProgress() {},
-          onWorkerStatus: (update) => statuses.push(update),
-          onWarning: (warning) => warnings.push(warning),
-        });
-        if (primaryFails)
-          await expect(result).rejects.toThrow("Could not draft fixes.");
-        else await result;
-        expect(turns).toBe(2);
-        expect(warnings).toEqual([]);
-        expect(statuses).toEqual(primaryFails ? [] : [status]);
-      } finally {
-        await client.close();
-      }
+      const result = client.run(repository, {
+        postScanPrompt: "Review the synthetic fix.",
+        onProgress() {},
+        onWorkerStatus: (update) => statuses.push(update),
+        onWarning: (warning) => warnings.push(warning),
+      });
+      if (primaryFails)
+        await expect(result).rejects.toThrow("Could not draft fixes.");
+      else await result;
+      expect(turns).toBe(2);
+      expect(warnings).toEqual([]);
+      expect(statuses).toEqual(primaryFails ? [] : [status]);
     },
   );
 
@@ -3977,7 +3945,7 @@ if __name__ == "__main__":
       const observerErrors: string[] = [];
       const workerStatuses: unknown[] = [];
       let failNextProgressRead = scenario === "unavailable";
-      const client = TestClient.withDependencies({
+      await using client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (_options, args, input): Promise<JsonObject> => {
           if (args[0] === "register-cli-scan") {
@@ -4021,50 +3989,46 @@ if __name__ == "__main__":
           })(),
         })),
       });
-      try {
-        await expect(
-          client.run(repository, {
-            onProgress: (progress) => {
-              updates.push(progress);
-              if (progress.reviewItems !== undefined)
-                throw new Error("presenter failed");
-            },
-            onWarning: (warning) => warnings.push(warning),
-            onWorkerStatus: (status) => workerStatuses.push(status),
-            onObserverError: (observer) => observerErrors.push(observer),
-          }),
-        ).rejects.toThrow("original scan failure");
-        expect(updates[0]).toEqual(scanProgress("preflight", 0, 8));
-        expect(workerStatuses).toEqual([]);
-        if (["marker-free", "late marker", "late worker"].includes(scenario)) {
-          expect(updates[1]).toEqual({
-            phase: "validation",
-            filesCompleted: 0,
-            filesTotal: 8,
-            reviewItems: { completed: 11, total: 13 },
+      await expect(
+        client.run(repository, {
+          onProgress: (progress) => {
+            updates.push(progress);
+            if (progress.reviewItems !== undefined)
+              throw new Error("presenter failed");
+          },
+          onWarning: (warning) => warnings.push(warning),
+          onWorkerStatus: (status) => workerStatuses.push(status),
+          onObserverError: (observer) => observerErrors.push(observer),
+        }),
+      ).rejects.toThrow("original scan failure");
+      expect(updates[0]).toEqual(scanProgress("preflight", 0, 8));
+      expect(workerStatuses).toEqual([]);
+      if (["marker-free", "late marker", "late worker"].includes(scenario)) {
+        expect(updates[1]).toEqual({
+          phase: "validation",
+          filesCompleted: 0,
+          filesTotal: 8,
+          reviewItems: { completed: 11, total: 13 },
+        });
+        if (scenario === "late marker") {
+          expect(updates.at(-1)).toEqual({
+            ...updates[1]!,
+            phase: "discovery",
+            filesCompleted: 3,
           });
-          if (scenario === "late marker") {
-            expect(updates.at(-1)).toEqual({
-              ...updates[1]!,
-              phase: "discovery",
-              filesCompleted: 3,
-            });
-          }
-          expect(warnings).toEqual([]);
-          expect(observerErrors).toEqual(
-            Array(updates.length - 1).fill("onProgress"),
-          );
-        } else {
-          expect(updates).toHaveLength(1);
-          expect(observerErrors).toEqual([]);
-          expect(warnings).toEqual([
-            scenario === "unavailable"
-              ? "Could not track scan progress: progress read failed"
-              : "Could not track scan progress: Codex Security workbench returned invalid scan progress.",
-          ]);
         }
-      } finally {
-        await client.close();
+        expect(warnings).toEqual([]);
+        expect(observerErrors).toEqual(
+          Array(updates.length - 1).fill("onProgress"),
+        );
+      } else {
+        expect(updates).toHaveLength(1);
+        expect(observerErrors).toEqual([]);
+        expect(warnings).toEqual([
+          scenario === "unavailable"
+            ? "Could not track scan progress: progress read failed"
+            : "Could not track scan progress: Codex Security workbench returned invalid scan progress.",
+        ]);
       }
     },
   );
@@ -6381,7 +6345,7 @@ if __name__ == "__main__":
       const updates: ScanProgress[] = [];
       const marker = (completed: number, total: number) =>
         progressMarker("discovery", completed, total);
-      const client = eightFileClient(codexHome, scanDir, async () => {
+      await using client = eightFileClient(codexHome, scanDir, async () => {
         await copyCompletedScan(root);
         const rollout = await writeUsageSession(codexHome, "thread-1", {});
         async function* events(): AsyncGenerator<ThreadEvent> {
@@ -6405,20 +6369,14 @@ if __name__ == "__main__":
         }
         return { events: completedEvents("thread-1", events()) };
       });
-      try {
-        await client.run(repository, {
-          onProgress: (update) => updates.push(update),
-        });
-        expect(updates.at(-1)).toEqual(scanProgress("discovery", count, 9));
-        const corrected = updates.findIndex(
-          (update) => update.filesTotal === 9,
-        );
-        expect(
-          updates.slice(corrected).every((update) => update.filesTotal === 9),
-        ).toBe(true);
-      } finally {
-        await client.close();
-      }
+      await client.run(repository, {
+        onProgress: (update) => updates.push(update),
+      });
+      expect(updates.at(-1)).toEqual(scanProgress("discovery", count, 9));
+      const corrected = updates.findIndex((update) => update.filesTotal === 9);
+      expect(
+        updates.slice(corrected).every((update) => update.filesTotal === 9),
+      ).toBe(true);
     },
   );
 
@@ -12226,7 +12184,7 @@ if __name__ == "__main__":
       target: { kind: "repository", paths: [] },
       repositoryRevision: "deadbeef",
     };
-    const client = TestClient.withDependencies({
+    await using client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
       runWorkbench: async (_options, args, input): Promise<JsonObject> =>
         args[0] === "get-cli-scan-resume"
@@ -12270,19 +12228,15 @@ if __name__ == "__main__":
         }),
       }),
     });
-    try {
-      await expect(
-        client.run(repository, {
-          mode: "deep",
-          outputDir: scanDir,
-          resumeScanId: "scan_example_001",
-          onProgress: (progress) => updates.push(progress),
-        }),
-      ).rejects.toThrow("Synthetic stop after resumed progress");
-      expect(updates.at(-1)).toEqual(scanProgress("discovery", 1, 9));
-    } finally {
-      await client.close();
-    }
+    await expect(
+      client.run(repository, {
+        mode: "deep",
+        outputDir: scanDir,
+        resumeScanId: "scan_example_001",
+        onProgress: (progress) => updates.push(progress),
+      }),
+    ).rejects.toThrow("Synthetic stop after resumed progress");
+    expect(updates.at(-1)).toEqual(scanProgress("discovery", 1, 9));
   });
 
   test("matches a progress command after an identical retained non-progress completion", async () => {
@@ -13534,7 +13488,7 @@ if __name__ == "__main__":
     const usages: unknown[] = [];
     const observerErrors: string[] = [];
     const commands: Array<readonly string[]> = [];
-    const client = new TestClient(
+    await using client = new TestClient(
       {
         codexOverrides: {
           model: "gpt-6-astra",
@@ -13549,44 +13503,40 @@ if __name__ == "__main__":
         createCodex: completedCodex(root),
       },
     );
-    try {
-      await expect(
-        client.preflight(repository, { maxCostUsd: 1 }),
-      ).rejects.toThrow("cost limit is not available for the configured model");
-      await expect(client.preflight(repository)).resolves.toMatchObject({
-        model: "gpt-6-astra",
-        modelProvider: "gcp",
-      });
-      const result = await client.run(repository, {
-        onUsage: async (usage) => {
-          usages.push(usage);
-          await Promise.resolve();
-          throw new Error("synthetic usage observer");
-        },
-        onObserverError: (observer) => observerErrors.push(observer),
-      });
-      expect(result.cost).toBeNull();
-      expect(usages).toEqual([
-        expect.objectContaining({ input_tokens: 10, output_tokens: 3 }),
-      ]);
-      expect(observerErrors).toEqual(["onUsage"]);
-      const completion = commands.find((args) => args[0] === "complete-scan");
-      const costIndex = completion?.indexOf("--cost-json") ?? -1;
-      expect(costIndex).toBeGreaterThan(0);
-      const receipt = JSON.parse(completion![costIndex + 1]!);
-      expect(receipt).toMatchObject({
-        usage: {
-          coverage: "complete",
-          threadCount: 1,
-          inputTokens: 10,
-          outputTokens: 3,
-          totalTokens: 13,
-        },
-      });
-      expect(receipt.cost).toBeUndefined();
-    } finally {
-      await client.close();
-    }
+    await expect(
+      client.preflight(repository, { maxCostUsd: 1 }),
+    ).rejects.toThrow("cost limit is not available for the configured model");
+    await expect(client.preflight(repository)).resolves.toMatchObject({
+      model: "gpt-6-astra",
+      modelProvider: "gcp",
+    });
+    const result = await client.run(repository, {
+      onUsage: async (usage) => {
+        usages.push(usage);
+        await Promise.resolve();
+        throw new Error("synthetic usage observer");
+      },
+      onObserverError: (observer) => observerErrors.push(observer),
+    });
+    expect(result.cost).toBeNull();
+    expect(usages).toEqual([
+      expect.objectContaining({ input_tokens: 10, output_tokens: 3 }),
+    ]);
+    expect(observerErrors).toEqual(["onUsage"]);
+    const completion = commands.find((args) => args[0] === "complete-scan");
+    const costIndex = completion?.indexOf("--cost-json") ?? -1;
+    expect(costIndex).toBeGreaterThan(0);
+    const receipt = JSON.parse(completion![costIndex + 1]!);
+    expect(receipt).toMatchObject({
+      usage: {
+        coverage: "complete",
+        threadCount: 1,
+        inputTokens: 10,
+        outputTokens: 3,
+        totalTokens: 13,
+      },
+    });
+    expect(receipt.cost).toBeUndefined();
   });
   const prices = [
     { model: "gpt-6-astra", provider: "openai", min: 0.000232, max: 0.000429 },
@@ -13727,7 +13677,7 @@ if __name__ == "__main__":
       await writeFile(join(repository, "notes.md"), "fixture");
       const turns: Array<{ prompt: string; paths: string[] }> = [];
       const warnings: string[] = [];
-      const client = TestClient.withDependencies({
+      await using client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         canRunDirectDeepScan: () => false,
         readDeepScanParentConfig: async () =>
@@ -13743,22 +13693,18 @@ if __name__ == "__main__":
             return { events: completedEvents() };
           })(),
       });
-      try {
-        await expect(
-          client.run(repository, {
-            mode: "deep",
-            target,
-            postScanPrompt,
-            onWarning: (warning) => warnings.push(warning),
-          }),
-        ).rejects.toThrow("native configuration failed");
-        expect(warnings).toEqual([]);
-        expect(turns).toEqual(
-          postScanPrompt ? [{ prompt: postScanPrompt, paths: target }] : [],
-        );
-      } finally {
-        await client.close();
-      }
+      await expect(
+        client.run(repository, {
+          mode: "deep",
+          target,
+          postScanPrompt,
+          onWarning: (warning) => warnings.push(warning),
+        }),
+      ).rejects.toThrow("native configuration failed");
+      expect(warnings).toEqual([]);
+      expect(turns).toEqual(
+        postScanPrompt ? [{ prompt: postScanPrompt, paths: target }] : [],
+      );
     },
   );
 
@@ -13781,7 +13727,7 @@ if __name__ == "__main__":
       events: completedEvents(threadId),
     }));
     const thread = { id: threadId, runStreamed };
-    const client = TestClient.withDependencies({
+    await using client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
       canRunDirectDeepScan: () => false,
       readDeepScanParentConfig: readConfig,
@@ -13805,21 +13751,17 @@ if __name__ == "__main__":
         return mockWorkbench(args, input);
       },
     });
-    try {
-      await expect(
-        client.run(repository, {
-          mode: "deep",
-          resumeScanId: scanId,
-          outputDir: scanDir,
-          maxCostUsd: 0.004,
-          postScanPrompt: "Summarize the failed scan.",
-        }),
-      ).rejects.toBeInstanceOf(ScanCostLimitExceededError);
-      expect(readConfig).not.toHaveBeenCalled();
-      expect(runStreamed).not.toHaveBeenCalled();
-    } finally {
-      await client.close();
-    }
+    await expect(
+      client.run(repository, {
+        mode: "deep",
+        resumeScanId: scanId,
+        outputDir: scanDir,
+        maxCostUsd: 0.004,
+        postScanPrompt: "Summarize the failed scan.",
+      }),
+    ).rejects.toBeInstanceOf(ScanCostLimitExceededError);
+    expect(readConfig).not.toHaveBeenCalled();
+    expect(runStreamed).not.toHaveBeenCalled();
   });
 
   test.each([
@@ -15301,21 +15243,17 @@ if __name__ == "__main__":
     );
     await writeFile(mcpPath, JSON.stringify(mcpConfiguration));
     const createCodex = mock(throwing("Codex should not start"));
-    const client = new TestClient(
+    await using client = new TestClient(
       { pluginPath: pluginRoot },
       {
         environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
         createCodex,
       },
     );
-    try {
-      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
-        "Update the custom plugin or use the bundled plugin",
-      );
-      expect(createCodex).not.toHaveBeenCalled();
-    } finally {
-      await client.close();
-    }
+    await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+      "Update the custom plugin or use the bundled plugin",
+    );
+    expect(createCodex).not.toHaveBeenCalled();
   });
 
   test("rejects a shell-visible plugin root inside CODEX_HOME", async () => {
@@ -15514,7 +15452,7 @@ if __name__ == "__main__":
       };
       const before = structuredClone(codexOverrides);
       let reachedScan = false;
-      const client = new TestClient(
+      await using client = new TestClient(
         { codexOverrides },
         {
           ...scanRuntimeDependencies(codexHome, scanDir),
@@ -15573,15 +15511,11 @@ if __name__ == "__main__":
             }),
         },
       );
-      try {
-        await expect(client.run(repository, { mode })).rejects.toThrow(
-          "readable workflow captured",
-        );
-        expect(reachedScan).toBe(true);
-        expect(codexOverrides).toEqual(before);
-      } finally {
-        await client.close();
-      }
+      await expect(client.run(repository, { mode })).rejects.toThrow(
+        "readable workflow captured",
+      );
+      expect(reachedScan).toBe(true);
+      expect(codexOverrides).toEqual(before);
     },
   );
 
@@ -15780,7 +15714,7 @@ if __name__ == "__main__":
       }
       const progress: ScanProgress[] = [];
       let scanId = "";
-      const client = new TestClient(
+      await using client = new TestClient(
         { pluginPath: pluginRoot },
         {
           ...dependencies,
@@ -15827,30 +15761,24 @@ if __name__ == "__main__":
             }),
         },
       );
-      try {
-        await expect(
-          client.run(repository, {
-            target: ["src", "src/a.py"],
-            onProgress: (update) => {
-              progress.push(update);
-            },
-          }),
-        ).rejects.toThrow("sandbox inventory captured");
-        expect(progress.at(-1)?.filesTotal).toBe(
-          parentMarker ? 1 : registration,
-        );
-        const detail = await runWorkbench(workbench, [
-          "get-scan",
-          "--scan-id",
-          scanId,
-        ]);
-        expect(detail["scan"]).toMatchObject({
-          progress: { coverage: { filesTotal: 1 } },
-        });
-        expect(await historyTotal()).toBe(1);
-      } finally {
-        await client.close();
-      }
+      await expect(
+        client.run(repository, {
+          target: ["src", "src/a.py"],
+          onProgress: (update) => {
+            progress.push(update);
+          },
+        }),
+      ).rejects.toThrow("sandbox inventory captured");
+      expect(progress.at(-1)?.filesTotal).toBe(parentMarker ? 1 : registration);
+      const detail = await runWorkbench(workbench, [
+        "get-scan",
+        "--scan-id",
+        scanId,
+      ]);
+      expect(detail["scan"]).toMatchObject({
+        progress: { coverage: { filesTotal: 1 } },
+      });
+      expect(await historyTotal()).toBe(1);
     },
   );
 
@@ -15866,7 +15794,7 @@ if __name__ == "__main__":
         runSelectedHelper,
         historyTotal,
       } = await scopedInventoryFixture();
-      const client = new TestClient(
+      await using client = new TestClient(
         { pluginPath: pluginRoot },
         {
           ...dependencies,
@@ -15906,14 +15834,10 @@ if __name__ == "__main__":
             }),
         },
       );
-      try {
-        await expect(
-          client.run(repository, { target: ["src", "src/keep.tmp"] }),
-        ).rejects.toThrow("inventory stopped");
-        expect(await historyTotal()).toBe(3);
-      } finally {
-        await client.close();
-      }
+      await expect(
+        client.run(repository, { target: ["src", "src/keep.tmp"] }),
+      ).rejects.toThrow("inventory stopped");
+      expect(await historyTotal()).toBe(3);
     },
   );
 
@@ -15935,7 +15859,7 @@ if __name__ == "__main__":
         "core.excludesFile",
         exclusions,
       ]);
-      const client = new TestClient(
+      await using client = new TestClient(
         {
           codexOverrides:
             source === "dotted override"
@@ -15999,13 +15923,9 @@ if __name__ == "__main__":
             }),
         },
       );
-      try {
-        await expect(
-          client.run(repository, { target: ["src"] }),
-        ).rejects.toThrow("profile scoped inventory captured");
-      } finally {
-        await client.close();
-      }
+      await expect(client.run(repository, { target: ["src"] })).rejects.toThrow(
+        "profile scoped inventory captured",
+      );
     },
   );
 
@@ -16021,7 +15941,7 @@ if __name__ == "__main__":
         await writeFile(policy, "Initial policy.");
         await writeFile(outside, outsideContent);
       }
-      const client = TestClient.withDependencies({
+      await using client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (_options, args, input) => {
           const result = mockWorkbench(args, input);
@@ -16066,22 +15986,18 @@ if __name__ == "__main__":
             throw new Error("policy resolution captured");
           })(),
       });
-      try {
-        await expect(
-          client.run(repository, {
-            onScanRegistered() {
-              if (change === "external link") {
-                unlinkSync(policy);
-                symlinkSync(outside, policy, "file");
-              } else {
-                writeFileSync(policy, addedContent);
-              }
-            },
-          }),
-        ).rejects.toThrow("policy resolution captured");
-      } finally {
-        await client.close();
-      }
+      await expect(
+        client.run(repository, {
+          onScanRegistered() {
+            if (change === "external link") {
+              unlinkSync(policy);
+              symlinkSync(outside, policy, "file");
+            } else {
+              writeFileSync(policy, addedContent);
+            }
+          },
+        }),
+      ).rejects.toThrow("policy resolution captured");
     },
   );
 
@@ -16451,7 +16367,7 @@ if __name__ == "__main__":
         "Path(args.out).write_text(''.join(json.dumps({'path': scope}) + '\\n' for scope in scopes))",
       ].join("\n"),
     );
-    const client = new TestClient(
+    await using client = new TestClient(
       { pluginPath: pluginRoot },
       {
         prepareRuntime: async () => {
@@ -16499,13 +16415,9 @@ if __name__ == "__main__":
           }),
       },
     );
-    try {
-      await expect(
-        client.run(repository, { target: ["source [1].ts"] }),
-      ).rejects.toThrow("legacy scope prepared");
-    } finally {
-      await client.close();
-    }
+    await expect(
+      client.run(repository, { target: ["source [1].ts"] }),
+    ).rejects.toThrow("legacy scope prepared");
   });
 
   test("removes scoped target files after a scan settles", async () => {
@@ -16968,7 +16880,7 @@ if __name__ == "__main__":
     };
     const originalEnvironment = { ...runtimeEnvironment };
     const createCodex = mock(completedCodex(root));
-    const client = TestClient.withDependencies({
+    await using client = TestClient.withDependencies({
       environment: callerEnvironment,
       ...scanRuntimeDependencies(codexHome, scanDir),
       prepareRuntime: runtimePreparer(codexHome, () => ({
@@ -16976,45 +16888,41 @@ if __name__ == "__main__":
       })),
       createCodex,
     });
-    try {
-      if (scenario === "bulk campaign") {
-        await withProtectedExecutableRoots([repository], () =>
-          client.run(repository),
-        );
-      } else {
-        await client.run(repository);
-      }
-      const options = createCodex.mock.lastCall?.[0] ?? null;
-      expect(options?.codexPathOverride).toBe(
-        process.platform === "win32"
-          ? win32.toNamespacedPath(executable)
-          : scenario === "bulk campaign"
-            ? executable
-            : undefined,
+    if (scenario === "bulk campaign") {
+      await withProtectedExecutableRoots([repository], () =>
+        client.run(repository),
       );
-      expect(options?.env?.["CODEX_CLI_PATH"]).toBe(executable);
-      const pathValues = Object.fromEntries(
-        Object.entries(options?.env ?? {}).filter(
-          ([key]) => key.toLowerCase() === "path",
-        ),
-      );
-      const expectedEntries = scenario === "no PATH" ? [] : [otherTools];
-      if (
-        (scenario !== "mixed-case alias" &&
-          scenario !== "no PATH" &&
-          scenario !== "missing tools") ||
-        (process.platform === "win32" && hasTools)
-      )
-        expectedEntries.unshift(toolsDirectory);
-      expect(pathValues).toEqual({ PATH: expectedEntries.join(delimiter) });
-      expect(runtimeEnvironment).toEqual(originalEnvironment);
-      expect(callerEnvironment).toEqual({
-        OPENAI_API_KEY: "ambient-key",
-        ...(scenario === "blank override" ? { CODEX_CLI_PATH: "   " } : {}),
-      });
-    } finally {
-      await client.close();
+    } else {
+      await client.run(repository);
     }
+    const options = createCodex.mock.lastCall?.[0] ?? null;
+    expect(options?.codexPathOverride).toBe(
+      process.platform === "win32"
+        ? win32.toNamespacedPath(executable)
+        : scenario === "bulk campaign"
+          ? executable
+          : undefined,
+    );
+    expect(options?.env?.["CODEX_CLI_PATH"]).toBe(executable);
+    const pathValues = Object.fromEntries(
+      Object.entries(options?.env ?? {}).filter(
+        ([key]) => key.toLowerCase() === "path",
+      ),
+    );
+    const expectedEntries = scenario === "no PATH" ? [] : [otherTools];
+    if (
+      (scenario !== "mixed-case alias" &&
+        scenario !== "no PATH" &&
+        scenario !== "missing tools") ||
+      (process.platform === "win32" && hasTools)
+    )
+      expectedEntries.unshift(toolsDirectory);
+    expect(pathValues).toEqual({ PATH: expectedEntries.join(delimiter) });
+    expect(runtimeEnvironment).toEqual(originalEnvironment);
+    expect(callerEnvironment).toEqual({
+      OPENAI_API_KEY: "ambient-key",
+      ...(scenario === "blank override" ? { CODEX_CLI_PATH: "   " } : {}),
+    });
   });
 
   test("authenticates without initializing the plugin runtime", async () => {
@@ -17156,7 +17064,7 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
       const fakeCommand = nodeCodex(fakeCodex);
 
       const advisories: Array<string | undefined> = [];
-      const client = TestClient.withDependencies({
+      await using client = TestClient.withDependencies({
         environment: {
           CODEX_HOME: codexHome,
           CODEX_SECURITY_STATE_DIR: join(root, "state"),
@@ -17179,30 +17087,26 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
         }),
       });
 
-      try {
-        await expect(
-          client.run(repository, { auth: "chatgpt" }),
-        ).rejects.toThrow("managed keyring scan reached");
-        if (credential === "ChatGPT") {
-          await writeFile(activeLogin, "an API key");
-          await expect(client.account()).resolves.toEqual({
-            authenticated: true,
-            details: "Logged in using an API key",
-          });
-        }
-        await expect(client.run(repository)).rejects.toThrow(
-          "managed keyring scan reached",
-        );
-        expect(advisories[0] !== undefined).toBe(credential === "ChatGPT");
-        expect(advisories[1]).toBeDefined();
-        if (credential === "ChatGPT") expect(advisories[1]).toBe(advisories[0]);
-        expect(await readFile(join(root, "status-calls"), "utf8")).toBe(
-          credential === "ChatGPT" ? "11" : "1",
-        );
-        expect(existsSync(join(codexHome, "auth.json"))).toBe(false);
-      } finally {
-        await client.close();
+      await expect(client.run(repository, { auth: "chatgpt" })).rejects.toThrow(
+        "managed keyring scan reached",
+      );
+      if (credential === "ChatGPT") {
+        await writeFile(activeLogin, "an API key");
+        await expect(client.account()).resolves.toEqual({
+          authenticated: true,
+          details: "Logged in using an API key",
+        });
       }
+      await expect(client.run(repository)).rejects.toThrow(
+        "managed keyring scan reached",
+      );
+      expect(advisories[0] !== undefined).toBe(credential === "ChatGPT");
+      expect(advisories[1]).toBeDefined();
+      if (credential === "ChatGPT") expect(advisories[1]).toBe(advisories[0]);
+      expect(await readFile(join(root, "status-calls"), "utf8")).toBe(
+        credential === "ChatGPT" ? "11" : "1",
+      );
+      expect(existsSync(join(codexHome, "auth.json"))).toBe(false);
     },
   );
 
@@ -17338,7 +17242,7 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     );
     const fake = nodeCodex(fakeCodex);
     const createCodex = mock(throwing("scan reached"));
-    const client = TestClient.withDependencies({
+    await using client = TestClient.withDependencies({
       environment: {
         CODEX_HOME: ambientHome,
         OPENAI_API_KEY: "synthetic-key",
@@ -17351,17 +17255,13 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
       resolveCodexCommand: () => fake.command,
       createCodex,
     });
-    try {
-      await expect(client.run(repository)).rejects.toThrow("scan reached");
-      await runtime.setCodexSecurityCredentialLogout(codexHome, true);
-      await expect(
-        client.run(repository, { auth: "chatgpt" }),
-      ).rejects.toBeInstanceOf(AuthenticationRequiredError);
-      expect(createCodex).toHaveBeenCalledTimes(1);
-      expect(existsSync(join(codexHome, "auth.json"))).toBe(false);
-    } finally {
-      await client.close();
-    }
+    await expect(client.run(repository)).rejects.toThrow("scan reached");
+    await runtime.setCodexSecurityCredentialLogout(codexHome, true);
+    await expect(
+      client.run(repository, { auth: "chatgpt" }),
+    ).rejects.toBeInstanceOf(AuthenticationRequiredError);
+    expect(createCodex).toHaveBeenCalledTimes(1);
+    expect(existsSync(join(codexHome, "auth.json"))).toBe(false);
   });
 
   test.each(["standard", "deep"] as const)(
@@ -17375,7 +17275,7 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
         REMOVED_SETTING: "first-value",
       };
       const observed: CodexOptions[] = [];
-      const client = new TestClient(
+      await using client = new TestClient(
         { pluginPath: PLUGIN_ROOT },
         {
           environment,
@@ -17388,33 +17288,29 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
           },
         },
       );
-      try {
-        await expect(client.run(repository, { mode })).rejects.toThrow(
-          "environment captured",
-        );
-        environment["OPENAI_API_KEY"] = "synthetic-second-key";
-        environment["AWS_REGION"] = "synthetic-second-region";
-        delete environment["REMOVED_SETTING"];
-        environment["ADDED_SETTING"] = "second-value";
-        await expect(client.run(repository, { mode })).rejects.toThrow(
-          "environment captured",
-        );
-        expect(observed.map((value) => value.apiKey)).toEqual([
-          "synthetic-first-key",
-          "synthetic-second-key",
-        ]);
-        expect(observed[1]?.env).toMatchObject({
-          AWS_REGION: "synthetic-second-region",
-          ADDED_SETTING: "second-value",
-        });
-        expect(observed[1]?.env).not.toHaveProperty("REMOVED_SETTING");
-        expect(observed[0]?.env).toMatchObject({
-          AWS_REGION: "synthetic-first-region",
-          REMOVED_SETTING: "first-value",
-        });
-      } finally {
-        await client.close();
-      }
+      await expect(client.run(repository, { mode })).rejects.toThrow(
+        "environment captured",
+      );
+      environment["OPENAI_API_KEY"] = "synthetic-second-key";
+      environment["AWS_REGION"] = "synthetic-second-region";
+      delete environment["REMOVED_SETTING"];
+      environment["ADDED_SETTING"] = "second-value";
+      await expect(client.run(repository, { mode })).rejects.toThrow(
+        "environment captured",
+      );
+      expect(observed.map((value) => value.apiKey)).toEqual([
+        "synthetic-first-key",
+        "synthetic-second-key",
+      ]);
+      expect(observed[1]?.env).toMatchObject({
+        AWS_REGION: "synthetic-second-region",
+        ADDED_SETTING: "second-value",
+      });
+      expect(observed[1]?.env).not.toHaveProperty("REMOVED_SETTING");
+      expect(observed[0]?.env).toMatchObject({
+        AWS_REGION: "synthetic-first-region",
+        REMOVED_SETTING: "first-value",
+      });
     },
   );
 
