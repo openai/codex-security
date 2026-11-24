@@ -39,12 +39,7 @@ const {
   readDeepScanRuntimeConfig,
   readDeepScanParentCyberAccessProgram,
   prepareCliDeepScanSession,
-} = await importSource(
-  path.join(
-    import.meta.dirname,
-    "../src/deep-scan/permission-profile-preflight.ts",
-  ),
-);
+} = await importSource("src/deep-scan/permission-profile-preflight.ts");
 
 const expectedProfile = {
   description: "Generated Deep Scan worker profile.",
