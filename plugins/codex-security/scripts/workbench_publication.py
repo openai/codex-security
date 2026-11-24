@@ -213,13 +213,13 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
     }
     inspect = payload["action"] == "inspect"
     if inspect or require_history:
-        sqlite_path = stat_path = db.database_path()
+        path = db.database_path()
         if os.name == "nt":
             from windows_scan_local_files import _extended_path
 
-            stat_path = Path(_extended_path(sqlite_path))
+            path = Path(_extended_path(path))
         try:
-            os.stat(stat_path)
+            os.stat(path)
         except FileNotFoundError:
             if require_history:
                 raise SystemExit(
@@ -231,12 +231,12 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
         except PermissionError:
             pass  # Let SQLite report the open failure used by the host's state fallback.
     if inspect:
-        # The default Win32 SQLite VFS allows 260 * 4 bytes including "-journal".
-        # Keep the ordinary filename if the prefix would exhaust that budget.
-        if os.name == "nt" and len(str(stat_path).encode("utf-8")) <= 260 * 4 - 8:
-            sqlite_path = stat_path
+        uri = readonly_sqlite_uri(path)
+        if os.name == "nt":
+            # The default Win32 VFS can reject even extended paths at its UTF-8 byte limit.
+            uri += "&vfs=win32-longpath"
         try:
-            connection = sqlite3.connect(readonly_sqlite_uri(sqlite_path), uri=True, timeout=5)
+            connection = sqlite3.connect(uri, uri=True, timeout=5)
         except sqlite3.OperationalError as exc:
             if str(exc) == "unable to open database file":
                 exc._codex_security_state_unavailable = True

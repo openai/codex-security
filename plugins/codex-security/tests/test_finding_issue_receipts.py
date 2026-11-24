@@ -143,6 +143,7 @@ def test_inspects_recorded_receipt_in_state_path_with_non_utf8_bytes(tmp_path: P
     )
 
 
+@pytest.mark.cross_platform
 @pytest.mark.parametrize("project", [None, "project-example"])
 def test_legacy_receipts_are_read_without_migration_and_preserved_on_upgrade(
     tmp_path: Path, project: str | None
@@ -380,30 +381,15 @@ def test_invalid_source_is_rejected_before_creating_state(tmp_path: Path, mutati
     assert not state.exists()
 
 
-def long_windows_store(root: PureWindowsPath, near_sqlite_limit: bool) -> PureWindowsPath:
-    # Only the filename, not its directory, crosses MAX_PATH in the ordinary case.
-    directory = root / ("state #% " + "x" * max(1, 234 - len(str(root))))
-    if near_sqlite_limit:
-        directory /= "界" * 200
-        padding = 1030 - len(str(directory / "workbench.sqlite3").encode("utf-8")) - 1
-        directory /= "x" * padding
-    path = directory / "workbench.sqlite3"
-    if near_sqlite_limit:
-        assert len(str(path).encode("utf-8")) == 1030
-    else:
-        assert len(str(directory)) < 260 <= len(str(path))
-    return path
-
-
 @pytest.mark.cross_platform
 @pytest.mark.parametrize("root", ["C:\\", "\\\\host\\share\\"])
-@pytest.mark.parametrize("near_sqlite_limit", [False, True])
+@pytest.mark.parametrize("directory", ["state #%", "x" * 242], ids=["short", "long"])
 def test_receipt_inspection_uses_extended_windows_paths(
-    tmp_path: Path, monkeypatch, root: str, near_sqlite_limit: bool
+    tmp_path: Path, monkeypatch, root: str, directory: str
 ) -> None:
     scan_dir, _ = source(tmp_path)
     publication = load_script("workbench_publication")
-    path = long_windows_store(PureWindowsPath(root), near_sqlite_limit)
+    path = PureWindowsPath(root) / directory / "workbench.sqlite3"
     extended = "\\\\?\\UNC\\" + str(path)[2:] if root.startswith("\\\\") else "\\\\?\\" + str(path)
     stat = Mock()
     connect = Mock(return_value=sqlite3.connect(":memory:"))
@@ -414,34 +400,31 @@ def test_receipt_inspection_uses_extended_windows_paths(
         {"action": "inspect", "scanDirectory": str(scan_dir), "destination": LINEAR},
     )
     stat.assert_called_once_with(Path(extended))
-    filename = str(path) if near_sqlite_limit else extended
-    connect.assert_called_once_with(f"file:{quote(filename, safe='')}?mode=ro", uri=True, timeout=5)
+    connect.assert_called_once_with(
+        f"file:{quote(extended, safe='')}?mode=ro&vfs=win32-longpath", uri=True, timeout=5
+    )
 
 
 @pytest.mark.native_windows
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows SQLite")
-@pytest.mark.parametrize("spelling", ["ordinary", "extended", "near-sqlite-limit"])
+@pytest.mark.parametrize("spelling", ["ordinary", "extended", "multibyte"])
 def test_inspection_reads_a_long_windows_store_without_modifying_it(
     tmp_path: Path, spelling: str
 ) -> None:
     scan_dir, validated = source(tmp_path)
     seed = tmp_path / "seed" / "workbench.sqlite3"
     legacy_database(seed, validated, LINEAR)
-    path = Path(long_windows_store(PureWindowsPath(tmp_path), spelling == "near-sqlite-limit"))
-    native = Path(load_script("windows_scan_local_files")._extended_path(path))
+    directory = tmp_path / ("state #% " + "x" * (234 - len(str(tmp_path))))
+    assert len(str(directory)) < 260 <= len(str(directory / seed.name))
+    if spelling == "multibyte":
+        directory = directory / ("界" * 150) / ("界" * 150)
+        assert len(str(directory).encode("utf-8")) > 260 * 4
+    native = Path(load_script("windows_scan_local_files")._extended_path(directory / seed.name))
     native.parent.mkdir(parents=True)
     original = seed.read_bytes()
     native.write_bytes(original)
-    if spelling == "near-sqlite-limit":
-        # This compatibility case requires a host that can open the ordinary spelling.
-        uri = load_script("snapshot_sqlite").readonly_sqlite_uri(path)
-        try:
-            sqlite3.connect(uri, uri=True).close()
-        except sqlite3.OperationalError as exc:
-            if str(exc) == "unable to open database file":
-                pytest.skip("the ordinary SQLite filename is unsupported on this host")
-            raise
-    directory = native.parent if spelling == "extended" else path.parent
+    if spelling == "extended":
+        directory = native.parent
     assert issues(directory, scan_dir, "inspect")["receipts"][0]["issueIdentifier"] == "SEC-101"
     assert native.read_bytes() == original
     assert list(native.parent.iterdir()) == [native]
