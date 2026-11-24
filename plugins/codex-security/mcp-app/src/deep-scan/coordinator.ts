@@ -1,8 +1,8 @@
 /// <reference lib="es2023.array" />
 import { randomUUID } from "node:crypto";
-import { CYBERSECURITY_POLICY_REFUSAL_MESSAGES } from "../native-policy-refusals.js";
 import { promises as fs } from "node:fs";
 import { basename, dirname, join, relative, sep } from "node:path";
+import { CYBERSECURITY_POLICY_REFUSAL_MESSAGES } from "../native-policy-refusals.js";
 import {
   writeWorkerUsageReceipt,
   type WorkerUsageReceipt,
@@ -201,13 +201,11 @@ export class DeepScanCoordinator {
   ): Promise<DeepScanRunState> {
     if (!signal) return this.wait(signal);
     const onAbort = () => {
-      if (
-        this.terminal ||
-        !CYBERSECURITY_POLICY_REFUSAL_MESSAGES.has(signal.reason)
-      )
+      const { reason } = signal;
+      if (this.terminal || !CYBERSECURITY_POLICY_REFUSAL_MESSAGES.has(reason))
         return;
-      this.abortController.abort(new DeepScanNonRetryableError(signal.reason));
-      this.publicationAbortController.abort(signal.reason);
+      this.abortController.abort(new DeepScanNonRetryableError(reason));
+      this.publicationAbortController.abort(reason);
     };
     if (signal.aborted) onAbort();
     else signal.addEventListener("abort", onAbort, { once: true });

@@ -20,6 +20,7 @@ export async function startMcpClient(
     request(method: string, params: Record<string, unknown>) {
       return client.request({ method, params }, ResultSchema);
     },
+    callTool: client.callTool.bind(client),
     close: () => client.close(),
   };
 }

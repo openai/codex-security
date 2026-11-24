@@ -70,11 +70,11 @@ export async function testDeepScanLifecycle(context: TestContext) {
       const coordinator = startCoordinator(fixture, store, executor);
       try {
         await eventually(() => executor.discoveryCalls === 2);
-        const caller = new AbortController();
+        // A cancellation can arrive during bootstrap, before the server waits.
+        const signal = AbortSignal.abort(reason);
         const waiter = parent
-          ? coordinator.waitForInitialRequest(caller.signal)
-          : coordinator.wait(caller.signal);
-        caller.abort(reason);
+          ? coordinator.waitForInitialRequest(signal)
+          : coordinator.wait(signal);
         await assert.rejects(waiter, { name: "AbortError", cause: reason });
       } finally {
         second.release();

@@ -33,6 +33,7 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
 import { applicationRoot as mcpAppRoot, buildServer } from "./build-server.ts";
+import { startMcpClient } from "./support/mcp-client.ts";
 import { startRpcServer } from "./support/rpc-server.ts";
 
 const execFileAsync = promisify(execFile);
@@ -441,7 +442,7 @@ service_tier = "ultrafast"
     // Stopping the original model response detaches only that long-poll waiter.
     server.notify("notifications/cancelled", {
       requestId: 10,
-      reason: "detach the first Deep Scan waiter",
+      reason: "MCP request cancelled by caller",
     });
     await delay(150);
 
@@ -1341,42 +1342,41 @@ async function testExplicitRefusalFailsScan(
   const refusal =
     "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber";
   const threadId = "deep-scan-stdio-refusal-thread";
-  const request = toolCall(
-    "start_codex_security_deep_scan",
-    { targetPath },
-    threadId,
+  const tool = "start_codex_security_deep_scan";
+  const logPath = environment.FAKE_CODEX_START_LOG!;
+  const launches = (await readLogLines(logPath)).length;
+  const client = await startMcpClient(
+    {
+      command: process.execPath,
+      args: [serverBundlePath, "--stdio"],
+      cwd: pluginRoot,
+      // Keep the fixture worker running until the coordinator stops it.
+      env: { ...environment, FAKE_CODEX_RESTART_CONTROL: "" },
+    },
+    "parent-turn-refusal",
   );
-  const server = startServer(serverBundlePath, environment);
   try {
-    await server.initialize("parent-turn-refusal");
-    server.sendRequest(2, "tools/call", request);
-    const scanId = await waitForScanId({ server, requestId: 2 });
-    await waitForDeepScanWorker({ environment, scanId, threadId });
-    server.notify("notifications/cancelled", {
-      requestId: 2,
-      reason: refusal,
-    });
-    const joined = await server.callTool(
-      3,
-      toolCall("start_codex_security_deep_scan", { scanId }, threadId),
+    const parent = new AbortController();
+    const pending = client.callTool(
+      toolCall(tool, { targetPath }, threadId),
+      undefined,
+      { signal: parent.signal },
     );
-    assert.equal(joined.result?.isError, true);
-    assert.ok(
-      joined.result.content.some((item: { text: string }) =>
-        item.text.includes(refusal),
-      ),
-    );
+    const worker = (await waitForJsonLines(logPath, launches + 1))[launches];
+    const { scanId } = discoveryPromptContext(worker.stdin);
+    parent.abort(refusal);
+    await assert.rejects(pending);
+    const joined = await client.callTool(toolCall(tool, { scanId }, threadId));
+    assert.equal(joined.isError, true);
+    assert.ok(JSON.stringify(joined.content).includes(refusal));
     const state = await getDeepScan({ environment, scanId, threadId });
     assert.equal(state.status, "failed");
     assert.equal(state.error, refusal);
-    assert.ok(
-      state.workers.every(
-        (worker: PersistedDeepScanWorker) =>
-          !["queued", "running"].includes(worker.status),
-      ),
-    );
+    assert.equal(state.workers.length, 1);
+    assert.ok(!["queued", "running"].includes(state.workers[0].status));
+    assert.throws(() => process.kill(worker.pid, 0), { code: "ESRCH" });
   } finally {
-    await server.stop();
+    await client.close();
   }
 }
 
