@@ -151,3 +151,108 @@ function dispatchStatus(
   );
   return parsed.success ? { kind: "dispatch", ...parsed.data } : null;
 }
+
+/** Runtime spawn events derived from live spawn_agent tool calls. */
+export type ScanWorkerRuntimeEvent =
+  | { kind: "dispatch"; attempt: number }
+  | {
+      kind: "failed";
+      attempt: number;
+      reason: string;
+    };
+
+/** Number distinct runtime spawn attempts from live Codex item events. */
+export function createWorkerDispatchMonitor(): {
+  observe(
+    event: Readonly<Record<string, unknown>>,
+  ): ScanWorkerRuntimeEvent | null;
+} {
+  const attempts = new Map<string, number>();
+  const failedIds = new Set<string>();
+  const attemptFor = (id: string) => {
+    const existing = attempts.get(id);
+    if (existing !== undefined) return existing;
+    const attempt = attempts.size + 1;
+    attempts.set(id, attempt);
+    return attempt;
+  };
+
+  return {
+    observe(
+      event: Readonly<Record<string, unknown>>,
+    ): ScanWorkerRuntimeEvent | null {
+      const spawn = spawnAgentCallFromEvent(event);
+      if (spawn === null) return null;
+      if (spawn.status === "started") {
+        if (attempts.has(spawn.id)) return null;
+        return { kind: "dispatch", attempt: attemptFor(spawn.id) };
+      }
+      const known = attempts.has(spawn.id);
+      const attempt = attemptFor(spawn.id);
+      if (spawn.status === "completed") {
+        return known ? null : { kind: "dispatch", attempt };
+      }
+      if (failedIds.has(spawn.id)) return null;
+      failedIds.add(spawn.id);
+      return {
+        kind: "failed",
+        attempt,
+        reason: spawn.reason ?? "Delegated worker failed to start.",
+      };
+    },
+  };
+}
+
+function spawnAgentCallFromEvent(event: Readonly<Record<string, unknown>>): {
+  id: string;
+  status: "started" | "completed" | "failed";
+  reason?: string;
+} | null {
+  if (
+    (event["type"] !== "item.started" && event["type"] !== "item.completed") ||
+    !isRecord(event["item"])
+  ) {
+    return null;
+  }
+  const item = event["item"];
+  if (
+    typeof item["id"] !== "string" ||
+    !isSpawnAgentTool(toolNameFromItem(item))
+  ) {
+    return null;
+  }
+  if (event["type"] === "item.started") {
+    return { id: item["id"], status: "started" };
+  }
+  return item["status"] === "failed"
+    ? { id: item["id"], status: "failed", reason: spawnFailureReason(item) }
+    : { id: item["id"], status: "completed" };
+}
+
+function toolNameFromItem(
+  item: Readonly<Record<string, unknown>>,
+): string | null {
+  for (const value of [item["tool"], item["name"], item["function"]]) {
+    if (typeof value === "string") return value;
+    if (isRecord(value) && typeof value["name"] === "string")
+      return value["name"];
+  }
+  return null;
+}
+
+function isSpawnAgentTool(name: string | null): name is string {
+  if (name === null || name === "") return false;
+  const separator = name.lastIndexOf("__");
+  const local = separator === -1 ? name : name.slice(separator + 2);
+  return local === "spawn_agent";
+}
+
+function spawnFailureReason(item: Readonly<Record<string, unknown>>): string {
+  const error = item["error"];
+  if (typeof error === "string" && error.trim() !== "") return error;
+  if (isRecord(error) && typeof error["message"] === "string") {
+    const message = error["message"].trim();
+    if (message !== "") return message;
+  }
+  return "Delegated worker failed to start.";
+}
