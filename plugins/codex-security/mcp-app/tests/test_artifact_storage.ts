@@ -1,3 +1,4 @@
+import { reviewSurface } from "./scan-draft-fixture.ts";
 import { fixturePython } from "./support/python.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
@@ -311,12 +312,9 @@ try {
     threatModel: { format: "markdown", content, origin: "provided" },
     reviewState: {
       surfaces: [
-        {
-          id: "example",
-          label: "Example source",
-          disposition: "not_applicable",
-          receiptRefs: [relativePath],
-        },
+        reviewSurface("example", "Example source", "not_applicable", [
+          relativePath,
+        ]),
       ],
       explicitExclusions: [],
       deferred: [],

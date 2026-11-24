@@ -16,7 +16,6 @@ from workbench_test_support import (
     select_checkpoint,
     sort_checkpoint_entries,
     write_checkpoint,
-    write_draft_checkpoint,
     write_result_draft,
 )
 
@@ -259,9 +258,8 @@ def test_root_outcome_uses_its_own_completion_marker(
         saved.fail_scan(context, workbench_db, stop_args)
     selected = write_checkpoint(scan.scan_dir / "checkpoints", root_draft, mtime_ns=100)
     select_checkpoint(scan.scan_dir, selected, mtime_ns=200)
-    pending = write_draft_checkpoint(
+    pending = scan.checkpoint(
         scan.scan_dir,
-        scan.scan_id,
         deferred=[{"candidateId": "candidate-review", "reason": "Validation is pending."}],
         mtime_ns=200,
     )

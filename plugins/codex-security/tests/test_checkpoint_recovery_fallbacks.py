@@ -16,7 +16,6 @@ from workbench_test_support import (
     saved_draft,
     select_checkpoint,
     write_checkpoint,
-    write_draft_checkpoint,
     write_result_draft,
 )
 
@@ -99,9 +98,7 @@ def test_early_head_error_keeps_captured_records_during_sibling_capture(
     for directory, anchor in [(first, "before"), (second, "second")]:
         finding = copy.deepcopy(scan.findings[0])
         finding["identity"]["anchor"] = anchor
-        checkpoint = write_draft_checkpoint(
-            directory, scan.scan_id, complete=True, findings=[finding]
-        )
+        checkpoint = scan.checkpoint(directory, complete=True, findings=[finding])
         head = select_checkpoint(directory, checkpoint, mtime_ns=100)
         if directory == first:
             original = head.read_bytes()
@@ -117,9 +114,7 @@ def test_early_head_error_keeps_captured_records_during_sibling_capture(
             changed = True
             finding = copy.deepcopy(scan.findings[0])
             finding["identity"]["anchor"] = "after"
-            checkpoint = write_draft_checkpoint(
-                first, scan.scan_id, complete=True, findings=[finding]
-            )
+            checkpoint = scan.checkpoint(first, complete=True, findings=[finding])
             (first / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
             os.utime(first / "checkpoint-head.json", ns=(200, 200))
         return write(root, relative, contents)
@@ -381,7 +376,7 @@ def test_early_head_failure_keeps_frozen_model_choice(
             saved._capture_saved_source(scan.scan_dir, "checkpoint-head.json", scan.scan_id)
     if failure == "worker-head":
         directory = scan.add_worker(status="canceled").parent
-        worker_checkpoint = write_draft_checkpoint(directory, scan.scan_id, complete=True)
+        worker_checkpoint = scan.checkpoint(directory, complete=True)
         select_checkpoint(directory, worker_checkpoint, mtime_ns=200)
     write = saved.write_scan_local_bytes
 
