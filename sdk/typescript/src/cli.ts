@@ -534,6 +534,7 @@ type SignalName = "SIGINT" | "SIGTERM";
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
 const booleanFlag = z.boolean().default(false);
+const optInFlag = (description: string) => booleanFlag.describe(description);
 const optionalArgument = z.string().min(1).optional();
 const MODEL_OPTIONS = modelOptions();
 type ModelCliOptions = z.infer<typeof MODEL_OPTIONS>;
@@ -541,7 +542,7 @@ const MATCHING_OPTIONS = modelOptions(
   "Model for finding matching (default: Codex's configured model).",
   "Matching reasoning effort (default: medium).",
 ).extend({
-  force: booleanFlag.describe("Recompute saved finding matches."),
+  force: optInFlag("Recompute saved finding matches."),
 });
 const SKILL_CODEX_OVERRIDE_DESCRIPTION =
   'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", model_provider="gateway", model_providers.<name>.<key>=VALUE, daybreak=true, or analytics.enabled=false.';
@@ -602,19 +603,19 @@ const PROVIDER_OPTION = z
   .describe("Inference provider for scans.");
 const positiveInteger = z.number().int().positive();
 
-const ARCHIVE_EXISTING_OPTION = booleanFlag.describe(
+const ARCHIVE_EXISTING_OPTION = optInFlag(
   "Archive existing results; requires --output-dir.",
 );
-const VERBOSE_OPTION = booleanFlag.describe(
+const VERBOSE_OPTION = optInFlag(
   "Print additional scan diagnostics to stderr.",
 );
-const SHOW_COST_OPTION = booleanFlag.describe(
+const SHOW_COST_OPTION = optInFlag(
   "Show estimated USD cost; always shown when a cost limit is set.",
 );
-const CREATE_PR_OPTION = booleanFlag.describe(
+const CREATE_PR_OPTION = optInFlag(
   "Create a draft GitHub pull request or GitLab merge request after verified patches.",
 );
-const ASSESS_PATCH_RISK_OPTION = booleanFlag.describe(
+const ASSESS_PATCH_RISK_OPTION = optInFlag(
   "Assess the completed patch and return the risk report.",
 );
 
@@ -3198,7 +3199,7 @@ export async function main(
         ),
       }),
       options: z.object({
-        showLinkedFindings: booleanFlag.describe(
+        showLinkedFindings: optInFlag(
           "Show findings linked across previous scans.",
         ),
       }),
@@ -3520,9 +3521,7 @@ export async function main(
         afterId: optionalArgument.describe("Later saved scan identifier."),
       }),
       options: z.object({
-        all: booleanFlag.describe(
-          "Match all completed scans of the current repository.",
-        ),
+        all: optInFlag("Match all completed scans of the current repository."),
         ...MATCHING_OPTIONS.shape,
       }),
       output: z.record(z.string(), z.unknown()).optional(),
@@ -3669,13 +3668,11 @@ export async function main(
         .describe(
           "Findings API base URL; required with --to custom (for example http://localhost:3000).",
         ),
-      dryRun: booleanFlag.describe(
-        "Preview the findings without publishing them.",
-      ),
+      dryRun: optInFlag("Preview the findings without publishing them."),
       csv: optionalValue("--csv").describe(
         "Findings CSV for internal publication; not supported with linear or custom.",
       ),
-      skipExisting: booleanFlag.describe(
+      skipExisting: optInFlag(
         "Skip findings already recorded for this exact Linear destination.",
       ),
     }),
@@ -4303,10 +4300,10 @@ export async function main(
         sourceKey: optionValue("--source-key").describe(
           "Stable vendor tenant and finding namespace; not a project selection filter.",
         ),
-        dryRun: booleanFlag.describe(
+        dryRun: optInFlag(
           "Read and preview the destination and findings without storing them.",
         ),
-        yes: booleanFlag.describe(
+        yes: optInFlag(
           "Confirm the previewed input without a prompt. Continuum inbox updates require a matching --dry-run.",
         ),
       }),
@@ -5150,10 +5147,10 @@ export async function main(
           .enum(["local", "cloud"])
           .default("local")
           .describe("Store locally, or also publish to Codex Security Cloud."),
-        dryRun: booleanFlag.describe(
+        dryRun: optInFlag(
           "Save a private evidence copy and preview the selected findings and destinations.",
         ),
-        yes: booleanFlag.describe("Confirm import of the reviewed selection."),
+        yes: optInFlag("Confirm import of the reviewed selection."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, options, format, formatExplicit, error: incurError }) {
@@ -5419,10 +5416,8 @@ export async function main(
         outputDir: optionalValue("--output-dir").describe(
           "Private artifact directory outside the repository (default: Codex Security state).",
         ),
-        headless: booleanFlag.describe("Skip questions and sign-in prompts."),
-        dryRun: booleanFlag.describe(
-          "Check inputs without generating a policy.",
-        ),
+        headless: optInFlag("Skip questions and sign-in prompts."),
+        dryRun: optInFlag("Check inputs without generating a policy."),
         auth: SKILL_AUTH_OPTION,
         ...MODEL_OPTIONS.shape,
         provider: PROVIDER_OPTION.describe(
@@ -5587,7 +5582,7 @@ export async function main(
       options: z
         .object({
           config: PROJECT_CONFIG_OPTION,
-          host: booleanFlag.describe(
+          host: optInFlag(
             "Run one hosted Standard scan over JSON-RPC stdin/stdout; use alone.",
           ),
           workflowId: optionalValue("--workflow-id").describe(
@@ -5649,10 +5644,10 @@ export async function main(
           failOnSeverity: FailureSeveritySchema.optional().describe(
             "Exit 1 for findings at or above LEVEL.",
           ),
-          patch: booleanFlag.describe(
+          patch: optInFlag(
             "Patch and verify findings after a scan without a cost limit.",
           ),
-          validate: booleanFlag.describe(
+          validate: optInFlag(
             "Validate after sealing the scan. Uses the configured provider, or the existing Codex validator. --validate=NAME overrides the provider.",
           ),
           patchSeverity: z
@@ -5667,13 +5662,13 @@ export async function main(
           ),
           ownerSuggestions: ScanSettingsSchema.shape.ownerSuggestions,
           showCost: SHOW_COST_OPTION,
-          headless: booleanFlag.describe(
+          headless: optInFlag(
             "Use plain text progress instead of the interactive dashboard.",
           ),
-          dryRun: booleanFlag.describe(
+          dryRun: optInFlag(
             "Validate local scan inputs without starting a scan.",
           ),
-          mock: booleanFlag.describe(
+          mock: optInFlag(
             "Save synthetic Standard scan findings without calling an LLM.",
           ),
         })
@@ -5828,9 +5823,7 @@ export async function main(
             "Artifact directory (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
           ),
           archiveExisting: ARCHIVE_EXISTING_OPTION,
-          dryRun: booleanFlag.describe(
-            "Validate the input without saving a scan.",
-          ),
+          dryRun: optInFlag("Validate the input without saving a scan."),
         })
         .refine(
           (options) =>
@@ -6043,10 +6036,10 @@ export async function main(
         runs: reviewRunsOption.describe(
           `Number of independent classification runs (1–10; default: ${DEFAULT_REVIEW_RUNS}).`,
         ),
-        records: booleanFlag.describe(
+        records: optInFlag(
           "Classify canonical records through host-provided reviews over version 1 JSON-RPC. Accepts --runs. Hosts can enable CLI diagnostics with the Node condition codex-security-records-logs-v1.",
         ),
-        reprocess: booleanFlag.describe(
+        reprocess: optInFlag(
           "Reclassify selected findings even when a matching assessment is saved.",
         ),
         scan: optionalValue("--scan").describe(
@@ -6159,7 +6152,7 @@ export async function main(
           .describe(
             "Maximum concurrent dedupe jobs across Luna and Sol; use 1 for serial execution.",
           ),
-        records: booleanFlag.describe(
+        records: optInFlag(
           "Run the versioned records JSON-RPC protocol on stdin/stdout; use alone.",
         ),
         workflowId: optionalValue("--workflow-id").describe(
@@ -6168,7 +6161,7 @@ export async function main(
         scan: optionalValue("--scan").describe(
           "Saved scan ID, unique prefix, or latest.",
         ),
-        allRepositories: booleanFlag.describe(
+        allRepositories: optInFlag(
           "Search all repositories instead of only the saved scan's repository.",
         ),
         findingsUrl: z
@@ -6368,13 +6361,11 @@ export async function main(
           componentsFile: optionalValue("--components-file").describe(
             "Read a component plan from JSON.",
           ),
-          auto: booleanFlag.describe(
-            "Ask Codex to divide the project into components.",
-          ),
-          planOnly: booleanFlag.describe(
+          auto: optInFlag("Ask Codex to divide the project into components."),
+          planOnly: optInFlag(
             "Save components.json and print a command to run it. Explicit plans work offline.",
           ),
-          headless: booleanFlag.describe(
+          headless: optInFlag(
             "Print status lines instead of the interactive dashboard.",
           ),
           outputDir: optionalValue("--output-dir").describe(
@@ -6667,7 +6658,7 @@ export async function main(
       }),
       options: z.object({
         config: PROJECT_CONFIG_OPTION,
-        recover: booleanFlag.describe(
+        recover: optInFlag(
           "Recover failed or interrupted attempts in an existing campaign, preserving their artifacts and checkouts.",
         ),
         outputDir: z
@@ -7156,7 +7147,7 @@ export async function main(
         scan: optionalValue("--scan").describe(
           "Submit open findings from a saved scan ID or latest using the configured provider.",
         ),
-        records: booleanFlag.describe(
+        records: optInFlag(
           "Run the versioned validation JSON-RPC protocol on stdin/stdout; use alone.",
         ),
         auth: SKILL_AUTH_OPTION,
@@ -7362,7 +7353,7 @@ export async function main(
           ),
       }),
       options: z.object({
-        host: booleanFlag.describe(
+        host: optInFlag(
           "Run one hosted fix verification over JSON-RPC stdin/stdout; use alone.",
         ),
         verificationMode: VERIFICATION_MODE_OPTION,
@@ -7609,13 +7600,13 @@ export async function main(
           ),
       }),
       options: z.object({
-        host: booleanFlag.describe(
+        host: optInFlag(
           "Run one hosted patch over JSON-RPC stdin/stdout; use alone.",
         ),
         verificationMode: VERIFICATION_MODE_OPTION,
         auth: SKILL_AUTH_OPTION,
         ...MODEL_OPTIONS.shape,
-        externalSandbox: booleanFlag.describe(
+        externalSandbox: optInFlag(
           "Use the container's isolation instead of the Codex sandbox (default: false).",
         ),
         ...remediationInputOptions("Patch").shape,
@@ -7944,13 +7935,9 @@ export async function main(
         hint: "Check the effective sign-in with codex-security login status. For a remote machine use --device-auth if your workspace permits it. For SSH, on your local machine run:\n    ssh -L 1455:localhost:1455 user@remote\nThen, in that SSH session:\n    codex-security login\nOpen the sign-in URL locally and keep SSH connected until login finishes.\nhttps://learn.chatgpt.com/docs/auth?surface=cli#cli-fallback-forward-the-localhost-callback-over-ssh",
         destructive: true,
         options: z.object({
-          deviceAuth: booleanFlag.describe(
-            "Use device auth if your workspace allows it.",
-          ),
-          withApiKey: booleanFlag.describe("Read an API key from stdin."),
-          withAccessToken: booleanFlag.describe(
-            "Read an access token from stdin.",
-          ),
+          deviceAuth: optInFlag("Use device auth if your workspace allows it."),
+          withApiKey: optInFlag("Read an API key from stdin."),
+          withAccessToken: optInFlag("Read an access token from stdin."),
         }),
         examples: [
           { options: {}, description: "Sign in using the browser." },
@@ -8155,7 +8142,7 @@ export async function main(
       }),
       options: z.object({
         reason: z.string().trim().min(1).describe("Describe the problem."),
-        includeLogs: booleanFlag.describe(
+        includeLogs: optInFlag(
           "Upload diagnostic logs, including scan and worker conversations and tool output. Defaults to off.",
         ),
       }),

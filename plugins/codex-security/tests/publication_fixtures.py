@@ -12,7 +12,12 @@ from types import SimpleNamespace
 
 import pytest
 from deep_deadline_crash import interrupt_finish_before_commit
-from workbench_test_support import read_review_state, repository_recipe, write_completed_contract
+from workbench_test_support import (
+    read_review_state,
+    repository_recipe,
+    write_completed_contract,
+    write_draft_checkpoint,
+)
 
 
 class PublicationScan(SimpleNamespace):
@@ -27,6 +32,10 @@ class PublicationScan(SimpleNamespace):
         return self.connection.execute(
             "SELECT * FROM deep_scan_runs WHERE scan_id = ?", (self.scan_id,)
         ).fetchone()
+
+    def checkpoint(self, output: Path, **draft) -> Path:
+        """Write a checkpoint for this scan without selecting it as the head."""
+        return write_draft_checkpoint(output, self.scan_id, **draft)
 
     def worker_draft(self, findings=(), **coverage_updates):
         """Build a completed worker result using this scan's coverage as the starting point."""

@@ -15,7 +15,6 @@ from workbench_test_support import (
     saved_draft,
     select_checkpoint,
     write_checkpoint,
-    write_draft_checkpoint,
 )
 
 
@@ -42,9 +41,8 @@ def test_deadline_requires_boolean_completion_before_superseding_worker_history(
     earlier = worker_finding(scan, "earlier-worker-finding")
     rejected = worker_finding(scan, "rejected-worker-finding")
     rejected["provenance"]["candidateId"] = "rejected-worker-finding"
-    checkpoint = write_draft_checkpoint(
+    checkpoint = scan.checkpoint(
         output,
-        scan.scan_id,
         findings=[earlier, rejected],
         deferred=[{"id": "review", "reason": "Review remains."}],
         mtime_ns=100,
@@ -122,9 +120,8 @@ def test_deadline_validates_each_recovered_finding_against_the_completed_contrac
     earlier = worker_finding(scan, "earlier-worker-finding")
     rejected = worker_finding(scan, "rejected-worker-finding")
     rejected["provenance"]["candidateId"] = "rejected-worker-finding"
-    checkpoint = write_draft_checkpoint(
+    checkpoint = scan.checkpoint(
         output,
-        scan.scan_id,
         findings=[earlier, rejected],
         deferred=[
             {"id": "review", "reason": "Review remains."},
@@ -243,7 +240,7 @@ def test_deadline_still_rejects_malformed_canonical_model(deadline_scan):
     manifest["scan"]["threatModel"] = {"assets": []}
     manifest_file.write_text(json.dumps(manifest))
     _, output = scan.canceled_discovery_output()
-    write_draft_checkpoint(output, scan.scan_id)
+    scan.checkpoint(output)
     with pytest.raises(ContractError, match="threatModel"):
         scan.finish(terminal_reason="capped")
 
@@ -258,7 +255,7 @@ def test_deadline_still_rejects_canonical_findings_outside_the_completed_contrac
     findings_path.write_text(json.dumps({"findings": scan.findings}))
     original = findings_path.read_bytes()
     _, output = scan.canceled_discovery_output()
-    write_draft_checkpoint(output, scan.scan_id, findings=[finding])
+    scan.checkpoint(output, findings=[finding])
 
     with pytest.raises(ContractError, match="rationale"):
         scan.finish(terminal_reason="capped")
@@ -272,9 +269,8 @@ def test_deadline_applies_existing_nonblank_surface_label_contract(
 ):
     scan = deadline_scan
     worker_id, output = scan.canceled_discovery_output()
-    checkpoint = write_draft_checkpoint(
+    checkpoint = scan.checkpoint(
         output,
-        scan.scan_id,
         findings=[worker_finding(scan, "worker-label-finding")],
         surfaces=[review_surface("entry", label, "reported")],
     )
@@ -322,9 +318,8 @@ def test_deadline_applies_existing_unicode_contract_per_worker_record(
         draft["coverage"][field] = [{"id": "review", "reason": text}]
     if field == "resolvedDeferred":
         draft["complete"] = True
-        write_draft_checkpoint(
+        scan.checkpoint(
             output,
-            scan.scan_id,
             deferred=[{"id": "review", "reason": "Review pending."}],
             mtime_ns=100,
         )
@@ -359,9 +354,8 @@ def test_deadline_recovers_historical_closure_text_without_losing_a_valid_siblin
 ):
     scan = deadline_scan
     _, output = scan.canceled_discovery_output()
-    previous = write_draft_checkpoint(
+    previous = scan.checkpoint(
         output,
-        scan.scan_id,
         deferred=[
             {"id": "review", "reason": "First review pending."},
             {"id": "sibling", "reason": "Valid sibling review pending."},
@@ -450,9 +444,8 @@ def test_malformed_terminal_coverage_preserves_only_earlier_coverage(
     rejected = worker_finding(scan, "rejected-sibling")
     rejected["provenance"]["candidateId"] = "rejected-sibling"
     surface = review_surface("entry", "Unfinished review")
-    checkpoint = write_draft_checkpoint(
+    checkpoint = scan.checkpoint(
         output,
-        scan.scan_id,
         findings=[finding, rejected],
         surfaces=[surface],
         deferred=[
@@ -536,9 +529,7 @@ def test_optional_export_failure_does_not_block_deadline(
     export.symlink_to(sentinel)
     if canceled_worker:
         _, output = scan.canceled_discovery_output()
-        write_draft_checkpoint(
-            output, scan.scan_id, findings=[worker_finding(scan, "saved-worker-finding")]
-        )
+        scan.checkpoint(output, findings=[worker_finding(scan, "saved-worker-finding")])
 
     scan.finish(terminal_reason="capped")
     completed = scan.complete()

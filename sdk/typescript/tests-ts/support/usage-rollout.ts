@@ -116,6 +116,13 @@ export function progressMarker(
   return `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({ phase, filesCompleted, filesTotal })}`;
 }
 
+// Exact ASCII fixture for the pinned native 64 KiB persistence representation.
+export const commandHead = "h".repeat(32_743);
+export const commandTail = "t".repeat(32_743);
+export const persistedCommandOutput = `${commandHead}\n... command output truncated for persistence ...\n${commandTail}`;
+export const commandOutput = (middle: string) =>
+  `${commandHead}\n${middle}\n${commandTail}`;
+
 export function nativeCommand(
   command: string | readonly string[],
   output: string,
