@@ -1,6 +1,5 @@
 import { expect, mock, test } from "bun:test";
-import { readFile } from "node:fs/promises";
-import { join } from "node:path";
+import report from "../../../examples/normalized-import/grype-report.json";
 import { main } from "../src/cli.js";
 import { normalizeGrypeFindings } from "../src/grype-findings.js";
 import { prepareNormalizedLocalImport } from "../src/external-findings-local.js";
@@ -18,23 +17,9 @@ const source = {
   sourceKey: "example/project/main",
 } as const;
 
-const exampleReport = join(
-  import.meta.dir,
-  "..",
-  "..",
-  "..",
-  "examples",
-  "normalized-import",
-  "grype-report.json",
-);
-
-async function report() {
-  return JSON.parse(await readFile(exampleReport, "utf8"));
-}
-
 test("the CLI previews the saved report without a source URL or credentials", async () => {
   await using fixture = await localReportFixture("grype-report.json", source);
-  await fixture.writeJson(await report());
+  await fixture.writeJson(report);
   const cli = createCliTest(main);
   const code = await cli.runCli(
     [
@@ -67,7 +52,7 @@ test("the CLI previews the saved report without a source URL or credentials", as
 
 test("previews, imports, and leaves a second import unchanged", async () => {
   await using fixture = await localReportFixture("grype-report.json", source);
-  await fixture.writeJson(await report());
+  await fixture.writeJson(report);
   const prepared = await fixture.prepare();
   expect(prepared.preview.excluded).toEqual([]);
   expect(prepared.preview.findings).toHaveLength(2);
@@ -92,11 +77,11 @@ test("previews, imports, and leaves a second import unchanged", async () => {
 
 test("a changed severity updates the same occurrence", async () => {
   await using fixture = await localReportFixture("grype-report.json", source);
-  await fixture.writeJson(await report());
+  await fixture.writeJson(report);
   await (await fixture.prepare()).import();
-  const raised = await report();
-  raised.matches[0].vulnerability.severity = "Low";
-  await fixture.writeJson(raised);
+  const changed = structuredClone(report);
+  changed.matches[0]!.vulnerability.severity = "Low";
+  await fixture.writeJson(changed);
   expect((await (await fixture.prepare()).import()).counts).toEqual({
     created: 0,
     updated: 1,
@@ -116,7 +101,7 @@ test("a changed severity updates the same occurrence", async () => {
 
 test("the reader rejects a source repository URL grype cannot corroborate", async () => {
   await using fixture = await localReportFixture("grype-report.json", source);
-  await fixture.writeJson(await report());
+  await fixture.writeJson(report);
   await expect(
     fixture.prepare({
       sourceRepositoryUrl: "https://github.com/example/project",
@@ -177,7 +162,7 @@ test("Cloud rejects grype findings before file access or credential lookup", asy
       deps,
     ),
   ).rejects.toThrow(/local/i);
-  const normalized = normalizeGrypeFindings(await report());
+  const normalized = normalizeGrypeFindings(report);
   for (const retained of [normalized, { ...normalized, report: undefined }])
     await expect(
       prepareNormalizedExternalPublication(

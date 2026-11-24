@@ -22,11 +22,11 @@ type NativeRecord = Record<string, unknown>;
 
 function matchFields(value: unknown) {
   const match = record(value, "Grype match");
-  return {
-    match,
-    vulnerability: record(match["vulnerability"], "Grype vulnerability"),
-    artifact: record(match["artifact"], "Grype artifact"),
-  };
+  const vulnerability = record(match["vulnerability"], "Grype vulnerability");
+  const artifact = record(match["artifact"], "Grype artifact");
+  const advisory = requiredText(vulnerability["id"], "Grype vulnerability id");
+  const name = requiredText(artifact["name"], "Grype artifact name");
+  return { match, vulnerability, artifact, advisory, name };
 }
 
 // Grype ranks Negligible below Low; treat it as the informational floor.
@@ -74,9 +74,11 @@ function advisoryIds(match: NativeRecord, primary: string): string[] {
 }
 
 function advisoryUrl(vulnerability: NativeRecord): string | null {
-  const url =
-    text(vulnerability["dataSource"]) ?? strings(vulnerability["urls"])[0];
-  return url && /^https?:\/\//iu.test(url) ? url : null;
+  return (
+    [text(vulnerability["dataSource"]), ...strings(vulnerability["urls"])].find(
+      (url) => url && /^https?:\/\//iu.test(url),
+    ) ?? null
+  );
 }
 
 /** Import native `grype -o json` SCA matches as one dependency finding each. Grype
@@ -87,19 +89,18 @@ export function normalizeGrypeFindings(input: unknown): ExternalFindings {
     throw new CodexSecurityError(
       "Expected a native `grype -o json` report with matches.",
     );
-  const descriptor = asRecord(document["descriptor"]);
-  const version = text(descriptor?.["version"]);
+  const version = text(asRecord(document["descriptor"])?.["version"]);
+  const report = {
+    format: grypeReportFormat,
+    ...(version && { grype_version: version }),
+  };
   const source = asRecord(document["source"]);
   const directory = source?.["type"] === "directory";
   return normalizeRecords(
     document["matches"],
     (value) => {
-      const { match, vulnerability, artifact } = matchFields(value);
-      const advisory = requiredText(
-        vulnerability["id"],
-        "Grype vulnerability id",
-      );
-      const name = requiredText(artifact["name"], "Grype artifact name");
+      const { match, vulnerability, artifact, advisory, name } =
+        matchFields(value);
       const paths = directory
         ? artifactPaths(artifact, directory).filter(
             (path) => repositoryFilePath(path) !== null,
@@ -126,9 +127,8 @@ export function normalizeGrypeFindings(input: unknown): ExternalFindings {
           ],
           locations: paths.map((path) => ({ path, line: null })),
           source_data: structuredClone({
-            format: grypeReportFormat,
-            ...(version ? { grype_version: version } : {}),
-            ...(source ? { source } : {}),
+            ...report,
+            ...(source && { source }),
             match,
           }),
         },
@@ -136,21 +136,16 @@ export function normalizeGrypeFindings(input: unknown): ExternalFindings {
       );
     },
     (value) => {
-      const { vulnerability, artifact } = matchFields(value);
+      const { artifact, advisory, name } = matchFields(value);
       return stableId("grype", [
         ecosystem(artifact),
-        requiredText(vulnerability["id"], "Grype vulnerability id"),
-        requiredText(artifact["name"], "Grype artifact name"),
+        advisory,
+        name,
         artifactPaths(artifact, directory),
       ]);
     },
     "local",
-    {
-      report: {
-        format: grypeReportFormat,
-        ...(version ? { grype_version: version } : {}),
-      },
-    },
+    { report },
   );
 }
 
