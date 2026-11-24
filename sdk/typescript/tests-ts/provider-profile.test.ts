@@ -859,6 +859,7 @@ test("private profiles adapt direct xAI without rerouting gateways or other prov
         wire_api: "responses",
         env_key: "XAI_API_KEY",
       },
+      socket: { base_url: "https://api.x.ai/v1", supports_websockets: true },
       openai: {
         name: "OpenAI",
         base_url: "https://api.openai.com/v1",
@@ -879,6 +880,9 @@ test("private profiles adapt direct xAI without rerouting gateways or other prov
     expect(written.model_providers["gateway"]).toEqual({
       base_url: "http://127.0.0.1:8317/v1",
     });
+    expect(written.model_providers["socket"]?.["base_url"]).toBe(
+      "https://api.x.ai/v1",
+    );
     expect(written.model_providers["openai"]).toEqual({
       name: "OpenAI",
       base_url: "https://api.openai.com/v1",

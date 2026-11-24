@@ -500,7 +500,7 @@ See [Opper's Codex setup guide](https://docs.opper.ai/integrations/coding-agents
 
 ### xAI Responses API
 
-Codex 0.167.0 sends collaboration and Codex Security MCP tools as `namespace`
+Codex 0.172.0 sends collaboration and Codex Security MCP tools as `namespace`
 declarations, which xAI rejects. When a private provider profile uses
 `https://api.x.ai/v1` over Responses, the SDK starts a local HTTP adapter for
 the lifetime of the profile. It translates tool declarations to functions,
@@ -510,7 +510,8 @@ it, use the scan command below with that base URL and set `CODEX_API_KEY` to you
 xAI key. The adapter supports HTTP Responses requests only. Live scan
 completion remains unverified.
 
-Other endpoints, including local gateways, retain their native behavior.
+Profiles with WebSockets enabled and other endpoints, including local gateways,
+retain their native behavior.
 For the gateway setup below, CLIProxyAPI's xAI adapter exposes each
 namespace member to xAI as a plain function and restores the namespace when
 Codex receives a tool call. Both connections use the Responses API.

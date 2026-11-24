@@ -129,6 +129,7 @@ export async function createProviderProfile(
       if (
         !isRecord(definition) ||
         (definition["wire_api"] ?? "responses") !== "responses" ||
+        definition["supports_websockets"] === true ||
         (definition["base_url"] !== upstream &&
           definition["base_url"] !== upstream + "/")
       )
