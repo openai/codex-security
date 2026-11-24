@@ -56,10 +56,13 @@ const networkFeatures = [
   "system_proxy_fallback",
   "psp",
 ];
-const catalogFeatures = [
+export const scanCyberFeatures = [
   "cli_daybreak",
   "api_key_model_discovery",
   "api_key_cyber_access_programs",
+];
+const catalogFeatures = [
+  ...scanCyberFeatures,
   "secret_auth_storage",
   ...networkFeatures,
 ];
@@ -385,7 +388,7 @@ export async function resolveScanCyberAccessProgram({
         policyOverrides.push(`model_catalog_json=${inlineToml(catalogFile)}`);
       else if (catalogUrl !== nativeUrl)
         throw new ConfigurationError(
-          "Automatic Cyber access program selection cannot use a different per-scan catalog URL with a saved login. Set the catalog URL in the native Codex home, supply model_catalog_json, or select --cyber-access-program explicitly.",
+          "Automatic Cyber access program selection cannot use a different per-scan catalog URL with a saved login. Supply model_catalog_json or select --cyber-access-program explicitly.",
         );
       return await probe(policyOverrides, (request) =>
         storedCatalogProgram(workspace.model, request),

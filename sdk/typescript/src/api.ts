@@ -49,7 +49,10 @@ import {
 import { z } from "zod";
 import { readThreatModelPath } from "./artifact-export.js";
 import { scanSkillConfig } from "./scan-skill-paths.js";
-import { resolveScanCyberAccessProgram } from "./scan-cyber-access.js";
+import {
+  resolveScanCyberAccessProgram,
+  scanCyberFeatures,
+} from "./scan-cyber-access.js";
 import { isRecord } from "./record.js";
 import {
   STANDALONE_REMEDIATION_EVIDENCE,
@@ -7580,9 +7583,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
       "goals",
       "multi_agent",
       "enable_fanout",
-      "cli_daybreak",
-      "api_key_cyber_access_programs",
-      "api_key_model_discovery",
+      ...scanCyberFeatures,
       "shell_tool",
       "unified_exec",
     ]) {
@@ -7642,6 +7643,11 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
       if (safeString(value)) result[key] = value;
     }
     copyWorkerSettings(result, source);
+    // Literal dotted keys also become SDK flags. Preserve them on rerun.
+    for (const feature of scanCyberFeatures) {
+      const key = `features.${feature}`;
+      if (typeof source[key] === "boolean") result[key] = source[key];
+    }
     const features = capabilityFeatures(source["features"]);
     if (Object.keys(features).length > 0) result["features"] = features;
     const skills = source["skills"];
@@ -7689,9 +7695,7 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
   const resolvedFeatures = capabilityFeatures(resolved["features"]);
   for (const key of [
     "code_mode",
-    "cli_daybreak",
-    "api_key_cyber_access_programs",
-    "api_key_model_discovery",
+    ...scanCyberFeatures,
     "shell_tool",
     "unified_exec",
   ]) {

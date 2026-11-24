@@ -3,6 +3,7 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
+import { scanPreflightCodexConfig } from "../src/api.js";
 import { resolveBundledCodexExecutable } from "../src/codex-sdk-environment.js";
 import { planComponents } from "../src/component-plan.js";
 import type { JsonObject } from "../src/config.js";
@@ -145,7 +146,7 @@ test("native catalog routing follows the scan's selected identity", async () => 
       },
       stored,
     ),
-  ).rejects.toThrow("Set the catalog URL in the native Codex home");
+  ).rejects.toThrow("Supply model_catalog_json");
 
   await writeFile(
     join(home, "config.toml"),
@@ -308,6 +309,7 @@ test("native preferences and non-OpenAI authentication bypass automatic selectio
     { daybreak: true },
     { model_provider: "custom" },
     { "features.cli_daybreak": false },
+    scanPreflightCodexConfig({ "features.cli_daybreak": false }),
   ];
   for (const config of nativePreferences)
     expect(await select("red", config)).toBeUndefined();

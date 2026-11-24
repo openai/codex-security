@@ -1745,6 +1745,7 @@ describe("CLI workbench", () => {
         approval_policy: "on-request",
         model: "gpt-original",
         model_reasoning_effort: "high",
+        "features.cli_daybreak": false,
         features: { goals: true },
         agents: { max_threads: 6 },
       };
