@@ -281,28 +281,18 @@ export async function preflightDeepScanWorkerPermissionProfile(
       cwd: options.cwd,
       includeLayers: false,
     });
-    const catalog = await client.readPermissionProfileCatalog(options.cwd);
-    const matchingEntries = catalog.filter(
-      (entry) => entry.id === DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID,
-    );
-    if (matchingEntries.length !== 1)
-      throw malformedPreflightError(options.context);
-    const catalogEntry = matchingEntries[0];
-    const requirementsResponse =
-      catalogEntry.allowed === true
-        ? undefined
-        : await client.readConfigRequirementsForClassification();
-    verifyPreflightResult(
-      options,
-      configResponse,
-      catalogEntry,
-      requirementsResponse,
-    );
-    const config = record(configResponse.config);
-    const mcpServerNames = Object.keys(record(config?.mcp_servers) ?? {});
+    if (!(await client.workerProfileAllowed(options.cwd))) {
+      const requirements =
+        await client.readConfigRequirementsForClassification();
+      throw existingAllowlistExcludesProfile(requirements)
+        ? disallowedProfileAllowlistError(options.context)
+        : managedPolicyRejectedError(options.context);
+    }
+    const config = verifiedWorkerConfig(options, configResponse);
+    const mcpServerNames = Object.keys(record(config.mcp_servers) ?? {});
     if (
       !options.allowOpenAiApiKeyFallback ||
-      config?.forced_login_method === "chatgpt"
+      config.forced_login_method === "chatgpt"
     ) {
       return { useOpenAiApiKey: false, mcpServerNames };
     }
@@ -357,10 +347,7 @@ class AppServerPreflightClient {
   private childClosed = false;
   private readonly removeAbortListener: () => void;
   private readonly onStdioError = (error: Error): void => {
-    const failure = codexExecutableStdioError(
-      this.options.codexPath,
-      this.options.context,
-    );
+    const failure = codexExecutableStdioError(this.options);
     failure.message += "\n" + error.message;
     this.fail(failure);
   };
@@ -402,20 +389,11 @@ class AppServerPreflightClient {
     this.stdoutLines.on("error", this.onStdioError);
     this.child.stdin.on("error", this.onStdioError);
     this.child.on("error", (error) => {
-      this.fail(
-        codexExecutableStartError(options.codexPath, error, options.context),
-      );
+      this.fail(codexExecutableStartError(options, error));
     });
     this.child.on("close", (code, signal) => {
       if (!this.closed) {
-        this.fail(
-          codexExecutableExitError(
-            options.codexPath,
-            code,
-            signal,
-            options.context,
-          ),
-        );
+        this.fail(codexExecutableExitError(options, code, signal));
       }
     });
 
@@ -445,8 +423,8 @@ class AppServerPreflightClient {
     this.write({ jsonrpc: "2.0", method: "initialized", params: {} });
   }
 
-  async readPermissionProfileCatalog(cwd: string): Promise<JsonRecord[]> {
-    const entries: JsonRecord[] = [];
+  async workerProfileAllowed(cwd: string): Promise<boolean> {
+    const matches: boolean[] = [];
     const seenCursors = new Set<string>();
     let cursor: string | undefined;
 
@@ -467,11 +445,12 @@ class AppServerPreflightClient {
         }
         if (typeof entry.allowed !== "boolean")
           throw malformedPreflightError(this.options.context);
-        entries.push(entry);
+        if (entry.id === DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID)
+          matches.push(entry.allowed);
       }
 
       const nextCursor = result.nextCursor;
-      if (nextCursor === null) return entries;
+      if (nextCursor === null) break;
       if (
         typeof nextCursor !== "string" ||
         nextCursor.length === 0 ||
@@ -482,6 +461,9 @@ class AppServerPreflightClient {
       seenCursors.add(nextCursor);
       cursor = nextCursor;
     }
+    if (matches.length !== 1)
+      throw malformedPreflightError(this.options.context);
+    return matches[0];
   }
 
   /**
@@ -538,9 +520,7 @@ class AppServerPreflightClient {
 
   private write(message: JsonRecord): void {
     if (!this.child.stdin.writable) {
-      this.fail(
-        codexExecutableStdioError(this.options.codexPath, this.options.context),
-      );
+      this.fail(codexExecutableStdioError(this.options));
       return;
     }
     this.child.stdin.write(`${JSON.stringify(message)}\n`, (error) => {
@@ -576,12 +556,7 @@ class AppServerPreflightClient {
     this.pending = undefined;
     if (message.error !== undefined) {
       pending.reject(
-        jsonRpcPreflightError(
-          this.options.codexPath,
-          pending.method,
-          message.error,
-          this.options.context,
-        ),
+        jsonRpcPreflightError(this.options, pending.method, message.error),
       );
       return;
     }
@@ -609,29 +584,16 @@ class AppServerPreflightClient {
   }
 }
 
-function verifyPreflightResult(
+function verifiedWorkerConfig(
   options: DeepScanPermissionProfilePreflightOptions,
   configResponse: JsonRecord,
-  catalogEntry: JsonRecord,
-  requirementsResponse: JsonRecord | undefined,
-): void {
-  if (catalogEntry.allowed !== true) {
-    throw existingAllowlistExcludesProfile(requirementsResponse)
-      ? disallowedProfileAllowlistError(options.context)
-      : managedPolicyRejectedError(options.context);
-  }
-
+): JsonRecord {
   const config = record(configResponse.config);
   const permissions = record(config?.permissions);
-  const actualProfile = permissions
-    ? record(permissions[DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID])
-    : undefined;
-  if (
-    !config ||
-    !permissions ||
-    !actualProfile ||
-    typeof config.default_permissions !== "string"
-  )
+  const actualProfile = record(
+    permissions?.[DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID],
+  );
+  if (!actualProfile || typeof config?.default_permissions !== "string")
     throw malformedPreflightError(options.context);
 
   if (config.default_permissions !== DEEP_SCAN_WORKER_PERMISSION_PROFILE_ID) {
@@ -643,20 +605,19 @@ function verifyPreflightResult(
   if (!isDeepStrictEqual(actualWithoutDescription, expectedProfile)) {
     throw profileCollisionError(options.context);
   }
+  return config;
 }
 
 function existingAllowlistExcludesProfile(
   response: JsonRecord | undefined,
 ): boolean {
   if (!response || !Object.hasOwn(response, "requirements")) return false;
-  if (response.requirements === null) return false;
   const requirements = record(response.requirements);
   if (
     !requirements ||
     !Object.hasOwn(requirements, "allowedPermissionProfiles")
   )
     return false;
-  if (requirements.allowedPermissionProfiles === null) return false;
   const allowlist = record(requirements.allowedPermissionProfiles);
   if (!allowlist) return false;
   if (Object.values(allowlist).some((value) => typeof value !== "boolean"))
@@ -740,89 +701,57 @@ function malformedPreflightError(context?: PreflightContext): Error {
   );
 }
 
-function unsupportedCodexApiError(
-  codexPath: string,
-  api: string,
-  context?: PreflightContext,
-): DeepScanNonRetryableError {
-  return new DeepScanNonRetryableError(
-    failedOperation(context) +
-      " because the selected Codex executable " +
-      JSON.stringify(codexPath) +
-      " does not support the required " +
-      JSON.stringify(api) +
-      " API. " +
-      "Update the Codex installation at that path " +
-      "(the desktop app if it is bundled, otherwise the selected CLI) and retry." +
-      " " +
-      subject(context) +
-      " did not run.",
-  );
+function executableFailurePrefix(options: RuntimeConfigReadOptions): string {
+  return `${failedOperation(options.context)} because the selected Codex executable ${JSON.stringify(options.codexPath)}`;
 }
 
 function jsonRpcPreflightError(
-  codexPath: string,
+  options: RuntimeConfigReadOptions,
   method: string,
   value: unknown,
-  context?: PreflightContext,
 ): Error {
   const error = record(value);
   const code =
     typeof error?.code === "number" && Number.isFinite(error.code)
       ? error.code
       : undefined;
-  if (code === -32601) {
-    const failure = unsupportedCodexApiError(codexPath, method, context);
-    if (typeof error?.message === "string")
-      failure.message += "\n" + error.message;
-    return failure;
-  }
+  const api = JSON.stringify(method);
+  const prefix = executableFailurePrefix(options);
+  const suffix =
+    `${subject(options.context)} did not run.` +
+    (typeof error?.message === "string" ? "\n" + error.message : "");
+  if (code === -32601)
+    return new DeepScanNonRetryableError(
+      `${prefix} does not support the required ${api} API. Update the Codex installation at that path (the desktop app if it is bundled, otherwise the selected CLI) and retry. ${suffix}`,
+    );
+  const detail = code === undefined ? "" : ` (JSON-RPC code ${code})`;
   return new Error(
-    failedOperation(context) +
-      " because the selected Codex executable " +
-      JSON.stringify(codexPath) +
-      " returned an error for " +
-      JSON.stringify(method) +
-      (code === undefined ? "" : " (JSON-RPC code " + code + ")") +
-      ". Check the Codex configuration and retry. " +
-      subject(context) +
-      " did not run." +
-      (typeof error?.message === "string" ? "\n" + error.message : ""),
+    `${prefix} returned an error for ${api}${detail}. Check the Codex configuration and retry. ${suffix}`,
     { cause: value },
   );
 }
 
 function codexExecutableStartError(
-  codexPath: string,
+  options: RuntimeConfigReadOptions,
   error: Error,
-  context?: PreflightContext,
 ): Error {
-  const value = "code" in error ? error.code : undefined;
-  const code =
-    typeof value === "string" && /^[A-Z0-9_]+$/u.test(value)
-      ? value
-      : undefined;
-  const codeDetail = code === undefined ? "" : " (" + code + ")";
-  return new Error(
-    codexExecutableFailureMessage(
-      codexPath,
-      "could not start" + codeDetail,
-      context,
-    ) +
-      "\n" +
-      error.message,
-    { cause: error },
+  const code = "code" in error ? error.code : undefined;
+  const codeDetail =
+    typeof code === "string" && /^[A-Z0-9_]+$/u.test(code) ? ` (${code})` : "";
+  const message = codexExecutableFailureMessage(
+    options,
+    "could not start" + codeDetail,
   );
+  return new Error(message + "\n" + error.message, { cause: error });
 }
 
 function codexExecutableExitError(
-  codexPath: string,
+  options: RuntimeConfigReadOptions,
   code: number | null,
   signal: NodeJS.Signals | null,
-  context?: PreflightContext,
 ): Error {
   const operation =
-    context === "parent-config"
+    options.context === "parent-config"
       ? "the configuration read"
       : "permission-profile verification";
   const detail =
@@ -831,42 +760,26 @@ function codexExecutableExitError(
       : signal !== null
         ? `was terminated before ${operation} completed by signal ${signal}`
         : `exited before ${operation} completed`;
-  return new Error(codexExecutableFailureMessage(codexPath, detail, context));
+  return new Error(codexExecutableFailureMessage(options, detail));
 }
 
-function codexExecutableStdioError(
-  codexPath: string,
-  context?: PreflightContext,
-): Error {
+function codexExecutableStdioError(options: RuntimeConfigReadOptions): Error {
   return new Error(
     codexExecutableFailureMessage(
-      codexPath,
+      options,
       "could not exchange app-server JSON-RPC over stdio",
-      context,
     ),
   );
 }
 
 function codexExecutableFailureMessage(
-  codexPath: string,
+  options: RuntimeConfigReadOptions,
   detail: string,
-  context?: PreflightContext,
 ): string {
+  const { context, codexPath } = options;
   if (context === "parent-config")
     return `${failedOperation(context)}. Codex executable ${JSON.stringify(codexPath)} ${detail}.`;
-  return (
-    subject(context) +
-    " cannot safely verify its read-only worker permission profile because " +
-    "the selected Codex executable " +
-    JSON.stringify(codexPath) +
-    " " +
-    detail +
-    ". " +
-    "Check that the named executable runs with --version, and check CODEX_CLI_PATH/PATH, then retry." +
-    " " +
-    subject(context) +
-    " did not run."
-  );
+  return `${executableFailurePrefix(options)} ${detail}. Check that the named executable runs with --version, and check CODEX_CLI_PATH/PATH, then retry. ${subject(context)} did not run.`;
 }
 
 /**

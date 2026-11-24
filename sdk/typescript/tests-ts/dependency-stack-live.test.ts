@@ -20,9 +20,8 @@ import {
 import { git } from "./git-fixture.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
-test("interactive attempts pin a revision before advisory metadata is known, then add observations without replacing prior work", async () => {
-  await using dir = await scopedTemporaryDirectory("stack-live-");
-  const repo = join(dir.path, "target");
+async function liveFixture(root: string) {
+  const repo = join(root, "target");
   await mkdir(repo);
   git(repo, "init", "--quiet");
   git(
@@ -35,7 +34,31 @@ test("interactive attempts pin a revision before advisory metadata is known, the
     "-m",
     "Fixture",
   );
-  const store = new DependencyAttemptStore(join(dir.path, "state.sqlite"));
+  const store = new DependencyAttemptStore(join(root, "state.sqlite"));
+  const sink = {
+    id: "decode",
+    function: "decode",
+    package: "sample",
+    versionScheme: "semver",
+    affectedVersions: ["<2"],
+    preconditions: [],
+  };
+  const imported = async (result: unknown) =>
+    saveRuntimeEvidence(
+      store,
+      await prepareRuntimeEvidence(
+        { kind: "runtime", server: "fixture", tool: "profiles", result },
+        repo,
+      ),
+    );
+  const record = (input: unknown) =>
+    store.transaction(() => recordObservations(store, input));
+  return { repo, store, sink, imported, record };
+}
+
+test("interactive attempts pin a revision before advisory metadata is known, then add observations without replacing prior work", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-live-");
+  const { repo, store, sink, imported, record } = await liveFixture(dir.path);
   try {
     const started = await initializeLive(store, repo);
     expect(started.target.sha).toBe(git(repo, "rev-parse", "HEAD"));
@@ -48,16 +71,7 @@ test("interactive attempts pin a revision before advisory metadata is known, the
         url: "https://example.invalid/advisory",
         summary: "Fixture advisory",
       },
-      sinks: [
-        {
-          id: "decode",
-          function: "decode",
-          package: "sample",
-          versionScheme: "semver",
-          affectedVersions: ["<2"],
-          preconditions: [],
-        },
-      ],
+      sinks: [sink],
     });
     expect(updated.inputDigest).toBe(started.inputDigest);
     expect(updated.target.repository).toBe("example/decoder");
@@ -81,34 +95,13 @@ test("interactive attempts pin a revision before advisory metadata is known, the
       ],
     };
     const page2 = { ...query, groups: [{ ...query.groups[0], id: "page-2" }] };
-    const receipt = saveRuntimeEvidence(
-      store,
-      await prepareRuntimeEvidence(
-        {
-          kind: "runtime",
-          server: "fixture",
-          tool: "profiles",
-          result: { queries: [query, page2] },
-        },
-        repo,
-      ),
-    );
-    expect(
-      store.transaction(() =>
-        recordObservations(store, {
-          receiptId: receipt.receiptId,
-          queries: [query],
-        }),
-      ),
-    ).toEqual({ workItemIds: ["query/page-1"] });
-    expect(
-      store.transaction(() =>
-        recordObservations(store, {
-          receiptId: receipt.receiptId,
-          queries: [page2],
-        }),
-      ),
-    ).toEqual({ workItemIds: ["query/page-2"] });
+    const receipt = await imported({ queries: [query, page2] });
+    expect(record({ receiptId: receipt.receiptId, queries: [query] })).toEqual({
+      workItemIds: ["query/page-1"],
+    });
+    expect(record({ receiptId: receipt.receiptId, queries: [page2] })).toEqual({
+      workItemIds: ["query/page-2"],
+    });
     const items = stackPacketWorkItems(overlayPacket(store, base));
     expect(items.map((item) => item.id)).toEqual([
       "query/page-1",
@@ -118,12 +111,7 @@ test("interactive attempts pin a revision before advisory metadata is known, the
       /^[0-9a-f]{64}$/,
     );
     expect(() =>
-      store.transaction(() =>
-        recordObservations(store, {
-          receiptId: receipt.receiptId,
-          queries: [query],
-        }),
-      ),
+      record({ receiptId: receipt.receiptId, queries: [query] }),
     ).toThrow("already recorded");
     await expect(
       initializeLive(store, repo, { cve: "CVE-2099-0002" }),
@@ -135,28 +123,7 @@ test("interactive attempts pin a revision before advisory metadata is known, the
 
 test("supplemental observations require matching receipt data and normalize graph frame order", async () => {
   await using dir = await scopedTemporaryDirectory("stack-live-provenance-");
-  const repo = join(dir.path, "target");
-  await mkdir(repo);
-  git(repo, "init", "--quiet");
-  git(
-    repo,
-    "-c",
-    "commit.gpgSign=false",
-    "commit",
-    "--allow-empty",
-    "--quiet",
-    "-m",
-    "Fixture",
-  );
-  const store = new DependencyAttemptStore(join(dir.path, "state.sqlite"));
-  const sink = {
-    id: "decode",
-    function: "decode",
-    package: "sample",
-    versionScheme: "semver",
-    affectedVersions: ["<2"],
-    preconditions: [],
-  };
+  const { repo, store, sink, imported, record } = await liveFixture(dir.path);
   const window = { start: "2026-01-01T00:00:00Z", end: "2026-01-02T00:00:00Z" };
   const canonical = {
     id: "original",
@@ -180,41 +147,24 @@ test("supplemental observations require matching receipt data and normalize grap
       },
     ],
   };
-  const imported = async (result: unknown) =>
-    saveRuntimeEvidence(
-      store,
-      await prepareRuntimeEvidence(
-        { kind: "runtime", server: "fixture", tool: "profiles", result },
-        repo,
-      ),
-    );
   try {
     await initializeLive(store, repo);
     const original = await imported({ queries: [canonical] });
-    expect(() =>
-      store.transaction(() =>
-        recordObservations(store, { receiptId: original.receiptId }),
-      ),
-    ).toThrow("Unknown catalog sink");
+    expect(() => record({ receiptId: original.receiptId })).toThrow(
+      "Unknown catalog sink",
+    );
     await initializeLive(store, repo, {
       cve: "CVE-2099-0001",
       advisory: { url: "https://example.invalid/advisory", summary: "Fixture" },
       sinks: [sink],
     });
-    expect(() =>
-      store.transaction(() =>
-        recordObservations(store, { queries: [canonical] }),
-      ),
-    ).toThrow("require an original runtime receipt");
+    expect(() => record({ queries: [canonical] })).toThrow(
+      "require an original runtime receipt",
+    );
     const altered = structuredClone(canonical);
     altered.groups[0]!.observations[0]!.frames[0]!.name = "different";
     expect(() =>
-      store.transaction(() =>
-        recordObservations(store, {
-          receiptId: original.receiptId,
-          queries: [altered],
-        }),
-      ),
+      record({ receiptId: original.receiptId, queries: [altered] }),
     ).toThrow("does not match");
     const graph = {
       format: "codex-security-graph-evidence/v1",
@@ -289,12 +239,9 @@ test("supplemental observations require matching receipt data and normalize grap
       ],
     };
     const resource = await imported(graph);
-    const [normalized] = normalizeRuntimeObservationQueries(
-      store,
-      resource.receiptId,
-      [sink],
-    );
-    const observation = normalized!.groups[0]!.observations[0]!;
+    const normalize = (receipt: { receiptId: string }) =>
+      normalizeRuntimeObservationQueries(store, receipt.receiptId, [sink])[0]!;
+    const observation = normalize(resource).groups[0]!.observations[0]!;
     expect(observation.frames.map((frame) => frame.name)).toEqual([
       "decode",
       "request",
@@ -307,22 +254,14 @@ test("supplemental observations require matching receipt data and normalize grap
       scope: { image_name: "registry.example/image", image_tag: "v1" },
     });
     expect(observation.scope).not.toHaveProperty("image_digest");
-    const unlabeledReceipt = await imported({
-      ...graph,
-      observations: [
-        {
-          ...graph.observations[0]!,
-          scope: {
-            ...graph.observations[0]!.scope,
-            observed_image: { name: "", tag: "" },
-          },
-        },
-      ],
-    });
+    const unlabeledGraph = structuredClone(graph);
+    unlabeledGraph.observations[0]!.scope.observed_image = {
+      name: "",
+      tag: "",
+    };
+    const unlabeledReceipt = await imported(unlabeledGraph);
     expect(
-      normalizeRuntimeObservationQueries(store, unlabeledReceipt.receiptId, [
-        sink,
-      ])[0]!.groups[0]!.observations[0]!.scope,
+      normalize(unlabeledReceipt).groups[0]!.observations[0]!.scope,
     ).toEqual({ cluster: "cluster", service: "sample", container: "app" });
     const wrapperGraph = structuredClone(graph);
     wrapperGraph.metadata.scope.query.sinks[0]!.name = "wrapper";
@@ -332,11 +271,7 @@ test("supplemental observations require matching receipt data and normalize grap
       attributes: { name: "wrapper", language: "javascript", offset: "0" },
     });
     const wrapperReceipt = await imported(wrapperGraph);
-    expect(
-      normalizeRuntimeObservationQueries(store, wrapperReceipt.receiptId, [
-        sink,
-      ])[0]!.groups[0]!.observations[0],
-    ).toMatchObject({
+    expect(normalize(wrapperReceipt).groups[0]!.observations[0]).toMatchObject({
       sinkIndex: 1,
       sourceIndex: 2,
       sinkMatches: [{ sinkId: "decode", rawIndex: 0 }],
@@ -358,11 +293,7 @@ test("supplemental observations require matching receipt data and normalize grap
       },
     ];
     const orderedReceipt = await imported(orderedGraph);
-    expect(
-      normalizeRuntimeObservationQueries(store, orderedReceipt.receiptId, [
-        sink,
-      ])[0]!.groups[0]!.observations[0],
-    ).toMatchObject({
+    expect(normalize(orderedReceipt).groups[0]!.observations[0]).toMatchObject({
       sinkIndex: 0,
       sourceIndex: 1,
       sinkMatches: [
@@ -370,66 +301,26 @@ test("supplemental observations require matching receipt data and normalize grap
         { sinkId: "decode", rawIndex: 2 },
       ],
     });
-    const aliasGraph = {
-      ...graph,
-      metadata: {
-        ...graph.metadata,
-        scope: {
-          ...graph.metadata.scope,
-          query: {
-            ...graph.metadata.scope.query,
-            sinks: [{ name: "decode", observed_name: "unverified_alias" }],
-          },
-        },
-      },
-      observations: [
-        {
-          ...graph.observations[0]!,
-          frames: [
-            graph.observations[0]!.frames[0]!,
-            {
-              ...graph.observations[0]!.frames[1]!,
-              name: "unverified_alias",
-              attributes: {
-                ...graph.observations[0]!.frames[1]!.attributes,
-                name: "unverified_alias",
-              },
-            },
-          ],
-        },
-      ],
-    };
+    const aliasGraph = structuredClone(graph);
+    Object.assign(aliasGraph.metadata.scope.query.sinks[0]!, {
+      observed_name: "unverified_alias",
+    });
+    const aliasFrame = aliasGraph.observations[0]!.frames[1]!;
+    aliasFrame.name = "unverified_alias";
+    aliasFrame.attributes.name = "unverified_alias";
     const aliasReceipt = await imported(aliasGraph);
     expect(
-      normalizeRuntimeObservationQueries(store, aliasReceipt.receiptId, [
-        sink,
-      ])[0]!.groups[0]!.observations[0],
+      normalize(aliasReceipt).groups[0]!.observations[0],
     ).not.toHaveProperty("sinkMatches");
-    const scopedReceipt = await imported({
-      ...graph,
-      metadata: {
-        ...graph.metadata,
-        scope: {
-          ...graph.metadata.scope,
-          image_tags: ["v1"],
-          image_digest: "sha256:" + "a".repeat(64),
-        },
-      },
-      observations: [
-        {
-          ...graph.observations[0]!,
-          scope: {
-            ...graph.observations[0]!.scope,
-            image_digest: "sha256:" + "b".repeat(64),
-          },
-        },
-      ],
+    const scopedGraph = structuredClone(graph);
+    Object.assign(scopedGraph.metadata.scope, {
+      image_tags: ["v1"],
+      image_digest: "sha256:" + "a".repeat(64),
     });
-    const scopedQuery = normalizeRuntimeObservationQueries(
-      store,
-      scopedReceipt.receiptId,
-      [sink],
-    )[0]!;
+    Object.assign(scopedGraph.observations[0]!.scope, {
+      image_digest: "sha256:" + "b".repeat(64),
+    });
+    const scopedQuery = normalize(await imported(scopedGraph));
     const basePacket = livePacket(store);
     const scopedWork = stackPacketWorkItems({
       ...basePacket,
@@ -441,51 +332,29 @@ test("supplemental observations require matching receipt data and normalize grap
         conflict.startsWith("image_digest:"),
       ),
     ).toBe(true);
-    const rulesReceipt = await imported({
-      ...graph,
-      metadata: {
-        ...graph.metadata,
-        scope: {
-          ...graph.metadata.scope,
-          query: {
-            kind: "pair",
-            rules: [
-              { sources: [{ name: "other" }], sinks: [{ name: "decode" }] },
-              { sources: [{ name: "request" }], sinks: [{ name: "decode" }] },
-            ],
-          },
-        },
+    const rulesGraph = structuredClone(graph);
+    Object.assign(rulesGraph.metadata.scope, {
+      query: {
+        kind: "pair",
+        rules: [
+          { sources: [{ name: "other" }], sinks: [{ name: "decode" }] },
+          { sources: [{ name: "request" }], sinks: [{ name: "decode" }] },
+        ],
       },
-      observations: [
-        {
-          ...graph.observations[0]!,
-          scope: {
-            ...graph.observations[0]!.scope,
-            matches: {
-              ...graph.observations[0]!.scope.matches,
-              rules: [
-                {
-                  ...graph.observations[0]!.scope.matches.rules[0]!,
-                  rule_index: 0,
-                  sources: [],
-                  ordered_pairs: [],
-                  matched: false,
-                },
-                {
-                  ...graph.observations[0]!.scope.matches.rules[0]!,
-                  rule_index: 1,
-                },
-              ],
-            },
-          },
-        },
-      ],
     });
-    const rulesQuery = normalizeRuntimeObservationQueries(
-      store,
-      rulesReceipt.receiptId,
-      [sink],
-    )[0]!;
+    const matches = rulesGraph.observations[0]!.scope.matches;
+    const rule = matches.rules[0]!;
+    matches.rules = [
+      {
+        ...rule,
+        rule_index: 0,
+        sources: [],
+        ordered_pairs: [],
+        matched: false,
+      },
+      { ...rule, rule_index: 1 },
+    ];
+    const rulesQuery = normalize(await imported(rulesGraph));
     expect(rulesQuery.selectors).toEqual({
       sources: [
         { name: "other", rule_index: 0 },
@@ -504,48 +373,23 @@ test("supplemental observations require matching receipt data and normalize grap
       ...graph,
       metadata: { ...graph.metadata, coverage: { result_complete: false } },
     });
-    expect(
-      normalizeRuntimeObservationQueries(store, partialReceipt.receiptId, [
-        sink,
-      ])[0]!.groups[0]!.truncated,
-    ).toBe(true);
-    const asyncGraph = {
-      ...graph,
-      metadata: {
-        ...graph.metadata,
-        join_basis: "inferred_creator_code",
-        instance_correlation_verified: false,
-        scope: {
-          ...graph.metadata.scope,
-          query: {
-            kind: "async_parent",
-            sources: [],
-            sinks: [{ name: "decode", location: "src/decode.js", line: 7 }],
-          },
-        },
+    expect(normalize(partialReceipt).groups[0]!.truncated).toBe(true);
+    const asyncGraph = structuredClone(graph);
+    Object.assign(asyncGraph.metadata, {
+      join_basis: "inferred_creator_code",
+      instance_correlation_verified: false,
+    });
+    Object.assign(asyncGraph.metadata.scope, {
+      query: {
+        kind: "async_parent",
+        sources: [],
+        sinks: [{ name: "decode", location: "src/decode.js", line: 7 }],
       },
-      observations: [
-        {
-          ...graph.observations[0]!,
-          frames: [
-            graph.observations[0]!.frames[0]!,
-            {
-              ...graph.observations[0]!.frames[1]!,
-              attributes: {
-                ...graph.observations[0]!.frames[1]!.attributes,
-                location: "/repo/src/decode.js:7",
-              },
-            },
-          ],
-        },
-      ],
-    };
-    const asyncReceipt = await imported(asyncGraph);
-    const asyncQuery = normalizeRuntimeObservationQueries(
-      store,
-      asyncReceipt.receiptId,
-      [sink],
-    )[0]!;
+    });
+    Object.assign(asyncGraph.observations[0]!.frames[1]!.attributes, {
+      location: "/repo/src/decode.js:7",
+    });
+    const asyncQuery = normalize(await imported(asyncGraph));
     expect(asyncQuery.provenance).toEqual({ source: "inferred_creator_code" });
     expect(asyncQuery.groups[0]!.observations[0]).toMatchObject({
       sinkIndex: 0,
@@ -554,48 +398,29 @@ test("supplemental observations require matching receipt data and normalize grap
     expect(asyncQuery.groups[0]!.observations[0]).not.toHaveProperty(
       "sinkMatches",
     );
-    const invalidQualifier = await imported({
-      ...graph,
-      metadata: {
-        ...graph.metadata,
-        scope: {
-          ...graph.metadata.scope,
-          query: {
-            ...graph.metadata.scope.query,
-            sinks: [{ name: "decode", frame_type: "python" }],
-          },
-        },
-      },
+    const invalidGraph = structuredClone(graph);
+    Object.assign(invalidGraph.metadata.scope.query.sinks[0]!, {
+      frame_type: "python",
     });
-    expect(() =>
-      normalizeRuntimeObservationQueries(store, invalidQualifier.receiptId, [
-        sink,
-      ]),
-    ).toThrow("selector does not match");
-    expect(
-      store.transaction(() =>
-        recordObservations(store, { receiptId: resource.receiptId }),
-      ),
-    ).toEqual({ workItemIds: ["query-id/capture/call"] });
+    const invalidQualifier = await imported(invalidGraph);
+    expect(() => normalize(invalidQualifier)).toThrow(
+      "selector does not match",
+    );
+    expect(record({ receiptId: resource.receiptId })).toEqual({
+      workItemIds: ["query-id/capture/call"],
+    });
     const empty = {
       ...graph,
       observations: [],
       metadata: { ...graph.metadata, status: "no_telemetry" },
     };
     const emptyReceipt = await imported(empty);
-    expect(
-      normalizeRuntimeObservationQueries(store, emptyReceipt.receiptId, [
-        sink,
-      ])[0]!.groups[0]!.status,
-    ).toBe("no_coverage");
+    expect(normalize(emptyReceipt).groups[0]!.status).toBe("no_coverage");
     const matched = await imported({
       ...empty,
       metadata: { ...empty.metadata, status: "empty_matches" },
     });
-    expect(
-      normalizeRuntimeObservationQueries(store, matched.receiptId, [sink])[0]!
-        .groups[0]!.status,
-    ).toBe("no_match");
+    expect(normalize(matched).groups[0]!.status).toBe("no_match");
   } finally {
     store.close();
   }

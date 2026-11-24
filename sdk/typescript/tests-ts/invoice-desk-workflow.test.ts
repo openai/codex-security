@@ -5,37 +5,18 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { parse } from "yaml";
+import {
+  workflowSource,
+  type Workflow,
+  type WorkflowStep,
+} from "./support/workflow.js";
 import { resolvePluginPython } from "../src/runtime.js";
 
-interface Step {
-  name: string;
-  id?: string;
-  if?: string;
-  run?: string;
-  with?: Record<string, string>;
-}
-
-const workflow = parse(
-  readFileSync(
-    new URL(
-      "../../../.github/workflows/invoice-desk-scan.yml",
-      import.meta.url,
-    ),
-    "utf8",
-  ),
-) as {
-  env: Record<string, string>;
-  concurrency?: unknown;
-  jobs: {
-    scan: {
-      needs: string;
-      if: string;
-      concurrency: { group: string; "cancel-in-progress": boolean };
-      steps: Step[];
-    };
-  };
+const workflow = parse(workflowSource("invoice-desk-scan")) as Workflow & {
+  env: { CODEX_SECURITY_VERSION: string };
 };
-const steps = workflow.jobs.scan.steps;
+const job = workflow.jobs["scan"]!;
+const steps = job.steps!;
 const scan = steps.find((step) => step.id === "scan")!;
 const sarif = steps.find(
   (step) => step.name === "Export completed findings as SARIF",
@@ -50,7 +31,6 @@ afterEach(temporaryDirectories.cleanup);
 
 test("Invoice Desk cancels only duplicate scans of an eligible target revision", () => {
   expect(workflow.concurrency).toBeUndefined();
-  const job = workflow.jobs.scan;
   expect(job.needs).toBe("target");
   const selected = new Function("needs", `return (${job.if});`);
   expect(selected({ target: { outputs: { sha: "" } } })).toBe(false);
@@ -61,9 +41,10 @@ test("Invoice Desk cancels only duplicate scans of an eligible target revision",
       },
     }),
   ).toBe(true);
-  expect(job.concurrency["cancel-in-progress"]).toBe(true);
+  const policy = job.concurrency!;
+  expect(policy["cancel-in-progress"]).toBe(true);
   const group = (pr: number, sha: string) =>
-    job.concurrency.group.replace(/\$\{\{(.*?)\}\}/g, (_, expression: string) =>
+    policy.group.replace(/\$\{\{(.*?)\}\}/g, (_, expression: string) =>
       new Function("needs", "format", `return (${expression});`)(
         { target: { outputs: { pr: pr ? String(pr) : "", sha } } },
         (template: string, value: unknown) =>
@@ -96,7 +77,7 @@ exit "$MOCK_EXIT_CODE"
 }
 
 function runStep(
-  step: Step,
+  step: WorkflowStep,
   directory: string,
   overrides: Record<string, string> = {},
   python?: string,

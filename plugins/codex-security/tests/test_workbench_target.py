@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from typing import Any, Callable, cast
 
 import pytest
-from workbench_test_support import initialize_git_repository
+from workbench_test_support import git_in, initialize_git_repository
 
 WORKBENCH_TARGET = runpy.run_path(
     str(Path(__file__).resolve().parents[1] / "scripts" / "workbench_target.py")
@@ -57,15 +57,13 @@ def test_register_local_diff_with_renamed_source(
     target = tmp_path / "repository"
     initialize_git_repository(target)
     (target / "old.py").write_bytes(b"\0binary" if binary else b"historical text\n")
-    subprocess.run(["git", "add", "old.py"], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "add source"], cwd=target, check=True)
-    subprocess.run(["git", "config", "diff.renames", "true"], cwd=target, check=True)
+    git_in(target, "add", "old.py")
+    git_in(target, "commit", "-qm", "add source")
+    git_in(target, "config", "diff.renames", "true")
     (target / destination).parent.mkdir(exist_ok=True)
-    subprocess.run(["git", "mv", "old.py", destination], cwd=target, check=True)
+    git_in(target, "mv", "old.py", destination)
     if missing:
-        subprocess.run(
-            ["git", "update-index", "--skip-worktree", destination], cwd=target, check=True
-        )
+        git_in(target, "update-index", "--skip-worktree", destination)
         (target / destination).unlink()
 
     assert workbench_target.git_changed_paths(target, "HEAD", "HEAD", "local-patch") == [
@@ -435,7 +433,7 @@ def test_reviewed_patch_preserves_junction_boundaries(
     source = tmp_path / "source"
     source.mkdir()
     if git_repository:
-        subprocess.run(["git", "init", "-q"], cwd=source, check=True)
+        git_in(source, "init", "-q")
     junction_root = source
     if git_repository == "nested":
         junction_root = source / "nested"
@@ -453,7 +451,7 @@ def test_reviewed_patch_preserves_junction_boundaries(
     scan = write_reviewed_patch(tmp_path, source, patch)
     (source / "app.txt").write_text("before\n")
     if git_repository == "indexed":
-        subprocess.run(["git", "add", "."], cwd=source, check=True)
+        git_in(source, "add", ".")
     remediation = reviewed_remediation(
         patch, "unversioned", workbench_db.directory_content_digest(source)
     )
@@ -496,7 +494,7 @@ def test_reviewed_patch_preserves_readonly_junction(
     source = tmp_path / "source"
     source.mkdir()
     if git_repository:
-        subprocess.run(["git", "init", "-q"], cwd=source, check=True)
+        git_in(source, "init", "-q")
     outside = tmp_path / "outside"
     outside.mkdir()
     if readonly_target:
@@ -535,8 +533,8 @@ def test_versioned_reviewed_patch_preserves_nested_junctions(
     target = repository / scope
     target.mkdir(exist_ok=True)
     (target / "app.txt").write_text("before\n")
-    subprocess.run(["git", "add", "."], cwd=repository, check=True)
-    subprocess.run(["git", "commit", "-qm", "Add target"], cwd=repository, check=True)
+    git_in(repository, "add", ".")
+    git_in(repository, "commit", "-qm", "Add target")
     nested = target / "nested"
     initialize_git_repository(nested)
     outside = tmp_path / "outside"
@@ -621,7 +619,7 @@ def test_reviewed_patch_does_not_copy_through_indexed_directory_links(
     link.mkdir(parents=True)
     (link / "file.txt").write_text("indexed child\n")
     (source / "app.txt").write_text("before\n")
-    subprocess.run(["git", "add", "component"], cwd=repository, check=True)
+    git_in(repository, "add", "component")
     shutil.rmtree(link)
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -688,7 +686,7 @@ def test_reviewed_patch_restores_junction_git_context(
         global_config.write_text("[core]\n\tautocrlf = false\n")
         monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(global_config))
         monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
-        subprocess.run(["git", "config", "core.autocrlf", "true"], cwd=source, check=True)
+        git_in(source, "config", "core.autocrlf", "true")
         newline = "\r\n" if case == "git_metadata_crlf" else "\n"
     (source / "src").mkdir()
     (source / "src" / "app.txt").write_text("stable contents\n")
@@ -769,9 +767,7 @@ def test_reviewed_patch_preserves_scoped_unborn_lf_bytes(
     monkeypatch.setattr(workbench_remediation, "git_command", require_short_reference)
     attributes = tmp_path / "attributes"
     attributes.write_text("*.txt text eol=crlf\n")
-    subprocess.run(
-        ["git", "config", "core.attributesFile", str(attributes)], cwd=repository, check=True
-    )
+    git_in(repository, "config", "core.attributesFile", str(attributes))
     source = repository / "component"
     source.mkdir()
 
@@ -818,14 +814,14 @@ def assert_reviewed_change(
 def test_native_reviewed_patch_preserves_indexed_junction_spelling(tmp_path: Path) -> None:
     source = tmp_path / "source"
     initialize_unborn_git_repository(source)
-    subprocess.run(["git", "config", "core.ignorecase", "true"], cwd=source, check=True)
+    git_in(source, "config", "core.ignorecase", "true")
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "file.txt").write_text("external contents\n")
     junction = source / "linked"
     subprocess.run(["cmd", "/c", "mklink", "/J", str(junction), str(outside)], check=True)
     (source / "app.txt").write_text("before\n")
-    subprocess.run(["git", "add", "."], cwd=source, check=True)
+    git_in(source, "add", ".")
     junction.rename(source / "Linked")
     assert_reviewed_change(source, tmp_path, "app.txt", "before\n", "after\n")
 
@@ -839,13 +835,13 @@ def test_indexed_junction_case_aliases_keep_snapshot_identity(
 
     source = tmp_path / "source"
     initialize_unborn_git_repository(source)
-    subprocess.run(["git", "config", "core.ignorecase", "true"], cwd=source, check=True)
+    git_in(source, "config", "core.ignorecase", "true")
     outside = tmp_path / "outside"
     outside.mkdir()
     (outside / "file.txt").write_text("external contents\n")
     junction = source / "linked"
     junction_factory(junction, outside)
-    subprocess.run(["git", "add", "."], cwd=source, check=True)
+    git_in(source, "add", ".")
     metadata = junction.lstat()
     renamed = junction.rename(source / "Linked")
     if not getattr(renamed.lstat(), "st_reparse_tag", 0):
@@ -954,7 +950,7 @@ index {"0" * 40}..{"1" * 40}
 
 def initialize_unborn_git_repository(target: Path) -> None:
     target.mkdir()
-    subprocess.run(["git", "init", "-q"], cwd=target, check=True)
+    git_in(target, "init", "-q")
 
 
 @pytest.mark.parametrize("git", [False, True])
@@ -971,7 +967,7 @@ def test_directory_snapshots_exclude_svn_metadata(tmp_path: Path, git: bool) -> 
         path.parent.mkdir(parents=True)
         path.write_text("metadata\n")
     if git:
-        subprocess.run(["git", "add", "--force", "."], cwd=target, check=True)
+        git_in(target, "add", "--force", ".")
 
     original = directory_content_digest(target)
     count_files = WORKBENCH_TARGET["directory_snapshot_regular_file_count"]
@@ -998,12 +994,10 @@ def test_worktree_snapshots_exclude_svn_metadata(tmp_path: Path, tracked: bool, 
     for path in metadata:
         path.parent.mkdir(parents=True)
         path.write_text("metadata\n")
-    subprocess.run(["git", "add", str(source)], cwd=repository, check=True)
+    git_in(repository, "add", str(source))
     if tracked:
-        subprocess.run(["git", "add", "."], cwd=repository, check=True)
-    subprocess.run(
-        ["git", "commit", "-qm", "Synthetic source and metadata"], cwd=repository, check=True
-    )
+        git_in(repository, "add", ".")
+    git_in(repository, "commit", "-qm", "Synthetic source and metadata")
 
     original = worktree_content_digest(target)
     for path in metadata:
@@ -1079,7 +1073,7 @@ def test_reviewed_patch_preserves_unborn_git_inventory(tmp_path: Path, change: s
     cache.mkdir()
     cached_file = cache / "output.txt"
     cached_file.write_text("ignored build output\n")
-    subprocess.run(["git", "add", ".gitignore", "src/app.txt"], cwd=source, check=True)
+    git_in(source, "add", ".gitignore", "src/app.txt")
     patch = (
         b"diff --git a/src/app.txt b/src/app.txt\n"
         b"--- a/src/app.txt\n+++ b/src/app.txt\n@@ -1 +1 @@\n-before\n+after\n"
@@ -1101,16 +1095,12 @@ def test_reviewed_patch_preserves_unborn_git_inventory(tmp_path: Path, change: s
 
 
 def add_submodule_gitlink(repository: Path, revision: str, scope: str) -> None:
-    subprocess.run(
-        [
-            "git",
-            "update-index",
-            "--add",
-            "--cacheinfo",
-            f"160000,{revision},{(Path(scope) / 'submodule').as_posix()}",
-        ],
-        cwd=repository,
-        check=True,
+    git_in(
+        repository,
+        "update-index",
+        "--add",
+        "--cacheinfo",
+        f"160000,{revision},{(Path(scope) / 'submodule').as_posix()}",
     )
 
 
@@ -1158,8 +1148,8 @@ def test_git_blob_binary_flags_match_full_file_classification_with_bounded_reads
     }
     for name, content in contents.items():
         (target / name).write_bytes(content)
-    subprocess.run(["git", "add", "."], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "source samples"], cwd=target, check=True)
+    git_in(target, "add", ".")
+    git_in(target, "commit", "-qm", "source samples")
 
     git_blob_binary_flags = WORKBENCH_TARGET["git_blob_binary_flags"]
     function_globals = git_blob_binary_flags.__globals__
@@ -1289,10 +1279,8 @@ def test_git_metadata_preserves_unicode_commit_subject(
 ) -> None:
     target = tmp_path / "target"
     initialize_git_repository(target)
-    subprocess.run(["git", "commit", "--allow-empty", "-qm", subject], cwd=target, check=True)
-    subprocess.run(
-        ["git", "config", "i18n.logOutputEncoding", log_encoding], cwd=target, check=True
-    )
+    git_in(target, "commit", "--allow-empty", "-qm", subject)
+    git_in(target, "config", "i18n.logOutputEncoding", log_encoding)
     set_default_subprocess_encoding(monkeypatch, encoding)
 
     assert WORKBENCH_TARGET["git_target_metadata"](target)["commitSubject"] == subject
@@ -1320,8 +1308,8 @@ def test_git_metadata_ignores_signature_output_in_commit_subject(tmp_path: Path)
         .decode()
         .strip()
     )
-    subprocess.run(["git", "update-ref", "HEAD", revision], cwd=target, check=True)
-    subprocess.run(["git", "config", "log.showSignature", "true"], cwd=target, check=True)
+    git_in(target, "update-ref", "HEAD", revision)
+    git_in(target, "config", "log.showSignature", "true")
 
     assert WORKBENCH_TARGET["git_target_metadata"](target)["commitSubject"] == "Signed subject"
 
@@ -1568,7 +1556,7 @@ def test_directory_content_digest_skips_missing_cached_paths(tmp_path: Path) -> 
     original_digest = directory_content_digest(target)
     cached_source = target / "cached.py"
     cached_source.write_text("print('cached')\n")
-    subprocess.run(["git", "add", cached_source.name], cwd=target, check=True)
+    git_in(target, "add", cached_source.name)
     cached_source.unlink()
 
     assert directory_content_digest(target) == original_digest
@@ -1615,14 +1603,14 @@ def test_git_diff_display_settings_preserve_selected_working_content(
         (target / name).write_text(
             "".join(f"{name} line {n}\n" for n in range(20)), encoding="utf-8"
         )
-    subprocess.run(["git", "add", "--", "."], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "Track fixture"], cwd=target, check=True)
+    git_in(target, "add", "--", ".")
+    git_in(target, "commit", "-qm", "Track fixture")
     indent.write_bytes(b"\ndone()\ndone()\ndef sample():\n")
     for name, destination in moved:
-        subprocess.run(["git", "mv", name, destination], cwd=target, check=True)
+        git_in(target, "mv", name, destination)
         with (target / destination).open("ab") as stream:
             stream.write(b"added line\n")
-        subprocess.run(["git", "add", "--", destination], cwd=target, check=True)
+        git_in(target, "add", "--", destination)
     path.write_bytes(b"heading\none\nB\nC\nC\nthree\n")
     original_lines[0] = "changed start"
     original_lines[-1] = "changed end"
@@ -1635,7 +1623,7 @@ def test_git_diff_display_settings_preserve_selected_working_content(
     if option == "GIT_DIFF_OPTS":
         monkeypatch.setenv(option, value)
     else:
-        subprocess.run(["git", "config", "--local", option, value], cwd=target, check=True)
+        git_in(target, "config", "--local", option, value)
 
     # Reproduce a stored digest generated by a previous version with this setting.
     old_patch = subprocess.check_output(
@@ -1673,19 +1661,19 @@ def test_git_submodule_display_preserves_selected_working_content(
     child = target / "submodule"
     initial = initialize_git_repository(child)
     add_submodule_gitlink(target, initial, ".")
-    subprocess.run(["git", "commit", "-qm", "Pin child"], cwd=target, check=True)
+    git_in(target, "commit", "-qm", "Pin child")
 
     def advance_child(content: str) -> None:
         (child / "README.md").write_text(content + "\n", encoding="utf-8")
-        subprocess.run(["git", "commit", "-qam", content], cwd=child, check=True)
-        subprocess.run(["git", "add", "--", "submodule"], cwd=target, check=True)
+        git_in(child, "commit", "-qam", content)
+        git_in(target, "add", "--", "submodule")
 
     advance_child("Selected child")
     require_target = workbench_api["require_diff_target"]
     selected = require_target(target, "working_tree", None, None, None)["contentDigest"]
     diff = ["git", "diff", "HEAD", "--", "submodule"]
     original = subprocess.check_output(diff, cwd=target)
-    subprocess.run(["git", "config", "--local", "diff.submodule", display], cwd=target, check=True)
+    git_in(target, "config", "--local", "diff.submodule", display)
     configured = subprocess.check_output(diff, cwd=target)
     assert configured != original
     assert require_target(target, "working_tree", None, None, selected)["contentDigest"] == selected
@@ -1720,14 +1708,14 @@ def test_git_driver_settings_preserve_selected_working_content(
         + (b"\0" + b"abcde" * 4096 if binary else b"")
     )
     source.write_bytes(initial)
-    subprocess.run(["git", "add", "--", "."], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "Track example"], cwd=target, check=True)
+    git_in(target, "add", "--", ".")
+    git_in(target, "commit", "-qm", "Track example")
     source.write_bytes(initial.replace(b"a = 15", b"a = 42"))
     require_target = workbench_api["require_diff_target"]
     selected = require_target(target, "working_tree", None, None, None)["contentDigest"]
     args = ["git", "diff", "--binary", "--full-index", "HEAD"]
     original = subprocess.check_output(args, cwd=target)
-    subprocess.run(["git", "config", "--local", key, value], cwd=target, check=True)
+    git_in(target, "config", "--local", key, value)
     configured = subprocess.check_output(args, cwd=target)
     assert configured != original
     assert require_target(target, "working_tree", None, None, selected)["contentDigest"] == selected
@@ -1761,8 +1749,8 @@ def test_worktree_content_digest_streams_tracked_binary_patch(
     # Incompressible fixture bytes keep the binary patch larger than one hash read.
     fixture_size = 1024 * 1024 + 17
     binary.write_bytes(hashlib.shake_256(b"original binary fixture").digest(fixture_size))
-    subprocess.run(["git", "add", binary.name], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "Add binary fixture"], cwd=target, check=True)
+    git_in(target, "add", binary.name)
+    git_in(target, "commit", "-qm", "Add binary fixture")
     binary.write_bytes(hashlib.shake_256(b"changed binary fixture").digest(fixture_size))
 
     tracked = subprocess.run(
@@ -2472,9 +2460,7 @@ def test_windows_root_inventory_retries_the_selected_git_directory(
         cwd.mkdir(parents=True)
         (source / scope).mkdir(parents=True)
         (source / scope / "selected.txt").write_text("selected\n", encoding="utf-8")
-        subprocess.run(
-            ["git", "add", "--", (scope / "selected.txt").as_posix()], cwd=source, check=True
-        )
+        git_in(source, "add", "--", (scope / "selected.txt").as_posix())
         expected = b"selected.txt\0"
     if case == "deep-gitfile":
         while len(os.fsencode(os.path.relpath(worktree / ".git", cwd))) <= len(
@@ -2699,7 +2685,7 @@ def test_long_git_metadata_keeps_nested_directory_inventory_scoped(tmp_path: Pat
         pytest.skip("requires an ordinary fixed local drive")
     seed = tmp_path / "seed"
     initialize_git_repository(seed)
-    subprocess.run(["git", "config", "core.longpaths", "true"], cwd=seed, check=True)
+    git_in(seed, "config", "core.longpaths", "true")
     # More than 220 UTF-8 bytes in --git-dir without requiring a long Win32 component.
     checkout = tmp_path / ("界" * 75)
     shutil.copytree(seed, checkout)
@@ -2726,8 +2712,8 @@ def test_copy_skips_index_paths_under_a_directory_replaced_by_a_file(tmp_path: P
     initialize_git_repository(target)
     (target / "config").mkdir()
     (target / "config" / "settings.py").write_text("tracked = True\n")
-    subprocess.run(["git", "add", "config"], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "Add config"], cwd=target, check=True)
+    git_in(target, "add", "config")
+    git_in(target, "commit", "-qm", "Add config")
     shutil.rmtree(target / "config")
     (target / "config").write_text("replacement file\n")
     destination = tmp_path / "copied"
@@ -2740,7 +2726,7 @@ def test_git_context_rejects_an_unrelated_configured_worktree(tmp_path: Path) ->
     unrelated = tmp_path / "unrelated"
     initialize_git_repository(target)
     unrelated.mkdir()
-    subprocess.run(["git", "config", "core.worktree", str(unrelated)], cwd=target, check=True)
+    git_in(target, "config", "core.worktree", str(unrelated))
     with pytest.raises(SystemExit, match="inside its Git working tree"):
         WORKBENCH_TARGET["git_worktree_context"](target)
     with pytest.raises(SystemExit, match="inside its Git working tree"):
@@ -2800,7 +2786,7 @@ def test_candidate_sources_disambiguate_revision_from_worktree_filename(tmp_path
     target = tmp_path / "repository"
     revision = initialize_git_repository(target)
     (target / revision).write_text("synthetic revision-named file\n")
-    subprocess.run(["git", "rm", "-q", "README.md"], cwd=target, check=True)
+    git_in(target, "rm", "-q", "README.md")
 
     sources = WORKBENCH_TARGET["candidate_source_lines"](
         target,
@@ -2821,10 +2807,10 @@ def test_deleted_candidate_sources_keep_base_blob_when_path_is_recreated(
     initialize_git_repository(target)
     source = target / "deleted.ts"
     source.write_bytes(b"one\rtwo\r\nthree\nfour")
-    subprocess.run(["git", "add", "deleted.ts"], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "selected source"], cwd=target, check=True)
+    git_in(target, "add", "deleted.ts")
+    git_in(target, "commit", "-qm", "selected source")
     revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip()
-    subprocess.run(["git", "rm", "-q", "deleted.ts"], cwd=target, check=True)
+    git_in(target, "rm", "-q", "deleted.ts")
     (target / ".git" / "info" / "exclude").write_text("deleted.ts\n")
     if replacement == "directory":
         source.mkdir()
@@ -2869,8 +2855,8 @@ def test_candidate_aliases_use_selected_tree_and_preserve_ambiguity(
     initialize_git_repository(target)
     support = target / "Support.ts"
     support.write_text("support\nsecond\n")
-    subprocess.run(["git", "add", "Support.ts"], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "support source"], cwd=target, check=True)
+    git_in(target, "add", "Support.ts")
+    git_in(target, "commit", "-qm", "support source")
     base = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip()
     for name, mode, content in (
         ("Foo.ts", "100644", b"upper\n"),
@@ -2885,18 +2871,12 @@ def test_candidate_aliases_use_selected_tree_and_preserve_ambiguity(
             .decode()
             .strip()
         )
-        subprocess.run(
-            ["git", "update-index", "--add", "--cacheinfo", f"{mode},{blob},{name}"],
-            cwd=target,
-            check=True,
-        )
-    subprocess.run(["git", "commit", "-qm", "selected tree"], cwd=target, check=True)
+        git_in(target, "update-index", "--add", "--cacheinfo", f"{mode},{blob},{name}")
+    git_in(target, "commit", "-qm", "selected tree")
     head = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip()
     support.unlink()
-    subprocess.run(
-        ["git", "update-index", "--force-remove", "Support.ts", "Foo.ts"], cwd=target, check=True
-    )
-    subprocess.run(["git", "commit", "-qm", "later tree"], cwd=target, check=True)
+    git_in(target, "update-index", "--force-remove", "Support.ts", "Foo.ts")
+    git_in(target, "commit", "-qm", "later tree")
     (target / "foo.ts").write_text("different current content\n")
     requested = ["Foo.ts", "foo.ts", "FOO.ts", "SUPPORT.TS", "./SUPPORT.TS", "LINK.TS", "FOLDER"]
     sources = WORKBENCH_TARGET["candidate_source_lines"](

@@ -2,22 +2,14 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { DatabaseSync } from "node:sqlite";
 import { after, test, type TestContext } from "node:test";
-import { importSource } from "./import-module.ts";
+import { bundledMcpDefine, importSource } from "./import-module.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import type * as Local from "../src/workbench/local-dedupe.ts";
 import type * as Migrations from "../src/workbench/migrations.ts";
 import type { Finding } from "../src/workbench/findings.ts";
 
 const { localDedupe } = (await importSource("src/workbench/local-dedupe.ts", {
-  define: {
-    // Native bindings are installed beside the generated server bundle.
-    "import.meta.url": JSON.stringify(
-      new URL(
-        "../../../../sdk/typescript/_bundled_plugin/mcp/server.mjs",
-        import.meta.url,
-      ).href,
-    ),
-  },
+  define: bundledMcpDefine("server"),
 })) as typeof Local;
 const { applyMigrations } = (await importSource(
   "src/workbench/migrations.ts",
