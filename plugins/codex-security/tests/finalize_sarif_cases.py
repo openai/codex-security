@@ -388,6 +388,13 @@ class FinalizerSarifCases:
         with ShortReads("line 1\nline 2\n") as source:
             self.assertEqual(FINALIZER._github_line_hashes(source)[1], "a4060029c94de37e:1")
 
+        # Each repeated line fills a UTF-16 window. The first CRLF splits across reads.
+        with ShortReads(("😀" * 50 + "\r\n") * 2) as source:
+            self.assertEqual(
+                FINALIZER._github_line_hashes(source, {2, 3}),
+                {2: "e4a94f1d18cd866a:2", 3: "c129715d7a2bc9a3:1"},
+            )
+
     def test_sarif_line_hash_includes_lines_beyond_previous_limit(self) -> None:
         source = io.StringIO("\n" * 100_000 + "source\n")
 

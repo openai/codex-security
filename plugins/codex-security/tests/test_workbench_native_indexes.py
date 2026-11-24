@@ -11,7 +11,6 @@ from pathlib import Path
 import pytest
 import test_workbench_scan_history as producer
 from workbench_test_support import (
-    add_detached_worktree,
     close_finding,
     create_saved_workspace,
     create_workspace,
@@ -61,13 +60,7 @@ def complete_scan(
         findings["findings"] = []
         findings_path.write_text(json.dumps(findings))
     if follow_up:
-        coverage_path = scan_dir / "coverage.json"
-        coverage = json.loads(coverage_path.read_text())
-        coverage["surfaces"][0]["disposition"] = "needs_follow_up"
-        coverage["deferred"] = [
-            {"id": "unreviewed-path", "reason": "Review incomplete", "paths": ["src/extract.py"]}
-        ]
-        coverage_path.write_text(json.dumps(coverage))
+        producer.mark_incomplete_coverage(scan_dir)
     return scan_command(state_dir, "complete-scan", scan_id)["scan"]
 
 
@@ -341,10 +334,7 @@ def test_legacy_linked_comparison_keeps_unbound_triage_target_local(
     tmp_path: Path, saved_comparison: bool
 ) -> None:
     state = tmp_path / "state"
-    repository = tmp_path / "repository"
-    revision = initialize_git_repository(repository)
-    linked = tmp_path / "linked"
-    add_detached_worktree(repository, linked)
+    repository, linked, revision = producer.linked_checkouts(tmp_path)
     first = producer.create_cli_scan(
         state, tmp_path / "results", repository, target_revision=revision
     )
@@ -385,10 +375,7 @@ def test_legacy_linked_comparison_keeps_unbound_triage_target_local(
 
 def linked_scans_with_current_timestamps(tmp_path, monkeypatch):
     state = tmp_path / "state"
-    repository = tmp_path / "repository"
-    linked = tmp_path / "linked"
-    revision = initialize_git_repository(repository)
-    add_detached_worktree(repository, linked)
+    repository, linked, revision = producer.linked_checkouts(tmp_path)
     original_write = producer.write_completed_contract
 
     def write_current_completion(scan_dir, scan_id, target, **values):
@@ -422,10 +409,7 @@ def test_sealed_legacy_recurrence_match_keeps_linked_scope_status(
     )
     first_finding = get_scan(state, first["scanId"])["scan"]["findings"][0]
     if legacy_first:
-        with sqlite3.connect(state / "workbench.sqlite3") as connection:
-            connection.execute(
-                "UPDATE scans SET repository_generation=NULL WHERE id=?", (first["scanId"],)
-            )
+        producer.clear_scan_generation(state, first)
     close_finding(
         state, first_finding["occurrenceId"], "false_positive", "Synthetic checked guard."
     )
@@ -480,24 +464,20 @@ def test_saved_legacy_alias_survives_current_linked_match(
     state, repository, linked, revision = linked_scans_with_current_timestamps(
         tmp_path, monkeypatch
     )
-    record_scan = partial(
-        producer.create_cli_scan, state, tmp_path / "results", target_revision=revision
-    )
-    first = record_scan(repository, identity_anchor="synthetic-first-control")
-    first_finding = get_scan(state, first["scanId"])["scan"]["findings"][0]
-    with sqlite3.connect(state / "workbench.sqlite3") as connection:
-        connection.execute(
-            "UPDATE scans SET repository_generation=NULL WHERE id=?", (first["scanId"],)
+
+    def scan_with_finding(target: Path, anchor: str):
+        scan = producer.create_cli_scan(
+            state, tmp_path / "results", target, target_revision=revision, identity_anchor=anchor
         )
+        return scan, get_scan(state, scan["scanId"])["scan"]["findings"][0]
+
+    first, first_finding = scan_with_finding(repository, "synthetic-first-control")
+    producer.clear_scan_generation(state, first)
     close_finding(
         state, first_finding["occurrenceId"], "false_positive", "Synthetic checked guard."
     )
-    second = record_scan(repository, identity_anchor="synthetic-second-control")
-    second_finding = get_scan(state, second["scanId"])["scan"]["findings"][0]
-    with sqlite3.connect(state / "workbench.sqlite3") as connection:
-        connection.execute(
-            "UPDATE scans SET repository_generation=NULL WHERE id=?", (second["scanId"],)
-        )
+    second, second_finding = scan_with_finding(repository, "synthetic-second-control")
+    producer.clear_scan_generation(state, second)
     assert first_finding["findingId"] != second_finding["findingId"]
     if saved_legacy_alias:
         result = producer.save_scan_matches(
@@ -507,10 +487,8 @@ def test_saved_legacy_alias_survives_current_linked_match(
             producer.confirmed_match(first_finding["occurrenceId"], second_finding["occurrenceId"]),
         )
         assert result["summary"]["persisting"] == 1
-    current = record_scan(repository, identity_anchor="synthetic-second-control")
-    current_finding = get_scan(state, current["scanId"])["scan"]["findings"][0]
-    later = record_scan(linked, identity_anchor="synthetic-second-control")
-    later_finding = get_scan(state, later["scanId"])["scan"]["findings"][0]
+    current, current_finding = scan_with_finding(repository, "synthetic-second-control")
+    later, later_finding = scan_with_finding(linked, "synthetic-second-control")
     assert second_finding["findingId"] == current_finding["findingId"]
     assert current_finding["findingId"] != later_finding["findingId"]
     if saved_current_match:

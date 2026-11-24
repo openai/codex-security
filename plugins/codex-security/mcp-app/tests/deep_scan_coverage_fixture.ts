@@ -1,3 +1,4 @@
+import { reviewSurface } from "./scan-draft-fixture.ts";
 import { fixturePython } from "./support/python.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -271,12 +272,12 @@ runpy.run_path(sys.argv[0], run_name="__main__")
             },
             ...(receiptOwnershipRetry === "unrelated"
               ? [
-                  {
-                    id: "closed",
-                    label: "Separate review",
-                    disposition: "needs_follow_up",
-                    receiptRefs: [receiptRef],
-                  },
+                  reviewSurface(
+                    "closed",
+                    "Separate review",
+                    "needs_follow_up",
+                    [receiptRef],
+                  ),
                 ]
               : []),
           ],
@@ -412,14 +413,12 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         reviewState: {
           completeness: status,
           surfaces: [
-            {
-              id: sameAttemptCloseout ? "first" : "later",
-              label: sameAttemptCloseout
-                ? "First checkpoint"
-                : "Later checkpoint",
-              disposition: "no_issue_found",
-              receiptRefs: [nextRef],
-            },
+            reviewSurface(
+              sameAttemptCloseout ? "first" : "later",
+              sameAttemptCloseout ? "First checkpoint" : "Later checkpoint",
+              "no_issue_found",
+              [nextRef],
+            ),
           ],
           explicitExclusions: [],
           deferred: [],
@@ -443,18 +442,15 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         { workerId: "untrusted-worker", attempt: 99, completeness: "complete" },
       ],
       surfaces: [
-        {
-          id: "shared-surface",
-          label: "Archive route",
-          disposition: pending ? "needs_follow_up" : "no_issue_found",
-          receiptRefs: ["artifacts/review.md"],
-        },
-        {
-          id: "shared-surface",
-          label: "Archive settings",
-          disposition: "no_issue_found",
-          receiptRefs: ["artifacts/review.md"],
-        },
+        reviewSurface(
+          "shared-surface",
+          "Archive route",
+          pending ? "needs_follow_up" : "no_issue_found",
+          ["artifacts/review.md"],
+        ),
+        reviewSurface("shared-surface", "Archive settings", "no_issue_found", [
+          "artifacts/review.md",
+        ]),
       ],
       explicitExclusions: [
         { pattern: "vendor/", reason: "External dependency." },
@@ -575,12 +571,9 @@ runpy.run_path(sys.argv[0], run_name="__main__")
             current,
             ...(receiptOwnershipRetry === "unrelated"
               ? [
-                  {
-                    id: "closed",
-                    label: "Separate review",
-                    disposition: "no_issue_found",
-                    receiptRefs: [closureReceiptRef],
-                  },
+                  reviewSurface("closed", "Separate review", "no_issue_found", [
+                    closureReceiptRef,
+                  ]),
                 ]
               : []),
           ],
