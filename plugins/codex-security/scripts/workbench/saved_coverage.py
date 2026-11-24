@@ -545,18 +545,18 @@ class SavedCoverageOrigins:
             identities = []
             for ref in refs:
                 digest = self.receipt_digest(ref)
-                if digest is None:
-                    return None
                 scan_owned = ref in shared
-                directory = next(
-                    (
-                        parent
-                        for parent in Path(ref).parents
-                        if parent == self.directory(path)
-                        or self.worker_attempts.get(parent.as_posix(), (None, None))[0] == owner
-                    ),
-                    None,
-                )
+                directory = None
+                if digest is not None:
+                    directory = next(
+                        (
+                            parent
+                            for parent in Path(ref).parents
+                            if parent == self.directory(path)
+                            or self.worker_attempts.get(parent.as_posix(), (None, None))[0] == owner
+                        ),
+                        None,
+                    )
                 local = not scan_owned and directory is not None
                 logical = (
                     re.sub(
@@ -573,9 +573,7 @@ class SavedCoverageOrigins:
             return identities
 
         left_identities = receipt_identities(left_refs, left_path, shared_refs[0])
-        return left_identities is not None and left_identities == receipt_identities(
-            right_refs, right_path, shared_refs[1]
-        )
+        return left_identities == receipt_identities(right_refs, right_path, shared_refs[1])
 
     def attempt(self, field, index, worker, source):
         relative = self.paths.get(id(source))

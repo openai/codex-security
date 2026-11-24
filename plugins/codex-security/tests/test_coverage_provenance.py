@@ -422,6 +422,10 @@ def test_recovered_legacy_surface_occurrence_is_consumed_once(
         "missing-archive",
         "shared-archive",
         "shared-archive-missing",
+        "copied-mixed-shared",
+        "copied-mixed-shared-missing",
+        "changed-mixed-shared-missing",
+        "copied-malformed-receipt",
     ],
 )
 def test_reconstructed_retry_surface_compares_receipt_bytes(
@@ -452,13 +456,28 @@ def test_reconstructed_retry_surface_compares_receipt_bytes(
             ],
         },
     }
+    shared_receipt = scan.scan_dir / "artifacts/shared.txt"
+    if "mixed-shared" in receipt_state:
+        shared_receipt.parent.mkdir(exist_ok=True)
+        shared_receipt.write_text("Shared synthetic evidence.\n")
+        surface["receiptRefs"].append("artifacts/shared.txt")
+        surface["provenance"] = {"scanReceiptRefs": ["artifacts/shared.txt"]}
+    if receipt_state == "copied-malformed-receipt":
+        surface["receiptRefs"].append(None)
     result.write_text(json.dumps(draft))
     archived.write_text(json.dumps({**draft, "complete": False}))
+    saved_sources = [result, archived]
+    if "mixed-shared" in receipt_state:
+        for path in (result, archived):
+            checkpoint = write_checkpoint(path.parent / "checkpoints", json.loads(path.read_text()))
+            head = path.parent / "checkpoint-head.json"
+            head.write_text(json.dumps({"checkpoint": checkpoint.name}))
+            saved_sources.extend([checkpoint, head])
     for directory in (output, archived.parent):
         receipt = directory / "artifacts/review.txt"
         receipt.parent.mkdir()
         receipt.write_text("Original synthetic evidence.\n")
-    if receipt_state == "changed":
+    if receipt_state in {"changed", "changed-mixed-shared-missing"}:
         (output / "artifacts/review.txt").write_text("Changed synthetic evidence.\n")
     if receipt_state in {"missing-archive", "shared-archive-missing"}:
         (archived.parent / "artifacts/review.txt").unlink()
@@ -476,7 +495,6 @@ def test_reconstructed_retry_surface_compares_receipt_bytes(
             current_receipt.relative_to(output).as_posix()
         ]
         result.write_text(json.dumps(draft))
-    saved_sources = [result, archived]
     if "nested" in receipt_state:
         second_archive = output.parent / "attempts/attempt-02/result.json"
         second_archive.parent.mkdir(parents=True)
@@ -518,6 +536,8 @@ def test_reconstructed_retry_surface_compares_receipt_bytes(
     )
     if receipt_state.startswith("changed") and retained_parent:
         current_receipt.write_text("Changed synthetic evidence.\n")
+    if receipt_state.endswith("mixed-shared-missing"):
+        shared_receipt.unlink()
     originals = {path: path.read_bytes() for path in saved_sources}
     coverage = stop_and_recover_projection(workbench_api, workbench_db, scan, monkeypatch, retry)
     expected_attempt = (
@@ -543,7 +563,7 @@ def test_reconstructed_retry_surface_compares_receipt_bytes(
         assert retained["disposition"] == "needs_follow_up"
         assert "completeness" not in coverage
     else:
-        assert retained["receiptRefs"] == [
+        expected_receipts = [
             (
                 archived.parent / "artifacts/review.txt"
                 if receipt_state.startswith("shared-archive")
@@ -552,6 +572,9 @@ def test_reconstructed_retry_surface_compares_receipt_bytes(
             .relative_to(scan.scan_dir)
             .as_posix()
         ]
+        if receipt_state == "copied-mixed-shared":
+            expected_receipts.append("artifacts/shared.txt")
+        assert retained["receiptRefs"] == expected_receipts
     gap = next(row for row in coverage["deferred"] if row.get("reason") == "Validate this source.")
     assert gap["surfaceIds"] == [retained["id"]]
     assert all(path.read_bytes() == data for path, data in originals.items())
