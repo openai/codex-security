@@ -884,14 +884,16 @@ def test_projection_preserves_inline_code_and_existing_url_escapes() -> None:
     assert "`` file&amp;` ``" in markdown
 
 
-def test_projection_preserves_only_intraword_underscores_in_bare_urls() -> None:
+def test_projection_preserves_emphasis_and_trailing_underscores_in_web_links() -> None:
+    url = "https://example.com/__init__.py?q=a&key=_private_"
+    label = r"https://example.com/\_\_init\_\_.py?q=a&key=\_private\_"
     markdown = report_with_finding(
-        summary="Compare https://example.com/__init__.py with www.example.com/_private_/a_b_c and snake_case."
+        title=url, summary=f"See ({url}), www.example.com/_end_. Keep snake_case and `{url}`."
     )
-    assert (
-        r"Compare https://example.com/\_\_init\_\_.py with "
-        r"www.example.com/\_private\_/a_b_c and snake\_case."
-    ) in markdown
+    assert f"[{label}](#finding-1)" in markdown
+    assert f"See ([{label}](<{url.replace('&', '&amp;')}>))," in markdown
+    assert r"[www.example.com/\_end\_](<http://www.example.com/_end_>)." in markdown
+    assert f"Keep snake\\_case and `{url}`." in markdown
 
 
 @pytest.mark.parametrize("status", ["completed", "interrupted"])

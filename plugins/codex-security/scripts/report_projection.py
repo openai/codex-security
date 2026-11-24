@@ -32,6 +32,10 @@ WRITEUP_REPORT_PATH_RE = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
 INLINE_CODE_RE = r"(?<!`)`[^`\n]+`(?!`)"
 ENTITY_AMP_RE = r"&(?=(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]*);)"
 WWW_LINK_RE = r"(?<![^\s*_~(])(?i:www)\.[^\s<>]+"
+# Match complete, plain web links without consuming Markdown syntax or parenthetical wrappers.
+WEB_LINK_RE = (
+    r'(?<![^\s("])(?ai:https?://|www\.)[A-Za-z0-9.:-]+[/?#][^\s<>\\`*[\]|()"]+(?=$|[\s)"])'
+)
 WORD_UNDERSCORE_RE = r"(?<=[A-Za-z0-9])_(?=[A-Za-z0-9])"
 
 
@@ -47,7 +51,7 @@ def markdown_threat_model_content(model: dict[str, Any]) -> str | None:
     return None
 
 
-def _escape_markdown(value: str) -> str:
+def _escape_markdown(value: str, *, link_label: bool = False) -> str:
     # Locate whole URLs before matching code spans: a URL can contain backticks.
     urls = [match.span() for match in re.finditer(WWW_LINK_RE, value)]
     # Preserve protocol-relative and fuzzy links without a domain/TLD table.
@@ -57,11 +61,24 @@ def _escape_markdown(value: str) -> str:
         if "//" in token or (dot >= 0 and re.search(r"[/?#]", token[dot + 1 :])):
             urls.append(match.span())
     punctuation = r"[\\`*_\[\]<>]|" + ENTITY_AMP_RE
-    pattern = f"(?P<code>{INLINE_CODE_RE})|(?P<word>{WORD_UNDERSCORE_RE})|{punctuation}"
+    pattern = (
+        f"(?P<code>{INLINE_CODE_RE})|(?P<link>{WEB_LINK_RE})"
+        f"|(?P<word>{WORD_UNDERSCORE_RE})|{punctuation}"
+    )
 
     def escape(match: re.Match[str]) -> str:
         if match.lastgroup == "code":
             return match[0]
+        if match.lastgroup == "link":
+            url = match[0].rstrip(".,:;!?")
+            if "_" not in re.sub(WORD_UNDERSCORE_RE, "", url):
+                return match[0]
+            # Bare links can lose a final underscore or turn __names__ into emphasis.
+            label = re.sub(r"[_~]|" + ENTITY_AMP_RE, r"\\\g<0>", url)
+            if link_label:
+                return label + match[0][len(url) :]
+            target = "http://" + url if url.lower().startswith("www.") else url
+            return f"[{label}](<{target.replace('&', '&amp;')}>)" + match[0][len(url) :]
         # GFM autolinks retain backslashes literally, including in query strings.
         # An underscore between ASCII letters or digits cannot delimit emphasis.
         if (match[0] == "&" or match.lastgroup == "word") and any(
@@ -73,12 +90,12 @@ def _escape_markdown(value: str) -> str:
     return re.sub(pattern, escape, value)
 
 
-def _text(value: Any, fallback: str) -> str:
+def _text(value: Any, fallback: str, *, link_label: bool = False) -> str:
     candidate = value if isinstance(value, str) and value.strip() else fallback
     normalized = " ".join(candidate.split())
     if re.match(r"^(?:#{1,6}\s|[-*+]\s|>\s|```|~~~|\d+[.)]\s|\|)", normalized):
         normalized = f"Text: {normalized}"
-    return _escape_markdown(normalized)
+    return _escape_markdown(normalized, link_label=link_label)
 
 
 def _string_values(value: Any) -> Iterator[str]:
@@ -108,8 +125,8 @@ def _path_text(value: str, *, ensure_ascii: bool = False) -> str:
     return re.sub(r"([\\`*_\[\]<>])", r"\\\1", value)
 
 
-def _cell(value: Any) -> str:
-    return _text(value, "none").replace("|", "\\|").replace("\n", "<br>")
+def _cell(value: Any, *, link_label: bool = False) -> str:
+    return _text(value, "none", link_label=link_label).replace("|", "\\|").replace("\n", "<br>")
 
 
 def _deep_report_id(finding: dict[str, Any]) -> str:
@@ -213,7 +230,7 @@ def _deep_group_row(group: list[tuple[int, dict[str, Any], str | None]]) -> str:
         identity = finding.get("identity")
         if label_counts[label] > 1 and isinstance(identity, dict):
             label = identity.get("instance") or report_id
-        label = _cell(label)
+        label = _cell(label, link_label=True)
         report_links.append(f"[{label}](#finding-{number})")
         writeup_links.append(f"[Open {label}]({path})" if path else f"{label}: inline below")
     return (
@@ -926,7 +943,7 @@ def build_report_markdown(
                 ]
             )
             for number, finding, report_path in numbered_findings:
-                title = _cell(finding["title"])
+                title = _cell(finding["title"], link_label=True)
                 finding_link = f"[{title}](#finding-{number})"
                 writeup_link = f"[Open report]({report_path})" if report_path else "inline below"
                 lines.append(

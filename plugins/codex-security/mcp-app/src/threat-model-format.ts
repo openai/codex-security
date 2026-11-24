@@ -10,10 +10,7 @@ function collapse(value: string): string {
   return value.replace(whitespace, " ").replace(/^ | $/gu, "");
 }
 
-/**
- * Match report_projection._escape_markdown without changing URL ampersands or
- * the underscores inside URL words.
- */
+/** Match report_projection._escape_markdown, including bare web link handling. */
 function escapeMarkdown(value: string): string {
   const urls = [
     ...value.matchAll(
@@ -34,23 +31,36 @@ function escapeMarkdown(value: string): string {
       urls.push({ start: match.index, end: match.index + token.length });
     }
   }
+  const webLink =
+    /(?<![^ ("])(?:[hH][tT][tT][pP][sS]?:\/\/|[wW]{3}\.)[A-Za-z0-9.:-]+[/?#][^ <>\\`*\[\]|()"]+(?=$|[ )"])/u;
+  const wordUnderscore = /(?<=[A-Za-z0-9])_(?=[A-Za-z0-9])/gu;
   const pattern = new RegExp(
-    /(?<!`)`[^`\n]+`(?!`)|((?<=[A-Za-z0-9])_(?=[A-Za-z0-9]))|[\\`*_\[\]<>]/u
-      .source +
-      "|" +
+    [
+      /(?<!`)`[^`\n]+`(?!`)/u.source,
+      "(" + webLink.source + ")",
+      "(" + wordUnderscore.source + ")",
+      /[\\`*_\[\]<>]/u.source,
       entityAmp.source,
+    ].join("|"),
     "gu",
   );
-  // An underscore between ASCII letters or digits cannot delimit emphasis.
-  return value.replace(
-    pattern,
-    (match, word: string | undefined, offset: number) =>
-      match.length > 1 ||
+  return value.replace(pattern, (match, link, word, offset: number) => {
+    if (link !== undefined) {
+      const url = match.replace(/[.,:;!?]+$/u, "");
+      if (!url.replace(wordUnderscore, "").includes("_")) return match;
+      const label = url.replace(
+        new RegExp("[_~]|" + entityAmp.source, "gu"),
+        "\\$&",
+      );
+      const target = /^www\./iu.test(url) ? "http://" + url : url;
+      return `[${label}](<${target.replaceAll("&", "&amp;")}>)${match.slice(url.length)}`;
+    }
+    return match.length > 1 ||
       ((match === "&" || word !== undefined) &&
         urls.some(({ start, end }) => start <= offset && offset < end))
-        ? match
-        : "\\" + match,
-  );
+      ? match
+      : "\\" + match;
+  });
 }
 
 /** Match report_projection._path_text with ensure_ascii for quoted scope paths. */
