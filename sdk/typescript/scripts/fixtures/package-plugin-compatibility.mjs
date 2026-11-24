@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
+import { packageEnvironment } from "./package-environment.mjs";
 
 const [installedRoot, consumer, selectedPlugin] = process.argv.slice(2);
 assert.ok(selectedPlugin, "Compatibility fixture requires a selected plugin.");
@@ -32,24 +33,7 @@ await mkdir(repository, { mode: 0o700 });
 await mkdir(home, { mode: 0o700 });
 await writeFile(join(repository, "example.py"), "print('synthetic fixture')\n");
 const environment = {
-  ...Object.fromEntries(
-    [
-      "PATH",
-      "Path",
-      "SystemRoot",
-      "WINDIR",
-      "ComSpec",
-      "PATHEXT",
-      "TMP",
-      "TEMP",
-      "TMPDIR",
-    ]
-      .filter((key) => process.env[key] !== undefined)
-      .map((key) => [key, process.env[key]]),
-  ),
-  HOME: home,
-  USERPROFILE: home,
-  CODEX_HOME: home,
+  ...packageEnvironment(home),
   CODEX_SECURITY_STATE_DIR: join(consumer, "compatibility-state"),
   OPENAI_API_KEY: "synthetic-compatibility-key",
 };

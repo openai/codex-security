@@ -1,3 +1,4 @@
+import { workflow } from "./support/workflow.js";
 import { gitText, nodeCommand, runCommand } from "./support/shell.js";
 import { cpSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
@@ -150,10 +151,6 @@ import {
 } from "../scripts/release-automation.mjs";
 const template = readFileSync(
   new URL("../../../.github/PULL_REQUEST_TEMPLATE.md", import.meta.url),
-  "utf8",
-);
-const workflow = readFileSync(
-  new URL("../../../.github/workflows/node-release-pr.yml", import.meta.url),
   "utf8",
 );
 const directories = createTemporaryDirectoriesSync(true);
@@ -1005,24 +1002,11 @@ describe("GitHub request transport", () => {
 });
 
 describe("release workflow controls", () => {
-  const { permissions, jobs, concurrency } = Bun.YAML.parse(workflow) as {
-    permissions: Record<string, string>;
-    concurrency: { group: string; "cancel-in-progress": boolean };
-    jobs: Record<
-      string,
-      {
-        if: string;
-        permissions?: Record<string, string>;
-        concurrency?: { group: string; queue: string };
-        env: { RELEASE_PR_DRY_RUN: string };
-        steps: { id?: string; if?: string }[];
-      }
-    >;
-  };
+  const { permissions, jobs, concurrency } = workflow("node-release-pr");
 
   test("manual release runs keep their place during a burst of main pushes", () => {
     const slot = (event_name: string, run_id: number) =>
-      concurrency.group.replace(/\$\{\{(.*?)\}\}/gu, (_, expression) =>
+      concurrency!.group.replace(/\$\{\{(.*?)\}\}/gu, (_, expression) =>
         String(
           new Function("github", `return (${expression})`)({
             event_name,
@@ -1038,7 +1022,7 @@ describe("release workflow controls", () => {
       slot("workflow_dispatch", 13),
     ];
     expect(new Set(slots).size).toBe(slots.length);
-    expect(concurrency["cancel-in-progress"]).toBe(false);
+    expect(concurrency!["cancel-in-progress"]).toBe(false);
     expect(slots).not.toContain(jobs["reconcile"]?.concurrency?.group);
     expect(jobs["reconcile"]?.concurrency).toEqual({
       group: "node-release-pr",
@@ -1058,9 +1042,9 @@ describe("release workflow controls", () => {
     "selects authentication for dry_run=$dryRun with client ID '$clientId'",
     ({ dryRun, clientId, createsAppToken }) => {
       const job = Object.values(jobs).find(
-        ({ env }) => env.RELEASE_PR_DRY_RUN === dryRun,
+        ({ env }) => env!["RELEASE_PR_DRY_RUN"] === dryRun,
       )!;
-      const appToken = job.steps.find((step) => step.id === "app-token");
+      const appToken = job.steps!.find((step) => step.id === "app-token");
       const evaluate = new Function(
         "vars",
         `return (${appToken?.if ?? "false"});`,
@@ -1130,9 +1114,9 @@ describe("release workflow controls", () => {
           { RELEASE_PR_ENABLED: enabled },
         );
       });
-      expect(selectedJobs.map((job) => job.env.RELEASE_PR_DRY_RUN)).toEqual([
-        String(expected),
-      ]);
+      expect(selectedJobs.map((job) => job.env!["RELEASE_PR_DRY_RUN"])).toEqual(
+        [String(expected)],
+      );
     },
   );
 });
