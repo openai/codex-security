@@ -45,7 +45,9 @@ function summaryFor(graph: EvidenceGraph) {
 
 function detailFor(graph: EvidenceGraph, node: string) {
   const result = graph.query(node);
-  assert("node" in result);
+  assert(
+    "node" in result && !("witness" in result) && !("witnesses" in result),
+  );
   return result;
 }
 
