@@ -159,17 +159,19 @@ function pythonCode(text: string): string {
 
 // ES imports and destructured require() calls share the same local bindings.
 // Return null for erased clauses, [] for an import with no bindings.
-function javascriptBindings(clause: string) {
-  if (/^type(?:\s+[\w$]|\s*[{*])/u.test(clause)) return null;
-  const names = clause
+function javascriptBindings(clause?: string, target?: string) {
+  if (clause && /^type(?:\s+[\w$]|\s*[{*])/u.test(clause)) return null;
+  const names = (clause ?? target ?? "")
     .replace(/[{}]/gu, "")
     .split(",")
     .map((name) => name.trim())
     .filter(Boolean);
   // "type Foo" is erased, but "type as foo" imports a value named type.
-  const values = names.filter(
-    (name) => !/^type\s/u.test(name) || /^type\s+as\s+[\w$]+$/u.test(name),
-  );
+  const values = clause
+    ? names.filter(
+        (name) => !/^type\s/u.test(name) || /^type\s+as\s+[\w$]+$/u.test(name),
+      )
+    : names;
   if (names.length && !values.length) return null;
   return values.flatMap((name) => {
     const binding = name.split("=", 1)[0]!.trim();
@@ -247,7 +249,7 @@ export function sourceReferences(
     for (const match of code.matchAll(imports)) {
       const [, statementKind, clause, kind, target, operator, load] = match;
       if (kind?.endsWith("type")) continue;
-      const names = javascriptBindings(clause ?? target ?? "");
+      const names = javascriptBindings(clause, target);
       if (!names) continue;
       chained.lastIndex = match.index + match[0].length;
       const binds =

@@ -316,10 +316,12 @@ test("preserves minified imports, template expressions, and escaped newlines", (
     'const data = await import("sample-codec/data.json", { with: { type: "json" } })',
     'const promise = import("sample-codec")',
     'type Options = import("sample-codec").Options',
+    'const { type : alias } = require("sample-codec")',
+    'const { type = fallback } = await import("sample-codec")',
   ].join("\r\n");
   expect(sourceReferences("test.ts", text, pkg, [])).toEqual({
-    lines: [3, 4, 5, 6, 7],
-    bindings: ["decode", "codec", "data"],
+    lines: [3, 4, 5, 6, 7, 9, 10],
+    bindings: ["decode", "codec", "data", "alias", "type"],
   });
 });
 
