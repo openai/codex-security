@@ -415,3 +415,42 @@ test("extracts JavaScript, TypeScript, and Python import bindings across multi-l
     "img",
   ]);
 });
+
+test("preserves minified imports, template expressions, and escaped newlines", () => {
+  const text = [
+    'const line = "first\\',
+    'second"',
+    'import{decode}from"sample-codec"',
+    'const codec = require("sample-codec")',
+    'const result = `raw require("sample-codec") ${require("sample-codec")}`',
+    'const data = import("sample-codec/data.json", { with: { type: "json" } })',
+    'type Options = import("sample-codec").Options',
+  ].join("\r\n");
+  expect(sourceReferences("test.ts", text, pkg, [])).toEqual({
+    lines: [3, 4, 5, 6],
+    bindings: ["decode", "codec", "data"],
+  });
+});
+
+test("keeps the runtime branch after a Python typing guard and skips unfinished docstrings", () => {
+  const text = [
+    "from typing import TYPE_CHECKING",
+    "if TYPE_CHECKING:",
+    "    from sample_image import Type",
+    "else:",
+    "    from sample_image import(load)",
+    '"""' + "\\".repeat(64),
+    "import sample_image",
+  ].join("\n");
+  expect(
+    sourceReferences(
+      "test.py",
+      text,
+      { ecosystem: "PyPI", name: "sample-image" },
+      [],
+    ),
+  ).toEqual({
+    lines: [5],
+    bindings: ["load"],
+  });
+});

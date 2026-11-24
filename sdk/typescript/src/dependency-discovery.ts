@@ -107,204 +107,95 @@ function knownDependencyFile(path: string) {
   );
 }
 
-const pkgPlaceholder = "__CODEX_PKG__";
-const regexPrefixKeywords = new Set([
-  "await",
-  "case",
-  "delete",
-  "in",
-  "instanceof",
-  "new",
-  "of",
-  "return",
-  "throw",
-  "typeof",
-  "void",
-  "yield",
-]);
-
+// Keep source lines intact when excluding comments and literal text.
 function newlinesIn(value: string): string {
-  return "\n".repeat(value.split("\n").length - 1);
+  return value.replace(/[^\n]+/gu, "");
 }
 
-function lineAtOffset(source: string, offset: number): number {
-  let line = 1;
-  for (let i = 0; i < offset; i++) if (source.charCodeAt(i) === 10) line++;
-  return line;
-}
-
-function matchesNpmSpecifier(raw: string, pkgName: string): boolean {
-  return (
-    !raw.includes("\\") &&
-    !raw.includes("\n") &&
-    (raw === pkgName || raw.startsWith(pkgName + "/"))
-  );
-}
-
-function sanitizeJavaScript(text: string, pkgName: string): string {
-  const source = text.replace(/\r\n/gu, "\n");
-  const templateBraces: number[] = [];
-  let out = "";
-  let prevNonSpace = "";
-  let lastNonSpace = "";
-  let lastWord = "";
-  let currentWord = "";
-
-  const flushWord = () => {
-    if (currentWord) {
-      lastWord = currentWord;
-      currentWord = "";
-    }
-  };
-  const markToken = (token: string) => {
-    flushWord();
-    prevNonSpace = lastNonSpace;
-    lastNonSpace = token;
-    lastWord = "";
-  };
-  const scanTemplateChunk = (start: number, firstChunk: boolean): number => {
-    let j = start;
-    let raw = "";
-    while (j < source.length) {
-      const c = source[j]!;
-      if (c === "\\") {
-        raw += source.slice(j, j + 2);
-        j += 2;
-        continue;
-      }
-      if (c === "`") {
-        out +=
-          firstChunk && matchesNpmSpecifier(raw, pkgName)
-            ? `"${pkgPlaceholder}"`
-            : firstChunk
-              ? `"${newlinesIn(raw)}"`
-              : `${newlinesIn(raw)})`;
-        markToken('"');
-        return j + 1;
-      }
-      if (c === "$" && source[j + 1] === "{") {
-        out += (firstChunk ? "(" : "+(") + newlinesIn(raw);
-        templateBraces.push(0);
-        markToken("(");
-        return j + 2;
-      }
-      raw += c;
-      j++;
-    }
-    out += newlinesIn(raw);
-    return j;
-  };
-
-  for (let i = 0; i < source.length;) {
-    const ch = source[i]!;
-    if (ch === "/" && source[i + 1] === "/") {
-      flushWord();
-      const end = source.indexOf("\n", i + 2);
-      out += " ";
-      i = end < 0 ? source.length : end;
+// Only package string literals survive as "@". Template expressions stay
+// visible, since they can contain real calls to require() or import().
+function javascriptCode(text: string, pkg: string): string {
+  const tokens =
+    /\/\/[^\n]*|\/\*[\s\S]*?(?:\*\/|$)|'(?:\\[\s\S]|[^'\\\n])*(?:'|$)|"(?:\\[\s\S]|[^"\\\n])*(?:"|$)|[\w$]+|=>|\+\+|--|\s+|[^\s]/gu;
+  const templateChunk = /(?:\\[\s\S]|[^`\\$]|\$(?!\{))*(?:`|\$\{|$)/uy;
+  const regexBody = /(?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^/\\[\n])+\/[a-z]*/uy;
+  const templateDepth: number[] = [];
+  let braces = 0;
+  let previous = "";
+  let regexAllowed = true;
+  let code = "";
+  for (let match; (match = tokens.exec(text));) {
+    let token = match[0];
+    if (token.startsWith("//") || token.startsWith("/*")) {
+      code += " " + newlinesIn(token);
       continue;
     }
-    if (ch === "/" && source[i + 1] === "*") {
-      flushWord();
-      const end = source.indexOf("*/", i + 2);
-      const comment = source.slice(i + 2, end < 0 ? source.length : end);
-      out += " " + newlinesIn(comment);
-      i = end < 0 ? source.length : end + 2;
+    if (!token.trim()) {
+      code += token;
       continue;
     }
-    if (ch === "'" || ch === '"') {
-      let j = i + 1;
-      let raw = "";
-      while (j < source.length && source[j] !== "\n") {
-        if (source[j] === "\\") {
-          raw += source.slice(j, j + 2);
-          j += 2;
-          continue;
-        }
-        if (source[j] === ch) {
-          j++;
-          break;
-        }
-        raw += source[j++]!;
-      }
-      out += matchesNpmSpecifier(raw, pkgName) ? `"${pkgPlaceholder}"` : '" "';
-      markToken('"');
-      i = j;
-      continue;
-    }
-    if (ch === "`") {
-      i = scanTemplateChunk(i + 1, true);
-      continue;
-    }
-    if (ch === "/" && source[i + 1] !== "/" && source[i + 1] !== "*") {
-      const word = currentWord || (/[\w$]/u.test(lastNonSpace) ? lastWord : "");
-      const postfix =
-        (lastNonSpace === "+" && prevNonSpace === "+") ||
-        (lastNonSpace === "-" && prevNonSpace === "-");
-      if (
-        !postfix &&
-        (lastNonSpace === "" ||
-          !/[\w$)\]]/u.test(lastNonSpace) ||
-          (prevNonSpace !== "." && regexPrefixKeywords.has(word)))
-      ) {
-        let j = i + 1;
-        let inClass = false;
-        let closed = false;
-        while (j < source.length && source[j] !== "\n") {
-          const c = source[j]!;
-          if (c === "\\") {
-            j += 2;
-            continue;
-          }
-          if (c === "[") inClass = true;
-          else if (c === "]") inClass = false;
-          else if (c === "/" && !inClass) {
-            j++;
-            while (j < source.length && /[A-Za-z]/u.test(source[j]!)) j++;
-            closed = true;
-            break;
-          }
-          j++;
-        }
-        if (closed) {
-          out += " ";
-          markToken("/");
-          i = j;
-          continue;
-        }
+    if (token === "/" && regexAllowed) {
+      regexBody.lastIndex = tokens.lastIndex;
+      if (regexBody.test(text)) {
+        tokens.lastIndex = regexBody.lastIndex;
+        token = "0";
       }
     }
-    if (templateBraces.length > 0) {
-      if (ch === "{") templateBraces[templateBraces.length - 1]!++;
-      else if (ch === "}") {
-        if (templateBraces.at(-1)! > 0)
-          templateBraces[templateBraces.length - 1]!--;
-        else {
-          templateBraces.pop();
-          i = scanTemplateChunk(i + 1, false);
-          continue;
-        }
-      }
+    if (token === "`" || (token === "}" && braces === templateDepth.at(-1))) {
+      if (token === "}") templateDepth.pop();
+      templateChunk.lastIndex = tokens.lastIndex;
+      const chunk = templateChunk.exec(text)?.[0] ?? "";
+      tokens.lastIndex += chunk.length;
+      if (chunk.endsWith("${")) {
+        templateDepth.push(braces);
+        code += newlinesIn(chunk);
+        token = ";";
+      } else if (token === "}") {
+        code += newlinesIn(chunk);
+        token = ")";
+      } else token += chunk;
+    } else if (token === "{") braces++;
+    else if (token === "}") braces--;
+
+    if (/^['"`]/u.test(token)) {
+      const value = token.slice(1, -1);
+      const matches = value === pkg || value.startsWith(pkg + "/");
+      code += matches && token.at(-1) === token[0] ? '"@"' : '""';
+      code += newlinesIn(token);
+      regexAllowed = false;
+    } else {
+      code += token;
+      regexAllowed =
+        previous !== "." &&
+        /^(?:[=(:,;!?&|{\[~*+%-]|=>|await|case|delete|in|instanceof|new|of|return|throw|typeof|void|yield)$/u.test(
+          token,
+        );
     }
-    out += ch;
-    if (/[\w$]/u.test(ch)) {
-      if (!currentWord) prevNonSpace = lastNonSpace;
-      currentWord += ch;
-      lastNonSpace = ch;
-    } else if (/\s/u.test(ch)) flushWord();
-    else markToken(ch);
-    i++;
+    previous = token;
   }
-  return out;
+  return code;
 }
 
-function sanitizePython(text: string): string {
-  return text
-    .replace(/\r\n/gu, "\n")
-    .replace(
-      /#[^\n]*|'''(?:\\[\s\S]|(?!''')[\s\S])*'''|"""(?:\\[\s\S]|(?!""")[\s\S])*"""|'(?:\\[\s\S]|[^'\\\n])*'|"(?:\\[\s\S]|[^"\\\n])*"/gu,
-      (token) => " " + newlinesIn(token),
-    );
+function pythonCode(text: string): string {
+  const code = text.replace(
+    /#[^\n]*|'''(?:\\[\s\S]|(?!''')[^\\])*(?:'''|$)|"""(?:\\[\s\S]|(?!""")[^\\])*(?:"""|$)|'(?:\\[\s\S]|[^'\\\n])*'|"(?:\\[\s\S]|[^"\\\n])*"/gu,
+    (token) => " " + newlinesIn(token),
+  );
+  if (!/\b(?:from|import)[ \t]+typing(?:_extensions)?\b/u.test(code))
+    return code;
+  let guardIndent = Infinity;
+  return code
+    .split("\n")
+    .map((line) => {
+      const indent = line.search(/\S/u);
+      if (indent < 0 || indent > guardIndent) return "";
+      guardIndent =
+        /^\s*(?:if|elif)\s+(?:typing\.)?TYPE_CHECKING\s*:\s*$/u.test(line)
+          ? indent
+          : Infinity;
+      return line;
+    })
+    .join("\n");
 }
 
 function isInlineTypeSpecifier(specifier: string): boolean {
@@ -314,25 +205,20 @@ function isInlineTypeSpecifier(specifier: string): boolean {
 }
 
 function destructuredBindings(pattern: string): string[] {
-  if (!pattern.startsWith("{"))
-    return /^[A-Za-z_$][\w$]*$/u.test(pattern) ? [pattern] : [];
-  const names: string[] = [];
-  for (const raw of pattern.slice(1, -1).split(",")) {
-    const part = raw.trim();
-    if (!part) continue;
-    const rest = /^\.\.\.([A-Za-z_$][\w$]*)$/u.exec(part);
-    if (rest) {
-      names.push(rest[1]!);
-      continue;
-    }
-    const withoutDefault = part.split("=", 1)[0]!.trim();
-    const colon = withoutDefault.indexOf(":");
-    const target = (
-      colon < 0 ? withoutDefault : withoutDefault.slice(colon + 1)
-    ).trim();
-    if (/^[A-Za-z_$][\w$]*$/u.test(target)) names.push(target);
-  }
-  return names;
+  const targets = pattern.startsWith("{")
+    ? pattern
+        .slice(1, -1)
+        .split(",")
+        .map((part) =>
+          part
+            .split("=", 1)[0]!
+            .split(":")
+            .at(-1)!
+            .trim()
+            .replace(/^\.\.\.\s*/u, ""),
+        )
+    : [pattern];
+  return targets.filter((target) => /^[A-Za-z_$][\w$]*$/u.test(target));
 }
 
 /** @internal */
@@ -347,155 +233,95 @@ export function sourceReferences(
   if (!python && !javascript) return { lines: [], bindings: [] };
 
   const matches: { offset: number; bindings: string[] }[] = [];
+  text = text.replace(/\r\n/gu, "\n");
   let sanitized: string;
 
   if (python) {
-    sanitized = sanitizePython(text);
+    sanitized = pythonCode(text);
     const roots = [
-      ...new Set([
-        pkg.name.replace(/-/gu, "_"),
-        ...symbols
-          .map((symbol) => symbol.split(".")[0]!)
-          .filter((s) => /^[A-Za-z_]\w*$/u.test(s)),
-      ]),
+      pkg.name.replace(/-/gu, "_"),
+      ...symbols.map((symbol) => symbol.split(".")[0]!).filter(Boolean),
     ].map((root) => root.toLowerCase());
-    const matchesRoot = (mod: string) => {
-      const lower = mod.toLowerCase();
+    const matchesRoot = (name: string) => {
+      const lower = name.toLowerCase();
       return roots.some(
         (root) => lower === root || lower.startsWith(root + "."),
       );
     };
 
     for (const match of sanitized.matchAll(
-      /(?:^|;)[ \t]*(from(?:[ \t]|\\\n)+([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)(?:[ \t]|\\\n)+import(?:[ \t]|\\\n)+(\([^{};()]*\)|(?:\\\n|[^\n;])+))/gmu,
+      /(?:^|;)[ \t]*((?:from(?:[ \t]|\\\n)+([\w.]+)(?:[ \t]|\\\n)+)?import\b(?:[ \t]|\\\n)*(\([^();]*\)|(?:\\\n|[^\n;])+))/gmu,
     )) {
-      if (!matchesRoot(match[2]!)) continue;
-      const offset = match.index + match[0].indexOf(match[1]!);
-      const targets = match[3]!.replace(/^\(|\)$/gu, "").replace(/\\\n/gu, " ");
-      const found = targets.split(",").flatMap((item) => {
-        const parsed = /^([A-Za-z_]\w*)(?:\s+as\s+([A-Za-z_]\w*))?$/u.exec(
-          item.trim(),
-        );
-        return parsed ? [parsed[2] ?? parsed[1]!] : [];
+      const from = match[2];
+      if (from && !matchesRoot(from)) continue;
+      const names = match[3]!.replace(/^\(|\)$/gu, "").replace(/\\\n/gu, " ");
+      const bindings = names.split(",").flatMap((name) => {
+        const parsed = /^([\w.]+)(?:\s+as\s+(\w+))?$/u.exec(name.trim());
+        if (!parsed || (!from && !matchesRoot(parsed[1]!))) return [];
+        return [parsed[2] ?? parsed[1]!.split(".")[0]!];
       });
-      matches.push({ offset, bindings: found });
-    }
-
-    for (const match of sanitized.matchAll(
-      /(?:^|;)[ \t]*(import[ \t]+((?:\\\n|[^\n;])+))/gmu,
-    )) {
-      const offset = match.index + match[0].indexOf(match[1]!);
-      const found: string[] = [];
-      let matched = false;
-      for (const item of match[2]!.replace(/\\\n/gu, " ").split(",")) {
-        const parsed =
-          /^([A-Za-z_]\w*(?:\.[A-Za-z_]\w*)*)(?:\s+as\s+([A-Za-z_]\w*))?$/u.exec(
-            item.trim(),
-          );
-        if (!parsed || !matchesRoot(parsed[1]!)) continue;
-        matched = true;
-        found.push(parsed[2] ?? parsed[1]!.split(".")[0]!);
+      if (from || bindings.length) {
+        matches.push({
+          offset: match.index + match[0].indexOf(match[1]!),
+          bindings,
+        });
       }
-      if (matched) matches.push({ offset, bindings: found });
     }
   } else {
-    sanitized = sanitizeJavaScript(text, pkg.name);
-    const covered: [number, number][] = [];
-    const cover = (match: RegExpExecArray) => {
-      covered.push([match.index, match.index + match[0].length]);
-    };
-
-    for (const pattern of [
-      /(?<![.$\w])import\s+type\s+[\w$]+\s*=\s*require\s*\(\s*"__CODEX_PKG__"\s*,?\s*\)/gu,
-      /(?<![.$\w])typeof\s+import\s*\(\s*"__CODEX_PKG__"\s*,?\s*\)/gu,
-    ]) {
-      for (const match of sanitized.matchAll(pattern)) cover(match);
+    sanitized = javascriptCode(text, pkg.name);
+    for (const match of sanitized.matchAll(
+      /(?<![.$\w])(import|export)\b\s*(?:((?:type\s*)?(?:[\w$]+\s*,\s*)?(?:[\w$]+|\*(?:\s*as\s+[\w$]+)?|\{[^{};()]*\}))\s*from\s*)?"@"/gu,
+    )) {
+      const clause = match[2] ?? "";
+      if (/^type(?:\s+[\w$]|\s*[{*])/u.test(clause)) continue;
+      const specifiers = clause
+        .replace(/[{}]/gu, "")
+        .split(",")
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const names = specifiers.filter((s) => !isInlineTypeSpecifier(s));
+      if (specifiers.length && !names.length) continue;
+      const locals = names.map((s) => s.replace(/^.*?\bas\s+/su, ""));
+      matches.push({
+        offset: match.index,
+        bindings:
+          match[1] === "export"
+            ? []
+            : locals.filter((s) => /^[A-Za-z_$][\w$]*$/u.test(s)),
+      });
     }
 
+    // A call can stand alone or initialize a declaration (including a
+    // comma-separated binding). A type alias never executes its import.
+    const chained = /\s*[.(\[]/uy;
     for (const match of sanitized.matchAll(
-      /(?<![.$\w])import\s*"__CODEX_PKG__"/gu,
+      /(?:((?<![.$\w])(?:import\s+type|type|const|let|var|import)\b|,)\s*([\w$]+|\{[^{};()]*\})\s*=\s*(?:\(\s*)?(?:(await|typeof)\s+)?)?(?<![.$\w])(?:require|import)\s*\(\s*"@"\s*(?:,\s*)?(?:\)(?:\s*\))?(?:\s*\.\s*[\w$]+)?|(?=\{))/gu,
     )) {
-      cover(match);
-      matches.push({ offset: match.index, bindings: [] });
-    }
-
-    for (const match of sanitized.matchAll(
-      /(?<![.$\w])import\s+((?:type\s+)?(?:[\w$]+|\*\s+as\s+[\w$]+|\{[^{};()]*\}|[\w$]+\s*,\s*(?:\*\s+as\s+[\w$]+|\{[^{};()]*\})))\s*from\s*"__CODEX_PKG__"/gu,
-    )) {
-      cover(match);
-      const clause = match[1]!.trim();
-      if (/^type\s+(?:\*|\{|[\w$]+$)/u.test(clause)) continue;
-      const braceStart = clause.indexOf("{");
-      const prefix = (braceStart < 0 ? clause : clause.slice(0, braceStart))
-        .replace(/,\s*$/u, "")
-        .trim();
-      const found: string[] = [];
-      if (prefix) {
-        const name = /^\*\s+as\s+([\w$]+)$/u.exec(prefix)?.[1] ?? prefix;
-        if (/^[A-Za-z_$][\w$]*$/u.test(name)) found.push(name);
-      }
-      if (braceStart >= 0) {
-        const inner = clause.slice(braceStart + 1, clause.lastIndexOf("}"));
-        let valueSpecifiers = 0;
-        for (const raw of inner.split(",")) {
-          const spec = raw.trim();
-          if (!spec || isInlineTypeSpecifier(spec)) continue;
-          valueSpecifiers++;
-          const local = /\bas\s+([\w$]+)$/u.exec(spec)?.[1] ?? spec;
-          if (/^[A-Za-z_$][\w$]*$/u.test(local)) found.push(local);
-        }
-        if (!prefix && inner.trim() !== "" && valueSpecifiers === 0) continue;
-      }
-      matches.push({ offset: match.index, bindings: found });
-    }
-
-    for (const match of sanitized.matchAll(
-      /(?<![.$\w])export\s+((?:type\s+)?(?:\*(?:\s+as\s+[\w$]+)?|\{[^{};()]*\}))\s*from\s*"__CODEX_PKG__"/gu,
-    )) {
-      cover(match);
-      const clause = match[1]!.trim();
-      if (/^type\s+/u.test(clause)) continue;
-      if (clause.startsWith("{")) {
-        const specs = clause
-          .slice(1, -1)
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
-        if (specs.length > 0 && specs.every(isInlineTypeSpecifier)) continue;
-      }
-      matches.push({ offset: match.index, bindings: [] });
-    }
-
-    for (const match of sanitized.matchAll(
-      /(?:(?<![.$\w])(?:const|let|var)\s+([\w$]+|\{[^{};()]*\})|,\s*([\w$]+|\{[^{};()]*\})|(?<![.$\w])import\s+([\w$]+))\s*=\s*\(?\s*(?:await\s+)?(?<![.$\w])(?:require|import)\s*\(\s*"__CODEX_PKG__"\s*,?\s*\)\s*\)?(?:\s*\.\s*[\w$]+)?(?!\s*[.([\w$])/gu,
-    )) {
-      cover(match);
-      const target = (match[1] ?? match[2] ?? match[3] ?? "").trim();
-      const offset =
-        match[2] !== undefined
-          ? match.index + match[0].indexOf(match[2])
-          : match.index;
-      matches.push({ offset, bindings: destructuredBindings(target) });
-    }
-
-    for (const match of sanitized.matchAll(
-      /(?<![.$\w])(?:require|import)\s*\(\s*"__CODEX_PKG__"\s*,?\s*\)/gu,
-    )) {
-      if (
-        covered.some(
-          ([start, end]) => match.index >= start && match.index < end,
-        )
-      )
-        continue;
-      matches.push({ offset: match.index, bindings: [] });
+      const [, declaration, target, operator] = match;
+      if (declaration?.endsWith("type")) continue;
+      // A binding of require("pkg").fn() is a call result, not the import.
+      chained.lastIndex = match.index + match[0].length;
+      matches.push({
+        offset:
+          declaration === ","
+            ? match.index + match[0].indexOf(target!)
+            : match.index,
+        bindings:
+          target && operator !== "typeof" && !chained.test(sanitized)
+            ? destructuredBindings(target)
+            : [],
+      });
     }
   }
 
   matches.sort((a, b) => a.offset - b.offset);
   const lines = new Set<number>();
   const bindings = new Set<string>();
+  let offset = 0;
+  let line = 1;
   for (const item of matches) {
-    lines.add(lineAtOffset(sanitized, item.offset));
+    while (offset < item.offset) if (sanitized[offset++] === "\n") line++;
+    lines.add(line);
     for (const binding of item.bindings) bindings.add(binding);
   }
   return { lines: [...lines], bindings: [...bindings] };
