@@ -1602,18 +1602,18 @@ directory.
 
 #### Helper Node runtime
 
-On macOS, the plugin launcher checks whether Node can load the bundled native
-addon. If a helper still reports that `unix.node` and Node have
-`different Team IDs`, set `CODEX_MCP_NODE_PATH` to the absolute path of a compatible Node
-executable. For example, if you have installed Homebrew's `node@24`:
+On macOS, the plugin launcher looks for a Node runtime that can load
+`node:sqlite` and the bundled `unix.node` addon. If a helper reports
+`different Team IDs`, set `CODEX_MCP_NODE_PATH` to the absolute path of a
+compatible Node executable. For example, with Homebrew's `node@24` installed, run
 
 ```sh
 export CODEX_MCP_NODE_PATH="$(brew --prefix node@24)/bin/node"
 ```
 
-Start the CLI or plugin host from that terminal. The override applies to its
-MCP server and helpers. To restore automatic selection, run
-`unset CODEX_MCP_NODE_PATH` and restart the host from that terminal.
+Restart the CLI or plugin host from that terminal. Its MCP launcher uses the
+selected executable for the server and helpers without checking compatibility.
+To restore automatic selection, run `unset CODEX_MCP_NODE_PATH` and restart again.
 
 ### Progress and cost
 
