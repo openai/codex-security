@@ -1,0 +1,31 @@
+apiVersion: scaffolder.backstage.io/v1beta3
+kind: Template
+metadata:
+  name: example-nodejs-template
+spec:
+  owner: group:platform
+  type: service
+  parameters:
+    - title: Component
+      type: object
+      required: [name]
+      additionalProperties: false
+      properties:
+        name:
+          type: string
+  steps:
+    - id: scaffold
+      name: Create service files
+      action: fetch:template
+      input:
+        url: ./content
+        values:
+          name: ${{ parameters.name }}
+    - id: publish
+      name: Propose service
+      action: publish:github:pull-request
+      input:
+        repoUrl: github.com?owner=example-org&repo=services
+        title: Add ${{ parameters.name }}
+        description: New service registration
+        branchName: service/${{ parameters.name }}
