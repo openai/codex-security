@@ -1,20 +1,37 @@
 import { expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import {
   discoverDependencyRepository,
   sourceReferences,
 } from "../src/dependency-discovery.js";
+import { gitText } from "./support/shell.js";
+import {
+  temporaryDirectory,
+  removeTemporaryDirectory,
+} from "./support/temporary-directories.js";
 
 const pkg = { ecosystem: "npm", name: "sample-codec" };
 
+function commitFixture(repo: string) {
+  const git = (...args: string[]) => gitText(args, { cwd: repo }).trim();
+  git("init", "--quiet");
+  git("add", ".");
+  git(
+    "-c",
+    "user.name=Fixture",
+    "-c",
+    "user.email=fixture@example.invalid",
+    "commit",
+    "-qm",
+    "Fixture",
+  );
+  return git;
+}
+
 test("caller ownership and installed versions come from the same committed workspace", async () => {
-  const repo = await mkdtemp(join(tmpdir(), "dependency-workspace-"));
-  const git = (...args: string[]) =>
-    execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
+  const repo = await temporaryDirectory("dependency-workspace-");
   try {
     const entries: Record<string, unknown> = { "": { workspaces: ["apps/*"] } };
     for (const [service, version] of [
@@ -68,18 +85,7 @@ test("caller ownership and installed versions come from the same committed works
         "export type { CodecOptions } from 'sample-codec';",
       ].join("\n"),
     );
-    git("init", "--quiet");
-    git("add", ".");
-    git(
-      "-c",
-      "user.name=Fixture",
-      "-c",
-      "user.email=fixture@example.invalid",
-      "commit",
-      "--quiet",
-      "-m",
-      "Fixture",
-    );
+    const git = commitFixture(repo);
     const revision = git("rev-parse", "HEAD");
     await writeFile(
       join(repo, "apps/alpha/main.js"),
@@ -160,14 +166,12 @@ test("caller ownership and installed versions come from the same committed works
     expect(result.coverage.gaps.join("\n")).toMatch(/unlocked/);
     expect(result.coverage.gaps.join("\n")).toMatch(/opaque is unknown/);
   } finally {
-    await rm(repo, { recursive: true, force: true });
+    await removeTemporaryDirectory(repo);
   }
 });
 
 test("Python pins and module aliases require scoped source evidence", async () => {
-  const repo = await mkdtemp(join(tmpdir(), "python-package-"));
-  const git = (...args: string[]) =>
-    execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
+  const repo = await temporaryDirectory("python-package-");
   try {
     for (const [project, requirement] of [
       ["worker", "sample_image==2.3.4"],
@@ -183,18 +187,7 @@ test("Python pins and module aliases require scoped source evidence", async () =
         "from decoder import (\n    load,\n)\nload('sample')\n",
       );
     }
-    git("init", "--quiet");
-    git("add", ".");
-    git(
-      "-c",
-      "user.name=Fixture",
-      "-c",
-      "user.email=fixture@example.invalid",
-      "commit",
-      "--quiet",
-      "-m",
-      "Fixture",
-    );
+    commitFixture(repo);
     const args = {
       repository: repo,
       package: { ecosystem: "PyPI", name: "sample-image" },
@@ -223,14 +216,12 @@ test("Python pins and module aliases require scoped source evidence", async () =
       "No direct importing caller",
     );
   } finally {
-    await rm(repo, { recursive: true, force: true });
+    await removeTemporaryDirectory(repo);
   }
 });
 
 test("reports a nested build-only package in the active caller boundary", async () => {
-  const repo = await mkdtemp(join(tmpdir(), "dependency-docker-build-"));
-  const git = (...args: string[]) =>
-    execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" });
+  const repo = await temporaryDirectory("dependency-docker-build-");
   try {
     for (const directory of [
       "services/renderer",
@@ -247,17 +238,7 @@ test("reports a nested build-only package in the active caller boundary", async 
       join(repo, "tests/owned/SECURITY.md"),
       "This renderer is deployed.\n",
     );
-    git("init", "--quiet");
-    git("add", ".");
-    git(
-      "-c",
-      "user.name=Test",
-      "-c",
-      "user.email=test@example.invalid",
-      "commit",
-      "-qm",
-      "renderer builds",
-    );
+    commitFixture(repo);
     const result = await discoverDependencyRepository({
       repository: repo,
       package: { ecosystem: "Debian", name: "libwebp7" },
@@ -268,7 +249,7 @@ test("reports a nested build-only package in the active caller boundary", async 
       "tests/owned/Dockerfile",
     ]);
   } finally {
-    await rm(repo, { recursive: true, force: true });
+    await removeTemporaryDirectory(repo);
   }
 });
 
