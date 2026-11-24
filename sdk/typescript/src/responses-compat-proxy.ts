@@ -3,20 +3,34 @@ import { createServer } from "node:http";
 import { once } from "node:events";
 import { json } from "node:stream/consumers";
 import { pipeline } from "node:stream/promises";
-import { isRecord } from "./record.js";
+import { asRecord, isRecord } from "./record.js";
 import { errorMessage } from "./errors.js";
 
-interface CompatToolIdentity {
-  name: string;
-  namespace?: string;
-  custom: boolean;
-}
+type Item = Record<string, unknown>;
 
-function collaborationMessage(tool: CompatToolIdentity): boolean {
-  return (
-    tool.namespace === "collaboration" &&
-    ["spawn_agent", "send_message", "followup_task"].includes(tool.name)
-  );
+// Declarations, tool choices and historical calls must use the same spelling,
+// even when a tool is no longer offered on the current turn.
+function identity({ name, type, namespace }: Item) {
+  if (
+    typeof name !== "string" ||
+    (namespace != null && typeof namespace !== "string")
+  )
+    throw new Error("Invalid xAI tool identity.");
+  const custom = type === "custom" || type === "custom_tool_call";
+  const key = JSON.stringify([namespace ?? "", name, custom]);
+  let alias = name;
+  if (custom || namespace != null) {
+    // Keep names readable, unique and under the 64-character limit.
+    const prefix = (namespace ? `${namespace}__${name}` : name)
+      .replace(/[^a-zA-Z0-9_-]/g, "_")
+      .slice(0, 48);
+    const suffix = createHash("sha256").update(key).digest("hex").slice(0, 12);
+    alias = `${prefix}_${suffix}`;
+  }
+  const message =
+    namespace === "collaboration" &&
+    ["spawn_agent", "send_message", "followup_task"].includes(name);
+  return { name, namespace, custom, message, alias, key };
 }
 
 function requirePlaintext(args: unknown) {
@@ -25,78 +39,83 @@ function requirePlaintext(args: unknown) {
   }
 }
 
-/** Translate xAI tools and keep their identities local to the request. */
-export function responsesCompatRequest(request: Record<string, unknown>) {
-  const identities = new Map<string, CompatToolIdentity>();
-  const declared = Array.isArray(request["tools"]) ? request["tools"] : [];
-  const plainNames = new Set(
-    declared.flatMap((tool) =>
-      isRecord(tool) && tool["type"] === "function" ? [tool["name"]] : [],
-    ),
-  );
-  function alias(identity: CompatToolIdentity): string {
-    // Function names are limited to 64 characters. Keep names readable without
-    // letting truncation or namespace separators merge distinct tool identities.
-    const label = [identity.namespace, identity.name]
-      .filter(Boolean)
-      .join("__")
-      .replace(/[^a-zA-Z0-9_-]/g, "_")
-      .slice(0, 48);
-    return `${label}_${createHash("sha256")
-      .update(
-        JSON.stringify([
-          identity.namespace ?? "",
-          identity.name,
-          identity.custom,
-        ]),
-      )
-      .digest("hex")
-      .slice(0, 12)}`;
-  }
-  function identity(
-    tool: Record<string, unknown>,
-    namespace?: string,
-  ): CompatToolIdentity {
-    if (typeof tool["name"] !== "string")
-      throw new Error("Responses compat proxy tool has no name.");
+function replayInput(raw: unknown): unknown {
+  if (!isRecord(raw)) return raw;
+  const { internal_chat_message_metadata_passthrough: _metadata, ...value } =
+    raw;
+  if (
+    value["type"] === "function_call" ||
+    value["type"] === "custom_tool_call"
+  ) {
+    const tool = identity(value);
+    const { namespace: _namespace, input: freeform, ...rest } = value;
+    if (tool.message) {
+      requirePlaintext(rest["encrypted_function_args"]);
+      delete rest["encrypted_function_args"];
+    }
+    if (!tool.custom && tool.namespace == null) return value;
     return {
-      name: tool["name"],
-      ...(namespace === undefined ? {} : { namespace }),
-      custom: tool["type"] === "custom" || tool["type"] === "custom_tool_call",
+      ...rest,
+      type: "function_call",
+      name: tool.alias,
+      arguments: tool.custom
+        ? JSON.stringify({ input: freeform })
+        : value["arguments"],
     };
   }
-  function register(tool: CompatToolIdentity): string {
-    const name = alias(tool);
-    const existing = identities.get(name);
+  if (value["type"] === "custom_tool_call_output")
+    return { ...value, type: "function_call_output" };
+  if (value["type"] === "agent_message") {
+    const { author, recipient, content } = value;
     if (
-      plainNames.has(name) ||
-      (existing && JSON.stringify(existing) !== JSON.stringify(tool))
-    ) {
-      throw new Error(`Tool alias ${name} collides with another tool.`);
-    }
-    identities.set(name, tool);
-    return name;
+      typeof author !== "string" ||
+      typeof recipient !== "string" ||
+      !Array.isArray(content)
+    )
+      throw new Error("Invalid agent message in xAI replay.");
+    const blocks = content.map((part: unknown) => {
+      if (
+        !isRecord(part) ||
+        part["type"] !== "input_text" ||
+        typeof part["text"] !== "string"
+      )
+        throw new Error("xAI replay supports only plaintext agent messages.");
+      return part["text"];
+    });
+    return {
+      type: "message",
+      role: "assistant",
+      ...(typeof value["id"] === "string" ? { id: value["id"] } : {}),
+      content: `Agent message from ${JSON.stringify(author)} to ${JSON.stringify(recipient)}\n${blocks.join("\n")}`,
+    };
   }
+  if (value["type"] === "reasoning" && value["content"] === null)
+    delete value["content"];
+  return value;
+}
+
+/** Translate xAI tools and keep their identities local to the request. */
+export function responsesCompatRequest(request: Item) {
+  const identities = new Map<string, ReturnType<typeof identity>>();
   function tools(values: unknown[], namespace?: string): unknown[] {
     return values.flatMap((value) => {
-      if (!isRecord(value))
-        throw new Error("Invalid Responses compat proxy tool declaration.");
+      if (!isRecord(value)) throw new Error("Invalid xAI tool declaration.");
       if (value["type"] === "namespace" && Array.isArray(value["tools"])) {
         return tools(value["tools"], String(value["name"]));
       }
-      if (
-        value["type"] !== "custom" &&
-        (value["type"] !== "function" || namespace === undefined)
-      )
+      if (value["type"] !== "custom" && value["type"] !== "function")
         return [value];
-      const tool = identity(value, namespace);
-      const name = register(tool);
+      const tool = identity({ ...value, namespace });
+      const name = tool.alias;
+      const previous = identities.get(name);
+      if (previous && previous.key !== tool.key)
+        throw new Error(`Tool alias ${name} collides with another tool.`);
+      identities.set(name, tool);
+      if (!tool.custom && namespace === undefined) return [value];
       const description = `${namespace ? namespace + "." : ""}${tool.name}: ${value["description"] ?? ""}`;
-      if (collaborationMessage(tool)) {
+      if (tool.message) {
         const parameters = structuredClone(value["parameters"]);
-        const fields = isRecord(parameters)
-          ? parameters["properties"]
-          : undefined;
+        const fields = asRecord(parameters)?.["properties"];
         if (isRecord(fields) && isRecord(fields["message"]))
           delete fields["message"]["encrypted"];
         return [{ ...value, name, description, parameters }];
@@ -127,129 +146,48 @@ export function responsesCompatRequest(request: Record<string, unknown>) {
       ];
     });
   }
-  function input(raw: unknown): unknown {
-    if (!isRecord(raw)) return raw;
-    const { internal_chat_message_metadata_passthrough: _metadata, ...value } =
-      raw;
-    if (
-      value["type"] === "function_call" ||
-      value["type"] === "custom_tool_call"
-    ) {
-      const tool = identity(
-        value,
-        typeof value["namespace"] === "string" ? value["namespace"] : undefined,
-      );
-      const { namespace: _namespace, input: freeform, ...rest } = value;
-      if (collaborationMessage(tool)) {
-        requirePlaintext(rest["encrypted_function_args"]);
-        delete rest["encrypted_function_args"];
-      }
-      if (!tool.custom && tool.namespace === undefined) return value;
-      return {
-        ...rest,
-        type: "function_call",
-        name: alias(tool),
-        arguments: tool.custom
-          ? JSON.stringify({ input: freeform })
-          : value["arguments"],
-      };
-    }
-    if (value["type"] === "custom_tool_call_output")
-      return { ...value, type: "function_call_output" };
-    if (value["type"] === "agent_message") {
-      const { author, recipient, content } = value;
-      if (
-        typeof author !== "string" ||
-        typeof recipient !== "string" ||
-        !Array.isArray(content)
-      )
-        throw new Error("Invalid agent message in xAI replay.");
-      const blocks = content.map((part: unknown) => {
-        if (
-          !isRecord(part) ||
-          part["type"] !== "input_text" ||
-          typeof part["text"] !== "string"
-        )
-          throw new Error("xAI replay supports only plaintext agent messages.");
-        return part["text"];
-      });
-      return {
-        type: "message",
-        role: "assistant",
-        ...(typeof value["id"] === "string" ? { id: value["id"] } : {}),
-        content: `Agent message from ${JSON.stringify(author)} to ${JSON.stringify(recipient)}\n${blocks.join("\n")}`,
-      };
-    }
-    if (value["type"] === "reasoning" && value["content"] === null) {
-      const { content: _content, ...rest } = value;
-      return rest;
-    }
-    return value;
-  }
-  const flattenedTools = tools(declared);
-  const body: Record<string, unknown> = {
-    ...request,
-    tools: flattenedTools,
-    input: Array.isArray(request["input"])
-      ? request["input"].map(input)
-      : request["input"],
-  };
-  const choice = request["tool_choice"];
+  const { tools: declared, input, tool_choice: choice } = request;
+  const flattened = tools(Array.isArray(declared) ? declared : []);
+  const body: Item = { ...request, tools: flattened };
+  if (Array.isArray(input)) body["input"] = input.map(replayInput);
   if (
     isRecord(choice) &&
     (choice["type"] === "function" || choice["type"] === "custom")
   ) {
-    const tool = identity(
-      choice,
-      typeof choice["namespace"] === "string" ? choice["namespace"] : undefined,
-    );
-    body["tool_choice"] =
-      tool.namespace !== undefined || tool.custom
-        ? { type: "function", name: alias(tool) }
-        : choice;
+    const tool = identity(choice);
+    if (tool.custom || tool.namespace != null)
+      body["tool_choice"] = { type: "function", name: tool.alias };
   }
-  if (flattenedTools.length === 0) delete body["tool_choice"];
-  function output(
-    value: Record<string, unknown>,
-    parseArguments = true,
-  ): Record<string, unknown> {
-    if (
-      value["type"] !== "function_call" &&
-      value["type"] !== "custom_tool_call"
-    )
-      return value;
-    if (value["type"] !== "function_call" || value["namespace"] != null)
+  if (flattened.length === 0) delete body["tool_choice"];
+  function output(value: Item, parseArguments = true): Item {
+    const { type, namespace, name } = value;
+    if (type !== "function_call" && type !== "custom_tool_call") return value;
+    if (type !== "function_call" || namespace != null)
       throw new Error("Expected a flattened function call from xAI.");
-    const tool = identities.get(String(value["name"]));
-    if (tool === undefined) {
-      if (plainNames.has(value["name"])) return value;
-      throw new Error(
-        `Responses compat proxy returned an unknown tool: ${value["name"]}`,
-      );
-    }
-    const { arguments: args, ...rest } = value;
+    const tool = typeof name === "string" ? identities.get(name) : undefined;
+    if (!tool) throw new Error(`xAI returned an unknown tool: ${name}`);
+    if (!tool.custom && tool.namespace == null) return value;
+    const restored: Item = { ...value, name: tool.name };
+    if (tool.namespace != null) restored["namespace"] = tool.namespace;
     // Codex treats an absent list as an encrypted collaboration message.
     // xAI returned plain JSON, so mark the arguments explicitly as plaintext.
-    if (collaborationMessage(tool)) {
-      requirePlaintext(rest["encrypted_function_args"]);
-      rest["encrypted_function_args"] = [];
+    if (tool.message) {
+      requirePlaintext(value["encrypted_function_args"]);
+      restored["encrypted_function_args"] = [];
     }
-    const restored = {
-      ...rest,
-      name: tool.name,
-      ...(tool.namespace === undefined ? {} : { namespace: tool.namespace }),
-    };
-    if (!tool.custom) return { ...restored, arguments: args };
+    if (!tool.custom) return restored;
+    delete restored["arguments"];
     // A stream's added event carries empty arguments; restore the identity
     // there and parse the input at output_item.done instead.
     if (!parseArguments)
       return { ...restored, type: "custom_tool_call", input: "" };
-    const parsed = JSON.parse(String(args)) as unknown;
-    const freeform = isRecord(parsed) ? parsed["input"] : undefined;
+    const args = value["arguments"];
+    const freeform =
+      typeof args === "string"
+        ? asRecord(JSON.parse(args))?.["input"]
+        : undefined;
     if (typeof freeform !== "string")
-      throw new Error(
-        `Responses compat proxy returned invalid input for custom tool ${tool.name}.`,
-      );
+      throw new Error(`Invalid xAI input for custom tool ${tool.name}.`);
     return { ...restored, type: "custom_tool_call", input: freeform };
   }
   return { body, output };
@@ -275,7 +213,7 @@ async function* compatFrames(body: ReadableStream<Uint8Array>) {
     }
   }
   if ((buffer + decoder.decode()).trim())
-    throw new Error("Incomplete Responses compat proxy stream.");
+    throw new Error("Incomplete xAI stream.");
 }
 
 type RestoreTool = ReturnType<typeof responsesCompatRequest>["output"];
@@ -318,7 +256,7 @@ async function* translateEvents(
   }
 }
 
-const connectionHeaders = new Set([
+const connectionHeaders = [
   "connection",
   "keep-alive",
   "proxy-authenticate",
@@ -332,7 +270,7 @@ const connectionHeaders = new Set([
   "content-length",
   "content-encoding",
   "accept-encoding",
-]);
+];
 
 function forwardedHeaders(source: Headers): Headers {
   const result = new Headers(source);
@@ -350,79 +288,61 @@ function forwardedHeaders(source: Headers): Headers {
 export async function startResponsesCompatProxy(upstream: string) {
   const upstreamUrl = new URL(upstream);
   upstreamUrl.pathname = upstreamUrl.pathname.replace(/\/$/, "") + "/responses";
-  const route = `/${randomUUID()}/v1/responses`;
-  const server = createServer((request, response) => {
+  const path = `/${randomUUID()}/v1`;
+  const server = createServer(async (request, response) => {
     const controller = new AbortController();
     response.on("close", () => controller.abort());
-    void (async () => {
-      const requestedUrl = new URL(request.url ?? "/", "http://localhost");
-      if (request.method !== "POST" || requestedUrl.pathname !== route) {
+    let errorStatus = 400;
+    try {
+      const url = new URL(request.url ?? "/", "http://localhost");
+      if (request.method !== "POST" || url.pathname !== path + "/responses") {
         response.writeHead(404).end();
         return;
       }
-      let translation: ReturnType<typeof responsesCompatRequest>;
-      try {
-        const parsed = await json(request);
-        if (!isRecord(parsed))
-          throw new Error(
-            "Responses compat proxy requires a JSON Responses request.",
-          );
-        translation = responsesCompatRequest(parsed);
-      } catch (error) {
-        response
-          .writeHead(400, { "content-type": "application/json" })
-          .end(JSON.stringify({ error: { message: errorMessage(error) } }));
-        return;
-      }
+      const parsed = await json(request);
+      if (!isRecord(parsed))
+        throw new Error("Expected a JSON Responses request.");
+      const { body, output } = responsesCompatRequest(parsed);
       const headers = new Headers();
       for (const [name, value] of Object.entries(request.headers))
         if (value !== undefined)
           headers.set(name, Array.isArray(value) ? value.join(", ") : value);
       const target = new URL(upstreamUrl.href);
-      for (const [name, value] of requestedUrl.searchParams)
+      for (const [name, value] of url.searchParams)
         target.searchParams.append(name, value);
+      errorStatus = 502;
       const result = await fetch(target, {
         method: "POST",
         headers: forwardedHeaders(headers),
-        body: JSON.stringify(translation.body),
+        body: JSON.stringify(body),
         signal: controller.signal,
         // A redirect can otherwise replay scan prompts and provider credentials.
         redirect: "error",
       });
       const forwarded = Object.fromEntries(forwardedHeaders(result.headers));
-      const type = result.headers
-        .get("content-type")
-        ?.split(";")[0]
-        ?.trim()
-        .toLowerCase();
       if (!result.ok) {
         response.writeHead(result.status, forwarded).end(await result.text());
-      } else if (type === "text/event-stream" && result.body) {
+      } else if (
+        result.body &&
+        /^text\/event-stream(?:\s*;|$)/i.test(forwarded["content-type"] ?? "")
+      ) {
         response.writeHead(result.status, forwarded);
-        await pipeline(
-          translateEvents(result.body, translation.output),
-          response,
-        );
+        await pipeline(translateEvents(result.body, output), response);
       } else {
-        const payload = restoreOutput(await result.json(), translation.output);
+        const payload = restoreOutput(await result.json(), output);
+        forwarded["content-type"] = "application/json";
         response
-          .writeHead(result.status, {
-            ...forwarded,
-            "content-type": "application/json",
-          })
+          .writeHead(result.status, forwarded)
           .end(JSON.stringify(payload));
       }
-    })().catch((error: unknown) => {
+    } catch (error) {
       if (response.destroyed) return;
-      if (response.headersSent)
-        response.destroy(
-          error instanceof Error ? error : new Error(String(error)),
-        );
+      if (response.headersSent) response.destroy();
       else
         response
-          .writeHead(502, { "content-type": "application/json" })
+          .writeHead(errorStatus, { "content-type": "application/json" })
           .end(JSON.stringify({ error: { message: errorMessage(error) } }));
-    });
+    }
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -431,7 +351,7 @@ export async function startResponsesCompatProxy(upstream: string) {
     throw new Error("Responses compat proxy did not bind a TCP port.");
   let closing: Promise<void> | undefined;
   return {
-    baseUrl: `http://127.0.0.1:${address.port}${route.slice(0, -"/responses".length)}`,
+    baseUrl: `http://127.0.0.1:${address.port}${path}`,
     close() {
       return (closing ??= new Promise<void>((resolve, reject) => {
         server.close((error) => (error ? reject(error) : resolve()));

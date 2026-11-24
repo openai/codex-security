@@ -70,6 +70,18 @@ test("round-trips tools and preserves call IDs, choices and historical aliases",
     type: "function",
     name: flat[0]!.name,
   });
+  const plainCall = {
+    type: "function_call",
+    name: plain.name,
+    arguments: "{}",
+  };
+  expect(output(plainCall)).toEqual(plainCall);
+  expect(() => output({ ...flat[0], name: [flat[0]!.name] })).toThrow(
+    /unknown tool/,
+  );
+  expect(() => output({ ...flat[1], arguments: [flat[1]!.arguments] })).toThrow(
+    /invalid xai input/i,
+  );
   expect(flat.map((item) => output(item))).toEqual([call, edit]);
   expect(JSON.parse(flat[1]!.arguments)).toEqual({ input: edit.input });
   expect(JSON.stringify(body["tools"])).toContain(custom.format.definition);
