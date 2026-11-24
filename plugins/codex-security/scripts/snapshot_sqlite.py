@@ -4,33 +4,15 @@
 from __future__ import annotations
 
 import argparse
-import ntpath
 import os
 import sqlite3
 from pathlib import Path
 from urllib.parse import quote
 
-_WINDOWS_LONG_PATH_THRESHOLD = 248
-
-
-def windows_long_path(path: Path | str) -> str:
-    """Return a Win32 extended-length path on Windows when a path approaches MAX_PATH."""
-    raw = os.fspath(path)
-    if os.name != "nt":
-        return raw
-    if raw.startswith("\\\\?\\"):
-        return raw
-    resolved = ntpath.abspath(raw)
-    if len(resolved) < _WINDOWS_LONG_PATH_THRESHOLD:
-        return raw
-    if resolved.startswith("\\\\"):
-        return "\\\\?\\UNC\\" + resolved[2:]
-    return "\\\\?\\" + resolved
-
 
 def readonly_sqlite_uri(path: Path) -> str:
     """Escape the native filename, including separators, without introducing a URI authority."""
-    filename: bytes | str = os.fsencode(path) if os.name == "posix" else windows_long_path(path)
+    filename = os.fsencode(path) if os.name == "posix" else str(path)
     return f"file:{quote(filename, safe='')}?mode=ro"
 
 

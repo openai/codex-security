@@ -26,7 +26,7 @@ from finalize_scan_contract import (
     write_export_output,
     write_sarif_projection,
 )
-from snapshot_sqlite import readonly_sqlite_uri, windows_long_path
+from snapshot_sqlite import readonly_sqlite_uri
 from validate_scan_contract import validate_contract
 from workbench_constants import PRIMARY_FINDING_LOCATION_SQL
 
@@ -213,8 +213,17 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
     }
     path = db.database_path()
     if payload["action"] == "inspect" or require_history:
+        stat_path = path
+        if os.name == "nt":
+            from windows_scan_local_files import _extended_path
+
+            stat_path = Path(_extended_path(path))
+            # The default Win32 SQLite VFS allows 260 * 4 bytes including "-journal".
+            # Don't lose an otherwise usable filename to the extra prefix bytes.
+            if len(str(stat_path).encode("utf-8")) <= 260 * 4 - 8:
+                path = stat_path
         try:
-            os.stat(windows_long_path(path))
+            os.stat(stat_path)
         except FileNotFoundError:
             if require_history:
                 raise SystemExit(

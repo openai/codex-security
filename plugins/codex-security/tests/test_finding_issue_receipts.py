@@ -9,7 +9,10 @@ import sqlite3
 import sys
 import uuid
 from contextlib import closing
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from types import SimpleNamespace
+from unittest.mock import Mock
+from urllib.parse import quote
 
 import pytest
 from workbench_test_support import load_script, run_workbench, write_completed_contract
@@ -377,97 +380,44 @@ def test_invalid_source_is_rejected_before_creating_state(tmp_path: Path, mutati
     assert not state.exists()
 
 
-def test_windows_long_path_and_readonly_uri_preserve_unc_and_escaping(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.cross_platform
+@pytest.mark.parametrize("root", ["C:\\", "\\\\host\\share\\"])
+@pytest.mark.parametrize("size", [265, 1030])
+def test_inspection_uses_extended_windows_paths_within_sqlite_budget(
+    tmp_path: Path, monkeypatch, root: str, size: int
 ) -> None:
-    snapshot = load_script("snapshot_sqlite")
-    monkeypatch.setattr(snapshot.os, "name", "nt")
-
-    long_drive = Path("C:\\" + "\\".join(["segment_padding_12345"] * 12) + "\\workbench.sqlite3")
-    extended = snapshot.windows_long_path(long_drive)
-    assert extended.startswith("\\\\?\\")
-    assert extended.endswith("workbench.sqlite3")
-    uri = snapshot.readonly_sqlite_uri(long_drive)
-    assert uri.startswith("file:%5C%5C%3F%5C")
-    assert uri.endswith("?mode=ro")
-
-    long_unc = Path("\\\\fileserver\\share\\" + "\\".join(["segment_padding_12345"] * 12) + "\\workbench.sqlite3")
-    extended_unc = snapshot.windows_long_path(long_unc)
-    assert extended_unc.startswith("\\\\?\\UNC\\fileserver\\share\\")
-    unc_uri = snapshot.readonly_sqlite_uri(long_unc)
-    assert unc_uri.startswith("file:%5C%5C%3F%5CUNC%5C")
-    assert unc_uri.endswith("?mode=ro")
-
-
-def test_finding_issues_inspect_uses_extended_path_for_long_windows_store(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    scan_dir, validated = source(tmp_path)
-    short_state = tmp_path / "short-state"
-    receipt = receipt_for(validated)
-    recorded = issues(short_state, scan_dir, "record", receipts=[receipt])
-    assert len(recorded["receipts"]) == 1
-
+    scan_dir, _ = source(tmp_path)
     publication = load_script("workbench_publication")
-    snapshot = sys.modules["snapshot_sqlite"]
-    workbench_db = load_script("workbench_db")
-
-    long_dir = tmp_path
-    while len(str(long_dir)) < 244:
-        long_dir = long_dir / "nested_state_segment"
-    long_dir.mkdir(parents=True, exist_ok=True)
-    long_db = long_dir / "workbench.sqlite3"
-
-    monkeypatch.setattr(snapshot.os, "name", "nt")
-    copy_dest = snapshot.windows_long_path(long_db) if os.name == "nt" else long_db
-    shutil.copy2(short_state / "workbench.sqlite3", copy_dest)
-
-    real_stat = os.stat
-    real_connect = sqlite3.connect
-
-    def guarded_stat(target, *args, **kwargs):
-        if not str(target).startswith("\\\\?\\") and len(str(target)) >= 248:
-            raise FileNotFoundError(target)
-        return real_stat(target, *args, **kwargs)
-
-    def guarded_connect(target, *args, **kwargs):
-        if isinstance(target, str) and target.startswith("file:"):
-            if not target.startswith("file:%5C%5C%3F%5C"):
-                raise sqlite3.OperationalError("unable to open database file")
-        return real_connect(target, *args, **kwargs)
-
-    monkeypatch.setattr(publication.os, "stat", guarded_stat)
-    monkeypatch.setattr(publication.sqlite3, "connect", guarded_connect)
-
-    class FakeDb:
-        @staticmethod
-        def database_path() -> Path:
-            return long_db
-
-        @staticmethod
-        def now() -> str:
-            return workbench_db.now()
-
-    inspected = publication.finding_issues(
-        FakeDb(),
-        {
-            "action": "inspect",
-            "scanDirectory": str(scan_dir),
-            "destination": LINEAR,
-        },
+    path = PureWindowsPath(root) / "state #% é" / "workbench.sqlite3"
+    padding = size - len(str(path).encode("utf-8"))
+    parts = [("x" * 99)] * (padding // 100)
+    path = path.parent.joinpath(*parts, "x" * (padding % 100 - 1), path.name)
+    assert len(str(path).encode("utf-8")) == size
+    extended = "\\\\?\\UNC\\" + str(path)[2:] if root.startswith("\\\\") else "\\\\?\\" + str(path)
+    stat = Mock()
+    connect = Mock(return_value=sqlite3.connect(":memory:"))
+    monkeypatch.setattr(publication, "os", SimpleNamespace(name="nt", stat=stat))
+    monkeypatch.setattr(publication.sqlite3, "connect", connect)
+    publication.finding_issues(
+        SimpleNamespace(database_path=lambda: path),
+        {"action": "inspect", "scanDirectory": str(scan_dir), "destination": LINEAR},
     )
-    assert inspected["storeExists"] is True
-    assert inspected["receipts"] == [{**receipt, "scanId": validated["manifest"]["scan"]["id"]}]
+    stat.assert_called_once_with(Path(extended))
+    filename = extended if size == 265 else str(path)
+    connect.assert_called_once_with(f"file:{quote(filename, safe='')}?mode=ro", uri=True, timeout=5)
 
-    # Preserve missing-store behavior when the extended path does not exist.
-    os.unlink(copy_dest)
-    missing = publication.finding_issues(
-        FakeDb(),
-        {
-            "action": "inspect",
-            "scanDirectory": str(scan_dir),
-            "destination": LINEAR,
-        },
-    )
-    assert missing["storeExists"] is False
-    assert missing["receipts"] == []
+
+@pytest.mark.native_windows
+@pytest.mark.skipif(os.name != "nt", reason="requires native Windows SQLite")
+def test_inspection_reads_existing_long_path_store_without_modifying_it(tmp_path: Path) -> None:
+    scan_dir, validated = source(tmp_path)
+    directory = tmp_path / ("state #% " + "x" * max(1, 234 - len(str(tmp_path))))
+    path = directory / "workbench.sqlite3"
+    assert len(str(path)) >= 260
+    native = Path(load_script("windows_scan_local_files")._extended_path(path))
+    legacy_database(native, validated, LINEAR)
+    before = native.read_bytes()
+    assert issues(directory, scan_dir, "inspect")["receipts"][0]["issueIdentifier"] == "SEC-101"
+    assert native.read_bytes() == before
+    native.unlink()
+    assert not issues(directory, scan_dir, "inspect")["storeExists"]
