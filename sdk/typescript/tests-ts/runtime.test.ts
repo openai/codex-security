@@ -4077,6 +4077,22 @@ describe("runtime directories and plugin Python boundary", () => {
     expect(secured.mock.calls.map(([value]) => value)).toEqual([home, home]);
   });
 
+  const sid = "S-1-5-21-111-222-333-1001";
+  const privateDirAcl = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
+  function inspectAclScript(home: string, script: string, input: object) {
+    return inspectWindowsCredentialAclSnapshot(home, sid, {
+      command: process.execPath,
+      args: ["--eval", script, "--", JSON.stringify(input)],
+    });
+  }
+  function inspectAclOutput(home: string, output: string, exitCode = 0) {
+    return inspectAclScript(
+      home,
+      "const { output, exitCode } = JSON.parse(process.argv[1]); process.stdout.write(output); process.exitCode = exitCode",
+      { output, exitCode },
+    );
+  }
+
   test.each(["created", "removed"] as const)(
     "inspects Windows credentials once while private descendants are %s",
     async (change) => {
@@ -4087,23 +4103,24 @@ describe("runtime directories and plugin Python boundary", () => {
       await mkdir(home);
       await writeFile(join(home, "auth.json"), "credential\n");
       if (change === "removed") await writeFile(temporary, "temporary\n");
-      const sid = "S-1-5-21-111-222-333-1001";
-      const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
       const file = `O:${sid}G:SYD:P(A;;FA;;;${sid})`;
-      const ancestors = credentialAncestors(home, directory);
+      const ancestors = credentialAncestors(home, privateDirAcl);
       const script = [
         'const fs = require("node:fs")',
-        `fs.appendFileSync(${JSON.stringify(inspectionCount)}, "inspection\\n")`,
-        change === "created"
-          ? `fs.writeFileSync(${JSON.stringify(temporary)}, "temporary")`
-          : `fs.rmSync(${JSON.stringify(temporary)})`,
-        `const descriptors = [...${JSON.stringify([...ancestors, directory])}, ...fs.readdirSync(${JSON.stringify(home)}).map(() => ${JSON.stringify(file)})]`,
+        "const { inspectionCount, temporary, change, home, descriptors, file } = JSON.parse(process.argv[1])",
+        'fs.appendFileSync(inspectionCount, "inspection\\n")',
+        'if (change === "created") fs.writeFileSync(temporary, "temporary"); else fs.rmSync(temporary)',
+        "descriptors.push(...fs.readdirSync(home).map(() => file))",
         'process.stdout.write(descriptors.join("\\n") + "\\nCODEX_SECURITY_ACL_COMPLETE:" + descriptors.length + "\\n")',
       ].join("; ");
 
-      const snapshot = await inspectWindowsCredentialAclSnapshot(home, sid, {
-        command: process.execPath,
-        args: ["--eval", script],
+      const snapshot = await inspectAclScript(home, script, {
+        inspectionCount,
+        temporary,
+        change,
+        home,
+        descriptors: [...ancestors, privateDirAcl],
+        file,
       });
 
       expect(snapshot.home).toMatchObject({
@@ -4119,19 +4136,11 @@ describe("runtime directories and plugin Python boundary", () => {
 
   test("inspects Windows credential ancestry and the home even without descendants", async () => {
     const { home } = await credentialHome(false);
-    const sid = "S-1-5-21-111-222-333-1001";
-    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
-    const ancestors = credentialAncestors(home, directory);
-    const descriptors = [...ancestors, directory];
+    const ancestors = credentialAncestors(home, privateDirAcl);
+    const descriptors = [...ancestors, privateDirAcl];
 
     await expect(
-      inspectWindowsCredentialAclSnapshot(home, sid, {
-        command: process.execPath,
-        args: [
-          "--eval",
-          `process.stdout.write(${JSON.stringify(windowsCredentialAclOutput(descriptors))})`,
-        ],
-      }),
+      inspectAclOutput(home, windowsCredentialAclOutput(descriptors)),
     ).resolves.toMatchObject({
       home: { owner: sid, protected: true },
       descendantsArePrivate: true,
@@ -4263,24 +4272,25 @@ describe("runtime directories and plugin Python boundary", () => {
     await mkdir(home);
     await writeFile(join(home, "auth.json"), "credential\n");
     await writeFile(temporary, "temporary credential\n");
-    const sid = "S-1-5-21-111-222-333-1001";
-    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
     const file = `O:${sid}G:SYD:P(A;;FA;;;${sid})`;
-    const descriptors = credentialAncestors(home, directory);
-    descriptors.push(directory, file);
+    const descriptors = credentialAncestors(home, privateDirAcl);
+    descriptors.push(privateDirAcl, file);
     const script = [
       'const fs = require("node:fs")',
-      `fs.appendFileSync(${JSON.stringify(inspectionCount)}, "inspection\\n")`,
-      `const interrupted = fs.existsSync(${JSON.stringify(temporary)})`,
-      `if (interrupted) fs.unlinkSync(${JSON.stringify(temporary)})`,
-      `process.stdout.write(interrupted ? ${JSON.stringify(`${descriptors.join("\n")}\n`)} : ${JSON.stringify(windowsCredentialAclOutput(descriptors))})`,
+      "const { inspectionCount, temporary, partial, complete } = JSON.parse(process.argv[1])",
+      'fs.appendFileSync(inspectionCount, "inspection\\n")',
+      "const interrupted = fs.existsSync(temporary)",
+      "if (interrupted) fs.unlinkSync(temporary)",
+      "process.stdout.write(interrupted ? partial : complete)",
       "process.exitCode = interrupted ? 2 : 0",
     ].join("; ");
 
     await expect(
-      inspectWindowsCredentialAclSnapshot(home, sid, {
-        command: process.execPath,
-        args: ["--eval", script],
+      inspectAclScript(home, script, {
+        inspectionCount,
+        temporary,
+        partial: `${descriptors.join("\n")}\n`,
+        complete: windowsCredentialAclOutput(descriptors),
       }),
     ).resolves.toMatchObject({
       home: { owner: sid, protected: true },
@@ -4302,15 +4312,13 @@ describe("runtime directories and plugin Python boundary", () => {
       const inspectionCount = join(root, "inspection-count");
       await mkdir(home);
       const script = [
-        `require("node:fs").appendFileSync(${JSON.stringify(inspectionCount)}, "inspection\\n")`,
-        `process.exitCode = ${exitCode}`,
+        "const { inspectionCount, exitCode } = JSON.parse(process.argv[1])",
+        'require("node:fs").appendFileSync(inspectionCount, "inspection\\n")',
+        "process.exitCode = exitCode",
       ].join("; ");
 
       await expect(
-        inspectWindowsCredentialAclSnapshot(home, "S-1-5-21-111-222-333-1001", {
-          command: process.execPath,
-          args: ["--eval", script],
-        }),
+        inspectAclScript(home, script, { inspectionCount, exitCode }),
       ).rejects.toThrow(message);
       expect(await readFile(inspectionCount, "utf8")).toBe(
         "inspection\n".repeat(attempts),
@@ -4330,13 +4338,11 @@ describe("runtime directories and plugin Python boundary", () => {
         return;
       }
       const home = join(await temporaryDirectory(), "home");
-      const sid = "S-1-5-21-111-222-333-1001";
-      const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
-      const descriptors = credentialAncestors(home, directory);
-      descriptors.push(directory);
+      const descriptors = credentialAncestors(home, privateDirAcl);
+      descriptors.push(privateDirAcl);
       const firstDescriptors = [...descriptors];
       if (kind === "unsafe") {
-        firstDescriptors[0] = `${directory}(A;OICI;FA;;;WD)`;
+        firstDescriptors[0] = `${privateDirAcl}(A;OICI;FA;;;WD)`;
       }
 
       const makeChild = () =>
@@ -4435,18 +4441,9 @@ describe("runtime directories and plugin Python boundary", () => {
 
   test("rejects unsafe Windows credential ancestry during combined ACL inspection", async () => {
     const { home } = await credentialHome(false);
-    const sid = "S-1-5-21-111-222-333-1001";
     const unsafe = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})(A;OICI;FA;;;WD)`;
 
-    await expect(
-      inspectWindowsCredentialAclSnapshot(home, sid, {
-        command: process.execPath,
-        args: [
-          "--eval",
-          `process.stdout.write(${JSON.stringify(`${unsafe}\n`)})`,
-        ],
-      }),
-    ).rejects.toThrow(
+    await expect(inspectAclOutput(home, `${unsafe}\n`)).rejects.toThrow(
       "Windows credential-home ancestor allows another identity to replace the directory",
     );
   });
@@ -4455,21 +4452,16 @@ describe("runtime directories and plugin Python boundary", () => {
     "identifies an Everyone-owned %s in streamed Windows ACL descriptors",
     async (location) => {
       const home = String.raw`C:\parent\home`;
-      const sid = "S-1-5-21-111-222-333-1001";
-      const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
-      const ancestors = [directory, directory];
+      const ancestors = [privateDirAcl, privateDirAcl];
       const rejected =
         location === "parent" ? win32.dirname(home) : win32.parse(home).root;
       ancestors[location === "parent" ? 1 : 0] =
         `O:WDG:SYD:P(A;OICI;FA;;;${sid})`;
 
-      const failure = await inspectWindowsCredentialAclSnapshot(home, sid, {
-        command: process.execPath,
-        args: [
-          "--eval",
-          `process.stdout.write(${JSON.stringify(windowsCredentialAclOutput([...ancestors, directory]))})`,
-        ],
-      }).catch((error: unknown) => error);
+      const failure = await inspectAclOutput(
+        home,
+        windowsCredentialAclOutput([...ancestors, privateDirAcl]),
+      ).catch((error: unknown) => error);
 
       expect(failure).toBeInstanceOf(Error);
       expect((failure as Error).message).toContain(
@@ -4506,16 +4498,14 @@ describe("runtime directories and plugin Python boundary", () => {
     "\\\\?\\UNC\\server\\share",
     "\\\\?\\UNC\\server\\share\\",
   ])("rejects Windows volume root %s as a credential home", async (root) => {
-    const sid = "S-1-5-21-111-222-333-1001";
-    const privateDirectory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
-    const readableRoot = `${privateDirectory}(A;OICI;FR;;;WD)`;
-    const output = windowsCredentialAclOutput([readableRoot, privateDirectory]);
+    const readableRoot = `${privateDirAcl}(A;OICI;FR;;;WD)`;
+    const output = windowsCredentialAclOutput([readableRoot, privateDirAcl]);
     const resolveDescriptorAliases = mock(async () => {});
 
     await expect(
       inspectWindowsCredentialAclSnapshot(root, sid, {
         command: process.execPath,
-        args: ["--eval", `process.stdout.write(${JSON.stringify(output)})`],
+        args: ["--eval", "process.stdout.write(process.argv[1])", "--", output],
         resolveDescriptorAliases,
       }),
     ).rejects.toThrow("must be below a volume or share root");
@@ -4527,23 +4517,14 @@ describe("runtime directories and plugin Python boundary", () => {
     async (location) => {
       const share = String.raw`\\?\UNC\server\share`;
       const parent = `${share}\\parent`;
-      const sid = "S-1-5-21-111-222-333-1001";
-      const safe = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
-      const unsafe = `${safe}(A;OICI;FA;;;WD)`;
+      const unsafe = `${privateDirAcl}(A;OICI;FA;;;WD)`;
       const output = windowsCredentialAclOutput([
-        location === "share" ? unsafe : safe,
-        location === "parent" ? unsafe : safe,
-        safe,
+        location === "share" ? unsafe : privateDirAcl,
+        location === "parent" ? unsafe : privateDirAcl,
+        privateDirAcl,
       ]);
 
-      const snapshot = inspectWindowsCredentialAclSnapshot(
-        `${parent}\\home`,
-        sid,
-        {
-          command: process.execPath,
-          args: ["--eval", `process.stdout.write(${JSON.stringify(output)})`],
-        },
-      );
+      const snapshot = inspectAclOutput(`${parent}\\home`, output);
       await expect(snapshot).rejects.toThrow(
         `ancestor could not be trusted: ${location === "share" ? share : parent}.`,
       );
@@ -4576,23 +4557,18 @@ describe("runtime directories and plugin Python boundary", () => {
 
   test("names the outermost Windows ancestor that allows replacement", async () => {
     const { home } = await credentialHome(false);
-    const sid = "S-1-5-21-111-222-333-1001";
     const sandbox = "S-1-5-21-444-555-666-1002";
-    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
-    const ancestors = credentialAncestors(home, directory);
+    const ancestors = credentialAncestors(home, privateDirAcl);
     ancestors[ancestors.length - 1] =
       `O:${sid}G:SYD:AI(A;OICIID;0x1301bf;;;${sandbox})(A;OICIID;FA;;;${sid})`;
     ancestors[ancestors.length - 2] =
       `O:${sid}G:SYD:(A;OICI;0x1301bf;;;${sandbox})(A;OICI;FA;;;${sid})`;
 
     await expect(
-      inspectWindowsCredentialAclSnapshot(home, sid, {
-        command: process.execPath,
-        args: [
-          "--eval",
-          `process.stdout.write(${JSON.stringify(windowsCredentialAclOutput([...ancestors, directory]))})`,
-        ],
-      }),
+      inspectAclOutput(
+        home,
+        windowsCredentialAclOutput([...ancestors, privateDirAcl]),
+      ),
     ).rejects.toThrow(
       `ancestor could not be trusted: ${dirname(dirname(home))}.`,
     );
@@ -4600,27 +4576,17 @@ describe("runtime directories and plugin Python boundary", () => {
 
   test("rejects incomplete combined Windows credential ACL inspections", async () => {
     const { home } = await credentialHome(false);
-    const sid = "S-1-5-21-111-222-333-1001";
-    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
 
-    await expect(
-      inspectWindowsCredentialAclSnapshot(home, sid, {
-        command: process.execPath,
-        args: [
-          "--eval",
-          `process.stdout.write(${JSON.stringify(`${directory}\n`)})`,
-        ],
-      }),
-    ).rejects.toThrow("Windows credential-home ancestry could not be verified");
+    await expect(inspectAclOutput(home, `${privateDirAcl}\n`)).rejects.toThrow(
+      "Windows credential-home ancestry could not be verified",
+    );
   });
 
   test("rejects incomplete or failed Windows credential descendant streams", async () => {
     const { home } = await credentialHome(false);
-    const sid = "S-1-5-21-111-222-333-1001";
-    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
     const file = `O:${sid}G:SYD:P(A;;FA;;;${sid})`;
-    const descriptors = credentialAncestors(home, directory);
-    descriptors.push(directory, file);
+    const descriptors = credentialAncestors(home, privateDirAcl);
+    descriptors.push(privateDirAcl, file);
     const complete = windowsCredentialAclOutput(descriptors);
     for (const { output, exitCode, error } of [
       {
@@ -4644,35 +4610,21 @@ describe("runtime directories and plugin Python boundary", () => {
         error: "Windows credential ACL inspection failed",
       },
     ]) {
-      await expect(
-        inspectWindowsCredentialAclSnapshot(home, sid, {
-          command: process.execPath,
-          args: [
-            "--eval",
-            `process.stdout.write(${JSON.stringify(output)}); process.exitCode = ${exitCode}`,
-          ],
-        }),
-      ).rejects.toThrow(error);
+      await expect(inspectAclOutput(home, output, exitCode)).rejects.toThrow(
+        error,
+      );
     }
   });
 
   test("detects unsafe descendants during combined Windows credential ACL inspections", async () => {
     const { home } = await credentialHome(false);
     await writeFile(join(home, "auth.json"), "credential\n");
-    const sid = "S-1-5-21-111-222-333-1001";
-    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
     const unsafeFile = `O:${sid}G:SYD:P(A;;FA;;;${sid})(A;;FR;;;WD)`;
-    const ancestors = credentialAncestors(home, directory);
-    const descriptors = [...ancestors, directory, unsafeFile];
+    const ancestors = credentialAncestors(home, privateDirAcl);
+    const descriptors = [...ancestors, privateDirAcl, unsafeFile];
 
     await expect(
-      inspectWindowsCredentialAclSnapshot(home, sid, {
-        command: process.execPath,
-        args: [
-          "--eval",
-          `process.stdout.write(${JSON.stringify(windowsCredentialAclOutput(descriptors))})`,
-        ],
-      }),
+      inspectAclOutput(home, windowsCredentialAclOutput(descriptors)),
     ).resolves.toMatchObject({ descendantsArePrivate: false });
   });
 
@@ -5333,9 +5285,7 @@ describe("runtime directories and plugin Python boundary", () => {
       ),
     );
     const home = join(ancestor, "codex-home");
-    const sid = "S-1-5-21-111-222-333-1001";
-    const directory = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
-    const ancestors = credentialAncestors(home, directory);
+    const ancestors = credentialAncestors(home, privateDirAcl);
     ancestors[ancestors.length - 1] = `O:WDG:SYD:P(A;OICI;FA;;;${sid})`;
     const failure = await requirePrivateCredentialHome(
       await lstat(root),
@@ -5343,13 +5293,10 @@ describe("runtime directories and plugin Python boundary", () => {
       {
         platform: "win32",
         secureWindowsHome: async (path) => {
-          await inspectWindowsCredentialAclSnapshot(path, sid, {
-            command: process.execPath,
-            args: [
-              "--eval",
-              `process.stdout.write(${JSON.stringify(windowsCredentialAclOutput([...ancestors, directory]))})`,
-            ],
-          });
+          await inspectAclOutput(
+            path,
+            windowsCredentialAclOutput([...ancestors, privateDirAcl]),
+          );
         },
       },
     ).catch((error: unknown) => error);

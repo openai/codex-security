@@ -14,10 +14,10 @@ from types import SimpleNamespace
 import pytest
 from test_workbench_standard_deep_results import (
     deep_scan_fixture,
-    standard_finding,
     write_saved_parent,
 )
 from workbench_test_support import (
+    archive_finding,
     finish_deep_scan,
     get_scan,
     read_review_state,
@@ -32,9 +32,7 @@ from workbench_test_support import (
 def deadline_fixture(
     tmp_path: Path, checkpoint_kind: str = "empty", *, include_paths: list[str] | None = None
 ) -> SimpleNamespace:
-    state, home, target, directory, scan_id = deep_scan_fixture(
-        tmp_path, include_paths=include_paths
-    )
+    state, home, _, directory, scan_id = deep_scan_fixture(tmp_path, include_paths=include_paths)
     environment = {"CODEX_HOME": str(home)}
     claimed = run_workbench(
         state,
@@ -46,7 +44,7 @@ def deadline_fixture(
         environment=environment,
     )
     generation = str(claimed["deepScan"]["coordinatorGeneration"])
-    finding = standard_finding(tmp_path, scan_id, target)
+    finding = archive_finding("app.py")
     if checkpoint_kind != "empty":
         prompt, output, _ = worker_paths(directory, "deadline-worker")
         args = (

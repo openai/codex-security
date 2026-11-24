@@ -8,7 +8,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { after, test, type TestContext } from "node:test";
 import { Worker } from "node:worker_threads";
-import { importSource } from "./import-module.ts";
+import { bundledMcpDefine, importSource } from "./import-module.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import workbenchMigrations from "../../shared/workbench-migrations.json" with { type: "json" };
 import type * as Database from "../src/workbench/database.ts";
@@ -17,15 +17,7 @@ import type * as Migrations from "../src/workbench/migrations.ts";
 const { openWorkbenchDatabase, databaseInfo } = (await importSource(
   "src/workbench/database.ts",
   {
-    define: {
-      // Native bindings are installed beside the generated server bundle.
-      "import.meta.url": JSON.stringify(
-        new URL(
-          "../../../../sdk/typescript/_bundled_plugin/mcp/server.mjs",
-          import.meta.url,
-        ).href,
-      ),
-    },
+    define: bundledMcpDefine("server"),
   },
 )) as typeof Database;
 const { applyMigrations, migrations } = (await importSource(
