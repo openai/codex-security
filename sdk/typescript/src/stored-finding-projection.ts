@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { normalizeBlackDuckFindings } from "./blackduck-findings.js";
 import {
   continuumIssueFormat,
+  checkRetainedContinuumPatches,
   normalizeContinuumFindings,
 } from "./continuum-findings.js";
 import { normalizeEndorFindings } from "./endor-findings.js";
@@ -133,6 +134,8 @@ function cloudEvidence(
   sourceRepositories: readonly ExternalSourceRepository[],
   inspectorMap?: ReadonlyMap<string, string>,
 ) {
+  if (row.provider === "continuum")
+    checkRetainedContinuumPatches(row.evidence.source_data);
   try {
     return validateExternalEvidence(row.evidence, "cloud");
   } catch (error) {

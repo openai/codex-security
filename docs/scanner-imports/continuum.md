@@ -4,6 +4,8 @@ Import Continuum issues to create one Codex Security record per issue ARN. The
 issue provides exploitability and severity analysis, supporting details, and an
 initial patch when available.
 
+For follow-up validation of Codex Security scans, see [validation providers](../validation-providers.md).
+
 ## Quick start
 
 Open the matching checkout. Set `ENVIRONMENT_ID` to the Continuum environment ID. Verify which
@@ -90,8 +92,27 @@ codex-security publish findings "$report" --to cloud --repository "$repo" \
 Check the account, repository and source ARNs. The preview identifies the inbox
 (`privateImport`) or repository environments (`requests`) that will receive them.
 Remove `--dry-run` and confirm. Match the resulting source IDs to the Continuum
-ARNs. A private inbox upload with changed evidence for the same ARN can return
-`source_order_unknown`. [Verify the import](README.md#verify-the-import)
+ARNs. [Verify the import](README.md#verify-the-import)
+
+To update an issue in your private inbox, collect a fresh report and preview
+it with the original source key. When the preview includes
+`privateImport.sourceCheckpoint`, confirmation authorizes replacing changed
+evidence for the selected ARNs as of that checkpoint. Compare the checkpoint
+at the prompt with the one you reviewed. For a new noninteractive upload,
+`--yes` requires a matching dry run. The CLI saves a digest of the latest
+preview for that file path in the local state directory. Use separate paths
+for independent reviews.
+
+If the source checkpoint changes before upload, review a new preview. Cloud
+can also report a conflict if another import updates the same ARN during the
+upload. Compare the current inbox evidence with the report before approving a
+new attempt. If a completed job had item errors and the checkpoint has
+advanced, the fresh preview identifies that job in `privateImport.retryOfJobId`.
+Confirmation retries the entire selection, including previously accepted items.
+
+After a lost response, resume the original upload with its saved checkpoint.
+On deployments that omit the checkpoint, changed evidence can return
+`source_order_unknown`.
 
 ## Identity, evidence, and repeat imports
 
@@ -219,14 +240,40 @@ out=$(mktemp -d "${TMPDIR:-/tmp}/continuum.XXXXXX") &&
   report="$out/continuum.json"
 ```
 
-When AWS supplies `perFindingResults`, the capture retains the selected finding's
-result, including its verdict and any flow or HTTP proof. Without that breakdown,
-the collector can attach the whole validation artifact when the selected finding
-is the issue's sole contributor. The capture records the issue ARN, issue ID,
-and its `findingIds` in `validationIssue` so a saved import can verify that
-association. Evidence shared by several findings without an identified subject
-is omitted. If no artifacts match, the collector saves the
-native finding detail. If an AWS read fails, retry the export before import.
+The collector verifies the finding ARN and reads artifacts under the issue
+linked by that finding. If AWS merged the finding into another issue, both
+the collector and the saved import use the destination issue. When a finding
+lists different issue IDs, each collected patch records the destination
+`issueArn`. Import excludes the finding if a patch has a different ARN or
+lacks one in such a capture. Publishing a locally stored finding to Cloud
+applies the same check. For normalized SDK input, a fresh Cloud publication
+rejects the selection if a retained patch fails this check. Recollect the
+finding using the command above before publishing. An interrupted normalized
+submission keeps its previously approved bytes when resumed.
+
+When AWS supplies `perFindingResults`, the collector looks for
+exactly one entry matching the selected `findingId` with a verdict of `EXPLOITABLE`,
+`NOT_EXPLOITABLE` or `UNCERTAIN`. It retains that entry, including any flow
+or HTTP proof. If the breakdown omits the selected ID, the collector skips
+the artifact. If the ID occurs multiple times or its verdict is unrecognized,
+the collector can retain just the overall verdict and artifact descriptor
+when the verdict is recognized and the verified issue lists the selected
+finding as its sole contributor.
+
+For a multi-finding issue, the individual capture keeps only an explicit
+result for the selected finding from a validation artifact. This keeps
+sibling IDs and proof out of the individual import. To retain the overall
+verdict and evidence for the group, [export the issue](#export-issues-for-one-repository).
+
+Without a per-finding breakdown, the collector can retain the issue artifact
+when the selected finding is the issue’s sole contributor. Its verdict describes
+the AWS issue. Historical issue evidence may include content from other findings
+that previously shared it. Review the evidence before publishing.
+The capture records the issue ARN, issue ID and `findingIds` in
+`validationIssue` so a saved import can verify the association. The imported
+record keeps this identity in `evidence.source_data.validation_issue`. If no
+artifacts match, the collector saves the native finding detail. If an AWS read
+fails, retry the export before import.
 
 Publish this report with `publish findings --provider continuum` and the verified
 `--source-repository-url`. The record is identified by the finding ARN.
