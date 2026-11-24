@@ -26,7 +26,7 @@ node plugins/codex-security/mcp-app/scripts/build_native.mjs
 node plugins/codex-security/mcp-app/scripts/build_mcp_app.mjs --output plugins/codex-security/mcp --native host
 ```
 
-`build_native.mjs` uses the MCP app's dependencies to compile the TypeScript tools, fetches the locked Cargo dependencies, and writes the host binary and license notices to `native/dist`. `--native host` packages those files for the current platform and architecture under `mcp/`, where the plugin launcher expects them. CI tests this build without the SDK on Linux, macOS, and Windows.
+`build_native.mjs` uses the MCP app's dependencies to compile the TypeScript tools, fetches the locked Cargo dependencies, and writes the host binary and license notices to `native/dist`. `--native host` packages those files for the current platform and architecture under `mcp/`, where the plugin launcher expects them. The MCP source build shares validation adapters with the sibling TypeScript SDK sources, so build from the repository checkout with both packages' dependencies installed. Installed plugins contain self-contained bundles and need no Codex Security SDK installation. CI tests the native-wrapper build without an npm launcher on Linux, macOS, and Windows.
 
 ## Build and verify the native bindings
 

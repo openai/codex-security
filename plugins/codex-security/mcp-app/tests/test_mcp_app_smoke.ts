@@ -1,3 +1,4 @@
+import { continuumAssessmentVersion } from "../src/standalone-validation.ts";
 import { fixturePython } from "./support/python.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import { readJson, writeJson } from "./support/json.ts";
@@ -944,6 +945,11 @@ exec "$CODEX_SECURITY_TEST_SYSTEM_PYTHON" "$@"
   }
 }
 
+const remediationCriteria = Array.from(
+  { length: 40 },
+  (_, index) => `Regression ${index}. ${"Synthetic check. ".repeat(32)}`,
+);
+
 async function writeCompletedContract(
   scanDir: string,
   scanId: string,
@@ -958,6 +964,8 @@ async function writeCompletedContract(
       {
         ruleId: "path-traversal.archive-extraction",
         identity: { anchor: "archive-entry-write-without-containment" },
+        continuumAssessment: { provider: "continuum", verdict: "EXPLOITABLE" },
+        remediationTests: remediationCriteria,
         title: "Fixture finding",
         summary: "An attacker-controlled path reaches a filesystem write.",
         severity: { level: "high" },
@@ -2634,6 +2642,65 @@ try {
     requestId: remediationRequestId.toUpperCase(),
     actionToken: generationActionToken.toUpperCase(),
   };
+  const configFile = path.join(
+    stateDir,
+    "validation-providers",
+    scanId + ".json",
+  );
+  const configuration = {
+    provider: "continuum",
+    continuum: { environment_id: "fixture" },
+  };
+  const assessment = {
+    itemId: occurrenceId,
+    provider: "continuum",
+    findingId: "f",
+    findingArn:
+      "arn:aws:continuum:us-east-1:000000000000:environments/fixture/code-findings/f",
+    submittedAt: "2026-10-01T00:00:00.000Z",
+    verdict: "UNCERTAIN",
+    terminalStatus: "FAILED",
+    claimMatch: "unknown",
+    freshness: { stale: false, reasons: [] },
+    reasons: [],
+  };
+  const projection = path.join(initializedScanDir, "validation.json");
+  const save = (record: object) =>
+    writeJson(configFile + ".result", {
+      schemaVersion: continuumAssessmentVersion,
+      configuration,
+      repositoryPath: results.targetPath,
+      result: { provider: "continuum" },
+      retry: null,
+      records: {
+        schemaVersion: 1,
+        items: [
+          { ...assessment, itemId: results.findings[1].occurrenceId },
+          record,
+        ],
+      },
+    });
+  await mkdir(path.dirname(configFile), { recursive: true });
+  await writeJson(configFile, configuration);
+  // Both the draft finding and the scan-local artifact can contain model-authored claims.
+  await writeJson(projection, {
+    schemaVersion: 1,
+    items: [{ ...assessment, verdict: "EXPLOITABLE" }],
+  });
+  const baseline = await stageContext(6310, generationClaim);
+  assertNoError(baseline);
+  const original = baseline.result.structuredContent.scan.findings[0];
+  assert.equal(original.continuumAssessment, undefined);
+  assert.deepEqual(original.remediationTests, remediationCriteria);
+  const modelAssessment = {
+    itemId: occurrenceId,
+    provider: "continuum",
+    verdict: assessment.verdict,
+    terminalStatus: assessment.terminalStatus,
+    claimMatch: "unknown",
+    freshness: { stale: false },
+  };
+  await save(assessment);
   const otherFinding = await stageContext(6301, {
     ...generationClaim,
     occurrenceId: results.findings[1].occurrenceId,
@@ -2643,6 +2710,9 @@ try {
   assertNoError(stage);
   assert.deepEqual(Object.keys(stage.result.structuredContent), ["scan"]);
   const scopedScan = stage.result.structuredContent.scan;
+  assert.deepEqual(scopedScan.findings, [
+    { ...original, continuumAssessment: modelAssessment },
+  ]);
   assert.deepEqual(Object.keys(scopedScan).sort(), [
     "findings",
     "scanDir",
@@ -2743,6 +2813,14 @@ try {
     requestedApply.structuredContent.scan.findings[0].remediationState.version,
     3,
   );
+  const applying = await stageContext(6313, {
+    ...generationClaim,
+    actionToken: applyActionToken,
+  });
+  assertNoError(applying);
+  const assignedApply = applying.result.structuredContent.scan.findings[0];
+  assert.equal(assignedApply.continuumAssessment, undefined);
+  assert.equal(assignedApply.remediationState.patch, remediationPatch);
   const markedApplyDelivered = await testServer.callSuccessfulTool(166, {
     name: "mark_codex_security_finding_remediation_delivered",
     arguments: {
@@ -2823,11 +2901,31 @@ try {
     "verify",
   );
 
+  const superseded = await stageContext(6314, generationClaim);
+  assert.equal(superseded.result.isError, true);
+  const revised = {
+    ...assessment,
+    statusMessage: "Synthetic validation failed during setup.",
+    freshness: { stale: true, reasons: ["Synthetic stale evidence"] },
+  };
+  await save(revised);
   const refreshedStage = await stageContext(6322, {
     ...generationClaim,
     actionToken: verifyActionToken,
   });
   assertNoError(refreshedStage);
+  assert.deepEqual(
+    refreshedStage.result.structuredContent.scan.findings[0]
+      .continuumAssessment,
+    { ...modelAssessment, freshness: { stale: true } },
+  );
+  assert.deepEqual(
+    refreshedStage.result.structuredContent.scan.findings[0].remediationTests,
+    remediationCriteria,
+  );
+  await rm(configFile);
+  await rm(configFile + ".result");
+  await rm(projection);
   assert.equal(
     refreshedStage.result.structuredContent.scan.findings[0].remediationState
       .version,
