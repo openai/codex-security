@@ -835,7 +835,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
                     self.assertIn("=Unsafe archive extraction", html)
                     self.assertIn("high", html)
                     self.assertIn("src/extract.py:41-44", html)
-                    self.assertIn("open at scan time", html)
+                    self.assertIn("excludes triage status", html)
                 else:
                     sarif = json.loads(result.stdout)
                     self.assertEqual(sarif["version"], "2.1.0")
@@ -978,16 +978,18 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         output = self.scan_dir.parent / "findings.csv"
 
         exported = self.run_finalizer("--export-format", "csv", "--export-output", str(output))
-        rejected = self.run_finalizer(
-            "--export-format", "json", "--export-output", findings.name, cwd=self.scan_dir
-        )
-
         self.assertEqual(exported.returncode, 0, exported.stderr)
         self.assertTrue(output.read_text().startswith("occurrence_id,finding_id,title,summary"))
         self.assertEqual(exported.stdout, "")
-        self.assertNotEqual(rejected.returncode, 0)
-        self.assertIn("JSON output path cannot overwrite a scan artifact", rejected.stderr)
-        self.assertEqual(findings.read_bytes(), before)
+        for fmt in ("json", "html"):
+            rejected = self.run_finalizer(
+                "--export-format", fmt, "--export-output", findings.name, cwd=self.scan_dir
+            )
+            self.assertNotEqual(rejected.returncode, 0)
+            self.assertIn(
+                f"{fmt.upper()} output path cannot overwrite a scan artifact", rejected.stderr
+            )
+            self.assertEqual(findings.read_bytes(), before)
 
     def test_export_failure_names_the_missing_output_directory(self) -> None:
         self.write_sealed_scan()

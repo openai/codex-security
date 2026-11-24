@@ -22,17 +22,17 @@ th, td { border-bottom: 1px solid #ccc; text-align: left; padding: .45rem .5rem;
   vertical-align: top; }
 th { font-size: .8rem; letter-spacing: .04em; text-transform: uppercase; }
 .sev { display: inline-block; border-radius: .25rem; font-size: .75rem;
-  font-weight: 600; padding: .1rem .45rem; text-transform: uppercase; }
-.critical { background: #7f1d1d; color: #fff; }
-.high { background: #b91c1c; color: #fff; }
-.medium { background: #b45309; color: #fff; }
-.low { background: #1d4ed8; color: #fff; }
-.informational { background: #4b5563; color: #fff; }
+  font-weight: 600; padding: .1rem .45rem; text-transform: uppercase; color: white; }
+.critical { background: #7f1d1d; }
+.high { background: #b91c1c; }
+.medium { background: #b45309; }
+.low { background: #1d4ed8; }
+.informational { background: #4b5563; }
 .finding { border-top: 1px solid #ccc; margin: 1.5rem 0; padding-top: 1rem; }
 .finding h2 { font-size: 1.1rem; }
-dl { display: grid; gap: .25rem 1rem; grid-template-columns: 9rem 1fr; }
+dl { display: grid; gap: .25rem 1rem; grid-template-columns: max-content 1fr; }
 dt { font-weight: 600; }
-dd { white-space: pre-wrap; }
+dd { margin: 0; white-space: pre-wrap; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
 a { color: inherit; }
 """.strip()
@@ -1084,9 +1084,8 @@ def build_html_projection(manifest: dict[str, Any], findings: dict[str, Any]) ->
     summary = f"{len(items)} {word}"
     if items:
         summary += f" · {_level_mix(items, 'severity', SEVERITY_ORDER)}"
-        summary += ". All findings were open at scan time. Later triage changes are excluded."
         if scan["status"] != "completed":
-            summary += " The scan stopped before completing its review."
+            summary += ". The scan stopped before completing its review."
     meta = " · ".join(escape(scan[key]) for key in ("id", "status", "completedAt"))
     rows: list[str] = []
     details: list[str] = []
@@ -1130,7 +1129,8 @@ def build_html_projection(manifest: dict[str, Any], findings: dict[str, Any]) ->
 <style>{_HTML_EXPORT_STYLE}</style>
 </head>
 <body>
-<header><h1>Codex Security findings — {target}</h1><p>{meta}</p><p>{summary}</p></header>
+<header><h1>Codex Security findings — {target}</h1><p>{meta}</p>
+<p>This sealed snapshot excludes triage status and review coverage.</p><p>{summary}</p></header>
 <table>
 <thead><tr><th>Severity</th><th>Finding</th><th>Location</th></tr></thead>
 <tbody>{"".join(rows)}</tbody>

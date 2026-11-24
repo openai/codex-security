@@ -2803,7 +2803,8 @@ apostrophes from older CSV exports.
 
 HTML writes an offline report to `./findings.html` by default. It shows
 the severity, primary location, summary, and remediation for each finding.
-All findings were open at scan time. The export excludes later triage changes.
+The export excludes triage status and review coverage. Consult `report.md` for
+coverage and the workbench for current finding status.
 
 ```bash
 codex-security export --scan SCAN_ID --export-format html --output findings.html
