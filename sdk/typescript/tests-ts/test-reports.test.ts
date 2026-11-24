@@ -4,6 +4,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { compareTestReports } from "../scripts/test-report-comparison.mts";
 import { bashCommand, runCommand } from "./support/shell.js";
 import { createTemporaryDirectories } from "./support/temporary-directories.js";
+import { workflow } from "./support/workflow.js";
 
 // Node 22.13 emits this upstream notice when executing TypeScript directly.
 const typeStrippingNotice =
@@ -41,30 +42,11 @@ async function fixtures() {
 
 async function workflowFixtures() {
   const fixture = await fixtures();
-  const workflow = Bun.YAML.parse(
-    await readFile(
-      new URL("../../../.github/workflows/test-quality.yml", import.meta.url),
-      "utf8",
-    ),
-  ) as {
-    jobs: {
-      runner: {
-        strategy: {
-          matrix: {
-            target: Array<{
-              os: string;
-              shard: number;
-              count: number;
-              mode: string;
-            }>;
-          };
-        };
-      };
-      compare: { steps: Array<{ name?: string; run?: string }> };
-    };
-  };
+  const { jobs } = workflow("test-quality");
   await mkdir(join(fixture.root, "reports"));
-  const { target } = workflow.jobs.runner.strategy.matrix;
+  const { target } = jobs["runner"]!.strategy!.matrix as {
+    target: { os: string; shard: number; count: number; mode: string }[];
+  };
   await Promise.all(
     target.map(({ os, shard, count, mode }) => {
       const totalCases = Math.max(
@@ -81,7 +63,7 @@ async function workflowFixtures() {
   );
   return {
     ...fixture,
-    script: workflow.jobs.compare.steps.find(
+    script: jobs["compare"]!.steps!.find(
       (step) => step.name === "Compare inventories and outcomes",
     )!.run!,
   };

@@ -24,6 +24,20 @@ import { createApiTestFixtures } from "./support/temporary-directories.js";
 const { temporaryDirectory, cleanup } = createApiTestFixtures("verify-fix-");
 afterEach(cleanup);
 
+function verdicts(...results: unknown[]) {
+  return JSON.stringify({ results });
+}
+
+function savedScan(result: ReturnType<typeof fakeResult>, scanId: string) {
+  return {
+    scan: {
+      scanId,
+      targetPath: "/saved/repository",
+      findings: result.findings.findings as unknown as JsonObject[],
+    },
+  };
+}
+
 async function linearIssue(identifier: string) {
   return {
     identifier,
@@ -77,15 +91,11 @@ describe("read-only finding verification", () => {
             prompt = output!.appServer!.prompt;
             environment = processEnvironment;
             output?.stdout.write(
-              JSON.stringify({
-                results: [
-                  {
-                    id: "SEC-123",
-                    status: "fixed",
-                    evidence:
-                      "The authorization check rejects the original request and the legitimate request succeeds.",
-                  },
-                ],
+              verdicts({
+                id: "SEC-123",
+                status: "fixed",
+                evidence:
+                  "The authorization check rejects the original request and the legitimate request succeeds.",
               }),
             );
             return 0;
@@ -179,14 +189,10 @@ describe("read-only finding verification", () => {
               },
             });
             output?.stdout.write(
-              JSON.stringify({
-                results: [
-                  {
-                    id: "finding-1",
-                    status: "fixed",
-                    evidence: "The original authorization bypass is rejected.",
-                  },
-                ],
+              verdicts({
+                id: "finding-1",
+                status: "fixed",
+                evidence: "The original authorization bypass is rejected.",
               }),
             );
             return 0;
@@ -235,15 +241,10 @@ describe("read-only finding verification", () => {
                 },
               });
               output?.stdout.write(
-                JSON.stringify({
-                  results: [
-                    {
-                      id: "finding-1",
-                      status: "fixed",
-                      evidence:
-                        "The original authorization bypass is rejected.",
-                    },
-                  ],
+                verdicts({
+                  id: "finding-1",
+                  status: "fixed",
+                  evidence: "The original authorization bypass is rejected.",
                 }),
               );
               return 0;
@@ -285,21 +286,19 @@ describe("read-only finding verification", () => {
             agentCalls += 1;
             prompt = output!.appServer!.prompt;
             output?.stdout.write(
-              JSON.stringify({
-                results: [
-                  {
-                    id: "SEC-123",
-                    status: "fixed",
-                    evidence: "The original exploit is rejected.",
-                  },
-                  {
-                    id: "SEC-456",
-                    status: "still_vulnerable",
-                    evidence:
-                      "The original unauthenticated route remains reachable.",
-                  },
-                ],
-              }),
+              verdicts(
+                {
+                  id: "SEC-123",
+                  status: "fixed",
+                  evidence: "The original exploit is rejected.",
+                },
+                {
+                  id: "SEC-456",
+                  status: "still_vulnerable",
+                  evidence:
+                    "The original unauthenticated route remains reachable.",
+                },
+              ),
             );
             return 0;
           },
@@ -353,13 +352,7 @@ describe("read-only finding verification", () => {
           result,
           onWorkbench: (args) => {
             expect(args).toEqual(["get-scan", "--scan-id", "scan-1"]);
-            return {
-              scan: {
-                scanId: "scan-1",
-                targetPath: "/saved/repository",
-                findings: result.findings.findings as unknown as JsonObject[],
-              },
-            };
+            return savedScan(result, "scan-1");
           },
           onCodex: (args, output) => {
             expect(args).toContain('model="gpt-6-astra"');
@@ -376,14 +369,10 @@ describe("read-only finding verification", () => {
               "occ_1",
             ]);
             output?.stdout.write(
-              JSON.stringify({
-                results: [
-                  {
-                    id: "occ_1",
-                    status: "fixed",
-                    evidence,
-                  },
-                ],
+              verdicts({
+                id: "occ_1",
+                status: "fixed",
+                evidence,
               }),
             );
             return 0;
@@ -413,13 +402,7 @@ describe("read-only finding verification", () => {
         ["verify-fix", "--scan", "scan", "--json"],
         dependencies({
           result,
-          onWorkbench: () => ({
-            scan: {
-              scanId: "scan",
-              targetPath: "/saved/repository",
-              findings: result.findings.findings as unknown as JsonObject[],
-            },
-          }),
+          onWorkbench: () => savedScan(result, "scan"),
           onCodex,
         }),
       ),
@@ -444,13 +427,7 @@ describe("read-only finding verification", () => {
       const message = workerMessage;
       const deps = dependencies({
         result,
-        onWorkbench: () => ({
-          scan: {
-            scanId: "scan",
-            targetPath: "/saved/repository",
-            findings: result.findings.findings as unknown as JsonObject[],
-          },
-        }),
+        onWorkbench: () => savedScan(result, "scan"),
         onCodex: (_args, output) => {
           output!.stderr.write(`${workerMessage}\n`);
           return 1;
@@ -530,13 +507,7 @@ describe("read-only finding verification", () => {
       const deps = dependencies({
         result,
         signals,
-        onWorkbench: () => ({
-          scan: {
-            scanId: "scan",
-            targetPath: "/saved/repository",
-            findings: result.findings.findings as unknown as JsonObject[],
-          },
-        }),
+        onWorkbench: () => savedScan(result, "scan"),
         onCodex: async (_args, output) => {
           const prompt = output!.appServer!.prompt;
           expect([...prompt].length).toBeLessThanOrEqual(1 << 20);
@@ -570,7 +541,7 @@ describe("read-only finding verification", () => {
             },
           });
           if (seen.length === 2 && scenario === "missing result") {
-            output!.stdout.write(JSON.stringify({ results: [] }));
+            output!.stdout.write(verdicts());
             return 0;
           }
           if (seen.length === 1 && scenario === "transport failure")
@@ -596,15 +567,10 @@ describe("read-only finding verification", () => {
               signals.emit("SIGTERM");
             });
           output!.stdout.write(
-            JSON.stringify({
-              results: [
-                {
-                  id:
-                    seen.length === 2 && scenario === "wrong ID" ? "occ_0" : id,
-                  status: seen.length === 1 ? "still_vulnerable" : "fixed",
-                  evidence: "Verified against source.",
-                },
-              ],
+            verdicts({
+              id: seen.length === 2 && scenario === "wrong ID" ? "occ_0" : id,
+              status: seen.length === 1 ? "still_vulnerable" : "fixed",
+              evidence: "Verified against source.",
             }),
           );
           return 0;
@@ -697,16 +663,10 @@ describe("read-only finding verification", () => {
             "--occurrence-id",
             "occ_earlier",
           ]);
-          return {
-            scan: {
-              scanId: "earlier",
-              targetPath: "/saved/repository",
-              findings: result.findings.findings as unknown as JsonObject[],
-            },
-          };
+          return savedScan(result, "earlier");
         },
         onCodex: (_args, output) => {
-          output!.stdout.write(JSON.stringify({ results: [verdict] }));
+          output!.stdout.write(verdicts(verdict));
           return 0;
         },
       }),
@@ -768,7 +728,7 @@ describe("read-only finding verification", () => {
     };
     const deps = dependencies({
       onCodex: (_args, output) => {
-        output?.stdout.write(JSON.stringify({ results: [result] }));
+        output?.stdout.write(verdicts(result));
         return 0;
       },
     });
@@ -803,14 +763,10 @@ describe("read-only finding verification", () => {
         dependencies({
           onCodex: (_args, output) => {
             output?.stdout.write(
-              JSON.stringify({
-                results: [
-                  {
-                    id: "finding-1",
-                    status: "inconclusive",
-                    evidence: "The original entrypoint cannot be identified.",
-                  },
-                ],
+              verdicts({
+                id: "finding-1",
+                status: "inconclusive",
+                evidence: "The original entrypoint cannot be identified.",
               }),
             );
             return 0;
@@ -1003,15 +959,11 @@ lines.once("line", () => process.stdout.write(JSON.stringify({
         dependencies({
           onCodex: (_args, output) => {
             output?.stdout.write(
-              JSON.stringify({
-                results: [
-                  {
-                    id: "finding-1",
-                    status: "fixed",
-                    evidence:
-                      "\u001b[31mOriginal exploit rejected.\nForged result.",
-                  },
-                ],
+              verdicts({
+                id: "finding-1",
+                status: "fixed",
+                evidence:
+                  "\u001b[31mOriginal exploit rejected.\nForged result.",
               }),
             );
             return 0;
@@ -1046,14 +998,10 @@ lines.once("line", () => process.stdout.write(JSON.stringify({
           dependencies({
             onCodex: (_args, output) => {
               output?.stdout.write(
-                JSON.stringify({
-                  results: [
-                    {
-                      id: "finding-1",
-                      status,
-                      evidence: "Synthetic evidence.",
-                    },
-                  ],
+                verdicts({
+                  id: "finding-1",
+                  status,
+                  evidence: "Synthetic evidence.",
                 }),
               );
               return 0;
@@ -1089,20 +1037,18 @@ lines.once("line", () => process.stdout.write(JSON.stringify({
       dependencies({
         onCodex: (_args, output) => {
           output?.stdout.write(
-            JSON.stringify({
-              results: [
-                {
-                  id: "finding-1",
-                  status: "fixed",
-                  evidence: "Café evidence.",
-                },
-                {
-                  id: "finding-2",
-                  status: "still_vulnerable",
-                  evidence: "Exploit still succeeds.",
-                },
-              ],
-            }),
+            verdicts(
+              {
+                id: "finding-1",
+                status: "fixed",
+                evidence: "Café evidence.",
+              },
+              {
+                id: "finding-2",
+                status: "still_vulnerable",
+                evidence: "Exploit still succeeds.",
+              },
+            ),
           );
           return 0;
         },
@@ -1307,13 +1253,7 @@ lines.once("line", () => process.stdout.write(JSON.stringify({
       dependencies({
         result,
         signals,
-        onWorkbench: () => ({
-          scan: {
-            scanId: "scan",
-            targetPath: "/saved/repository",
-            findings: result.findings.findings as unknown as JsonObject[],
-          },
-        }),
+        onWorkbench: () => savedScan(result, "scan"),
         onCodex: (_args, output) => {
           output!.stderr.write(message);
           return 1;

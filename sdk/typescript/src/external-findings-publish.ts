@@ -28,6 +28,7 @@ import { armorCodeRepositoryUrl } from "./armorcode-findings.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 import { tenableReportFormat } from "./tenable-findings.js";
 import { crowdstrikeReportFormat } from "./crowdstrike-findings.js";
+import { tenzaiReportFormat } from "./tenzai-findings.js";
 import {
   guardianFindingId,
   guardianFindingRepository,
@@ -576,6 +577,8 @@ function checkFindingProvider(
       requireCloudReader({ provider: "tenable" });
     if (format === crowdstrikeReportFormat)
       requireCloudReader({ provider: "crowdstrike" });
+    if (format === tenzaiReportFormat)
+      requireCloudReader({ provider: "tenzai" });
     if (format === guardianSelectionFormat && provider !== "semgrep")
       throw new CodexSecurityError(
         "Use the semgrep provider for Guardian findings.",
