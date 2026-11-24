@@ -1,5 +1,5 @@
-import { mkdir, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
+import { join, relative, toNamespacedPath } from "node:path";
 import { afterEach, expect, test } from "bun:test";
 import { resolveCodexProfile, type JsonObject } from "../src/config.js";
 import { scanSkillConfig } from "../src/scan-skill-paths.js";
@@ -95,6 +95,39 @@ test.each([false, true])(
   },
 );
 
+test("checks credential home containment through directory links", async () => {
+  const { root, home, plugin, blocked } = await fixture();
+  const alias = join(root, "linked home");
+  const linkType = process.platform === "win32" ? "junction" : "dir";
+  await mkdir(plugin.installedRoot, { recursive: true });
+  await symlink(home, alias, linkType);
+  const linkedInstall = join(alias, relative(home, plugin.installedRoot));
+  for (const { credentialHome, installedRoot } of [
+    { credentialHome: alias, installedRoot: plugin.installedRoot },
+    { credentialHome: home, installedRoot: toNamespacedPath(linkedInstall) },
+  ]) {
+    const actual = await scanSkillConfig(
+      {},
+      { ...plugin, installedRoot },
+      credentialHome,
+    );
+    expect(selection(actual)).toEqual(
+      selection({ skills: { config: blocked } }),
+    );
+  }
+
+  const outsideLink = join(home, "linked plugin");
+  await symlink(plugin.pluginRoot, outsideLink, linkType);
+  const config = {};
+  expect(
+    await scanSkillConfig(
+      config,
+      { ...plugin, installedRoot: outsideLink },
+      home,
+    ),
+  ).toBe(config);
+});
+
 test("leaves plugins outside the credential home and absent skills unchanged", async () => {
   const { root, home, plugin } = await fixture();
   const config: JsonObject = {
@@ -138,25 +171,54 @@ test.each([false, true])(
   },
 );
 
+test("inherits root skill rules when the selected profile's rules are null", async () => {
+  const { home, plugin, blocked } = await fixture();
+  const rule = { name: "user-skill", enabled: false };
+  const actual = await scanSkillConfig(
+    {
+      profile: "active",
+      profiles: { active: { skills: { config: null } } },
+      skills: { config: [rule] },
+    },
+    plugin,
+    home,
+  );
+  expect(selection(resolveCodexProfile(actual))).toEqual(
+    selection({ skills: { config: [rule, ...blocked] } }),
+  );
+});
+
+test("ignores inherited profile names when writing skill rules", async () => {
+  const { home, plugin } = await fixture();
+  const config = { profile: "__proto__", profiles: {} };
+  expect(Object.hasOwn(Object.prototype, "skills")).toBe(false);
+  try {
+    await scanSkillConfig(config, plugin, home);
+    expect(Object.hasOwn(Object.prototype, "skills")).toBe(false);
+  } finally {
+    Reflect.deleteProperty(Object.prototype, "skills");
+  }
+});
+
 test("isolates concurrent scan selections without changing their shared configuration", async () => {
   const [first, second] = await Promise.all([fixture(), fixture()]);
+  const rule = { name: "user-skill", enabled: false };
   const config: JsonObject = {
     plugins: { "selected@local": { enabled: true } },
+    skills: { config: [rule] },
   };
+  const before = structuredClone(config);
   const [a, b] = await Promise.all([
     scanSkillConfig(config, first.plugin, first.home),
     scanSkillConfig(config, second.plugin, second.home),
   ]);
   expect(selection(a)).toEqual(
-    selection({ skills: { config: first.blocked } }),
+    selection({ skills: { config: [rule, ...first.blocked] } }),
   );
+  const retained = selection(a).find((entry) => entry["name"] === rule.name)!;
+  retained["enabled"] = true;
+  expect(config).toEqual(before);
   expect(selection(b)).toEqual(
-    selection({ skills: { config: second.blocked } }),
-  );
-  expect(a["skills"]).not.toBe(b["skills"]);
-  expect(config).toEqual({ plugins: { "selected@local": { enabled: true } } });
-  (a["skills"] as JsonObject)["config"] = [];
-  expect(selection(b)).toEqual(
-    selection({ skills: { config: second.blocked } }),
+    selection({ skills: { config: [rule, ...second.blocked] } }),
   );
 });
