@@ -363,6 +363,7 @@ async function runCampaign(
       knowledgeByMode[mode] = { failure: { error } };
     }
   }
+  await requireLockOwner();
   await ensureManifest(
     join(output, "manifest.json"),
     tasks,
@@ -371,6 +372,7 @@ async function runCampaign(
   );
   const receipts = await readReceipts(
     ledger,
+    requireLockOwner,
     new Set(tasks.map((task) => task.id.toLowerCase())),
     options.recoverScan !== undefined,
   );
@@ -439,6 +441,7 @@ async function runCampaign(
       continue;
     }
     if (artifactsPresent) {
+      if (receipt.cleanupPending) await requireLockOwner();
       if (receipt.status === "completed") {
         try {
           if (receipt.cleanupPending === "checkout") {
@@ -540,6 +543,7 @@ async function runCampaign(
       }
       for (let retry = 0; retry < options.maxAttempts; retry += 1) {
         options.signal?.throwIfAborted();
+        await requireLockOwner();
         let attempt = maxAttempt;
         if (options.recoverScan === undefined) attempt = nextAttempt();
         else if (retry === 0) attempt = recoveryAttempt;
@@ -697,6 +701,7 @@ async function runCampaign(
               .filter(Boolean)
               .join("\n\n");
             operationId ??= randomUUID();
+            await requireLockOwner();
             result = await security.run(checkout, {
               ...scanSettings,
               knowledgeBaseSnapshot: knowledge?.snapshot,
@@ -762,6 +767,7 @@ async function runCampaign(
             : errorMessage(error);
         } finally {
           if (options.recoverScan === undefined && checkout !== undefined) {
+            await requireLockOwner();
             cleanupFailure = await removeCheckout(checkout, scanDir);
           }
         }
@@ -812,6 +818,7 @@ async function runCampaign(
         await receiptTail;
         options.signal?.throwIfAborted();
         if (recoveryCheckout !== undefined) {
+          await requireLockOwner();
           reportedError = await removeCheckout(recoveryCheckout, scanDir);
         }
         notifyProgress(options, {
@@ -1029,11 +1036,13 @@ async function acquireLock(output: string): Promise<SupervisorLock> {
     throw error;
   }
 
+  const ownsLock = async () =>
+    (await readFile(ownerPath, "utf8").catch(undefinedIfMissingFile)) === owner;
   let heartbeat = Promise.resolve();
   const timer = setInterval(() => {
     heartbeat = heartbeat
       .then(async () => {
-        if ((await readFile(ownerPath, "utf8")) !== owner) return;
+        if (!(await ownsLock())) return;
         const now = new Date();
         await utimes(ownerPath, now, now);
       })
@@ -1045,16 +1054,10 @@ async function acquireLock(output: string): Promise<SupervisorLock> {
     async release() {
       clearInterval(timer);
       await heartbeat;
-      const current = await readFile(ownerPath, "utf8").catch(
-        undefinedIfMissingFile,
-      );
-      if (current === owner) await rm(path, { recursive: true });
+      if (await ownsLock()) await rm(path, { recursive: true });
     },
     async requireOwner() {
-      const current = await readFile(ownerPath, "utf8").catch(
-        undefinedIfMissingFile,
-      );
-      if (current !== owner) {
+      if (!(await ownsLock())) {
         throw new Error(
           "This multiscan supervisor no longer holds the output lock.",
         );
@@ -1273,6 +1276,7 @@ async function ensureManifest(
 
 async function readReceipts(
   path: string,
+  requireLockOwner: () => Promise<void>,
   campaignIds: ReadonlySet<string>,
   preserveInterrupted = false,
 ): Promise<Map<string, MultiscanHistory>> {
@@ -1325,6 +1329,7 @@ async function readReceipts(
         mode: 0o600,
       });
     }
+    await requireLockOwner();
     await truncate(path, end);
   }
   return receipts;

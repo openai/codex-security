@@ -809,35 +809,6 @@ describe("multiscan", () => {
     });
   }
 
-  test("does not record results after another supervisor takes over the lock", async () => {
-    const { paths } = await repositoryFixture("lost-lease", "lost");
-    const ownerPath = join(paths.output, ".lock", "owner.json");
-    const takeover = JSON.stringify({
-      pid: process.pid,
-      ownerId: "replacement-supervisor",
-      hostname: hostname(),
-      processStartedAt: performance.timeOrigin,
-    });
-
-    await expect(
-      runMultiscan(
-        options(
-          paths,
-          client(async (repository, scanOptions) => {
-            await writeFile(ownerPath, takeover);
-            return completeRun(repository, scanOptions);
-          }),
-          { maxAttempts: 1 },
-        ),
-      ),
-    ).rejects.toThrow("no longer holds the output lock");
-
-    await expect(
-      readFile(join(paths.output, "results.jsonl"), "utf8"),
-    ).resolves.toBe("");
-    expect(await readFile(ownerPath, "utf8")).toBe(takeover);
-  });
-
   test("does not reclaim a live supervisor in another container", async () => {
     const { paths } = await repositoryFixture("remote-supervisor", "remote");
     const lock = join(paths.output, ".lock");
@@ -984,45 +955,49 @@ describe("multiscan", () => {
     ).toHaveLength(1);
   });
 
-  test("never removes a replacement owner's lock during interrupted cleanup", async () => {
-    const { paths } = await repositoryFixture(
-      "replacement-owner",
-      "replacement",
-    );
-    const running = Promise.withResolvers<void>();
-    const finish = Promise.withResolvers<void>();
-    const first = runMultiscan(
-      options(
+  test.each([false, true])(
+    "preserves the replacement lock and checkout without writing a receipt (recover: %p)",
+    async (recover) => {
+      const { paths } = await repositoryFixture(
+        "replacement-owner",
+        "replacement",
+      );
+      const ledger = join(paths.output, "results.jsonl");
+      if (recover)
+        await runMultiscan(
+          options(paths, client(rejecting("Interrupted scan")), {
+            maxAttempts: 1,
+          }),
+        );
+      const before = recover ? await readFile(ledger, "utf8") : undefined;
+      const lock = join(paths.output, ".lock");
+      const owner = join(lock, "owner.json");
+      const replacement = JSON.stringify({ ownerId: "replacement-supervisor" });
+      const security = client(async (repository, scanOptions) => {
+        await rename(lock, join(paths.output, ".lock.stale-interrupted"));
+        await mkdir(lock, { mode: 0o700 });
+        await writeFile(owner, replacement, { mode: 0o600 });
+        return completeRun(repository, scanOptions);
+      });
+      const settings = options(
         paths,
-        client(async (_repository, scanOptions = {}) => {
-          running.resolve();
-          await finish.promise;
-          return completedScan(scanOptions.outputDir!);
-        }),
-      ),
-    );
-    await running.promise;
-    const lock = join(paths.output, ".lock");
-    const abandoned = join(paths.output, ".lock.stale-interrupted");
-    await rename(lock, abandoned);
-    await mkdir(lock, { mode: 0o700 });
-    const replacement = {
-      pid: process.pid,
-      ownerId: "replacement-supervisor",
-      hostname: hostname(),
-      processStartedAt: performance.timeOrigin,
-    };
-    await writeFile(join(lock, "owner.json"), JSON.stringify(replacement), {
-      mode: 0o600,
-    });
-
-    finish.resolve();
-    await first;
-
-    expect(
-      JSON.parse(await readFile(join(lock, "owner.json"), "utf8")),
-    ).toEqual(replacement);
-  });
+        security,
+        recover ? { recoverScan: async () => undefined } : {},
+      );
+      await expect(runMultiscan(settings)).rejects.toThrow(
+        "no longer holds the output lock",
+      );
+      if (before !== undefined)
+        expect(await readFile(ledger, "utf8")).toBe(before);
+      else
+        await expect(lstat(ledger)).rejects.toMatchObject({ code: "ENOENT" });
+      const checkout = recover
+        ? join(paths.output, "recovery-checkouts", "replacement", "attempt-2")
+        : join(paths.output, "checkouts", "replacement");
+      expect((await lstat(checkout)).isDirectory()).toBe(true);
+      expect(await readFile(owner, "utf8")).toBe(replacement);
+    },
+  );
 
   test("removes an empty supervisor lock when owner creation fails", async () => {
     const { paths } = await repositoryFixture(
