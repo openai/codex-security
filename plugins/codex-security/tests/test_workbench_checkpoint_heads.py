@@ -636,9 +636,7 @@ def test_selected_parent_retains_semantic_context_through_frozen_recovery(
         os.utime(tmp_path / name, ns=(100, 100))
     checkpoint = write_checkpoint(tmp_path / "checkpoints", selected, mtime_ns=200)
     select_checkpoint(tmp_path, checkpoint, mtime_ns=300)
-    first = saved.merge_saved_results(
-        tmp_path, scan_id, binding, [], [], stopped=stopped, reason="interrupted"
-    )
+    first = merge_interrupted(saved, tmp_path, scan_id, binding, stopped=stopped)
     replay = replay_saved_results(saved, first, tmp_path, scan_id, binding, stopped=stopped)
     repeated = replay_saved_results(saved, replay, tmp_path, scan_id, binding, stopped=stopped)
     for result in (first, replay, repeated):

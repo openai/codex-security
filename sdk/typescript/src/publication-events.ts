@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import { parseJson } from "./value.js";
 import { isLinearIssueIdentifier, linearIssueReference } from "./linear.js";
 import { isRecord } from "./record.js";
@@ -50,6 +51,32 @@ export function collectPublicationEvents(
   publication: PreparedScanPublication,
   failureMessage: string,
 ): PublicationEventEvidence[] {
+  if (!output) return [];
+  const { issues } = publication;
+  const byDescription = Map.groupBy(issues, (issue) => issue.description);
+
+  function matchIssue(actual: unknown) {
+    const description = isRecord(actual) ? actual["description"] : undefined;
+    if (typeof description !== "string") return undefined;
+    const exact = (byDescription.get(description) ?? []).filter((issue) =>
+      hasExpectedPublicationArguments(publication, issue, actual),
+    );
+    const matches =
+      exact.length === 1
+        ? exact
+        : issues.filter(
+            (issue) =>
+              containsIdentifier(description, issue.findingId) &&
+              containsIdentifier(description, issue.occurrenceId),
+          );
+    if (matches.length !== 1) return undefined;
+    const owner = matches[0]!;
+    return {
+      ownerFindingId: owner.findingId,
+      argumentsValid: exact.includes(owner),
+    };
+  }
+
   const evidence: PublicationEventEvidence[] = [];
 
   for (const rawLine of output.split(/\r?\n/)) {
@@ -59,19 +86,11 @@ export function collectPublicationEvents(
     const item = event["item"];
     if (!isLinearCreateCall(item)) continue;
 
-    const arguments_ = item["arguments"];
-    const owner = isRecord(arguments_)
-      ? matchPublicationIssue(publication, arguments_)
-      : undefined;
-    const argumentsValid =
-      owner !== undefined &&
-      hasExpectedPublicationArguments(publication, owner, arguments_);
     const completed: CompletedCreateEvidence = {
       source: "event",
       status: "completed",
       rawLine,
-      ...(owner === undefined ? {} : { ownerFindingId: owner.findingId }),
-      argumentsValid,
+      ...(matchIssue(item["arguments"]) ?? { argumentsValid: false }),
       resolution: resolvePublicationClaims(item["result"]),
     };
     if (item["status"] === "completed") {
@@ -97,34 +116,10 @@ export function hasExpectedPublicationArguments(
   issue: PreparedPublicationIssue,
   actual: unknown,
 ): boolean {
-  if (!isRecord(actual)) return false;
-  const expected = linearPublicationArguments(publication.destination, issue);
-  return (
-    Object.keys(actual).length === Object.keys(expected).length &&
-    Object.entries(expected).every(
-      ([key, value]) =>
-        Object.hasOwn(actual, key) && Object.is(actual[key], value),
-    )
+  return isDeepStrictEqual(
+    actual,
+    linearPublicationArguments(publication.destination, issue),
   );
-}
-
-export function matchPublicationIssue(
-  publication: PreparedScanPublication,
-  arguments_: Record<string, unknown>,
-): PreparedPublicationIssue | undefined {
-  const exactMatches = publication.issues.filter((issue) =>
-    hasExpectedPublicationArguments(publication, issue, arguments_),
-  );
-  if (exactMatches.length === 1) return exactMatches[0];
-
-  const description = arguments_["description"];
-  if (typeof description !== "string") return undefined;
-  const matches = publication.issues.filter(
-    (issue) =>
-      containsIdentifier(description, issue.findingId) &&
-      containsIdentifier(description, issue.occurrenceId),
-  );
-  return matches.length === 1 ? matches[0] : undefined;
 }
 
 export function resolvePublicationClaims(value: unknown): ClaimResolution {

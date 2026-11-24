@@ -215,6 +215,9 @@ const startHeadlessStandardScanSchema = {
     .optional()
     .describe("Optional security focus supplied by the user."),
 };
+type ConversationScanInput =
+  | z.output<z.ZodObject<typeof startPromptOnlyScanSchema>>
+  | z.output<z.ZodObject<typeof startHeadlessStandardScanSchema>>;
 const userInputOptionSchema = z.strictObject({
   description: requiredText.max(1200),
   label: requiredText.max(200),
@@ -597,30 +600,14 @@ export function createCodexSecurityServer(): McpServer {
       annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
-    async (
-      { targetPath, scope, targetSummary, userContext, projectConfigPath },
-      extra,
-    ) => {
+    async (input, extra) => {
       const threadId = threadIdFromExtra(extra);
       if (!threadId) {
         return toolErrorResult(
           "Starting a Standard scan requires the owning Codex thread context.",
         );
       }
-      const started = await startWithValidation(
-        "start-headless-standard-scan",
-        {
-          threadId,
-          targetPath,
-          scope: scope ?? ".",
-          ...codexModelSettingsFromExtra(extra),
-          targetSummary: targetSummary || undefined,
-          userContextStdin: Boolean(userContext),
-          scanRoot: await scanRoot(),
-        },
-        projectConfigPath,
-        userContext,
-      );
+      const started = await startConversationScan(input, threadId, extra);
       const scan = startedScanSchema.safeParse(started).data?.scan;
       const progress = asRecord(scan?.progress);
       const handoffClaimToken = scan?.handoffClaimToken;
@@ -677,18 +664,8 @@ export function createCodexSecurityServer(): McpServer {
       annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
-    async (
-      {
-        mode,
-        targetPath,
-        scope,
-        targetSummary,
-        userContext,
-        diffTarget,
-        projectConfigPath,
-      },
-      extra,
-    ) => {
+    async (input, extra) => {
+      const { mode, diffTarget, scope, targetPath } = input;
       if (mode === "diff" && !diffTarget) {
         return toolErrorResult(
           "Review changes prompt-only scans require diffTarget.",
@@ -710,23 +687,9 @@ export function createCodexSecurityServer(): McpServer {
           "Starting a prompt-only scan requires the owning Codex thread context.",
         );
       }
-      const promptOnly = await startWithValidation(
-        "start-prompt-only-scan",
-        {
-          threadId,
-          targetPath,
-          scope,
-          mode,
-          ...codexModelSettingsFromExtra(extra),
-          targetSummary,
-          userContextStdin: Boolean(userContext),
-          ...diffTargetFields(diffTarget),
-          scanRoot: await scanRoot(),
-        },
-        projectConfigPath,
-        userContext,
+      return promptOnlyScanResult(
+        await startConversationScan(input, threadId, extra),
       );
-      return promptOnlyScanResult(promptOnly);
     },
   );
 
@@ -1860,6 +1823,30 @@ export function createCodexSecurityServer(): McpServer {
   });
 
   return server;
+}
+
+async function startConversationScan(
+  input: ConversationScanInput,
+  threadId: string,
+  extra: unknown,
+): Promise<JsonObject> {
+  const prompt = "mode" in input ? input : undefined;
+  return startWithValidation(
+    prompt ? "start-prompt-only-scan" : "start-headless-standard-scan",
+    {
+      threadId,
+      targetPath: input.targetPath,
+      scope: input.scope ?? ".",
+      mode: prompt?.mode,
+      ...codexModelSettingsFromExtra(extra),
+      targetSummary: input.targetSummary || undefined,
+      userContextStdin: Boolean(input.userContext),
+      ...diffTargetFields(prompt?.diffTarget),
+      scanRoot: await scanRoot(),
+    },
+    input.projectConfigPath,
+    input.userContext,
+  );
 }
 
 async function startWithValidation(
