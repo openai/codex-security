@@ -16,7 +16,7 @@ import {
   type JsonObject,
 } from "./config.js";
 import { isRecord } from "./record.js";
-import { startResponsesCompatProxy } from "./responses-compat-proxy.js";
+import { routeXaiProvider } from "./responses-compat-proxy.js";
 import { nativeCodexLaunch } from "./codex-sdk-environment.js";
 import {
   bundledPluginRoot,
@@ -140,27 +140,14 @@ export async function createProviderProfile(
     return { name, path, cleanup: () => rm(path, { force: true }) };
   }
 
-  const resolved = resolveCodexProfile(config);
-  const providers = resolved["model_providers"];
-  const definitions: JsonObject = isRecord(providers) ? { ...providers } : {};
-  const selected = resolved["model_provider"];
-  const definition =
-    typeof selected === "string" ? definitions[selected] : undefined;
-  const upstream = "https://api.x.ai/v1";
-  let adapter:
-    Awaited<ReturnType<typeof startResponsesCompatProxy>> | undefined;
+  // resolveCodexProfile returns a fresh copy, so this route stays private.
+  const { model_provider: selected, model_providers } =
+    resolveCodexProfile(config);
+  const definitions = isRecord(model_providers) ? model_providers : {};
+  const adapter = await routeXaiProvider(
+    typeof selected === "string" ? definitions[selected] : undefined,
+  );
   try {
-    if (
-      typeof selected === "string" &&
-      isRecord(definition) &&
-      (definition["wire_api"] ?? "responses") === "responses" &&
-      definition["supports_websockets"] !== true &&
-      (definition["base_url"] === upstream ||
-        definition["base_url"] === upstream + "/")
-    ) {
-      adapter = await startResponsesCompatProxy(upstream);
-      definitions[selected] = { ...definition, base_url: adapter.baseUrl };
-    }
     await writeCodexConfig(path, { model_providers: definitions });
   } catch (error) {
     await adapter?.close();

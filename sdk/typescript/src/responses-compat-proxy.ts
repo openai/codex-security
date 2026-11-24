@@ -41,31 +41,26 @@ function requirePlaintext(args: unknown) {
 
 function replayInput(raw: unknown): unknown {
   if (!isRecord(raw)) return raw;
-  const { internal_chat_message_metadata_passthrough: _metadata, ...value } =
-    raw;
-  if (
-    value["type"] === "function_call" ||
-    value["type"] === "custom_tool_call"
-  ) {
+  const value = { ...raw };
+  delete value["internal_chat_message_metadata_passthrough"];
+  const { type } = value;
+  if (type === "function_call" || type === "custom_tool_call") {
     const tool = identity(value);
-    const { namespace: _namespace, input: freeform, ...rest } = value;
     if (tool.message) {
-      requirePlaintext(rest["encrypted_function_args"]);
-      delete rest["encrypted_function_args"];
+      requirePlaintext(value["encrypted_function_args"]);
+      delete value["encrypted_function_args"];
     }
-    if (!tool.custom && tool.namespace == null) return value;
-    return {
-      ...rest,
-      type: "function_call",
-      name: tool.alias,
-      arguments: tool.custom
-        ? JSON.stringify({ input: freeform })
-        : value["arguments"],
-    };
+    if (tool.custom) {
+      value["type"] = "function_call";
+      value["arguments"] = JSON.stringify({ input: value["input"] });
+      delete value["input"];
+    }
+    delete value["namespace"];
+    value["name"] = tool.alias;
   }
-  if (value["type"] === "custom_tool_call_output")
-    return { ...value, type: "function_call_output" };
-  if (value["type"] === "agent_message") {
+  if (type === "custom_tool_call_output")
+    value["type"] = "function_call_output";
+  if (type === "agent_message") {
     const { author, recipient, content } = value;
     if (
       typeof author !== "string" ||
@@ -74,13 +69,10 @@ function replayInput(raw: unknown): unknown {
     )
       throw new Error("Invalid agent message in xAI replay.");
     const blocks = content.map((part: unknown) => {
-      if (
-        !isRecord(part) ||
-        part["type"] !== "input_text" ||
-        typeof part["text"] !== "string"
-      )
+      const { type, text } = asRecord(part) ?? {};
+      if (type !== "input_text" || typeof text !== "string")
         throw new Error("xAI replay supports only plaintext agent messages.");
-      return part["text"];
+      return text;
     });
     return {
       type: "message",
@@ -89,7 +81,7 @@ function replayInput(raw: unknown): unknown {
       content: `Agent message from ${JSON.stringify(author)} to ${JSON.stringify(recipient)}\n${blocks.join("\n")}`,
     };
   }
-  if (value["type"] === "reasoning" && value["content"] === null)
+  if (type === "reasoning" && value["content"] === null)
     delete value["content"];
   return value;
 }
@@ -97,53 +89,48 @@ function replayInput(raw: unknown): unknown {
 /** Translate xAI tools and keep their identities local to the request. */
 export function responsesCompatRequest(request: Item) {
   const identities = new Map<string, ReturnType<typeof identity>>();
-  function tools(values: unknown[], namespace?: string): unknown[] {
-    return values.flatMap((value) => {
+  function tools(values: unknown[], namespace?: string): Item[] {
+    return values.flatMap<Item>((value) => {
       if (!isRecord(value)) throw new Error("Invalid xAI tool declaration.");
-      if (value["type"] === "namespace" && Array.isArray(value["tools"])) {
+      const { type, format } = value;
+      if (type === "namespace" && Array.isArray(value["tools"]))
         return tools(value["tools"], String(value["name"]));
-      }
-      if (value["type"] !== "custom" && value["type"] !== "function")
-        return [value];
+      if (type !== "custom" && type !== "function") return value;
       const tool = identity({ ...value, namespace });
       const name = tool.alias;
       const previous = identities.get(name);
       if (previous && previous.key !== tool.key)
         throw new Error(`Tool alias ${name} collides with another tool.`);
       identities.set(name, tool);
-      if (!tool.custom && namespace === undefined) return [value];
+      if (!tool.custom && namespace === undefined) return value;
       const description = `${namespace ? namespace + "." : ""}${tool.name}: ${value["description"] ?? ""}`;
       if (tool.message) {
         const parameters = structuredClone(value["parameters"]);
         const fields = asRecord(parameters)?.["properties"];
         if (isRecord(fields) && isRecord(fields["message"]))
           delete fields["message"]["encrypted"];
-        return [{ ...value, name, description, parameters }];
+        return { ...value, name, description, parameters };
       }
-      if (!tool.custom) return [{ ...value, name, description }];
-      const format = value["format"];
-      return [
-        {
-          type: "function",
-          name,
-          description,
-          parameters: {
-            type: "object",
-            properties: {
-              input: {
-                type: "string",
-                description:
-                  isRecord(format) && format["type"] === "grammar"
-                    ? `The complete freeform tool input, matching this ${format["syntax"]} grammar:\n${format["definition"]}`
-                    : "The complete freeform tool input.",
-              },
-            },
-            required: ["input"],
-            additionalProperties: false,
-          },
-          strict: true,
+      if (!tool.custom) return { ...value, name, description };
+      const input = {
+        type: "string",
+        description:
+          isRecord(format) && format["type"] === "grammar"
+            ? `The complete freeform tool input, matching this ${format["syntax"]} grammar:\n${format["definition"]}`
+            : "The complete freeform tool input.",
+      };
+      return {
+        type: "function",
+        name,
+        description,
+        strict: true,
+        parameters: {
+          type: "object",
+          properties: { input },
+          required: ["input"],
+          additionalProperties: false,
         },
-      ];
+      };
     });
   }
   const { tools: declared, input, tool_choice: choice } = request;
@@ -159,9 +146,11 @@ export function responsesCompatRequest(request: Item) {
       body["tool_choice"] = { type: "function", name: tool.alias };
   }
   if (flattened.length === 0) delete body["tool_choice"];
-  function output(value: Item, parseArguments = true): Item {
+  function output(value: Item, done = true): Item | undefined {
     const { type, namespace, name } = value;
     if (type !== "function_call" && type !== "custom_tool_call") return value;
+    // Codex dispatches done items even when the call is marked incomplete.
+    if (type === "function_call" && done && unfinished(value)) return;
     if (type !== "function_call" || namespace != null)
       throw new Error("Expected a flattened function call from xAI.");
     const tool = typeof name === "string" ? identities.get(name) : undefined;
@@ -175,20 +164,19 @@ export function responsesCompatRequest(request: Item) {
       requirePlaintext(value["encrypted_function_args"]);
       restored["encrypted_function_args"] = [];
     }
-    if (!tool.custom) return restored;
-    delete restored["arguments"];
-    // A stream's added event carries empty arguments; restore the identity
-    // there and parse the input at output_item.done instead.
-    if (!parseArguments)
-      return { ...restored, type: "custom_tool_call", input: "" };
-    const args = value["arguments"];
-    const freeform =
-      typeof args === "string"
-        ? asRecord(JSON.parse(args))?.["input"]
-        : undefined;
-    if (typeof freeform !== "string")
-      throw new Error(`Invalid xAI input for custom tool ${tool.name}.`);
-    return { ...restored, type: "custom_tool_call", input: freeform };
+    if (tool.custom) {
+      // Added events have no input yet. Decode only completed calls.
+      const args = value["arguments"];
+      const input = done
+        ? typeof args === "string" && asRecord(JSON.parse(args))?.["input"]
+        : "";
+      if (typeof input !== "string")
+        throw new Error(`Invalid xAI input for custom tool ${tool.name}.`);
+      delete restored["arguments"];
+      restored["type"] = "custom_tool_call";
+      restored["input"] = input;
+    }
+    return restored;
   }
   return { body, output };
 }
@@ -222,19 +210,14 @@ function unfinished({ status }: Item) {
   return status != null && status !== "completed";
 }
 
-function unfinishedCall(item: Item) {
-  return item["type"] === "function_call" && unfinished(item);
-}
-
 function restoreOutput(response: unknown, restore: RestoreTool) {
   if (!isRecord(response)) throw new Error("Invalid xAI response.");
   // An unfinished response can contain truncated JSON in a tool's arguments.
   // Keep that evidence and the provider's failure or interruption reason.
   if (!unfinished(response) && Array.isArray(response["output"])) {
-    response["output"] = response["output"].flatMap((item: unknown) => {
-      if (!isRecord(item)) return [item];
-      return unfinishedCall(item) ? [] : [restore(item)];
-    });
+    response["output"] = response["output"].flatMap((item: unknown) =>
+      isRecord(item) ? (restore(item) ?? []) : [item],
+    );
   }
   return response;
 }
@@ -250,10 +233,8 @@ async function* translateEvents(
       if (!isRecord(event)) throw new Error("Invalid xAI event.");
       const { type, item } = event;
       if (isRecord(item)) {
-        // Codex dispatches done items even when the call is marked incomplete.
-        const done = type === "response.output_item.done";
-        if (done && unfinishedCall(item)) continue;
-        event["item"] = restore(item, done);
+        event["item"] = restore(item, type === "response.output_item.done");
+        if (!event["item"]) continue;
       }
       if (type === "response.completed")
         restoreOutput(event["response"], restore);
@@ -292,11 +273,22 @@ function forwardedHeaders(source: Headers): Headers {
   return result;
 }
 
-/**
- * Translate one Responses provider through a loopback proxy. Scoped to a
- * private native provider profile; the profile cleanup closes the server.
- * Headers (including authorization) are forwarded as-is and never logged.
- */
+/** Rewrite only the selected private provider for the lifetime of its profile. */
+export async function routeXaiProvider(definition: unknown) {
+  if (!isRecord(definition)) return;
+  const { base_url, wire_api, supports_websockets } = definition;
+  const upstream = "https://api.x.ai/v1";
+  if (
+    (base_url !== upstream && base_url !== upstream + "/") ||
+    (wire_api ?? "responses") !== "responses" ||
+    supports_websockets === true
+  )
+    return;
+  const proxy = await startResponsesCompatProxy(upstream);
+  definition["base_url"] = proxy.baseUrl;
+  return proxy;
+}
+
 export async function startResponsesCompatProxy(upstream: string) {
   const upstreamUrl = new URL(upstream);
   upstreamUrl.pathname = upstreamUrl.pathname.replace(/\/$/, "") + "/responses";
@@ -365,10 +357,9 @@ export async function startResponsesCompatProxy(upstream: string) {
   return {
     baseUrl: `http://127.0.0.1:${address.port}${path}`,
     close() {
-      return (closing ??= new Promise<void>((resolve, reject) => {
-        server.close((error) => (error ? reject(error) : resolve()));
-        server.closeAllConnections();
-      }));
+      closing ??= server[Symbol.asyncDispose]();
+      server.closeAllConnections();
+      return closing;
     },
   };
 }
