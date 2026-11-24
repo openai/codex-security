@@ -4079,16 +4079,17 @@ describe("runtime directories and plugin Python boundary", () => {
 
   const sid = "S-1-5-21-111-222-333-1001";
   const privateDirAcl = `O:${sid}G:SYD:P(A;OICI;FA;;;${sid})`;
-  function inspectAclScript(home: string, script: string) {
+  function inspectAclScript(home: string, script: string, input: object) {
     return inspectWindowsCredentialAclSnapshot(home, sid, {
       command: process.execPath,
-      args: ["--eval", script],
+      args: ["--eval", script, "--", JSON.stringify(input)],
     });
   }
-  function inspectAclOutput(home: string, output: string) {
+  function inspectAclOutput(home: string, output: string, exitCode = 0) {
     return inspectAclScript(
       home,
-      `process.stdout.write(${JSON.stringify(output)})`,
+      "const { output, exitCode } = JSON.parse(process.argv[1]); process.stdout.write(output); process.exitCode = exitCode",
+      { output, exitCode },
     );
   }
 
@@ -4106,15 +4107,21 @@ describe("runtime directories and plugin Python boundary", () => {
       const ancestors = credentialAncestors(home, privateDirAcl);
       const script = [
         'const fs = require("node:fs")',
-        `fs.appendFileSync(${JSON.stringify(inspectionCount)}, "inspection\\n")`,
-        change === "created"
-          ? `fs.writeFileSync(${JSON.stringify(temporary)}, "temporary")`
-          : `fs.rmSync(${JSON.stringify(temporary)})`,
-        `const descriptors = [...${JSON.stringify([...ancestors, privateDirAcl])}, ...fs.readdirSync(${JSON.stringify(home)}).map(() => ${JSON.stringify(file)})]`,
+        "const { inspectionCount, temporary, change, home, descriptors, file } = JSON.parse(process.argv[1])",
+        'fs.appendFileSync(inspectionCount, "inspection\\n")',
+        'if (change === "created") fs.writeFileSync(temporary, "temporary"); else fs.rmSync(temporary)',
+        "descriptors.push(...fs.readdirSync(home).map(() => file))",
         'process.stdout.write(descriptors.join("\\n") + "\\nCODEX_SECURITY_ACL_COMPLETE:" + descriptors.length + "\\n")',
       ].join("; ");
 
-      const snapshot = await inspectAclScript(home, script);
+      const snapshot = await inspectAclScript(home, script, {
+        inspectionCount,
+        temporary,
+        change,
+        home,
+        descriptors: [...ancestors, privateDirAcl],
+        file,
+      });
 
       expect(snapshot.home).toMatchObject({
         owner: sid,
@@ -4270,14 +4277,22 @@ describe("runtime directories and plugin Python boundary", () => {
     descriptors.push(privateDirAcl, file);
     const script = [
       'const fs = require("node:fs")',
-      `fs.appendFileSync(${JSON.stringify(inspectionCount)}, "inspection\\n")`,
-      `const interrupted = fs.existsSync(${JSON.stringify(temporary)})`,
-      `if (interrupted) fs.unlinkSync(${JSON.stringify(temporary)})`,
-      `process.stdout.write(interrupted ? ${JSON.stringify(`${descriptors.join("\n")}\n`)} : ${JSON.stringify(windowsCredentialAclOutput(descriptors))})`,
+      "const { inspectionCount, temporary, partial, complete } = JSON.parse(process.argv[1])",
+      'fs.appendFileSync(inspectionCount, "inspection\\n")',
+      "const interrupted = fs.existsSync(temporary)",
+      "if (interrupted) fs.unlinkSync(temporary)",
+      "process.stdout.write(interrupted ? partial : complete)",
       "process.exitCode = interrupted ? 2 : 0",
     ].join("; ");
 
-    await expect(inspectAclScript(home, script)).resolves.toMatchObject({
+    await expect(
+      inspectAclScript(home, script, {
+        inspectionCount,
+        temporary,
+        partial: `${descriptors.join("\n")}\n`,
+        complete: windowsCredentialAclOutput(descriptors),
+      }),
+    ).resolves.toMatchObject({
       home: { owner: sid, protected: true },
       descendantsArePrivate: true,
     });
@@ -4297,11 +4312,14 @@ describe("runtime directories and plugin Python boundary", () => {
       const inspectionCount = join(root, "inspection-count");
       await mkdir(home);
       const script = [
-        `require("node:fs").appendFileSync(${JSON.stringify(inspectionCount)}, "inspection\\n")`,
-        `process.exitCode = ${exitCode}`,
+        "const { inspectionCount, exitCode } = JSON.parse(process.argv[1])",
+        'require("node:fs").appendFileSync(inspectionCount, "inspection\\n")',
+        "process.exitCode = exitCode",
       ].join("; ");
 
-      await expect(inspectAclScript(home, script)).rejects.toThrow(message);
+      await expect(
+        inspectAclScript(home, script, { inspectionCount, exitCode }),
+      ).rejects.toThrow(message);
       expect(await readFile(inspectionCount, "utf8")).toBe(
         "inspection\n".repeat(attempts),
       );
@@ -4487,7 +4505,7 @@ describe("runtime directories and plugin Python boundary", () => {
     await expect(
       inspectWindowsCredentialAclSnapshot(root, sid, {
         command: process.execPath,
-        args: ["--eval", `process.stdout.write(${JSON.stringify(output)})`],
+        args: ["--eval", "process.stdout.write(process.argv[1])", "--", output],
         resolveDescriptorAliases,
       }),
     ).rejects.toThrow("must be below a volume or share root");
@@ -4592,12 +4610,9 @@ describe("runtime directories and plugin Python boundary", () => {
         error: "Windows credential ACL inspection failed",
       },
     ]) {
-      await expect(
-        inspectAclScript(
-          home,
-          `process.stdout.write(${JSON.stringify(output)}); process.exitCode = ${exitCode}`,
-        ),
-      ).rejects.toThrow(error);
+      await expect(inspectAclOutput(home, output, exitCode)).rejects.toThrow(
+        error,
+      );
     }
   });
 
