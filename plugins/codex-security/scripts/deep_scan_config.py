@@ -119,6 +119,11 @@ def resolve_deep_scan_setup(
         "sources": sources,
         **({"legacyConfigPath": str(path)} if exists else {}),
         **({"projectConfigPath": project["path"]} if project is not None else {}),
+        **(
+            {"validation": project["validation"]}
+            if project is not None and "validation" in project
+            else {}
+        ),
     }
 
 
