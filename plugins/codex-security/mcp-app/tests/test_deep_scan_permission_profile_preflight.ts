@@ -603,6 +603,39 @@ test(async function testStdioFailuresRemainRetryable() {
   }
 });
 
+test(async function testInvalidNativeConfigurationStopsRetries() {
+  const diagnostic =
+    "invalid configuration: invalid type: map, expected a boolean\nin `features`";
+  for (const context of ["worker", "parent"] as const) {
+    await withFakeCodex(
+      {
+        methodErrors: {
+          "config/read": { code: -32603, message: diagnostic },
+        },
+      },
+      async ({ codexPath, cwd, terminatedPath, children }) => {
+        const running =
+          context === "worker"
+            ? preflight(codexPath, cwd)
+            : readDeepScanRuntimeConfig({
+                codexPath,
+                cwd,
+                configOverrides: rawOverrides,
+                context: "parent-config",
+                signal: new AbortController().signal,
+              });
+        await assert.rejects(running, (error: Error) => {
+          assert.equal(error.name, "DeepScanNonRetryableError");
+          assert.ok(error.message.includes(diagnostic));
+          assert.deepEqual(error.cause, { code: -32603, message: diagnostic });
+          return true;
+        });
+        await assertPreflightStopped(children, terminatedPath);
+      },
+    );
+  }
+});
+
 test(async function testUnknownJsonRpcFailuresPreserveNativeDiagnostics() {
   for (const code of [-32603, -32602, -32000, undefined]) {
     await withFakeCodex(
@@ -627,6 +660,32 @@ test(async function testUnknownJsonRpcFailuresPreserveNativeDiagnostics() {
             error.message.includes("SECRET_REPOSITORY_PATH") &&
             !error.message.includes("does not support"),
         );
+        await assertPreflightStopped(children, terminatedPath);
+      },
+    );
+  }
+});
+
+test(async function testOtherRpcErrorsRemainRetryable() {
+  for (const [method, code, message] of [
+    ["config/read", -32602, "invalid configuration: invalid type: map"],
+    ["config/read", -32603, "transport error: invalid configuration: retry"],
+    ["config/read", -32603, "invalid configuration: remote lookup failed"],
+    [
+      "permissionProfile/list",
+      -32603,
+      "invalid configuration: invalid type: map",
+    ],
+  ] as const) {
+    await withFakeCodex(
+      { methodErrors: { [method]: { code, message } } },
+      async ({ codexPath, cwd, terminatedPath, children }) => {
+        await assert.rejects(preflight(codexPath, cwd), (error: Error) => {
+          assert.equal(error.name, "Error");
+          if (method === "config/read")
+            assert.ok(error.message.includes(message));
+          return true;
+        });
         await assertPreflightStopped(children, terminatedPath);
       },
     );
