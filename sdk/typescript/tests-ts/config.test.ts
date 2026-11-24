@@ -1711,18 +1711,18 @@ test("native standardcompute tables never acquire a preset endpoint or credentia
         config,
       ),
     ).not.toHaveProperty("STANDARDCOMPUTE_API_KEY");
-    if (table["env_key"] === undefined) {
-      expect(
-        scanAuthentication(
-          environment,
-          "auto",
-          "standardcompute",
-          false,
-          false,
-          undefined,
-          config,
-        ).method,
-      ).toBe("stored_credentials");
-    }
   }
+  expect(
+    scanAuthentication(environment, "auto", "standardcompute").method,
+  ).toBe("stored_credentials");
+  expect(() =>
+    scanAuthentication(
+      environment,
+      "chatgpt",
+      "standardcompute",
+      false,
+      false,
+      "STANDARDCOMPUTE_API_KEY",
+    ),
+  ).toThrow(/ChatGPT/);
 });

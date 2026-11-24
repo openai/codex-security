@@ -79,6 +79,9 @@ describe("CodexSecurity orchestration", () => {
         name: "Synthetic",
         base_url: "https://provider.example/v1",
         wire_api: "responses",
+        ...(selection === "profile"
+          ? { env_http_headers: { "X-Synthetic": "STANDARDCOMPUTE_API_KEY" } }
+          : {}),
         auth,
       };
       const rootDefinition = {
@@ -135,6 +138,7 @@ describe("CodexSecurity orchestration", () => {
           environment: {
             CODEX_HOME: relative(process.cwd(), home),
             CODEX_SECURITY_STATE_DIR: state,
+            STANDARDCOMPUTE_API_KEY: "synthetic-header",
             ...(selection === "profile" ||
             selection === "profile-providers-ambient"
               ? {
@@ -191,6 +195,9 @@ describe("CodexSecurity orchestration", () => {
           "synthetic command-auth scan started",
         );
         expect(captured?.apiKey).toBeUndefined();
+        expect(captured?.env?.["STANDARDCOMPUTE_API_KEY"]).toBe(
+          selection === "profile" ? "synthetic-header" : undefined,
+        );
         expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");
         expect(captured?.env).not.toHaveProperty("CODEX_API_KEY");
         expect(captured?.env?.["CODEX_HOME"]).toBe(join(state, "codex-home"));

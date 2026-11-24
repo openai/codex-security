@@ -69,29 +69,36 @@ function providerSettings(
 }
 
 describe("skill authentication configuration", () => {
-  test("a Standard Compute skill uses the selected native header", () => {
-    const result = resolveSkillAuthentication(
-      {
-        command: "patch",
-        auth: "api-key",
-        modelProvider: "standardcompute",
+  test("a Standard Compute skill requires an explicit provider key and rejects ChatGPT", () => {
+    const options = {
+      command: "patch" as const,
+      modelProvider: "standardcompute",
+    };
+    const environment = {
+      STANDARDCOMPUTE_API_KEY: "synthetic-key",
+      OPENAI_API_KEY: "unused-account",
+    };
+    const config = {
+      model_providers: {
+        standardcompute: { env_key: "STANDARDCOMPUTE_API_KEY" },
       },
-      { STANDARDCOMPUTE_API_KEY: "unused-synthetic-key" },
-      {
-        model_providers: {
-          standardcompute: {
-            http_headers: { Authorization: "Bearer synthetic" },
-          },
-        },
-      },
+    };
+    const skill = resolveSkillAuthentication(
+      { ...options, auth: "auto" },
+      environment,
+      config,
     );
-    expect(result.authentication).toEqual({
-      method: "api_key",
-      source: "http_headers",
-      verified: false,
+    expect(skill.environment).toEqual({
+      STANDARDCOMPUTE_API_KEY: "synthetic-key",
     });
-    expect(result.requiresOpenAiAuth).toBe(false);
-    expect(result.environment).not.toHaveProperty("STANDARDCOMPUTE_API_KEY");
+    expect(skill.requiresOpenAiAuth).toBe(false);
+    expect(() =>
+      resolveSkillAuthentication(
+        { ...options, auth: "chatgpt" },
+        environment,
+        config,
+      ),
+    ).toThrow(/ChatGPT/);
   });
 
   test.each(

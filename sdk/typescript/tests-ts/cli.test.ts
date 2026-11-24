@@ -3481,7 +3481,7 @@ describe("CLI", () => {
     for (const [override, environment, expectedKey, expectedUrl] of [
       [
         'profile="review"',
-        { SYNTHETIC_GATEWAY_KEY: "synthetic" },
+        { SYNTHETIC_GATEWAY_KEY: "synthetic", CODEX_API_KEY: "synthetic" },
         undefined,
         "https://gateway.example.test/v1",
       ],

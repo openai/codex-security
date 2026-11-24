@@ -482,9 +482,26 @@ codex-security scan . --provider standardcompute --model StandardCompute
 
 The Standard Compute preset applies only to an explicit
 `--provider standardcompute` selection without an existing table of that name.
-If you configure a native table or use the SDK, supply the provider name,
-Responses endpoint and credential source together. The SDK leaves existing
-tables unchanged. Live scan completion remains unverified.
+The preset requires its API key. It cannot use ChatGPT authentication.
+Live scan completion remains unverified. Existing native tables keep their
+endpoint and authentication settings. To configure the equivalent native
+provider in the SDK, set the same environment variable and pass these
+`codexOverrides` to `CodexSecurity`.
+
+```json
+{
+  "model": "StandardCompute",
+  "model_provider": "standardcompute",
+  "model_providers": {
+    "standardcompute": {
+      "name": "Standard Compute",
+      "base_url": "https://api.stdcmpt.com/v1",
+      "wire_api": "responses",
+      "env_key": "STANDARDCOMPUTE_API_KEY"
+    }
+  }
+}
+```
 
 For Opper, save this profile in `$CODEX_HOME/opper.config.toml`
 (default `~/.codex/opper.config.toml`). Opper requires `web_search = "disabled"`.

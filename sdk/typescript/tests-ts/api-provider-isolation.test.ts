@@ -174,104 +174,6 @@ test("OpenAI scans omit ambient Standard Compute credentials", () => {
   }
 });
 
-const standardComputeCredentials: JsonObject[] = [
-  { http_headers: { aUtHoRiZaTiOn: "Bearer synthetic-static" } },
-  { env_http_headers: { "X-Router-Auth": "OPENAI_API_KEY" } },
-  { experimental_bearer_token: "synthetic-bearer" },
-  {
-    auth: { command: "synthetic-auth", cwd: process.cwd() },
-    env_http_headers: { "X-Router-Auth": "OPENAI_API_KEY" },
-  },
-  {
-    env_key: "ROUTER_KEY",
-    env_http_headers: { "X-Router-Auth": "OPENAI_API_KEY" },
-  },
-];
-
-test.each(standardComputeCredentials)(
-  "Standard Compute uses a native credential without its preset key: %j",
-  async (credential) => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
-    const home = join(root, "home");
-    await mkdir(repository);
-    await mkdir(home, { mode: 0o700 });
-    const provider = {
-      name: "Private router",
-      base_url: "http://127.0.0.1:8021/v1",
-      wire_api: "responses",
-      ...credential,
-    };
-    const environment = {
-      CODEX_HOME: home,
-      CODEX_SECURITY_STATE_DIR: join(root, "state"),
-      STANDARDCOMPUTE_API_KEY: "unrelated-preset-key",
-      OPENAI_API_KEY: "synthetic-header-value",
-      CODEX_API_KEY: "unrelated-account-key",
-      ROUTER_KEY: "synthetic-primary",
-    };
-    await using client = new TestClient(
-      {
-        codexOverrides: {
-          model_provider: "standardcompute",
-          model_providers: { standardcompute: provider },
-        },
-      },
-      {
-        environment,
-        prepareRuntime: async () => ({
-          ...preparedRuntime(home),
-          environment,
-          credentialsAvailable: false,
-        }),
-        resolvePluginPython: async () => "/managed/python",
-        repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (options, args, input) => {
-          expect(options.environment).not.toHaveProperty("OPENAI_API_KEY");
-          expect(options.environment).not.toHaveProperty("CODEX_API_KEY");
-          expect(options.environment).not.toHaveProperty(
-            "STANDARDCOMPUTE_API_KEY",
-          );
-          return mockWorkbench(args, input);
-        },
-        createCodex: async (options) => {
-          expect(options.apiKey).toBeUndefined();
-          expect(options.env).not.toHaveProperty("CODEX_API_KEY");
-          expect(options.env).not.toHaveProperty("STANDARDCOMPUTE_API_KEY");
-          expect(options.env!["OPENAI_API_KEY"]).toBe(
-            "env_http_headers" in credential
-              ? environment.OPENAI_API_KEY
-              : undefined,
-          );
-          if (credential["env_key"] === "ROUTER_KEY")
-            expect(options.env!["ROUTER_KEY"]).toBe(environment.ROUTER_KEY);
-          const native = parseToml(
-            await readFile(
-              join(home, `${options.nativeProfile}.config.toml`),
-              "utf8",
-            ),
-          );
-          expect(native["model_providers"] as JsonObject).toEqual({
-            standardcompute: provider,
-          });
-          throw new Error("checked native provider launch");
-        },
-      },
-    );
-    expect((await client.preflight(repository)).authentication).toMatchObject(
-      "auth" in credential
-        ? { method: "command" }
-        : {
-            method: "api_key",
-            source: credential["env_key"] ?? Object.keys(credential)[0],
-          },
-    );
-    await expect(
-      client.run(repository, { outputDir: join(root, "scan") }),
-    ).rejects.toThrow("checked native provider launch");
-  },
-);
-
 test("native worker override tables retain inherited features and MCP servers", async () => {
   const root = await temporaryDirectory();
   const home = join(root, "home");
@@ -827,6 +729,7 @@ const fileProviderKeyCases = [
   ["gateway", "declared OpenAI account header", "SYNTHETIC_GATEWAY_TOKEN"],
   ["gateway", "missing custom primary", "SYNTHETIC_GATEWAY_TOKEN"],
   ["openrouter", "default", "OPENROUTER_API_KEY"],
+  ["openrouter", "Standard Compute header", "OPENROUTER_API_KEY"],
   ["standardcompute", "default", "STANDARDCOMPUTE_API_KEY"],
   ["openrouter", "custom only", "SYNTHETIC_CUSTOM_API_KEY"],
   ["openrouter", "canonical header", "SYNTHETIC_CUSTOM_API_KEY"],
@@ -894,7 +797,11 @@ for (const mode of ["standard", "deep"] as const) {
       const gatewayHeader = gatewayHeaders.get(_selection);
       const headerKey =
         gatewayHeader ??
-        (_selection === "canonical header" ? canonicalKey : undefined);
+        (_selection === "Standard Compute header"
+          ? "STANDARDCOMPUTE_API_KEY"
+          : _selection === "canonical header"
+            ? canonicalKey
+            : undefined);
       const headerEnvironment =
         headerKey || _selection === "missing custom primary"
           ? { [headerKey ?? canonicalKey]: " synthetic-header-key " }
@@ -976,6 +883,9 @@ for (const mode of ["standard", "deep"] as const) {
           runWorkbench: async (options, args, input) => {
             if (args[0] === "register-cli-scan") {
               expect(options.environment).not.toHaveProperty(providerKey);
+              expect(options.environment).not.toHaveProperty(
+                "STANDARDCOMPUTE_API_KEY",
+              );
               if (gatewayHeader) {
                 expect(options.environment).not.toHaveProperty(gatewayHeader);
                 expect(options.environment).not.toHaveProperty(inactiveKey);
@@ -1075,12 +985,13 @@ for (const mode of ["standard", "deep"] as const) {
         });
         expect(preflight.modelProvider).toBe(providerId);
         if (
-          providerId === "gateway" &&
-          (_selection === "custom only" ||
-            _selection === "account-named primary")
+          providerId === "standardcompute" ||
+          (providerId === "gateway" &&
+            (_selection === "custom only" ||
+              _selection === "account-named primary"))
         ) {
           const request = { mode, auth: "chatgpt" as const };
-          const guidance = `ChatGPT authentication cannot use the gateway provider's required ${providerKey}`;
+          const guidance = `ChatGPT authentication cannot use the ${providerId} provider's required ${providerKey}`;
           await expect(client.preflight(repository, request)).rejects.toThrow(
             guidance,
           );
@@ -1519,9 +1430,10 @@ test.each([
             async runStreamed() {
               expect(options.apiKey).toBeUndefined();
               expect(options.env!["OPENAI_API_KEY"]).toBeUndefined();
-              const selectedKey = external
-                ? "synthetic-custom-key"
-                : providerEnvironment[providerKey];
+              const selectedKey =
+                external && providerId !== "standardcompute"
+                  ? "synthetic-custom-key"
+                  : providerEnvironment[providerKey];
               expect(options.env![declaredKey]).toBe(selectedKey);
               const status = await nativeRequest(
                 options.env!,

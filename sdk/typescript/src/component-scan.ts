@@ -193,7 +193,6 @@ export async function runComponentScans(
       hasCommandAuth(configuration),
       false,
       providerEnvKey,
-      configuration,
     );
     environment = selectedScanEnvironment(
       source,

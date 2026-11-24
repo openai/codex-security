@@ -49,7 +49,7 @@ test.each([
               standardcompute: {
                 name: "Synthetic",
                 base_url: "https://provider.example.test/v1",
-                auth: { command: "synthetic-auth" },
+                env_key: "STANDARDCOMPUTE_API_KEY",
                 env_http_headers: { "X-Billing": "OPENAI_API_KEY" },
               },
             },
@@ -85,8 +85,11 @@ test.each([
     for (const stage of ["screening", "pair-review"] as const) {
       const transcript = join(f.root, `${stage}.jsonl`);
       const runner = new CodexReviewRunner(
-        environment,
+        { ...environment, STANDARDCOMPUTE_API_KEY: "fixture" },
         (_command, _args, options) => {
+          expect(options.env?.["STANDARDCOMPUTE_API_KEY"]).toBe(
+            selection === "standardcompute" ? "fixture" : undefined,
+          );
           expect(options.env?.["OPENAI_API_KEY"]).toBe(
             environment.OPENAI_API_KEY,
           );

@@ -3,7 +3,6 @@ import {
   CHEAPERINFERENCE_CODEX_PROVIDER,
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
-  STANDARDCOMPUTE_CODEX_PROVIDER,
   type JsonObject,
 } from "../../src/config.js";
 import { throwing } from "./errors.js";
@@ -32,13 +31,6 @@ export const EXTERNAL_PROVIDER_CASES = [
     "CHEAPER_INFERENCE_API_KEY",
     "gpt-5.4",
     CHEAPERINFERENCE_CODEX_PROVIDER,
-  ],
-  [
-    "Standard Compute",
-    "standardcompute",
-    "STANDARDCOMPUTE_API_KEY",
-    "StandardCompute",
-    STANDARDCOMPUTE_CODEX_PROVIDER,
   ],
 ] as const;
 

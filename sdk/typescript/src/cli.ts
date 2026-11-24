@@ -245,11 +245,10 @@ import {
   scanModelConfiguration,
   scanModelProvider,
   scanProviderEnvKey,
-  standardComputeCredentialSource,
-  selectedProviderTable,
   writeCodexConfig,
+  STANDARDCOMPUTE_CODEX_PROVIDER,
+  selectedProviderTable,
   type CodexSecurityConfig,
-  type ExternalModelProvider,
   type JsonObject,
   type JsonValue,
 } from "./config.js";
@@ -11392,7 +11391,7 @@ async function runSkill(
       : ((
           overrides["model_providers"] as Record<string, JsonObject> | undefined
         )?.[provider] ??
-        (isExternalModelProvider(provider) && provider !== "standardcompute"
+        (isExternalModelProvider(provider)
           ? EXTERNAL_CODEX_PROVIDERS[provider]
           : undefined)));
   const effectiveOverrides = resolveCommandAuthConfig(
@@ -12399,7 +12398,6 @@ async function chooseInteractiveAuthentication(
   if (
     errorOutput.isTTY !== true ||
     hasCommandAuth(config) ||
-    standardComputeCredentialSource(config) !== undefined ||
     scanProviderEnvKey(config) !== undefined ||
     (auth !== undefined && auth !== "auto")
   )
@@ -12677,13 +12675,9 @@ async function executeScan(
       )?.[provider];
       providerOptions = {
         provider,
-        providerConfiguration:
-          isExternalModelProvider(provider) && provider !== "standardcompute"
-            ? {
-                ...EXTERNAL_CODEX_PROVIDERS[provider],
-                ...providerConfiguration,
-              }
-            : providerConfiguration,
+        providerConfiguration: isExternalModelProvider(provider)
+          ? { ...EXTERNAL_CODEX_PROVIDERS[provider], ...providerConfiguration }
+          : providerConfiguration,
       };
     }
     selectedAuthentication = arguments_.mock
@@ -12695,7 +12689,6 @@ async function executeScan(
           hasCommandAuth(effectiveConfiguration),
           arguments_.dryRun,
           scanProviderEnvKey(effectiveConfiguration),
-          effectiveConfiguration,
         );
     diagnostic("scan.configuration", {
       cli_version: VERSION,
@@ -14533,7 +14526,7 @@ async function parseScanCodexOverrides(
 ): Promise<JsonObject> {
   const { codex: values, model, effort, provider } = options;
   const profileHome = scanCodexHome(environment);
-  if (!isExternalModelProvider(provider) && provider !== "amazon-bedrock") {
+  if (provider === "openai") {
     return parseCodexOverrides(values, model, effort, provider, defaults);
   }
   const explicit = parseCodexOverrides(values, model, effort);
@@ -14549,7 +14542,6 @@ async function parseScanCodexOverrides(
   const providers = profile["model_providers"];
   if (
     isExternalModelProvider(provider) &&
-    provider !== "standardcompute" &&
     isJsonObject(providers) &&
     isJsonObject(providers[provider])
   ) {
@@ -14576,7 +14568,7 @@ export function parseCodexOverrides(
   values: readonly string[],
   model?: string,
   effort?: ModelCliOptions["effort"],
-  provider?: "openai" | "amazon-bedrock" | ExternalModelProvider,
+  provider?: z.infer<typeof PROVIDER_OPTION>,
   defaults?: JsonObject,
 ): JsonObject {
   const result = Object.create(null) as JsonObject;
@@ -14584,12 +14576,10 @@ export function parseCodexOverrides(
   if (effort !== undefined) result["model_reasoning_effort"] = effort;
   if (isExternalModelProvider(provider)) {
     result["model_provider"] = provider;
-    if (provider !== "standardcompute") {
-      result["model_providers"] = {
-        [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
-      };
-    }
-  } else if (provider === "amazon-bedrock") {
+    result["model_providers"] = {
+      [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
+    };
+  } else if (provider !== undefined && provider !== "openai") {
     result["model_provider"] = provider;
   }
   for (const value of values) {
@@ -14641,7 +14631,8 @@ export function parseCodexOverrides(
         );
       }
       if (
-        (isExternalModelProvider(provider) || provider === "amazon-bedrock") &&
+        provider !== undefined &&
+        provider !== "openai" &&
         key === "model_provider"
       ) {
         throw new CodexSecurityError(
@@ -14652,7 +14643,7 @@ export function parseCodexOverrides(
     }
     cursor[final] = parsed;
   }
-  if (isExternalModelProvider(provider) || provider === "amazon-bedrock") {
+  if (provider !== undefined && provider !== "openai") {
     const configured = mergeCodexOverrides(defaults ?? {}, result);
     const selectedModel = scanModel(configured);
     if (typeof selectedModel !== "string" || !selectedModel.trim()) {
@@ -14669,11 +14660,7 @@ export function parseCodexOverrides(
       !selectedProviderTable(configured, provider)
     ) {
       return mergeCodexOverrides(
-        {
-          model_providers: {
-            [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
-          },
-        },
+        { model_providers: { [provider]: STANDARDCOMPUTE_CODEX_PROVIDER } },
         result,
       );
     }

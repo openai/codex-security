@@ -44,6 +44,8 @@ export const CHEAPERINFERENCE_CODEX_PROVIDER = {
   wire_api: "responses",
 } as const satisfies JsonObject;
 
+// A CLI-only preset. Registering it as an implicit SDK default could attach
+// a credential to an existing provider with the same ID but a different URL.
 export const STANDARDCOMPUTE_CODEX_PROVIDER = {
   name: "Standard Compute",
   base_url: "https://api.stdcmpt.com/v1",
@@ -55,24 +57,7 @@ export const EXTERNAL_CODEX_PROVIDERS = {
   openrouter: OPENROUTER_CODEX_PROVIDER,
   fireworks: FIREWORKS_CODEX_PROVIDER,
   cheaperinference: CHEAPERINFERENCE_CODEX_PROVIDER,
-  standardcompute: STANDARDCOMPUTE_CODEX_PROVIDER,
 } as const;
-
-export const EXTERNAL_PROVIDER_KEYS: ReadonlySet<string> = new Set(
-  Object.values(EXTERNAL_CODEX_PROVIDERS).map(({ env_key }) => env_key),
-);
-
-/** Native bearer and header profiles supply credentials directly to the transport. */
-function standardComputeTableCredential(table: unknown): string | undefined {
-  if (!isObject(table) || table["auth"] != null || table["env_key"] != null)
-    return undefined;
-  if (typeof table["experimental_bearer_token"] === "string")
-    return "experimental_bearer_token";
-  return ["http_headers", "env_http_headers"].find((field) => {
-    const headers = table[field];
-    return isObject(headers) && Object.keys(headers).length > 0;
-  });
-}
 
 export function selectedProviderTable(
   config: Readonly<JsonObject>,
@@ -84,35 +69,28 @@ export function selectedProviderTable(
   return isObject(table) ? table : undefined;
 }
 
-export function standardComputeCredentialSource(
-  config: Readonly<JsonObject>,
-): string | undefined {
-  return scanModelProvider(config) === "standardcompute"
-    ? standardComputeTableCredential(selectedProviderTable(config))
-    : undefined;
+export function isStandardComputeKey(name: unknown): boolean {
+  return (
+    typeof name === "string" &&
+    name.toUpperCase() === STANDARDCOMPUTE_CODEX_PROVIDER.env_key
+  );
 }
 
 /** Keep the Standard Compute credential only when the selected provider uses it. */
-export function standardComputeEnvironment(
-  environment: Readonly<Record<string, string | undefined>>,
-  provider: unknown,
-  providerEnvKey?: string,
-  config?: JsonObject,
-): Record<string, string | undefined> {
-  const key = STANDARDCOMPUTE_CODEX_PROVIDER.env_key;
-  if (!Object.keys(environment).some((name) => name.toUpperCase() === key))
-    return environment;
-  const settings = (config && selectedProviderTable(config, provider)) ?? {};
-  const referencesKey = (name: unknown) =>
-    typeof name === "string" && name.toUpperCase() === key;
+export function standardComputeEnvironment<Value>(
+  environment: Readonly<Record<string, Value>>,
+  settings?: JsonObject,
+): Record<string, Value> {
+  if (!Object.keys(environment).some(isStandardComputeKey)) return environment;
+
   if (
-    referencesKey(providerEnvKey ?? settings["env_key"]) ||
-    (isObject(settings["env_http_headers"]) &&
-      Object.values(settings["env_http_headers"]).some(referencesKey))
+    isStandardComputeKey(settings?.["env_key"]) ||
+    (isObject(settings?.["env_http_headers"]) &&
+      Object.values(settings["env_http_headers"]).some(isStandardComputeKey))
   )
     return environment;
   return Object.fromEntries(
-    Object.entries(environment).filter(([name]) => !referencesKey(name)),
+    Object.entries(environment).filter(([name]) => !isStandardComputeKey(name)),
   );
 }
 
@@ -307,11 +285,9 @@ export function scanProviderEnvKey(
   )
     return undefined;
   const provider = selectedProviderTable(config, selected);
-  if (selected === "standardcompute" && provider?.["auth"] != null)
-    return undefined;
   return typeof provider?.["env_key"] === "string"
     ? provider["env_key"]
-    : isExternalModelProvider(selected) && selected !== "standardcompute"
+    : isExternalModelProvider(selected)
       ? EXTERNAL_CODEX_PROVIDERS[selected].env_key
       : undefined;
 }

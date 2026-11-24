@@ -9,10 +9,10 @@ import { environmentEntry } from "./auth.js";
 import {
   deepMerge,
   EXTERNAL_CODEX_PROVIDERS,
+  isStandardComputeKey,
   isExternalModelProvider,
   modelProviderConfigOverride,
   scanModelProvider,
-  standardComputeCredentialSource,
   type JsonObject,
 } from "./config.js";
 import { AuthenticationRequiredError } from "./errors.js";
@@ -33,8 +33,6 @@ export function resolveSkillAuthentication(
   ) as JsonObject;
   const config = deepMerge(structuredClone(ambientConfig), overrides);
   const provider = options.modelProvider ?? scanModelProvider(config);
-  if (options.modelProvider !== undefined)
-    config["model_provider"] = options.modelProvider;
   // Native Codex ignores configured tables for these built-in providers.
   const providerConfiguration =
     typeof provider === "string" &&
@@ -52,10 +50,7 @@ export function resolveSkillAuthentication(
     options.auth === "chatgpt" && !isExternalModelProvider(provider);
   const providerBearer =
     typeof providerConfiguration?.["experimental_bearer_token"] === "string";
-  const providerKeyConfigured =
-    providerEnvKey !== undefined ||
-    providerBearer ||
-    standardComputeCredentialSource(config) !== undefined;
+  const providerKeyConfigured = providerEnvKey !== undefined || providerBearer;
   const requiresOpenAiAuth =
     !commandAuth &&
     (explicitChatgpt || !providerKeyConfigured) &&
@@ -65,7 +60,16 @@ export function resolveSkillAuthentication(
       (explicitChatgpt && providerKeyConfigured));
   let authentication: ScanAuthentication;
   let configOverrides: string[] = [];
-  if (providerEnvKey !== undefined && !commandAuth && !explicitChatgpt) {
+  if (isStandardComputeKey(providerEnvKey) && !commandAuth) {
+    authentication = scanAuthentication(
+      processEnvironment,
+      options.auth,
+      provider,
+      false,
+      false,
+      providerEnvKey,
+    );
+  } else if (providerEnvKey !== undefined && !commandAuth && !explicitChatgpt) {
     const key = environmentEntry(processEnvironment, providerEnvKey)?.trim();
     if (!key && options.auth === "api-key") {
       throw new AuthenticationRequiredError(
@@ -81,15 +85,11 @@ export function resolveSkillAuthentication(
       options.auth,
       provider,
       commandAuth,
-      false,
-      undefined,
-      config,
     );
   }
   if (
     authentication.method === "stored_credentials" &&
-    isExternalModelProvider(provider) &&
-    (provider !== "standardcompute" || providerEnvKey !== undefined)
+    isExternalModelProvider(provider)
   ) {
     const externalProvider = EXTERNAL_CODEX_PROVIDERS[provider];
     throw new AuthenticationRequiredError(
@@ -100,8 +100,8 @@ export function resolveSkillAuthentication(
     processEnvironment,
     authentication.method === "command" ? "chatgpt" : options.auth,
     provider,
-    undefined,
-    config,
+    isStandardComputeKey(providerEnvKey) ? providerEnvKey : undefined,
+    explicitChatgpt && !commandAuth ? undefined : config,
   );
   if (
     explicitChatgpt &&
