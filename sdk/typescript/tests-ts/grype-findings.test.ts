@@ -164,6 +164,33 @@ test("excludes ambiguous duplicate matches sharing an identity", () => {
   expect(output.excluded[0]!.reason).toMatch(/ambiguous duplicate/i);
 });
 
+test("uses a directory accessPath when Grype records an absolute path", () => {
+  const native = match();
+  const input = report({
+    ...native,
+    artifact: {
+      ...native.artifact,
+      locations: [
+        {
+          path: "/checkout/package-lock.json",
+          accessPath: "./package-lock.json",
+        },
+      ],
+    },
+  });
+  const finding = normalizeGrypeFindings(input).findings[0]!;
+  expect(finding.evidence.locations).toEqual([
+    { path: "package-lock.json", line: null },
+  ]);
+  expect(finding.source_finding_id).toBe(
+    normalizeGrypeFindings(report(native)).findings[0]!.source_finding_id,
+  );
+  input.source.type = "image";
+  expect(normalizeGrypeFindings(input).findings[0]!.evidence.locations).toEqual(
+    [],
+  );
+});
+
 test("keeps relative and absolute image paths out of repository locations", () => {
   const image = match();
   image.artifact.locations = [

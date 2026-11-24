@@ -63,13 +63,13 @@ and the manifest location.
 
 - `advisory_ids` starts with the match `id` and adds each `relatedVulnerabilities` id. `evidence.url` is the vulnerability `dataSource` when it is an HTTP link.
 - `packages[0]` carries the artifact name, the PURL type as its ecosystem, the installed version, the `fix.versions` as fixed versions, and the manifest or lockfile path when exactly one reported checkout location has a recognized manifest filename.
-- `locations` lists each checkout-relative artifact location. Grype reports no line numbers. All image paths stay in `source_data` only.
+- `locations` lists each checkout-relative artifact location. For directory scans, a relative `accessPath` can identify the checkout file when `path` is absolute. Grype reports no line numbers. All image paths stay in `source_data` only.
 - Grype ranks Negligible below Low. A Negligible match imports as `informational`; an Unknown or missing severity imports as `unknown`.
 - `evidence.source_data` keeps the native match, the scan `source`, and the Grype version. A saved preview imports under the `grype` provider.
 
 ## Repeat an import
 
-The reader identifies a match by ecosystem, advisory, package name and the sorted set of reported artifact paths. A new severity, installed version or fix updates the same occurrence. A
+The reader identifies a match by ecosystem, advisory, package name and the sorted set of artifact paths. Directory paths use the normalized checkout location when available. A new severity, installed version or fix updates the same occurrence. A
 different advisory, package or set of paths is a separate finding. Two matches with
 the same identity are excluded as a group. Keep the same source key for one
 project and branch.

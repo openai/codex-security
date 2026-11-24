@@ -1,7 +1,7 @@
 import { CodexSecurityError } from "./errors.js";
 import type { ExternalFindings } from "./external-findings.js";
 import { validateExternalEvidence } from "./external-import-contract.js";
-import { asRecord, isRecord } from "./record.js";
+import { asRecord } from "./record.js";
 import {
   array,
   manifestPath,
@@ -43,13 +43,20 @@ function ecosystem(artifact: NativeRecord): string | null {
   return fromPurl ?? text(artifact["language"]) ?? text(artifact["type"]);
 }
 
-function artifactPaths(artifact: NativeRecord): string[] {
+function artifactPaths(artifact: NativeRecord, directory: boolean): string[] {
   const paths = new Set<string>();
   for (const value of array(
     artifact["locations"] ?? [],
     "Grype artifact locations",
   )) {
-    const path = text(record(value, "Grype location")["path"]);
+    const location = record(value, "Grype location");
+    const raw = text(location["path"]);
+    // Directory scans can pair an absolute resolved path with a relative accessPath.
+    const path = directory
+      ? (repositoryFilePath(raw) ??
+        repositoryFilePath(location["accessPath"]) ??
+        raw)
+      : raw;
     if (path) paths.add(path);
   }
   return [...paths].sort();
@@ -70,11 +77,6 @@ function advisoryUrl(vulnerability: NativeRecord): string | null {
   const url =
     text(vulnerability["dataSource"]) ?? strings(vulnerability["urls"])[0];
   return url && /^https?:\/\//iu.test(url) ? url : null;
-}
-
-function fixedVersions(vulnerability: NativeRecord): string[] {
-  const fix = vulnerability["fix"];
-  return strings(isRecord(fix) ? fix["versions"] : undefined);
 }
 
 /** Import native `grype -o json` SCA matches as one dependency finding each. Grype
@@ -99,13 +101,9 @@ export function normalizeGrypeFindings(input: unknown): ExternalFindings {
       );
       const name = requiredText(artifact["name"], "Grype artifact name");
       const paths = directory
-        ? [
-            ...new Set(
-              artifactPaths(artifact)
-                .map(repositoryFilePath)
-                .filter((path) => path !== null),
-            ),
-          ]
+        ? artifactPaths(artifact, directory).filter(
+            (path) => repositoryFilePath(path) !== null,
+          )
         : [];
       const manifests = paths.filter((path) => manifestPath(path) !== null);
       return validateExternalEvidence(
@@ -120,7 +118,9 @@ export function normalizeGrypeFindings(input: unknown): ExternalFindings {
               name,
               ecosystem: ecosystem(artifact),
               installed_version: text(artifact["version"]),
-              fixed_versions: fixedVersions(vulnerability),
+              fixed_versions: strings(
+                asRecord(vulnerability["fix"])?.["versions"],
+              ),
               manifest_path: manifests.length === 1 ? manifests[0] : null,
             },
           ],
@@ -141,7 +141,7 @@ export function normalizeGrypeFindings(input: unknown): ExternalFindings {
         ecosystem(artifact),
         requiredText(vulnerability["id"], "Grype vulnerability id"),
         requiredText(artifact["name"], "Grype artifact name"),
-        artifactPaths(artifact),
+        artifactPaths(artifact, directory),
       ]);
     },
     "local",
