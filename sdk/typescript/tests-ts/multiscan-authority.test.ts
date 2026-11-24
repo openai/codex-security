@@ -402,77 +402,88 @@ test.each([3, undefined])(
   },
 );
 
-test("SDK registration records the same complete request identity used by campaign reuse", async () => {
-  const root = await temporaryDirectory();
-  const repository = join(root, "repository"),
-    home = join(root, "home"),
-    outputDir = join(root, "scan");
-  for (const path of [repository, home, outputDir])
-    await mkdir(path, { mode: 0o700 });
-  const config: CodexSecurityConfig = {
-    pluginPath: pluginRoot,
-    codexOverrides: {
-      analytics: { enabled: false },
-      shell_environment_policy: { inherit: "none" },
-    },
-  };
-  const options: ScanOptions = {
-    outputDir,
-    mode: "standard",
-    scanPrompt: "Supplied discovery instructions.",
-    validationPrompt: "Supplied verification instructions.",
-    postScanPrompt: "Supplied reporting instructions.",
-  };
-  let recipe: Record<string, unknown> | undefined;
-  const client = new TestClient(config, {
-    environment: {
-      CODEX_HOME: home,
-      CODEX_SECURITY_STATE_DIR: join(root, "state"),
-    },
-    resolvePluginPython: async () => "/managed/python",
-    prepareRuntime: async () => ({
-      codexHome: home,
-      environment: {},
-      credentialsAvailable: true,
-      plugin: {
-        pluginRoot,
-        marketplaceRoot: pluginRoot,
-        installedRoot: pluginRoot,
-        marketplaceName: "codex-security-sdk",
-        name: "codex-security",
-        version: "0.1.0",
+test.each([undefined, 6])(
+  "SDK registration records the same complete request identity used by campaign reuse (budget: %s)",
+  async (maxCostUsd) => {
+    const root = await temporaryDirectory();
+    const repository = join(root, "repository"),
+      home = join(root, "home"),
+      outputDir = join(root, "scan");
+    for (const path of [repository, home, outputDir])
+      await mkdir(path, { mode: 0o700 });
+    const config: CodexSecurityConfig = {
+      pluginPath: pluginRoot,
+      codexOverrides: {
+        analytics: { enabled: false },
+        shell_environment_policy: { inherit: "none" },
       },
-    }),
-    prepareOutputDir: async () => outputDir,
-    repositoryRevision: async () => "deadbeef",
-    runWorkbench: async (_runtime, args, input) => {
-      if (args[0] === "register-cli-scan") recipe = JSON.parse(input!).recipe;
-      return mockWorkbench(args, input);
-    },
-    createCodex: async () => ({
-      startThread: () => ({
-        id: null,
-        runStreamed: rejecting("synthetic stop after registration"),
+    };
+    const options: ScanOptions = {
+      outputDir,
+      mode: "standard",
+      maxCostUsd,
+      scanPrompt: "Supplied discovery instructions.",
+      validationPrompt: "Supplied verification instructions.",
+      postScanPrompt: "Supplied reporting instructions.",
+    };
+    let recipe: Record<string, unknown> | undefined;
+    const client = new TestClient(config, {
+      environment: {
+        CODEX_HOME: home,
+        CODEX_SECURITY_STATE_DIR: join(root, "state"),
+      },
+      resolvePluginPython: async () => "/managed/python",
+      prepareRuntime: async () => ({
+        codexHome: home,
+        environment: {},
+        credentialsAvailable: true,
+        plugin: {
+          pluginRoot,
+          marketplaceRoot: pluginRoot,
+          installedRoot: pluginRoot,
+          marketplaceName: "codex-security-sdk",
+          name: "codex-security",
+          version: "0.1.0",
+        },
       }),
-    }),
-  });
-  try {
-    await expect(client.run(repository, options)).rejects.toThrow(
-      "synthetic stop after registration",
-    );
-    expect(recipe?.["scanRequestDigest"]).toBe(
-      workflowDigest({ config, options: { ...options, target: "repository" } }),
-    );
-    expect(recipe?.["scanRequestDigest"]).not.toBe(
-      scanRequestDigest(config, {
-        ...options,
-        validationPrompt: "Different verification instructions.",
+      prepareOutputDir: async () => outputDir,
+      repositoryRevision: async () => "deadbeef",
+      runWorkbench: async (_runtime, args, input) => {
+        if (args[0] === "register-cli-scan") recipe = JSON.parse(input!).recipe;
+        return mockWorkbench(args, input);
+      },
+      createCodex: async () => ({
+        startThread: () => ({
+          id: null,
+          runStreamed: rejecting("synthetic stop after registration"),
+        }),
       }),
-    );
-  } finally {
-    await client.close();
-  }
-});
+    });
+    try {
+      await expect(client.run(repository, options)).rejects.toThrow(
+        "synthetic stop after registration",
+      );
+      expect(recipe?.["scanRequestDigest"]).toBe(
+        workflowDigest({
+          config,
+          options: { ...options, target: "repository" },
+        }),
+      );
+      expect(recipe?.["maxCostUsd"]).toBe(maxCostUsd);
+      if (maxCostUsd === undefined)
+        expect(recipe).not.toHaveProperty("scanRequestMaxCostUsd");
+      else expect(recipe?.["scanRequestMaxCostUsd"]).toBe(maxCostUsd);
+      expect(recipe?.["scanRequestDigest"]).not.toBe(
+        scanRequestDigest(config, {
+          ...options,
+          validationPrompt: "Different verification instructions.",
+        }),
+      );
+    } finally {
+      await client.close();
+    }
+  },
+);
 
 test.each([
   "duplicate-resolved",

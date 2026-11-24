@@ -2918,6 +2918,8 @@ export class CodexSecurity {
         options,
         repo,
       );
+      if (options.maxCostUsd !== undefined)
+        recipe["scanRequestMaxCostUsd"] = options.maxCostUsd;
       if (savedProviderProfile !== undefined) {
         recipe["providerProfile"] = {
           name: savedProviderProfile.name,

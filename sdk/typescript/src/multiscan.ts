@@ -1638,8 +1638,8 @@ function matchesRegisteredRequest(
     );
   };
   if (matches(scan)) return true;
-  // A batch reservation sets these execution options for just this attempt.
-  const limit = recipe["maxCostUsd"];
+  // Match the original batch reservation after approved budget increases.
+  const limit = recipe["scanRequestMaxCostUsd"] ?? recipe["maxCostUsd"];
   return (
     typeof limit === "number" &&
     recipe["ownerSuggestions"] === false &&
