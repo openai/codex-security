@@ -962,6 +962,87 @@ findings or the `--fail-on-severity` decision. Validation failures exit with
 cost-tracked, so `--validate` cannot be combined with `--max-cost` (including a
 configured scan cost limit), `--dry-run`, or `--mock`.
 
+#### Host-side validation providers
+
+`scan.validation.provider` selects an optional host-side provider for the
+post-seal follow-up. Select the project file with `-c FILE` or
+`CODEX_SECURITY_PROJECT_CONFIG`. A bare `--validate` uses that selection;
+`--validate=NAME` overrides the name, retaining the project-file options.
+Without a provider, the existing Codex validator is unchanged. This setting
+does not change the inference provider selected with `--provider`.
+
+```yaml
+scan:
+  validation:
+    provider: continuum
+    continuum:
+      environment_id: example
+      aws_region: us-east-1
+      wait_minutes: 45
+```
+
+```sh
+codex-security scan . --validate -c codex-security.yaml
+```
+
+To send findings from a completed scan, supply its scan ID and the selected
+occurrence IDs. Use `--scan latest` for the latest completed scan in the
+current directory. Omitting the IDs submits all open findings in that scan.
+
+Continuum receives titles, summaries, identifiers, severities, CWEs and code
+locations. Setting `scan.validation.continuum.include_local_validation` to
+`true` also sends the full local `validation.method` and `validation.summary`,
+including any secrets in those fields. This setting defaults to `false`.
+For a local review before submission, run the CLI scan without `--validate`
+and export the complete sealed findings. `scans show` may shorten these fields.
+
+```sh
+codex-security export --scan SCAN_ID --export-format json --output -
+codex-security validate --scan SCAN_ID -c codex-security.yaml OCCURRENCE_ID --format json
+```
+
+The command writes results to stdout and saves accepted assessments in
+private host state for patch and verify. It leaves the scan's original
+`validation.md` and `validation.json` unchanged and exits with code 1 if
+any assessment is unavailable. Check `status` and each item's `disposition` in JSON.
+An inconclusive assessment can return `incomplete` with exit code 0. JSON
+also includes the AWS finding ID and ARN after acceptance and the issue ID
+and ARN when found.
+
+To resume, use the original scan ID, pending occurrence IDs, configuration
+and private host state. New uploads and retries without receipts require
+the original checkout and scan snapshot. With a receipt, the host can poll
+after local edits if the repository still matches the destination. Changing
+the payload or environment, or losing the receipt, can create a new AWS
+finding. Until a receipt is saved, the request remains in private host state.
+
+In Codex CLI, explicitly select the same project file when requesting a plugin
+scan. Standard, diff and Deep Scan completion runs the configured provider on
+the MCP host after sealing, and includes its supplemental report and paths in
+the existing completion result. No provider means no additional work.
+
+AWS Continuum is the first built-in adapter. It submits reported code findings
+before waiting in parallel under one deadline. Per-item rejections and timeouts
+remain visible without failing the completed scan. The existing trusted AWS
+launcher uses an optional `aws_profile` or the ordinary credential chain.
+
+Provider reports add conclusions-only `validation.json` beside `validation.md`,
+with matching suffixes on repeated runs and `validation.recordsPath` in CLI JSON.
+The versioned document shows each verdict's scope, the issue URL, evidence
+freshness and any issue severity. Only an explicit result for the submitted
+finding is labeled as its verdict. Issue evidence cannot establish that a
+specific finding or fix was validated. Codex severity stays unchanged.
+Continuum reports `terminalStatus` separately from its exploitability verdict.
+Failed or inconclusive runs and discarded findings omit
+`freshness.validatedAt`. A discard can include a `statusMessage`.
+When Continuum defers an assessment, `scan --validate --format json` reports
+`validation.status` as `incomplete`. The sealed findings still determine
+`--fail-on-severity`. Continuum verifies that its only code source matches
+a Git remote of the scanned repository root. Evidence freshness describes its age and
+leaves the deployed revision unverified.
+See [validation providers](../../../docs/validation-providers.md)
+for configuration, permissions and limits.
+
 ### Understand scan scope and follow-up work
 
 A completed scan means the requested workflow finished. It does not mean every
@@ -2015,7 +2096,12 @@ Run the command with `--dry-run --format json`. Check `accountId`,
 To import, run the same command without `--dry-run` and confirm. The terminal
 shows the file, exclusions, severities and up to five finding IDs and titles.
 The prompt defaults to No. For a noninteractive import, add `--yes` after
-reviewing the full JSON preview.
+reviewing the full JSON preview. For new Continuum inbox jobs with a
+`privateImport.sourceCheckpoint`, `--yes` checks the upload, destination and
+source revision against a digest saved by the latest dry run for the same
+file path and state directory. Use separate paths for independent reviews.
+If the revision changes, compare the current inbox evidence with a fresh
+preview before approving an update.
 
 ### Configure an alternate Cloud deployment
 
@@ -3047,6 +3133,7 @@ commands must be prohibited.
 The default is `standard`, which retains the existing verification checks.
 Static results identify the evidence and state that runtime checks were not
 performed; material proof gaps can still block verification.
+`--assess-patch-risk` may run focused local tests after static verification.
 
 ```bash
 codex-security patch finding.md --verification-mode static
