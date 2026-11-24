@@ -360,6 +360,46 @@ await test("built MCP setup previews and saves the selected project before scan 
       assert.equal(joined.scan.scanId, created.scan.scanId);
       await assertBound(joined.scan.scanId);
     }
+
+    const optInPath = join(root, "share.json");
+    await writeFile(
+      optInPath,
+      JSON.stringify({
+        scan: {
+          validation: {
+            provider: "continuum",
+            continuum: {
+              ...validation.continuum,
+              include_local_validation: true,
+            },
+          },
+        },
+      }),
+    );
+    await writeSelection();
+    const tool = "start_codex_security_standard_scan";
+    const target = { targetPath, userContext: "check rejoin sharing" };
+    const optedIn = await call(tool, {
+      ...target,
+      projectConfigPath: optInPath,
+    });
+    const conflict = await client.callTool({
+      name: tool,
+      arguments: { ...target, projectConfigPath: validationPath },
+      _meta: { "openai/threadId": "project-owner" },
+    });
+    assert.equal(
+      (conflict.structuredContent as Record<string, unknown>)?.scanId,
+      optedIn.scanId,
+    );
+    assert.match(
+      JSON.stringify(conflict.content),
+      /Automatic Continuum validation is disabled/,
+    );
+    assert.doesNotMatch(
+      JSON.stringify(conflict.content),
+      /Submissions include/,
+    );
   } finally {
     await client.close();
     await rm(root, { recursive: true, force: true });

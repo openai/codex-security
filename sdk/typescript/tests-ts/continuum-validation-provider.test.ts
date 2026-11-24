@@ -5,6 +5,7 @@ import {
   requestBody,
 } from "./support/continuum-validation-fixtures.js";
 import { describe, expect, test } from "bun:test";
+import { assessPluginFindings } from "../src/plugin-validation.js";
 import {
   ContinuumValidationProvider,
   findingToOcsf,
@@ -202,23 +203,79 @@ describe("Continuum validation provider", () => {
     );
   });
 
-  test("checks document size before submission", async () => {
-    const { launcher, calls } = fakeAws();
-    const p = new ContinuumValidationProvider({
-      environmentId: "environment1",
-      launcher,
-    });
-    const results = await p.validateBatch(
-      [
-        { ...finding, summary: "a".repeat(65_537) },
-        { ...finding, summary: "📋".repeat(22_000) },
-      ],
-      context,
-    );
-    expect(results[0]?.unavailable).toContain("65,536");
-    expect(results[1]?.unavailable).toContain("256 KiB");
-    expect(calls).not.toContain("create-code-finding");
+  test("sends only local method and summary on opt-in, and resumes each receipt", async () => {
+    const validation = {
+      method: "Query fixture A. ",
+      summary: " Two rows.\nOne belongs to B.",
+      evidenceRefs: ["private artifact"],
+    };
+    const input = { ...finding, validation, includeLocalValidation: true };
+    const { launcher } = fakeAws();
+    const sent: unknown[] = [];
+    const now = new Date(0);
+    for (const includeLocalValidation of [undefined, true, false, true]) {
+      const provider = new ContinuumValidationProvider({
+        environmentId: "environment1",
+        includeLocalValidation,
+        now: () => now,
+        launcher(op, args, signal) {
+          if (op === "create-code-finding")
+            sent.push(JSON.parse(requestBody(args)).ocsfDocument);
+          return launcher(op, args, signal);
+        },
+      });
+      expect(
+        (await provider.validate(input, context)).unavailable,
+      ).toBeUndefined();
+    }
+    const summary =
+      finding.summary +
+      "\n\nCodex local validation method\n" +
+      validation.method +
+      "\n\nCodex local validation summary\n" +
+      validation.summary;
+    expect(sent).toEqual([
+      findingToOcsf(finding, now),
+      findingToOcsf({ ...finding, summary }, now),
+    ]);
   });
+
+  test("checks enriched descriptions and UTF-8 document size before submission", () => {
+    const convert = (summary: string) =>
+      findingToOcsf(
+        { ...finding, validation: { method: " ", summary } },
+        new Date(0),
+        true,
+      );
+    const prefix = finding.summary + "\n\nCodex local validation summary\n";
+    const limit = "x".repeat(65_536 - prefix.length - 1) + "📋";
+    expect(convert(limit)["message"]).toBe(prefix + limit);
+    expect(() => convert(limit + "x")).toThrow("65,536");
+    expect(() => convert("📋".repeat(22_000))).toThrow("256 KiB");
+    expect(() => convert("\u0001".repeat(15_000))).toThrow("256 KiB");
+  });
+
+  test.each([false, true])(
+    "checks unenriched documents before submission (opt-in %s)",
+    async (includeLocalValidation) => {
+      const { launcher, calls } = fakeAws();
+      const p = new ContinuumValidationProvider({
+        environmentId: "environment1",
+        launcher,
+        includeLocalValidation,
+      });
+      const results = await p.validateBatch(
+        [
+          { ...finding, summary: "a".repeat(65_537) },
+          { ...finding, summary: "📋".repeat(22_000) },
+        ],
+        context,
+      );
+      expect(results[0]?.unavailable).toContain("65,536");
+      expect(results[1]?.unavailable).toContain("256 KiB");
+      expect(calls).not.toContain("create-code-finding");
+    },
+  );
 
   test("concurrent senders share a receipt", async () => {
     const aws = fakeAws();
@@ -481,8 +538,9 @@ describe("Continuum validation provider", () => {
       return response;
     }).validate(finding, context);
     expect(result.record?.scoringArtifactId).toBeUndefined();
-    expect(result.record?.reachableFromAttacker).toBeUndefined();
-    expect(result.disposition).toBe("reportable");
+    expect(result.record?.scoringPending).toBe(true);
+    expect(result.disposition).toBe("deferred");
+    expect(result.report).toContain("Retry");
   });
 
   test.each(["another sole finding", "wrong issue ARN"])(
@@ -683,6 +741,52 @@ describe("Continuum validation provider", () => {
     });
     expect((await p.validate(finding, context)).unavailable).toBeUndefined();
     expect(elapsed).toBe(1000);
+  });
+
+  test("only retries the pending receipt alongside permanent local input errors", async () => {
+    const aws = fakeAws();
+    let polls = 0;
+    const p = provider(async (op, args, signal) => {
+      if (op === "get-code-finding" && ++polls === 1)
+        throw new Error("read interrupted");
+      return aws.launcher(op, args, signal);
+    });
+    const inputs = [
+      { occurrenceId: "no_location" },
+      { ...finding, occurrenceId: "oversize", summary: "x".repeat(65_537) },
+      finding,
+    ];
+    const batches: unknown[] = [];
+    const resolve = () => ({
+      name: p.name,
+      version: p.version,
+      validate: p.validate.bind(p),
+      validateBatch: (items: Parameters<typeof p.validateBatch>[0]) => {
+        batches.push(items);
+        return p.validateBatch(items, context);
+      },
+    });
+    const config = { provider: "continuum" };
+    const first = await assessPluginFindings(config, inputs, context, resolve);
+    expect(first.retry).not.toBeNull();
+    const next = await assessPluginFindings(
+      config,
+      inputs,
+      context,
+      resolve,
+      first.retry!,
+    );
+    expect(batches).toEqual([inputs, [finding]]);
+    expect(next.status).toBe("incomplete");
+    expect(next.retry).toBeNull();
+    for (const item of next.records.items.slice(0, 2)) {
+      expect(item.invalidInput).toBe(true);
+      expect(item.terminalStatus).toBeUndefined();
+      expect(item.unavailable).toContain("No upload attempted");
+    }
+    expect(aws.calls.filter((op) => op === "create-code-finding")).toHaveLength(
+      1,
+    );
   });
 
   test("maps sink-first code findings", () => {

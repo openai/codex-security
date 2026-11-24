@@ -10,6 +10,7 @@ import {
   ContinuumValidationProvider,
   type ContinuumAwsLauncher,
 } from "../src/continuum-validation-provider.js";
+import { assessPluginFindings } from "../src/plugin-validation.js";
 import type { ValidationItemRecord } from "../src/validation-provider.js";
 
 const recorded = JSON.parse(
@@ -171,14 +172,22 @@ test.each(["member", "failed issue", "sibling"])(
   },
 );
 
-test.each(["SUBMITTED", "VALIDATING"])(
-  "waits for current evidence when a %s finding joins an issue with historical proof",
-  async (status) => {
+test.each([
+  ["SUBMITTED", "historical"],
+  ["VALIDATING", "sibling"],
+])(
+  "keeps polling a %s finding with only %s evidence",
+  async (status, evidence) => {
     const { fake, proof } = scoringFixture();
-    const first = structuredClone(recorded);
-    first.artifacts[proofId].createdAt = "2026-11-06T15:19:00Z";
-    first.artifactLists.VALIDATION_EVIDENCE.items[0].createdAt =
-      first.artifacts[proofId].createdAt;
+    const first = structuredClone(fake);
+    if (evidence === "historical") {
+      first.artifacts[proofId].createdAt = "2026-11-06T15:19:00Z";
+      first.artifactLists.VALIDATION_EVIDENCE.items[0].createdAt =
+        first.artifacts[proofId].createdAt;
+    } else {
+      first.issue.findingIds.push("sibling");
+      validation(first).perFindingResults[0].findingId = "sibling";
+    }
     let polls = 0;
     const { record } = await provider(async (operation, args) => {
       if (operation === "get-code-finding") polls++;
@@ -419,22 +428,85 @@ describe("explicitly fake outcome variations", () => {
     expect(result.record).not.toHaveProperty("proofObservation");
   });
 
-  test("omits ambiguous issue scoring without delaying the verdict", async () => {
+  test.each([
+    ["2026-11-06T16:40:18.536989+01:00", "2026-11-06T10:42:53.583051-05:00"],
+    ["invalid", "invalid"],
+  ])(
+    "selects the newest dated proof and score with competing times %s and %s",
+    async (proofTime, scoreTime) => {
+      const { fake, proof, score } = scoringFixture();
+      for (const [artifact, createdAt] of [
+        [proof, proofTime],
+        [score, scoreTime],
+      ]) {
+        const artifactId = "older-" + artifact.artifactId;
+        fake.artifacts[artifactId] = { ...artifact, artifactId, createdAt };
+        fake.artifactLists[artifact.artifactType].items.unshift({
+          artifactId,
+          createdAt,
+        });
+      }
+      const result = await provider(transport(fake)).validate(finding, context);
+      expect(result.record).toMatchObject({
+        validationArtifactId: proofId,
+        scoringArtifactId: scoreId,
+        severityAfter: "high",
+        freshness: { evidenceCreatedAt: "2026-11-06T15:40:18.536990+00:00" },
+      });
+    },
+  );
+
+  test.each([true, false])(
+    "checks whether a concurrent issue score is also linked (%s)",
+    async (linked) => {
+      const { fake, score } = scoringFixture();
+      const concurrent = {
+        ...structuredClone(score),
+        artifactId: "concurrent",
+      };
+      if (!linked)
+        concurrent.body.prevalidationSignals.signals[0].exploitability.sourceValidationArtifactId =
+          "other";
+      fake.artifacts[concurrent.artifactId] = concurrent;
+      fake.artifactLists.EVIDENCE.items.push(concurrent);
+      const { record } = await provider(transport(fake)).validate(
+        finding,
+        context,
+      );
+      expect(record?.verdict).toBe("EXPLOITABLE");
+      expect(record?.scoringArtifactId).toBe(linked ? undefined : scoreId);
+      expect(record?.freshness.scoredAt).toBe(score.createdAt);
+      expect(record?.scoringPending).toBe(linked ? true : undefined);
+      expect(record?.reachableFromAttacker).toBe(linked ? undefined : true);
+    },
+  );
+
+  test("uses the newest linked evidence while retaining severity if a newer issue score is unrelated", async () => {
     const { fake, score } = scoringFixture();
-    fake.artifactLists.EVIDENCE.items.push({
-      artifactId: "another-score",
-      createdAt: score.createdAt,
+    for (const [artifactId, createdAt] of [
+      ["unrelated", fake.issue.updatedAt],
+      ["older", "2026-11-06T15:41:00Z"],
+    ]) {
+      fake.artifacts[artifactId] = {
+        ...structuredClone(score),
+        artifactId,
+        createdAt,
+      };
+      fake.artifactLists.EVIDENCE.items.push({ artifactId, createdAt });
+    }
+    fake.artifacts.unrelated.body.prevalidationSignals.signals[0].exploitability.sourceValidationArtifactId =
+      "other-proof";
+    for (const signal of score.body.prevalidationSignals.signals)
+      delete signal.computed;
+    fake.issue.severityReasoning = "UNRELATED_FACTORS";
+    const result = await provider(transport(fake)).validate(finding, context);
+    expect(result.record).toMatchObject({
+      scoringArtifactId: scoreId,
+      severityAfter: "high",
+      providerSeverity: "critical",
+      reachableFromAttacker: true,
     });
-    let polls = 0;
-    const result = await provider((op, args) => {
-      if (op === "get-code-finding") polls++;
-      return transport(fake)(op, args);
-    }).validate(finding, context);
-    expect(polls).toBe(1);
-    expect(result.disposition).toBe("reportable");
-    expect(result.record?.verdict).toBe("EXPLOITABLE");
-    expect(result.record?.scoringArtifactId).toBeUndefined();
-    expect(result.record?.reachableFromAttacker).toBeUndefined();
+    expect(JSON.stringify(result)).not.toContain("UNRELATED_FACTORS");
   });
 
   test.each([1, 2])(
@@ -608,6 +680,232 @@ describe("explicitly fake outcome variations", () => {
       "waiting",
     ]);
   });
+
+  test.each(["EVIDENCE", scoreId])(
+    "keeps the validated verdict and stops polling when reading %s fails",
+    async (target) => {
+      const launch = transport(withObservation());
+      const diagnostic = "AccessDeniedException\nSynthetic score read failure";
+      let polls = 0;
+      const result = await provider(async (op, args) => {
+        if (op === "get-code-finding") polls++;
+        if (args.at(-1) === target) throw new Error(diagnostic);
+        return launch(op, args);
+      }).validate(finding, context);
+      expect(result.unavailable).toContain(diagnostic);
+      expect(polls).toBe(1);
+      expect(result.report).toContain(diagnostic);
+      expect(result.record).toMatchObject({
+        verdict: "EXPLOITABLE",
+        resultScope: "finding",
+        terminalStatus: "COMPLETED",
+        validationArtifactId: proofId,
+        issueId: recorded.issueId,
+        scoringPending: true,
+        disposition: "deferred",
+        unavailable: result.unavailable,
+      });
+      expect(result.record?.scoringArtifactId).toBeUndefined();
+    },
+  );
+
+  test.each([
+    "between polls",
+    "first score",
+    "score error",
+    "same issue",
+    "changed issue",
+  ])(
+    "a deadline retains the pending verdict only for its issue (%s)",
+    async (stage) => {
+      let milliseconds = 0;
+      const launch = transport();
+      const p = new ContinuumValidationProvider({
+        environmentId: recorded.environmentId,
+        waitMinutes: 1,
+        launcher: async (op, args, signal) => {
+          if (
+            op === "list-code-issue-artifacts" &&
+            args.at(-1) === "EVIDENCE"
+          ) {
+            if (stage === "score error") {
+              milliseconds = 60_000;
+              throw new Error("Synthetic scoring access denied");
+            }
+            if (stage !== "first score") return { items: [] };
+            milliseconds = 60_000;
+          }
+          const response = await launch(op, args, signal);
+          if (
+            op === "get-code-finding" &&
+            milliseconds &&
+            stage !== "between polls"
+          ) {
+            if (stage === "changed issue")
+              response["mergedIntoIssueId"] = "new";
+            milliseconds = 60_000;
+          }
+          return response;
+        },
+        now: () => new Date(milliseconds),
+        delay: async (ms) => {
+          milliseconds += ms;
+        },
+      });
+      const result = await p.validate(finding, context);
+      if (stage === "changed issue") {
+        expect(result.record?.verdict).toBe("UNAVAILABLE");
+        expect(result.record?.issueId).toBe("new");
+        return;
+      }
+      expect(result.unavailable).toContain("timed out");
+      if (stage === "score error")
+        expect(result.unavailable).toContain("Synthetic scoring access denied");
+      expect(result.record).toMatchObject({
+        issueId: recorded.issueId,
+        verdict: "EXPLOITABLE",
+        terminalStatus: "COMPLETED",
+        validationArtifactId: proofId,
+        scoringPending: true,
+        disposition: "deferred",
+      });
+      expect(result.record?.scoringArtifactId).toBeUndefined();
+      expect(result.report).toContain("Retry");
+    },
+  );
+});
+
+test.each(["finding", "issue"])(
+  "after detachment on the %s, retries show observed issue IDs without restoring the verdict",
+  async (side) => {
+    const launch = transport();
+    let stage: "linked" | "detached" | "offline" | "relink" | "merged" =
+      "linked";
+    const p = provider(async (op, args) => {
+      if (op === "list-code-issue-artifacts" && args.at(-1) === "EVIDENCE")
+        return { items: [] };
+      if (op === "get-code-" + side && stage === "offline")
+        throw Error("Offline");
+      const response = await launch(op, args);
+      if (op === "get-code-issue" && stage === "detached" && side === "issue")
+        response["findingIds"] = ["sibling"];
+      if (
+        op === "get-code-finding" &&
+        stage === "detached" &&
+        side === "finding"
+      ) {
+        delete response["createdIssueId"];
+        delete response["duplicateOfIssueId"];
+        delete response["mergedIntoIssueId"];
+      }
+      if (stage === "relink" || stage === "merged") {
+        if (stage === "relink" && op === "get-code-issue")
+          throw Error("Offline");
+        if (op === "get-code-finding") response["mergedIntoIssueId"] = "new";
+        if (op === "get-code-issue") {
+          response["issueId"] = "new";
+          response["issueArn"] = recorded.issue.issueArn.replace(
+            recorded.issueId,
+            "new",
+          );
+        }
+      }
+      return response;
+    });
+    const config = {
+      provider: "continuum",
+      continuum: { environment_id: recorded.environmentId },
+    };
+    let result = await assessPluginFindings(
+      config,
+      [finding],
+      context,
+      () => p,
+    );
+    const first = result.records.items[0]!;
+    expect(first.scoringPending).toBe(true);
+    for (const next of ["detached", "offline", "relink"] as const) {
+      stage = next;
+      result = await assessPluginFindings(
+        config,
+        [finding],
+        context,
+        () => p,
+        result.retry!,
+      );
+      const item = result.records.items[0]!;
+      expect(item).toMatchObject({
+        findingArn: first.findingArn,
+        issueUnlinked: true,
+        verdict: "UNAVAILABLE",
+      });
+      const id =
+        next === "relink"
+          ? "new"
+          : side === "issue"
+            ? first.issueId
+            : undefined;
+      expect(item.issueId).toBe(id);
+      if (id) {
+        expect(item.issueArn?.endsWith("/code-issues/" + id)).toBe(true);
+        expect(result.summary).toContain(id);
+      } else expect(item.issueArn).toBeUndefined();
+      expect(item.validationArtifactId).toBeUndefined();
+      expect(result.summary).not.toContain("EXPLOITABLE");
+    }
+    stage = "merged";
+    result = await assessPluginFindings(
+      config,
+      [finding],
+      context,
+      () => p,
+      result.retry!,
+    );
+    expect(result.records.items[0]?.issueId).toBe("new");
+    expect(result.records.items[0]?.issueUnlinked).toBeUndefined();
+  },
+);
+
+test("a plugin retry drops the old verdict when reading the merge destination fails", async () => {
+  const launch = transport();
+  let merged = false;
+  const p = provider(async (op, args) => {
+    if (op === "list-code-issue-artifacts" && args.at(-1) === "EVIDENCE")
+      return { items: [] };
+    if (op === "get-code-issue" && args.at(-1) === "new")
+      throw new Error("Issue read failed");
+    const response = await launch(op, args);
+    if (op === "get-code-finding" && merged)
+      response["mergedIntoIssueId"] = "new";
+    return response;
+  });
+  const pending = await p.validate(finding, context);
+  expect(pending.record).toMatchObject({
+    issueId: recorded.issueId,
+    verdict: "EXPLOITABLE",
+    scoringPending: true,
+  });
+  merged = true;
+  const result = await assessPluginFindings(
+    {
+      provider: "continuum",
+      continuum: { environment_id: recorded.environmentId },
+    },
+    [finding],
+    context,
+    () => p,
+    [pending],
+  );
+  const record = result.records.items[0]!;
+  expect(record).toMatchObject({
+    issueId: "new",
+    issueArn: recorded.issue.issueArn.replace(recorded.issueId, "new"),
+    verdict: "UNAVAILABLE",
+    unavailable: "Issue read failed",
+  });
+  expect(record.validationArtifactId).toBeUndefined();
+  expect(record.providerSeverity).toBeUndefined();
+  expect(result.summary).not.toContain("EXPLOITABLE");
 });
 
 test.each(["EVIDENCE", "VALIDATION_EVIDENCE"])(
@@ -677,3 +975,19 @@ test.each(["FAILED", "PARTIAL", "COMPLETED"])(
     expect(record).not.toHaveProperty("proofObservation");
   },
 );
+
+test("keep polling when an unrelated score arrives first", async () => {
+  const ready = withObservation();
+  const waiting = scoringFixture();
+  waiting.exploitability.sourceValidationArtifactId = "older-proof";
+  waiting.score.artifactId = "older-score";
+  waiting.fake.artifacts["older-score"] = waiting.score;
+  waiting.fake.artifactLists.EVIDENCE.items[0].artifactId = "older-score";
+  let polls = 0;
+  const { record } = await provider((operation, args) => {
+    if (operation === "get-code-finding") polls++;
+    return transport(polls < 2 ? waiting.fake : ready)(operation, args);
+  }).validate(finding, context);
+  expect(polls).toBeGreaterThan(1);
+  expect(record?.scoringArtifactId).toBe(scoreId);
+});

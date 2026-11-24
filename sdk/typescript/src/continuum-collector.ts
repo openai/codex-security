@@ -7,9 +7,12 @@ import {
   findingIdentity,
   issueIdentity,
   readPatch,
+} from "./continuum-findings.js";
+import {
+  linkedIssueIds,
   selectFindingValidationArtifact,
   singleFindingValidationIssue,
-} from "./continuum-findings.js";
+} from "./continuum-validation-evidence.js";
 import { CodexSecurityError } from "./errors.js";
 import { array, record } from "./scanner-import.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
@@ -252,8 +255,8 @@ export async function collectContinuumFinding(
       `Unexpected detail for Continuum finding ${findingId}.`,
     );
 
-  const linkedIssue =
-    finding["createdIssueId"] || finding["duplicateOfIssueId"];
+  const links = linkedIssueIds(finding);
+  const linkedIssue = links[0];
   if (!linkedIssue) return finding;
   const issueId = continuumId.parse(linkedIssue);
   const list = await request(
@@ -316,7 +319,16 @@ export async function collectContinuumFinding(
         );
       continue;
     }
-    patches.push(readPatch({ ...patch, artifactId }));
+    patches.push(
+      readPatch({
+        ...patch,
+        artifactId,
+        issueArn:
+          links.length > 1
+            ? `${identity.scope}/code-issues/${issueId}`
+            : undefined,
+      }),
+    );
   }
   signal?.throwIfAborted();
   if (!patches.length && !evidenceArtifacts.length) return finding;

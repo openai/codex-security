@@ -33,7 +33,10 @@ function itemConclusion(record: ValidationItemRecord, ids: string[]): string {
   const items =
     ids.length === 1 ? `Item ${record.itemId}` : `Items ${ids.join(", ")}`;
   const lines = [`${items}: ${severity}.`];
-  if (record.issueId) lines.push(`Issue ${record.issueId}.`);
+  if (record.issueId)
+    lines.push(
+      `Issue ${record.issueId}${record.issueUnlinked ? " (membership unconfirmed)" : ""}.`,
+    );
   if (record.issueFindingCount !== undefined)
     lines.push(`Findings in issue: ${record.issueFindingCount}.`);
   if (record.resultScope === "issue") {

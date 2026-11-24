@@ -87,7 +87,10 @@ import {
   projectedBlackDuckRepositoryUrl,
 } from "./blackduck-findings.js";
 import { checkmarxSelection } from "./checkmarx-repository.js";
-import { continuumReportRepositories } from "./continuum-findings.js";
+import {
+  checkRetainedContinuumPatches,
+  continuumReportRepositories,
+} from "./continuum-findings.js";
 import { veracodeReportRepositories } from "./veracode-findings.js";
 import { inspectorReportRepository } from "./inspector-findings.js";
 import { sonarRepositoryUrls } from "./sonar-findings.js";
@@ -1618,6 +1621,9 @@ async function preparePublicationInput(
     );
     for (const finding of findings) {
       const { source_finding_id: id, evidence } = finding;
+      // Resume only the exact bytes already approved under an older reader.
+      if (provider === "continuum" && !historical)
+        checkRetainedContinuumPatches(evidence.source_data);
       const guardian = guardianFindingRepository(finding, "cloud");
       if (guardian) {
         requireDestination(id, guardian);
