@@ -4477,16 +4477,26 @@ if __name__ == "__main__":
     },
   );
 
-  test.each([true, false])(
-    "records a native failure only when its terminal event preceded cancellation (failure first: %p)",
-    async (failureFirst) => {
+  test.each([
+    ["turn.failed", true],
+    ["turn.failed", false],
+    ["error", true],
+    ["error", false],
+  ] as const)(
+    "records a native failure only when %s preceded cancellation (failure first: %p)",
+    async (type, failureFirst) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const controller = new AbortController();
-      const message = "Synthetic native turn failure";
+      const message =
+        type === "error"
+          ? "This request has been flagged for possible cybersecurity risk."
+          : "Synthetic native turn failure";
       async function* events(): AsyncGenerator<ThreadEvent> {
         if (!failureFirst) controller.abort();
         try {
-          yield { type: "turn.failed", error: { message } };
+          yield type === "error"
+            ? { type, message }
+            : { type, error: { message } };
         } finally {
           // The reader closes a failed stream after observing its terminal event.
           if (failureFirst) controller.abort();

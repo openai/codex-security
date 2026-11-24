@@ -3776,16 +3776,19 @@ export class CodexSecurity {
         onTurnStatus: (status, message) => {
           // Codex can emit an error before turn.failed. The stream closes
           // on that first error, so recognize an exact refusal on either.
-          const refused =
-            releaseStandardScan !== undefined &&
+          if (
+            !hosted &&
+            skillName === "security-scan" &&
             message !== undefined &&
-            CYBERSECURITY_POLICY_REFUSAL_MESSAGES.has(message);
-          if (status === "error" && !refused) return;
-          if (refused) runPostScan = null;
-          scanTurnStatus = status === "error" ? "failed" : status;
+            CYBERSECURITY_POLICY_REFUSAL_MESSAGES.has(message)
+          ) {
+            runPostScan = null;
+            status = "failed";
+          } else if (status === "error") return;
+          scanTurnStatus = status;
           // A later caller abort during iterator cleanup cannot undo a reported failure.
           if (
-            scanTurnStatus === "failed" &&
+            status === "failed" &&
             !directDeepScan &&
             !this.#dependencies.hostedScan &&
             !signal.aborted
