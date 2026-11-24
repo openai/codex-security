@@ -1,4 +1,5 @@
 import {
+  available,
   nativeRules,
   sourceEvidence,
   sourceStep,
@@ -28,13 +29,6 @@ const file: TraceScope = {
   path: "example.py",
 };
 const search: TraceScope = { ...file, kind: "search", path: "." };
-
-async function available(command: string) {
-  return promisify(execFile)(command, ["--version"]).then(
-    () => true,
-    () => false,
-  );
-}
 
 test("project references cite launch and CI records without assigning ownership", async (t) => {
   if (!(await available("rg"))) return t.skip("rg required");

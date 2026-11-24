@@ -1,3 +1,4 @@
+import { claimKey } from "./dependency-report-proof.js";
 import {
   stackInvestigationReportSchema,
   type StackInvestigationReport,
@@ -63,10 +64,6 @@ export function stackFrames(
   }));
 }
 
-function key(ref: DependencyClaimReference) {
-  return JSON.stringify([ref.id, ref.revision, ref.hash]);
-}
-
 export function readStackReport(value: unknown): StackReport | undefined {
   if (
     !isRecord(value) ||
@@ -78,7 +75,7 @@ export function readStackReport(value: unknown): StackReport | undefined {
     stackInvestigationReportSchema.parse(value);
   const records = new Map<string, Claim>();
   for (const record of claims) {
-    const id = key(record);
+    const id = claimKey(record);
     if (records.has(id))
       throw new Error("Duplicate stack claim reference: " + record.id);
     records.set(id, projectClaim(record));
@@ -92,7 +89,7 @@ export function readStackReport(value: unknown): StackReport | undefined {
     const claims: Claim[] = [];
     const missingClaims: DependencyClaimReference[] = [];
     for (const ref of pending) {
-      const id = key(ref);
+      const id = claimKey(ref);
       if (seen.has(id)) continue;
       seen.add(id);
       const record = records.get(id);
