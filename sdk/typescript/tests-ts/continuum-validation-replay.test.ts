@@ -10,6 +10,7 @@ import {
   ContinuumValidationProvider,
   type ContinuumAwsLauncher,
 } from "../src/continuum-validation-provider.js";
+import { continuumObservations } from "../src/continuum-validation-evidence.js";
 import { assessPluginFindings } from "../src/plugin-validation.js";
 import type { ValidationItemRecord } from "../src/validation-provider.js";
 
@@ -754,10 +755,16 @@ describe("explicitly fake outcome variations", () => {
       });
       const result = await p.validate(finding, context);
       if (stage === "changed issue") {
+        expect(continuumObservations.get(result.record!)?.issueChanged).toBe(
+          true,
+        );
         expect(result.record?.verdict).toBe("UNAVAILABLE");
         expect(result.record?.issueId).toBe("new");
         return;
       }
+      expect(
+        continuumObservations.get(result.record!)?.issueChanged,
+      ).toBeUndefined();
       expect(result.unavailable).toContain("timed out");
       if (stage === "score error")
         expect(result.unavailable).toContain("Synthetic scoring access denied");
@@ -773,6 +780,57 @@ describe("explicitly fake outcome variations", () => {
       expect(result.report).toContain("Retry");
     },
   );
+});
+
+test("a sibling's disputed score cannot mask an older individual verdict on retry", async () => {
+  const { fake, proof, score } = scoringFixture();
+  fake.issue.findingIds.push("sibling");
+  const sibling = structuredClone(proof);
+  sibling.artifactId = "sibling-proof";
+  sibling.createdAt = "2026-11-06T15:41:00Z";
+  sibling.body.validationEvidence.perFindingResults[0].findingId = "sibling";
+  fake.artifacts[sibling.artifactId] = sibling;
+  fake.artifactLists.VALIDATION_EVIDENCE.items = [sibling];
+  for (const artifactId of ["sibling-score-1", "sibling-score-2"]) {
+    const tied = { ...structuredClone(score), artifactId };
+    tied.body.prevalidationSignals.signals[0].exploitability.sourceValidationArtifactId =
+      sibling.artifactId;
+    fake.artifacts[artifactId] = tied;
+    fake.artifactLists.EVIDENCE.items.push(tied);
+  }
+  const config = {
+    provider: "continuum",
+    continuum: { environment_id: recorded.environmentId },
+  };
+  const resolve = () => provider(transport(fake));
+  const first = await assessPluginFindings(config, [finding], context, resolve);
+  expect(first.records.items[0]).toMatchObject({
+    resultScope: "issue",
+    scoringPending: true,
+    freshness: { scoredAt: score.createdAt },
+  });
+
+  proof.body.validationEvidence.perFindingResults[0].exploitable =
+    "NOT_EXPLOITABLE";
+  fake.artifactLists.VALIDATION_EVIDENCE.items.push(proof);
+  const result = await resolve().validate(finding, context);
+  expect(JSON.stringify(result)).not.toContain(sibling.artifactId);
+  // A pre-upgrade cache lacks the marker. The live poll still sees the same sibling proof.
+  const retry = JSON.parse(JSON.stringify(first.retry));
+  delete retry[0].siblingOnly;
+  const next = await assessPluginFindings(
+    config,
+    [finding],
+    context,
+    resolve,
+    retry,
+  );
+  expect(next.records.items[0]).toMatchObject({
+    resultScope: "finding",
+    verdict: "NOT_EXPLOITABLE",
+    scoringArtifactId: scoreId,
+  });
+  expect(next.retry).toBeNull();
 });
 
 test.each(["finding", "issue"])(
@@ -976,7 +1034,7 @@ test.each(["FAILED", "PARTIAL", "COMPLETED"])(
   },
 );
 
-test("keep polling when an unrelated score arrives first", async () => {
+test("remembers lost membership while waiting for a linked score", async () => {
   const ready = withObservation();
   const waiting = scoringFixture();
   waiting.exploitability.sourceValidationArtifactId = "older-proof";
@@ -984,10 +1042,18 @@ test("keep polling when an unrelated score arrives first", async () => {
   waiting.fake.artifacts["older-score"] = waiting.score;
   waiting.fake.artifactLists.EVIDENCE.items[0].artifactId = "older-score";
   let polls = 0;
-  const { record } = await provider((operation, args) => {
+  const result = await provider(async (operation, args) => {
     if (operation === "get-code-finding") polls++;
-    return transport(polls < 2 ? waiting.fake : ready)(operation, args);
+    const response = await transport(polls < 2 ? waiting.fake : ready)(
+      operation,
+      args,
+    );
+    if (operation === "get-code-issue" && polls === 2)
+      response["findingIds"] = ["sibling"];
+    return response;
   }).validate(finding, context);
-  expect(polls).toBeGreaterThan(1);
-  expect(record?.scoringArtifactId).toBe(scoreId);
+  expect(polls).toBe(3);
+  expect(continuumObservations.get(result.record!)?.issueChanged).toBe(true);
+  expect(result.record?.scoringArtifactId).toBe(scoreId);
+  expect(JSON.stringify(result)).not.toContain("issueChanged");
 });

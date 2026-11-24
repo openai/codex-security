@@ -62,6 +62,10 @@ import {
   crowdstrikeReportFormat,
 } from "./crowdstrike-findings.js";
 import {
+  tenzaiReportFormat,
+  tenzaiSourceRepository,
+} from "./tenzai-findings.js";
+import {
   guardianFindingRepository,
   guardianSelectionFormat,
 } from "./semgrep-guardian-findings.js";
@@ -963,6 +967,7 @@ export async function prepareLocalImport(
     (
       | { provider: "tenable" }
       | { provider: "crowdstrike" }
+      | { provider: "tenzai" }
       | { provider: Provider }
     ),
   dependencies: LocalExternalImportDependencies,
@@ -993,6 +998,7 @@ export async function prepareLocalImport(
   for (const [provider, format] of [
     ["tenable", tenableReportFormat],
     ["crowdstrike", crowdstrikeReportFormat],
+    ["tenzai", tenzaiReportFormat],
   ] as const)
     if (
       options.provider !== provider &&
@@ -1050,6 +1056,17 @@ export async function prepareLocalImport(
       [...readerSources, ...parsedSources],
     );
     await requireFetchRemote(source, "tenable");
+    return preparedLocalStorage(current, options, context, dependencies, true, {
+      sourceRepositories: [source],
+    });
+  }
+  if (options.provider === "tenzai") {
+    const source = tenzaiSourceRepository(
+      current,
+      options.sourceRepositoryUrl,
+      [...readerSources, ...parsedSources],
+    );
+    await requireFetchRemote(source, "tenzai");
     return preparedLocalStorage(current, options, context, dependencies, true, {
       sourceRepositories: [source],
     });
