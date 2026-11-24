@@ -28,8 +28,6 @@ def test_schema_references_preserve_constraints_siblings_and_cycle_errors() -> N
         FINALIZER._validate_schema_node("yes", {"$ref": "#"}, "value")
 
 
-def test_schema_pattern_end_anchor_rejects_a_trailing_newline() -> None:
-    schema = {"type": "string", "pattern": "^yes$"}
-    FINALIZER._validate_schema_node("yes", schema, "value")
-    with pytest.raises(FINALIZER.ContractError, match="string does not match schema pattern"):
-        FINALIZER._validate_schema_node("yes\n", schema, "value")
+@pytest.mark.parametrize("pattern", [r"\$", "[$]", r"\S"])
+def test_schema_patterns_preserve_literal_dollars_and_partial_matches(pattern: str) -> None:
+    FINALIZER._validate_schema_node("$\n", {"pattern": pattern}, "value")

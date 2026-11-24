@@ -1906,7 +1906,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         self.assertFalse((self.scan_dir / "report.html").exists())
 
     def test_failed_finalization_does_not_rewrite_semantic_artifacts(self) -> None:
-        self.manifest["scan"]["target"]["snapshotDigest"] = "invalid"
+        self.manifest["scan"]["target"]["snapshotDigest"] += "\n"
         self.write_scan()
         findings = (self.scan_dir / "findings.json").read_bytes()
         coverage = (self.scan_dir / "coverage.json").read_bytes()

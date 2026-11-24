@@ -2108,6 +2108,17 @@ def _resolve_schema_reference(
     return target
 
 
+def _matches_schema_pattern(pattern: str, value: str) -> bool:
+    # Only Python permits $ before a final newline. Keep escapes and character classes literal.
+    if value.endswith("\n"):
+        pattern = re.sub(
+            r"\\.|\[(?:\\.|[^\\\]])*\]|\$",
+            lambda token: r"\Z" if token[0] == "$" else token[0],
+            pattern,
+        )
+    return re.search(pattern, value) is not None
+
+
 def _matches_sealed_path_exclusion(value: str, one_of: Any) -> bool:
     # The empty alternative always matches, so a path must not match the second one.
     if not isinstance(one_of, list) or len(one_of) != 2 or one_of[0] != {}:
@@ -2119,7 +2130,7 @@ def _matches_sealed_path_exclusion(value: str, one_of: Any) -> bool:
         and excluded["$comment"] == "invalidSealedDeferredPath"
         and excluded["type"] == "string"
         and isinstance(excluded["pattern"], str)
-        and re.search(excluded["pattern"], value) is not None
+        and _matches_schema_pattern(excluded["pattern"], value)
     )
 
 
@@ -2170,8 +2181,7 @@ def _validate_schema_node(
             raise ContractError(f"{context}: string is too short")
         if "maxLength" in schema and len(value) > schema["maxLength"]:
             raise ContractError(f"{context}: string is too long")
-        # JSON Schema patterns are ECMA-262 regexes, where $ doesn't match before a final newline.
-        if "pattern" in schema and not re.search(schema["pattern"].replace("$", r"\Z"), value):
+        if "pattern" in schema and not _matches_schema_pattern(schema["pattern"], value):
             raise ContractError(f"{context}: string does not match schema pattern")
         if _matches_sealed_path_exclusion(value, schema.get("oneOf")):
             raise ContractError(f"{context}: string matches excluded schema pattern")
