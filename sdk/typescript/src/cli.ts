@@ -194,6 +194,7 @@ import {
   FindingPatchSchema as findingPatchSchema,
   parseFindingVerifications,
   remediationPrompt,
+  standaloneRemediationText,
   verificationBatches,
   VerificationModeSchema,
   type FindingPatch,
@@ -465,6 +466,10 @@ import {
   type ProjectConfigProvenance,
 } from "./project-config.js";
 import type { ProjectScope } from "./project-config-schema.js";
+import {
+  saveCliContinuumAssessments,
+  savedContinuumAssessments,
+} from "./saved-continuum-assessment.js";
 import { validationSummary } from "./validation-provider-report.js";
 import { validationProviderFromConfiguration } from "./validation-providers.js";
 import {
@@ -7452,6 +7457,7 @@ export async function main(
                 configuration,
                 selected.findings.length,
               );
+              const requestedAt = performance.timeOrigin + performance.now();
               const results = !selected.findings.length
                 ? []
                 : provider.validateBatch
@@ -7463,6 +7469,15 @@ export async function main(
                     );
               const status = supplementalValidationStatus(provider, results);
               const items = results.map((result) => result.record);
+              await saveForRemediation(
+                errorOutput,
+                dependencies.environment,
+                selected.repository,
+                selected.scanId,
+                configuration,
+                items,
+                requestedAt,
+              );
               exitCode = controller.signal.aborted
                 ? controller.signal.reason === "SIGTERM"
                   ? 143
@@ -7669,7 +7684,7 @@ export async function main(
                 : withoutLinearCredentials(dependencies.environment);
             const batches = selected
               ? await verificationBatches(
-                  selected.findings,
+                  await remediationFindings(selected, dependencies),
                   await bundledPluginRoot(),
                   options.verificationMode,
                 )
@@ -9908,6 +9923,25 @@ async function* workbenchFindings(
   } while (offset !== undefined);
 }
 
+async function saveForRemediation(
+  stderr: Writable,
+  ...args: Parameters<typeof saveCliContinuumAssessments>
+): Promise<void> {
+  try {
+    const warning = await saveCliContinuumAssessments(...args);
+    if (warning)
+      await writeCliOutput(
+        stderr,
+        `codex-security: ${diagnosticValue(warning)}\n`,
+      ).catch(() => {});
+  } catch (error) {
+    await writeCliOutput(
+      stderr,
+      `codex-security: Could not save validation for remediation: ${diagnosticValue(errorMessage(error))}\n`,
+    ).catch(() => {});
+  }
+}
+
 async function selectSavedFindings(
   identifiers: readonly string[],
   requestedScanId: string | undefined,
@@ -10066,9 +10100,29 @@ async function selectSavedFindings(
         if (Object.hasOwn(finding, key)) hydrated[key] = finding[key];
         else delete hydrated[key];
       }
+      delete hydrated["continuumAssessment"];
       return hydrated;
     }),
   };
+}
+
+/** Use the same host-only evidence for inline and reopened remediation. */
+async function remediationFindings(
+  { scanId, repository, findings }: SelectedFindings,
+  dependencies: CliDependencies,
+): Promise<Finding[]> {
+  const assessments = await savedContinuumAssessments(
+    dependencies.environment,
+    scanId,
+    repository,
+    findings.map((finding) => finding.occurrenceId),
+  );
+  return findings.map(({ continuumAssessment: _ignored, ...finding }) => {
+    const assessment = assessments.get(finding.occurrenceId);
+    return assessment
+      ? { ...finding, continuumAssessment: assessment }
+      : finding;
+  });
 }
 
 async function readSavedFindings(
@@ -10815,7 +10869,7 @@ async function runFindingPatches(
     `\nPatching ${formatItemCount(selected.findings.length, "confirmed finding")}...\n`,
   );
   const patches: FindingPatch[] = [];
-  for (const finding of selected.findings) {
+  for (const finding of await remediationFindings(selected, dependencies)) {
     const response = captureOutput();
     const instruction = options.findingInstructions?.[finding.occurrenceId];
     const progress = new FindingProgressPresenter(
@@ -11373,6 +11427,10 @@ async function runSkill(
       : new Ajv2020({ strict: false }).compile(
           JSON.parse(await readRegularInputFile(schemaPath, directory)),
         );
+  const directInput = (value: string) =>
+    skill === "fix-finding" || skill === "verify-fix"
+      ? standaloneRemediationText(value)
+      : value;
   const contents: Array<string | Finding> = [...(options.findings ?? [])];
   let standaloneFileContents: string | undefined;
   for (const input of inputs) {
@@ -11393,10 +11451,11 @@ async function runSkill(
         throw new CodexSecurityError(
           "Finding or issue inputs must not be empty.",
         );
-      contents.push(literal);
+      contents.push(directInput(literal));
       continue;
     }
     let contentsOrLiteral = input;
+    let fromFile = false;
     const explicitFile = /^file:\/\//iu.test(input)
       ? new URL(input)
       : undefined;
@@ -11474,12 +11533,13 @@ async function runSkill(
             "Finding or issue inputs must not be empty.",
           );
         }
-        if (inputs.length === 1 && contents.length === 0) {
-          standaloneFileContents = contentsOrLiteral;
-        }
+        fromFile = true;
       }
     }
-    contents.push(contentsOrLiteral);
+    const data = directInput(contentsOrLiteral);
+    if (fromFile && inputs.length === 1 && contents.length === 0)
+      standaloneFileContents = data;
+    contents.push(data);
   }
   const plugin = await bundledPluginRoot();
   const pluginVersion = await pluginMetadata(plugin).then(
@@ -13238,6 +13298,7 @@ async function executeScan(
             let completed = 0;
             const records: ValidationItemRecord[] = [];
             let providerAssessments: ValidationProviderAssessment[] | undefined;
+            const requestedAt = performance.timeOrigin + performance.now();
             try {
               announceContinuum(
                 errorOutput,
@@ -13319,6 +13380,16 @@ async function executeScan(
                 { flag: "wx", mode: 0o600 },
               );
             await checkTarget();
+            if (configuredValidation)
+              await saveForRemediation(
+                errorOutput,
+                dependencies.environment,
+                repository,
+                result.manifest.scan.id,
+                configuredValidation,
+                records,
+                requestedAt,
+              );
             validation = {
               status: supplementalValidationStatus(
                 validationProvider,

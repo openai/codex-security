@@ -2416,6 +2416,11 @@ def assigned_remediation_context(
     ):
         # The next action may already have started since this write committed.
         return {"occurrenceId": occurrence_id, "requestId": request_id, "version": written_version}
+    if state.get("pendingAction") in ("generate", "verify"):
+        # List previews may abbreviate criteria. Assigned workers need every original test.
+        details = read_finding_details(occurrence["details_json"])
+        if "remediationTests" in details:
+            finding["remediationTests"] = details["remediationTests"]
     return {
         "scan": {
             "scanId": scan["id"],

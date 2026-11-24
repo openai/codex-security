@@ -9,6 +9,7 @@ import {
   validationProviderFromConfiguration,
   assessPluginFindings,
   continuumAssessmentVersion,
+  savedContinuumAssessments,
   withPublicationLock,
   type ValidationProviderConfiguration,
 } from "#validation-runtime";
@@ -33,6 +34,37 @@ function configurationPath(scanId: string): string {
     "validation-providers",
     `${scanId}.json`,
   );
+}
+
+/** Called after get-scan authorizes the caller's remediation claim. */
+export async function withAssignedAssessment(
+  context: JsonObject,
+): Promise<JsonObject> {
+  const scan = asRecord(context.scan);
+  if (!Array.isArray(scan?.findings)) return context;
+  // Only a protected host record can supply this field.
+  const findings = scan.findings.map(
+    ({ continuumAssessment: _ignored, ...finding }: JsonObject) => finding,
+  );
+  const finding = findings[0];
+  const action = asRecord(finding?.remediationState)?.pendingAction;
+  if (
+    findings.length === 1 &&
+    (action === "generate" || action === "verify") &&
+    typeof scan.scanId === "string" &&
+    typeof scan.targetPath === "string" &&
+    typeof finding?.occurrenceId === "string"
+  ) {
+    const saved = await savedContinuumAssessments(
+      process.env,
+      scan.scanId,
+      scan.targetPath,
+      [finding.occurrenceId],
+    );
+    const assessment = saved.get(finding.occurrenceId);
+    if (assessment) finding.continuumAssessment = assessment;
+  }
+  return { ...context, scan: { ...scan, findings } };
 }
 
 /** Bind the host-owned setup snapshot without rereading a changed project file. */

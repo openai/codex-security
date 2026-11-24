@@ -51,6 +51,7 @@ import {
   bindValidationProviderConfiguration,
   validateCompletedScan,
   validationCompletionText,
+  withAssignedAssessment,
 } from "./src/validation-provider.js";
 import {
   validationProviderFromConfiguration,
@@ -1413,13 +1414,14 @@ export function createCodexSecurityServer(): McpServer {
             "Remediation context requires occurrenceId, requestId and actionToken.",
           );
         }
+        const assigned = await workbench("get-scan", {
+          scanId,
+          occurrenceId,
+          requestId,
+          actionToken,
+        });
         return scanActionResult(
-          await workbench("get-scan", {
-            scanId,
-            occurrenceId,
-            requestId,
-            actionToken,
-          }),
+          await withAssignedAssessment(assigned),
           "Loaded the assigned remediation finding.",
         );
       }

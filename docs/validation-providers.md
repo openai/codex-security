@@ -140,6 +140,31 @@ A finding still marked `SUBMITTED` may be waiting for a build. For `FAILED`,
 open `issueUrl` and check the run or ask AWS privately for worker logs.
 Polling cannot restart a failed worker. Keep raw artifacts and logs private.
 
+## Patch and verify a saved occurrence
+
+On the same host, CLI patch and verify-fix and workbench Generate and Verify
+can read a saved conclusion without contacting AWS. The workbench keeps its
+original submission binding when the CLI validates a subset. For CLI-only
+scans, the most recently started validation with an accepted submission
+for a single destination takes precedence, even if an earlier request
+finishes later. Conflicting destinations or ambiguous evidence can leave
+an occurrence without supplemental context.
+
+If two linked scores share a timestamp, `scoringPending` and
+`freshness.scoredAt` identify the conflict. Patch and verify keep the
+verdict and withhold issue severity and reachability until a newer score
+resolves the conflict.
+
+The model receives a limited set of status and scope fields from protected
+host state. The live issue member count stays in the reports. A change in
+that count alone does not invalidate a saved verdict. AWS identifiers,
+provider free text and proof stay out of the remediation context.
+The original finding and its remediation tests remain
+the criteria for the fix. Apply uses the recorded patch unchanged.
+
+If CLI and plugin results disagree on issue membership, refresh the
+entry point reporting `issueUnlinked` before using its assessment for remediation.
+
 ## AWS permissions
 
 The host uses the AWS credential chain. Keep profiles and custom AWS models

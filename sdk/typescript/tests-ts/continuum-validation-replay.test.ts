@@ -475,6 +475,7 @@ describe("explicitly fake outcome variations", () => {
       );
       expect(record?.verdict).toBe("EXPLOITABLE");
       expect(record?.scoringArtifactId).toBe(linked ? undefined : scoreId);
+      expect(record?.freshness.scoredAt).toBe(score.createdAt);
       expect(record?.scoringPending).toBe(linked ? true : undefined);
       expect(record?.reachableFromAttacker).toBe(linked ? undefined : true);
     },

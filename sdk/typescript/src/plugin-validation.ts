@@ -1,3 +1,4 @@
+import { compareTimestamps } from "./timestamps.js";
 import { validationSummary } from "./validation-provider-report.js";
 import { validationProviderFromConfiguration } from "./validation-providers.js";
 import {
@@ -11,7 +12,8 @@ import {
 
 export { validationProviderFromConfiguration };
 export { codexSecurityStateDirectory } from "./runtime.js";
-export const continuumAssessmentVersion = 6;
+export { continuumAssessmentVersion } from "./continuum-assessment-store.js";
+export { savedContinuumAssessments } from "./saved-continuum-assessment.js";
 export { withPublicationLock } from "./publication-state.js";
 export type { ValidationProviderConfiguration };
 
@@ -53,6 +55,33 @@ export async function assessPluginFindings(
       prior?.findingArn &&
       prior.findingArn === current?.findingArn &&
       prior.submittedAt === current.submittedAt;
+    // A replica may return just one of two disputed scores on retry.
+    // Only a newer score can settle the dispute for this validation.
+    if (
+      sameAdmission &&
+      prior.issueArn === current.issueArn &&
+      prior.validationArtifactId === current.validationArtifactId &&
+      prior.scoringPending &&
+      prior.freshness.scoredAt &&
+      !(
+        compareTimestamps(
+          current.freshness.scoredAt ?? "",
+          prior.freshness.scoredAt,
+        ) > 0
+      )
+    ) {
+      if (current.scoringPending)
+        current.freshness.scoredAt = prior.freshness.scoredAt;
+      else if (current.scoringArtifactId) {
+        update.disposition = "deferred";
+        update.unavailable =
+          "Continuum has not returned a newer score to resolve the earlier conflict. Retry validation.";
+        update.record = { ...prior, unavailable: update.unavailable };
+        update.report = validationSummary([update]);
+        return update;
+      }
+    }
+
     // A failed lookup cannot undo acceptance or a confirmed change of issue.
     // A successful lookup with no issue must drop the previous issue's verdict.
     if (update.unavailable && (!current || current.verdict === "UNAVAILABLE")) {

@@ -95,6 +95,7 @@ async function savedEvidence(git = false) {
     Object.assign(finding, {
       createdAt: "2000-01-01T00:00:00Z",
       remediationState: { status: "fixed" },
+      continuumAssessment: { verdict: "EXPLOITABLE", provider: "continuum" },
       matches: [{ occurrenceId: "stale-occurrence" }],
       knownSince: "2000-01-01T00:00:00Z",
       knownScanIds: ["stale-scan"],
@@ -231,10 +232,68 @@ test("saved patch and verification tasks receive complete sealed evidence and li
   expect(previewFinding.codeEvidence).toHaveLength(4);
   expect(previewFinding.writeup?.reportPath).not.toBe(full.writeup!.reportPath);
 
+  const state = join(fixture.root, "state");
+  const config = join(fixture.root, "project.json");
+  const validation = {
+    provider: "continuum",
+    continuum: { environment_id: "synthetic" },
+  };
+  await writeFile(config, JSON.stringify({ scan: { validation } }));
+  const assessment = {
+    provider: "continuum",
+    itemId: full.occurrenceId,
+    ...creation("f", "synthetic"),
+    submittedAt: "2026-01-01T00:00:00Z",
+    verdict: "DISCARDED",
+    statusMessage: "Synthetic provider declined validation",
+    severityBefore: "high",
+    severityAfter: "high",
+    reasons: [],
+    claimMatch: "unknown" as const,
+    freshness: { stale: false, reasons: [] },
+  };
+  using batch = spyOn(
+    ContinuumValidationProvider.prototype,
+    "validateBatch",
+  ).mockResolvedValue([
+    {
+      disposition: "not_applicable",
+      report: "Synthetic decline",
+      provenance: { provider: "continuum", providerVersion: "1" },
+      record: assessment,
+    },
+  ]);
+  // A failed save reports the error and still returns the provider result.
+  const args = ["validate", "--scan", fixture.scanId, "-c", config, "--json"];
+  for (const directory of [fixture.repository, state]) {
+    const cli = createCliTest(main);
+    const current = dependencies({
+      onWorkbench: fixture.workbench,
+      environment: { CODEX_SECURITY_STATE_DIR: directory },
+    });
+    delete current.readSavedFindings;
+    expect(await cli.runCli(args, current), cli.stderr.text()).toBe(0);
+    expect(JSON.parse(cli.stdout.text()).items).toEqual([assessment]);
+    expect(cli.stderr.text().includes("Could not save validation")).toBe(
+      directory === fixture.repository,
+    );
+    expect(batch.mock.calls.at(-1)![0][0]).not.toHaveProperty(
+      "continuumAssessment",
+    );
+  }
+  // A model-writable projection cannot replace the host conclusion.
+  await writeFile(
+    join(fixture.scanDir, "validation.json"),
+    JSON.stringify({
+      schemaVersion: 1,
+      items: [{ ...assessment, verdict: "EXPLOITABLE" }],
+    }),
+  );
   for (const command of ["patch", "verify-fix"]) {
     const { runCli, stderr } = createCliTest(main);
     const received: Finding[] = [];
     const current = dependencies({
+      environment: { CODEX_SECURITY_STATE_DIR: state },
       onWorkbench: fixture.workbench,
       onRepositoryCommand: (_command, args) =>
         args.includes("--name-only") ? "src/extract.py\0" : "",
@@ -273,9 +332,17 @@ test("saved patch and verification tasks receive complete sealed evidence and li
     ).toBe(0);
     expect(received).toHaveLength(1);
     expect(received[0]!.codeEvidence).toHaveLength(9);
+    expect(received[0]!["continuumAssessment"]).toEqual({
+      itemId: full.occurrenceId,
+      provider: "continuum",
+      verdict: assessment.verdict,
+      claimMatch: "unknown",
+      freshness: { stale: false },
+    });
     expect(received[0]).toMatchObject({
       occurrenceId: full.occurrenceId,
       findingId: full.findingId,
+      remediationTests: full.remediationTests,
       codeEvidence: full.codeEvidence,
       validation: full.validation,
       writeup: full.writeup,

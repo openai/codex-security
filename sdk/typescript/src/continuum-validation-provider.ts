@@ -853,7 +853,21 @@ export class ContinuumValidationProvider implements ValidationProvider {
         if (linkedScore(issue, artifact, candidate)) {
           // Two eligible scores with the same time cannot be ordered. Leave
           // scoring pending until a newer, unambiguous score arrives.
-          if (score && score["artifactId"] !== candidate["artifactId"]) break;
+          if (score && score["artifactId"] !== candidate["artifactId"])
+            return this.#report(
+              finding,
+              submittedAt,
+              {
+                ...outcome,
+                unavailable:
+                  "Continuum returned conflicting linked issue scores at the same time. Retry validation for a newer score.",
+              },
+              {
+                ...details,
+                scoringPending: true,
+                conflictingScoreTime: createdAt(score),
+              },
+            );
           score = candidate;
         }
         if (score && !tied)
@@ -897,6 +911,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
       validationArtifact = {},
       score,
       scoringPending,
+      conflictingScoreTime,
       resultScope = "finding",
       issueFindingCount,
       issueVerdict,
@@ -905,6 +920,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
       validationArtifact?: Record<string, unknown>;
       score?: Record<string, unknown>;
       scoringPending?: boolean;
+      conflictingScoreTime?: string;
       resultScope?: ValidationResultScope;
       issueFindingCount?: number;
       issueVerdict?: string;
@@ -1030,6 +1046,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
           ...(evidenceCreatedAt && { evidenceCreatedAt }),
           ...(validatedAt && { validatedAt }),
           ...(score && { scoredAt: createdAt(score) }),
+          ...(conflictingScoreTime && { scoredAt: conflictingScoreTime }),
           stale,
           reasons: stale ? ["Evidence predates this submission."] : [],
         },
