@@ -31,12 +31,21 @@ DISPOSITION_LABELS = {
 WRITEUP_REPORT_PATH_RE = re.compile(r"^findings/([a-z0-9][a-z0-9._-]*)/\1\.md$")
 INLINE_CODE_RE = r"(?<!`)`[^`\n]+`(?!`)"
 ENTITY_AMP_RE = r"&(?=(?:#[0-9]+|#[xX][0-9A-Fa-f]+|[A-Za-z][A-Za-z0-9]*);)"
-WWW_LINK_RE = r"(?<![^\s*_~(])(?i:www)\.[^\s<>]+"
+# Whole tokens with // or a dotted host and /, ? or #. A bare www link can also
+# start just inside Markdown punctuation.
+URL_TOKEN_RE = (
+    r"(?<![^\s<>])(?:[^\s<>]*//|[^./\s<>]*\.[^\s<>]*[/?#])[^\s<>]*"
+    r"|(?<![^\s*_~(])(?i:www)\.[^\s<>]+"
+)
 # Match complete, plain web links without consuming Markdown syntax or parenthetical wrappers.
 WEB_LINK_RE = (
     r'(?<![^\s("])(?ai:https?://|www\.)[A-Za-z0-9.:-]+[/?#][^\s<>\\`*[\]|()"]+(?=$|[\s)"])'
 )
 WORD_UNDERSCORE_RE = r"(?<=[A-Za-z0-9])_(?=[A-Za-z0-9])"
+MARKDOWN_RE = re.compile(
+    rf"(?P<code>{INLINE_CODE_RE})|(?P<link>{WEB_LINK_RE})|(?P<word>{WORD_UNDERSCORE_RE})"
+    rf"|[\\`*_\[\]<>]|{ENTITY_AMP_RE}"
+)
 
 
 class ReportProjectionError(ValueError):
@@ -54,19 +63,8 @@ def markdown_threat_model_content(model: dict[str, Any]) -> str | None:
 def _escape_markdown(value: str, *, link_label: bool = False) -> str:
     # Locate whole URLs before matching code spans: a URL can contain backticks.
     in_url = bytearray(len(value))
-    for match in re.finditer(WWW_LINK_RE, value):
+    for match in re.finditer(URL_TOKEN_RE, value):
         in_url[match.start() : match.end()] = b"\x01" * len(match[0])
-    # Preserve protocol-relative and fuzzy links without a domain/TLD table.
-    for match in re.finditer(r"[^\s<>]+", value):
-        token = match[0]
-        dot = token.split("/", 1)[0].find(".")
-        if "//" in token or (dot >= 0 and re.search(r"[/?#]", token[dot + 1 :])):
-            in_url[match.start() : match.end()] = b"\x01" * len(token)
-    punctuation = r"[\\`*_\[\]<>]|" + ENTITY_AMP_RE
-    pattern = (
-        f"(?P<code>{INLINE_CODE_RE})|(?P<link>{WEB_LINK_RE})"
-        f"|(?P<word>{WORD_UNDERSCORE_RE})|{punctuation}"
-    )
 
     def escape(match: re.Match[str]) -> str:
         if match.lastgroup == "code":
@@ -87,7 +85,7 @@ def _escape_markdown(value: str, *, link_label: bool = False) -> str:
             return match[0]
         return "\\" + match[0]
 
-    return re.sub(pattern, escape, value)
+    return MARKDOWN_RE.sub(escape, value)
 
 
 def _text(value: Any, fallback: str, *, link_label: bool = False) -> str:
