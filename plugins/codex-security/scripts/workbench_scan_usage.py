@@ -401,7 +401,6 @@ def collect_scan_usage(
                 )
     unresolved_receipts = missing_receipts - complete_native_thread_ids
     if unresolved_receipts:
-        missing_thread_ids.update(unresolved_receipts)
         warnings.add("worker_usage_unavailable")
     if not accepted_thread_ids:
         return _unavailable_usage("scan_thread_unavailable", warnings=warnings)
@@ -434,14 +433,9 @@ def collect_scan_usage(
         "source": "codex_runtime" if runtime_receipts_used else "codex_rollout",
         **{key: sum(role[key] for role in by_role.values()) for key in TOKEN_FIELDS.values()},
         "threadCount": len(measured_threads),
-        # Receipt gaps keep the labels recorded in the receipt scope.
         "coverageScope": sorted(
             receipt_scope
-            | {f"thread:{identity}" for identity in measured_threads}
-            | {
-                identity if identity in receipt_scope else f"thread:{identity}"
-                for identity in missing_thread_ids
-            }
+            | {f"thread:{identity}" for identity in measured_threads.keys() | missing_thread_ids}
         ),
         "byRole": by_role,
         "window": {"startedAt": started_at.isoformat(), "endedAt": stopped_at.isoformat()},
@@ -452,8 +446,9 @@ def collect_scan_usage(
         result["cacheWriteInputTokensReported"] = False
     if tokens_updated_at is not None:
         result["tokensUpdatedAt"] = tokens_updated_at.isoformat()
-    if missing_thread_ids:
-        result["missingThreadCount"] = len(missing_thread_ids)
+    # Receipt gaps already have scope labels, and some also identify missing threads.
+    if missing_thread_ids or unresolved_receipts:
+        result["missingThreadCount"] = len(missing_thread_ids | unresolved_receipts)
     if warnings:
         result["warnings"] = sorted(warnings)
     return result
