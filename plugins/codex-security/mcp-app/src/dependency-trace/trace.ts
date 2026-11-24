@@ -60,7 +60,6 @@ export async function processTrace(
   stopped.addEventListener("abort", onStop, { once: true });
   const scopes: TraceResult["scopes"] = [];
   const ids = new Map<string, number>();
-  const queue: number[] = [];
   const results = new Map<number, TraceScope[]>();
   const limits = new Set<string>();
   const atHopLimit = new Set<number>();
@@ -79,7 +78,6 @@ export async function processTrace(
     const id = scopes.length;
     ids.set(key, id);
     scopes.push({ id, scope, hops, evidence: [], complete: false });
-    queue.push(id);
   }
 
   function expand(id: number) {
@@ -128,9 +126,10 @@ export async function processTrace(
       request.files ?? [],
     ))
       schedule(scope, 0);
-    while (!stopped.aborted && (queue.length || running.size)) {
-      while (queue.length && running.size < concurrency) {
-        const id = queue.shift()!;
+    let nextId = 0;
+    while (!stopped.aborted && (nextId < scopes.length || running.size)) {
+      while (nextId < scopes.length && running.size < concurrency) {
+        const id = nextId++;
         const task = lookup(scopes[id].scope, stopped).catch(
           (error: unknown): ScopeResult => ({
             evidence: [],
