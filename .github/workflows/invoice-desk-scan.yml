@@ -256,7 +256,7 @@ jobs:
                   summary.write("| Severity | Count |\n| --- | --- |\n")
                   for severity in ("critical", "high", "medium", "low", "informational"):
                       summary.write(f"| {severity} | {counts[severity]} |\n")
-                  summary.write("\nDownload the report and metrics artifacts to compare distinct root causes with the ten seeded cases. Extra reports and duplicates need review; raw counts do not measure recall.\n")
+                  summary.write("\nDownload the report and metrics artifacts to compare distinct root causes with the active cases in the scanned revision's QA manifest. Extra reports and duplicates need review; raw counts do not measure recall.\n")
               summary.write("\nScanner: @openai/codex-security@" + metrics["cliVersion"] + "; OpenAI gpt-5.6-sol; standard mode; high effort.\n")
           PYTHON
 

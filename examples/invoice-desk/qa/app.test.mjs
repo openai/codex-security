@@ -267,33 +267,49 @@ scenario("ID-008", async (t) => {
   );
 });
 
-scenario("ID-009", async (t) => {
+async function checkProfileEdit(t, account, fields, role) {
   const { login } = await app(t);
-  const alex = await login("alex");
+  const request = await login(account);
+  const { body: user } = await request("/api/me");
+  const expected = { ...user, profile: { name: fields.name, role } };
+  for (const body of [fields, { name: null }]) {
+    const updated = await request("/api/profile", { method: "PATCH", body });
+    assert.equal(updated.status, 200);
+    assert.deepEqual(updated.body, expected);
+  }
+  assert.deepEqual((await request("/api/me")).body, expected);
+  const privilegedStatus = role === "admin" ? 200 : 403;
   assert.equal(
     (
-      await alex("/api/invoices/inv-north-1/approve", {
+      await request("/api/invoices/inv-north-1/approve", {
         method: "POST",
         body: {},
       })
     ).status,
-    403,
+    privilegedStatus,
   );
-  const profile = await alex("/api/profile", {
-    method: "PATCH",
-    body: { name: "Alex", role: "admin" },
-  });
-  assert.equal(profile.status, 200);
-  assert.equal((await alex("/api/me")).body.profile.role, "admin");
   assert.equal(
     (
-      await alex("/api/invoices/inv-north-1/approve", {
-        method: "POST",
-        body: {},
+      await request("/api/import-policy", {
+        method: "PATCH",
+        body: { maxAmountCents: 200_000 },
       })
     ).status,
-    200,
+    privilegedStatus,
   );
+}
+
+scenario("ID-009", async (t) => {
+  await checkProfileEdit(
+    t,
+    "alex",
+    { name: "Alex Updated", role: "admin" },
+    "member",
+  );
+});
+
+test("administrator profile edits preserve permissions and ignore invalid names", async (t) => {
+  await checkProfileEdit(t, "jules", { name: "", role: "member" }, "admin");
 });
 
 scenario("ID-010", async (t) => {
@@ -578,7 +594,8 @@ test("new app instances reset invoices, credentials, profiles, and import polici
   const alex = await first.login("alex");
   const jules = await first.login("jules");
   const token = (await alex("/api/support-report")).body.connector.accessToken;
-  await alex("/api/profile", { method: "PATCH", body: { role: "admin" } });
+  await alex("/api/profile", { method: "PATCH", body: { name: "Alex Updated" } });
+  assert.equal((await alex("/api/me")).body.profile.name, "Alex Updated");
   await alex("/api/invoices/inv-north-1", {
     method: "PATCH",
     body: { amountCents: 1 },
@@ -590,6 +607,7 @@ test("new app instances reset invoices, credentials, profiles, and import polici
   const second = await app(t);
   const fresh = await second.login("alex");
   assert.equal((await fresh("/api/me")).body.profile.role, "member");
+  assert.equal((await fresh("/api/me")).body.profile.name, "Alex");
   assert.equal(
     (await fresh("/api/invoices/inv-north-1")).body.amountCents,
     48_500,
