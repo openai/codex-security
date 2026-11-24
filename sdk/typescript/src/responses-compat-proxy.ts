@@ -13,7 +13,7 @@ interface CompatToolIdentity {
 }
 
 /**
- * Compatible Responses endpoints (xAI, OpenRouter, ...) reject the
+ * The xAI Responses endpoint rejects the
  * `namespace` tool type and the `custom` tool type, so Codex scans through a
  * custom provider fail with a 422 before the first turn. Flatten namespaced
  * and custom tools to plain `function` tools on the way out and restore the
@@ -80,10 +80,7 @@ export function responsesCompatRequest(request: Record<string, unknown>) {
       if (value["type"] === "function") {
         if (typeof value["name"] !== "string")
           throw new Error("Responses compat proxy tool has no name.");
-        if (namespace === undefined) {
-          plainNames.add(value["name"]);
-          return [value];
-        }
+        if (namespace === undefined) return [value];
         const tool = identity(value, namespace);
         return [
           {
@@ -163,20 +160,22 @@ export function responsesCompatRequest(request: Record<string, unknown>) {
       return { ...value, type: "function_call_output" };
     if (value["type"] === "agent_message") {
       const content = Array.isArray(value["content"])
-        ? value["content"].flatMap((part: unknown) => {
-            if (!isRecord(part)) return [];
-            if (part["type"] === "input_text") return [part];
-            if (
-              part["type"] === "encrypted_content" &&
-              typeof part["encrypted_content"] === "string"
-            )
-              return [{ type: "input_text", text: part["encrypted_content"] }];
-            return [];
-          })
+        ? value["content"]
+            .flatMap((part: unknown) => {
+              if (!isRecord(part)) return [];
+              if (part["type"] === "input_text") return [part["text"]];
+              if (
+                part["type"] === "encrypted_content" &&
+                typeof part["encrypted_content"] === "string"
+              )
+                return [part["encrypted_content"]];
+              return [];
+            })
+            .join("")
         : value["content"];
       return {
         type: "message",
-        role: "user",
+        role: "assistant",
         ...(typeof value["id"] === "string" ? { id: value["id"] } : {}),
         content,
       };
@@ -389,15 +388,10 @@ export async function startResponsesCompatProxy(upstream: string) {
                   event["type"] === "response.output_item.done") &&
                 isRecord(event["item"])
               ) {
-                const restored = translation.output(
+                const item = translation.output(
                   event["item"],
                   event["type"] !== "response.output_item.added",
                 );
-                const item =
-                  event["type"] === "response.output_item.added" &&
-                  restored["type"] === "custom_tool_call"
-                    ? { ...restored, input: "" }
-                    : restored;
                 yield `data: ${JSON.stringify({ ...event, item })}\n\n`;
               } else if (
                 event["type"] === "response.completed" &&

@@ -30,10 +30,6 @@ import {
   preparedRuntime,
 } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
-import {
-  COMPAT_PROXY_BASE_URL_PATTERN,
-  normalizeCompatProxyProviders,
-} from "./support/responses-compat-proxy.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
 afterEach(cleanup);
@@ -222,25 +218,16 @@ describe("CodexSecurity orchestration", () => {
         expect(JSON.stringify(captured!.configOverrides ?? [])).not.toContain(
           "model_providers",
         );
-        const writtenProviders = (
+        expect(
           parseToml(
             await readFile(
               join(runtimeHome, `${captured!.nativeProfile}.config.toml`),
               "utf8",
             ),
-          ) as JsonObject
-        )["model_providers"] as JsonObject;
-        // The live profile routes the provider through the Responses compat
-        // proxy; authentication and every other field are unchanged.
-        const { providers, proxyUrls } = normalizeCompatProxyProviders(
-          writtenProviders,
-          { "synthetic.provider": provider },
-        );
-        expect({ model_providers: providers }).toEqual({
+          ),
+        ).toEqual({
           model_providers: { "synthetic.provider": provider },
         });
-        for (const proxyUrl of proxyUrls)
-          expect(proxyUrl).toMatch(COMPAT_PROXY_BASE_URL_PATTERN);
         if (profile) {
           expect(captured?.config?.["profile"]).toBeUndefined();
           expect(captured?.config?.["profiles"]).toBeUndefined();
@@ -1029,27 +1016,18 @@ process.exit(process.exitCode ?? 0);
             return mockWorkbench(args, input);
           },
           createCodex: async (options) => {
-            const writtenProviders = (
-              parseToml(
-                await readFile(
-                  join(runtimeHome, `${options.nativeProfile}.config.toml`),
-                  "utf8",
-                ),
-              ) as JsonObject
-            )["model_providers"] as JsonObject;
-            // The live profile routes the provider through the Responses
-            // compat proxy; every other provider field is unchanged.
-            const expectedProvider =
-              selection === "generated"
-                ? EXTERNAL_CODEX_PROVIDERS[provider]
-                : { ...fileProvider, ...explicitProvider };
-            const { providers, proxyUrls } = normalizeCompatProxyProviders(
-              writtenProviders,
-              { [provider]: expectedProvider },
+            const profile = parseToml(
+              await readFile(
+                join(runtimeHome, `${options.nativeProfile}.config.toml`),
+                "utf8",
+              ),
             );
-            expect(providers).toEqual({ [provider]: expectedProvider });
-            for (const proxyUrl of proxyUrls)
-              expect(proxyUrl).toMatch(COMPAT_PROXY_BASE_URL_PATTERN);
+            expect(profile["model_providers"]).toEqual({
+              [provider]:
+                selection === "generated"
+                  ? EXTERNAL_CODEX_PROVIDERS[provider]
+                  : { ...fileProvider, ...explicitProvider },
+            });
             return {
               startThread: () => ({
                 id: null,
@@ -1291,25 +1269,16 @@ process.exit(process.exitCode ?? 0);
               : {}),
           },
         };
-        const writtenProviders = (
+        expect(
           parseToml(
             await readFile(
               join(runtimeHome, `${captured!.nativeProfile}.config.toml`),
               "utf8",
             ),
-          ) as JsonObject
-        )["model_providers"] as JsonObject;
-        // The live profile routes the provider through the Responses compat
-        // proxy; authentication and every other field are unchanged.
-        const { providers, proxyUrls } = normalizeCompatProxyProviders(
-          writtenProviders,
-          { [providerName]: provider },
-        );
-        expect({ model_providers: providers }).toEqual({
+          ),
+        ).toEqual({
           model_providers: { [providerName]: provider },
         });
-        for (const proxyUrl of proxyUrls)
-          expect(proxyUrl).toMatch(COMPAT_PROXY_BASE_URL_PATTERN);
         expect(captured?.config).not.toHaveProperty("profile");
         expect(captured?.config).not.toHaveProperty("profiles");
         expect(captured?.config?.["model_provider"]).toBe(providerName);

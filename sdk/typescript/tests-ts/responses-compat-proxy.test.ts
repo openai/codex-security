@@ -334,12 +334,9 @@ test("rewrites replayed history: calls, agent_message, reasoning, tool_choice", 
   });
   expect(input[3]).toEqual({
     type: "message",
-    role: "user",
+    role: "assistant",
     id: "amsg_1",
-    content: [
-      { type: "input_text", text: "Message Type: FINAL_ANSWER\n" },
-      { type: "input_text", text: "Done." },
-    ],
+    content: "Message Type: FINAL_ANSWER\nDone.",
   });
   expect(input[4]).toEqual({ type: "reasoning", id: "rs_1" });
   expect(input[5]).toEqual({

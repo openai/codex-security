@@ -36,83 +36,6 @@ export interface ProviderProfile {
   cleanup(): Promise<void>;
 }
 
-const AZURE_BASE_URL_MARKERS = [
-  "openai.azure.",
-  "cognitiveservices.azure.",
-  "aoai.azure.",
-  "azure-api.",
-  "azurefd.",
-  "windows.net/openai",
-];
-
-/** OpenAI and Azure serve the `namespace` tool type natively. */
-function isOpenAiResponsesProvider(id: string, baseUrl: string): boolean {
-  if (id.toLowerCase() === "azure") return true;
-  let hostname = "";
-  try {
-    hostname = new URL(baseUrl).hostname.toLowerCase();
-  } catch {
-    return false;
-  }
-  if (hostname === "api.openai.com") return true;
-  const lower = baseUrl.toLowerCase();
-  return AZURE_BASE_URL_MARKERS.some((marker) => lower.includes(marker));
-}
-
-/**
- * A provider needs the Responses compatibility proxy when it speaks the
- * Responses API to a non-OpenAI host: those endpoints reject the `namespace`
- * tool type, so delegation and the scan-completion tool fail before the first
- * turn. A missing `wire_api` counts as `responses`. Loopback endpoints are
- * adapted too: a local gateway that already translates namespaces receives
- * already-flat tools (a no-op for it), and the `huggingface` provider has
- * its own adapter in open PR #2648.
- */
-export function needsResponsesCompatProxy(
-  id: string,
-  definition: unknown,
-): boolean {
-  if (!isRecord(definition)) return false;
-  if (id === "huggingface") return false;
-  const wireApi = definition["wire_api"];
-  if (wireApi !== undefined && wireApi !== "responses") return false;
-  const baseUrl = definition["base_url"];
-  if (typeof baseUrl !== "string" || baseUrl.length === 0) return false;
-  return !isOpenAiResponsesProvider(id, baseUrl);
-}
-
-/**
- * Rewrite compatible Responses providers through a loopback proxy, keeping
- * every other provider field unchanged. The returned cleanup closes every
- * started proxy; a failed start closes the proxies already started.
- */
-export async function adaptResponsesCompatProviders(providers: JsonObject) {
-  const adapted: JsonObject = { ...providers };
-  const cleanups: Array<() => Promise<void>> = [];
-  try {
-    for (const [id, definition] of Object.entries(providers)) {
-      if (!needsResponsesCompatProxy(id, definition)) continue;
-      const adapter = await startResponsesCompatProxy(
-        (definition as JsonObject)["base_url"] as string,
-      );
-      cleanups.push(adapter.close);
-      adapted[id] = {
-        ...(definition as JsonObject),
-        base_url: adapter.baseUrl,
-      };
-    }
-  } catch (error) {
-    for (const close of cleanups) await close();
-    throw error;
-  }
-  return {
-    providers: adapted,
-    cleanup: async () => {
-      for (const close of cleanups) await close();
-    },
-  };
-}
-
 /** Keep provider metadata, analytics consent, and attribution on no-turn commands. */
 export async function providerPreflightCommand(
   command: CodexCommand,
@@ -192,29 +115,43 @@ export async function createProviderProfile(
   }
   if (options.replay) {
     await writePrivateConfig(path, JSON.stringify(config));
-  } else {
-    const providers = resolveCodexProfile(config)["model_providers"];
-    const adapted = await adaptResponsesCompatProviders(
-      isRecord(providers) ? providers : {},
-    );
-    let closeAdapter: (() => Promise<void>) | undefined;
-    try {
-      await writeCodexConfig(path, { model_providers: adapted.providers });
-      closeAdapter = adapted.cleanup;
-    } catch (error) {
-      await adapted.cleanup();
-      throw error;
-    }
-    return {
-      name,
-      path,
-      cleanup: async () => {
-        await closeAdapter?.();
-        await rm(path, { force: true });
-      },
-    };
+    return { name, path, cleanup: () => rm(path, { force: true }) };
   }
-  return { name, path, cleanup: () => rm(path, { force: true }) };
+
+  const providers = resolveCodexProfile(config)["model_providers"];
+  const definitions: JsonObject = isRecord(providers) ? { ...providers } : {};
+  // xAI rejects native namespaces. Leave gateways and other providers alone.
+  const upstream = "https://api.x.ai/v1";
+  let adapter:
+    Awaited<ReturnType<typeof startResponsesCompatProxy>> | undefined;
+  try {
+    for (const [id, definition] of Object.entries(definitions)) {
+      if (
+        !isRecord(definition) ||
+        (definition["wire_api"] ?? "responses") !== "responses" ||
+        (definition["base_url"] !== upstream &&
+          definition["base_url"] !== upstream + "/")
+      )
+        continue;
+      adapter ??= await startResponsesCompatProxy(upstream);
+      definitions[id] = { ...definition, base_url: adapter.baseUrl };
+    }
+    await writeCodexConfig(path, { model_providers: definitions });
+  } catch (error) {
+    await adapter?.close();
+    throw error;
+  }
+  return {
+    name,
+    path,
+    cleanup: async () => {
+      try {
+        await adapter?.close();
+      } finally {
+        await rm(path, { force: true });
+      }
+    },
+  };
 }
 
 /** Restore private replay settings from the credential home, never scan artifacts. */

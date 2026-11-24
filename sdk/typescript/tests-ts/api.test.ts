@@ -16812,24 +16812,16 @@ if __name__ == "__main__":
               });
               expect(options.config?.["model_providers"]).toBeUndefined();
               if (provider !== undefined) {
-                const profileConfig = parseToml(
-                  await readFile(
-                    join(codexHome, `${options.nativeProfile}.config.toml`),
-                    "utf8",
+                expect(
+                  parseToml(
+                    await readFile(
+                      join(codexHome, `${options.nativeProfile}.config.toml`),
+                      "utf8",
+                    ),
                   ),
-                ) as JsonObject;
-                const profileProvider = (
-                  profileConfig["model_providers"] as JsonObject
-                )[provider] as JsonObject;
-                // The live profile routes the provider through the Responses
-                // compat proxy; every other provider field is unchanged.
-                expect({
-                  ...profileProvider,
-                  base_url: OPENROUTER_CODEX_PROVIDER.base_url,
-                }).toEqual(OPENROUTER_CODEX_PROVIDER);
-                expect(profileProvider["base_url"]).toMatch(
-                  /^http:\/\/127\.0\.0\.1:\d+\/[0-9a-f-]+\/v1$/,
-                );
+                ).toEqual({
+                  model_providers: { [provider]: OPENROUTER_CODEX_PROVIDER },
+                });
               }
               return {
                 startThread: () => ({

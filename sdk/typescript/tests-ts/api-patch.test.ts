@@ -20,10 +20,6 @@ import {
 import { estimateScanCost } from "../src/cost.js";
 import type { JsonObject } from "../src/config.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
-import {
-  COMPAT_PROXY_BASE_URL_PATTERN,
-  normalizeCompatProxyProviders,
-} from "./support/responses-compat-proxy.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
 import { preparedRuntime } from "./support/api-events.js";
@@ -487,26 +483,16 @@ describe("CodexSecurity headless patching", () => {
       await using security = client;
       expect(await security.patch(options)).toMatchObject(verified);
       expect(captured.codex?.nativeProfile).toBeDefined();
-      const writtenProviders = (
+      expect(
         parseToml(
           await readFile(
             join(codexHome, `${captured.codex!.nativeProfile}.config.toml`),
             "utf8",
           ),
-        ) as JsonObject
-      )["model_providers"] as JsonObject;
-      // The live profile routes the provider through the Responses compat
-      // proxy; authentication and every other field are unchanged.
-      const { providers, proxyUrls } = normalizeCompatProxyProviders(
-        writtenProviders,
-        { "synthetic.provider": provider },
-      );
-      expect({ model_providers: providers }).toEqual({
+        ),
+      ).toEqual({
         model_providers: { "synthetic.provider": provider },
       });
-      expect(proxyUrls).toHaveLength(1);
-      for (const proxyUrl of proxyUrls)
-        expect(proxyUrl).toMatch(COMPAT_PROXY_BASE_URL_PATTERN);
       expect(
         parseToml(captured.codex!.configOverrides!.join("\n")),
       ).toMatchObject({

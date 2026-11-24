@@ -498,11 +498,19 @@ tool calling and streaming. Verification covered profile loading and a request t
 a local Responses endpoint.
 See [Opper's Codex setup guide](https://docs.opper.ai/integrations/coding-agents/codex).
 
-### xAI Responses API through a local gateway
+### xAI Responses API
 
 Codex 0.167.0 sends collaboration and Codex Security MCP tools as `namespace`
-declarations. A direct scan against xAI can pass `--dry-run` and then fail with
-HTTP 422 on the first model request. CLIProxyAPI's xAI adapter exposes each
+declarations, which xAI rejects. When a private provider profile uses
+`https://api.x.ai/v1` over Responses, the SDK starts a local HTTP adapter for
+the lifetime of the profile. It translates tool declarations to functions,
+restores tool calls, and replays subagent messages as assistant text. To try it,
+use the scan command below with that base URL and set `CODEX_API_KEY` to your
+xAI key. The adapter supports HTTP Responses requests only. Live scan
+completion remains unverified.
+
+Other endpoints, including local gateways, retain their native behavior.
+For the gateway setup below, CLIProxyAPI's xAI adapter exposes each
 namespace member to xAI as a plain function and restores the namespace when
 Codex receives a tool call. Both connections use the Responses API.
 [Direct xAI provider support](https://github.com/openai/codex-security/issues/2412)

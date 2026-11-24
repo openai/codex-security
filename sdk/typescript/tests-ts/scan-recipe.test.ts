@@ -26,10 +26,6 @@ import {
 } from "./support/api-events.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import {
-  COMPAT_PROXY_BASE_URL_PATTERN,
-  normalizeCompatProxyProviders,
-} from "./support/responses-compat-proxy.js";
-import {
   EXTERNAL_CODEX_PROVIDERS,
   mergedCodexConfig,
   resolveCodexProfile,
@@ -245,25 +241,11 @@ test.each(
               options.env!["CODEX_HOME"]!,
               `${options.nativeProfile}.config.toml`,
             );
-            const writtenProviders = (
-              parseToml(
-                await readFile(providerProfilePath, "utf8"),
-              ) as JsonObject
-            )["model_providers"] as JsonObject;
-            // The live profile routes compatible providers through the
-            // Responses compat proxy; every other provider field is unchanged.
-            const expectedProviders = resolveCodexProfile(initial)[
-              "model_providers"
-            ] as JsonObject;
-            const { providers, proxyUrls } = normalizeCompatProxyProviders(
-              writtenProviders,
-              expectedProviders,
-            );
-            expect({ model_providers: providers }).toEqual({
-              model_providers: expectedProviders,
+            expect<unknown>(
+              parseToml(await readFile(providerProfilePath, "utf8")),
+            ).toEqual({
+              model_providers: resolveCodexProfile(initial)["model_providers"],
             });
-            for (const proxyUrl of proxyUrls)
-              expect(proxyUrl).toMatch(COMPAT_PROXY_BASE_URL_PATTERN);
           }
           return {
             startThread: () => ({
