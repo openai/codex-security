@@ -247,6 +247,35 @@ test("streaming preserves headers and restores empty, completed and repeated too
   ]);
 });
 
+test("unfinished calls cannot dispatch or mask the reason a response stopped", async () => {
+  const partial = { ...flat[1], arguments: '{"input":"', status: "incomplete" };
+  const incomplete = {
+    status: "incomplete",
+    incomplete_details: { reason: "max_output_tokens" },
+    output: [partial],
+  };
+  const failed = {
+    status: "failed",
+    error: { code: "server_error", message: "Please retry" },
+    output: [partial],
+  };
+  for (const response of [incomplete, failed]) {
+    const terminal = { type: `response.${response.status}`, response };
+    await using proxy = await fixture(() =>
+      stream([
+        {
+          type: "response.output_item.done",
+          item: { ...flat[0], status: "incomplete" },
+        },
+        terminal,
+      ]),
+    );
+    expect(await readEvents(await proxy.post())).toEqual([terminal]);
+  }
+  await using proxy = await fixture(() => Response.json(incomplete));
+  expect(await (await proxy.post()).json()).toEqual(incomplete);
+});
+
 test("unknown tools fail the stream", async () => {
   await using proxy = await fixture(() =>
     stream([

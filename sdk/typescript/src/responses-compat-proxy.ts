@@ -218,9 +218,15 @@ async function* compatFrames(body: ReadableStream<Uint8Array>) {
 
 type RestoreTool = ReturnType<typeof responsesCompatRequest>["output"];
 
+function unfinished({ status }: Item) {
+  return status != null && status !== "completed";
+}
+
 function restoreOutput(response: unknown, restore: RestoreTool) {
   if (!isRecord(response)) throw new Error("Invalid xAI response.");
-  if (Array.isArray(response["output"])) {
+  // An unfinished response can contain truncated JSON in a tool's arguments.
+  // Keep that evidence and the provider's failure or interruption reason.
+  if (!unfinished(response) && Array.isArray(response["output"])) {
     response["output"] = response["output"].map((item: unknown) =>
       isRecord(item) ? restore(item) : item,
     );
@@ -237,13 +243,15 @@ async function* translateEvents(
       if (data === "[DONE]") return;
       const event: unknown = JSON.parse(data);
       if (!isRecord(event)) throw new Error("Invalid xAI event.");
-      if (isRecord(event["item"])) {
-        event["item"] = restore(
-          event["item"],
-          event["type"] !== "response.output_item.added",
-        );
+      const { type, item } = event;
+      if (isRecord(item)) {
+        // Codex dispatches done items even when the call is marked incomplete.
+        const done = type === "response.output_item.done";
+        if (done && item["type"] === "function_call" && unfinished(item))
+          continue;
+        event["item"] = restore(item, done);
       }
-      if (isRecord(event["response"]))
+      if (type === "response.completed")
         restoreOutput(event["response"], restore);
       yield `data: ${JSON.stringify(event)}\n\n`;
     }
