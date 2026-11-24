@@ -16,6 +16,9 @@
 - reuse equivalent option and argument schemas ([#2840](https://github.com/openai/codex-security/pull/2840))
 - index retained outcomes and share finding scope checks ([#2841](https://github.com/openai/codex-security/pull/2841))
 - simplify dependency trace tool lookup and report preparation ([#2847](https://github.com/openai/codex-security/pull/2847))
+- render policy diffs directly from changed ranges ([#2829](https://github.com/openai/codex-security/pull/2829))
+- keep duplicate grouping evidence with each finding cluster ([#2832](https://github.com/openai/codex-security/pull/2832))
+- honor Continuum issue changes and member evidence across retries ([#2821](https://github.com/openai/codex-security/pull/2821))
 
 </details>
 
