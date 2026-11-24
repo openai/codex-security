@@ -7,6 +7,7 @@ import {
   parseFindingPatch,
   parseFindingVerifications,
   remediationPrompt,
+  standaloneRemediationText,
   VerificationModeSchema,
   type FindingPatch,
   type FindingVerification,
@@ -121,7 +122,10 @@ export async function runHostedRemediation(
     operation: input.operation,
     pluginRoot,
     contents: [
-      { occurrenceId: input.finding.id, context: input.finding.context },
+      {
+        occurrenceId: input.finding.id,
+        context: standaloneRemediationText(input.finding.context),
+      },
     ],
     structuredPatch: true,
     verificationIds: [input.finding.id],
