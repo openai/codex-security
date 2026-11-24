@@ -12,14 +12,12 @@ function collapse(value: string): string {
 
 /** Match report_projection._escape_markdown, including bare web link handling. */
 function escapeMarkdown(value: string): string {
-  const urls = [
-    ...value.matchAll(
-      /(?<![^\p{White_Space}\u001c-\u001f*_~(])www\.[^\p{White_Space}\u001c-\u001f<>]+/giu,
-    ),
-  ].map((match) => ({
-    start: match.index,
-    end: match.index + match[0].length,
-  }));
+  const inUrl = new Uint8Array(value.length);
+  for (const match of value.matchAll(
+    /(?<![^\p{White_Space}\u001c-\u001f*_~(])www\.[^\p{White_Space}\u001c-\u001f<>]+/giu,
+  )) {
+    inUrl.fill(1, match.index, match.index + match[0].length);
+  }
   // Preserve protocol-relative and fuzzy links without a domain/TLD table.
   for (const match of value.matchAll(/[^\p{White_Space}\u001c-\u001f<>]+/gu)) {
     const token = match[0];
@@ -28,7 +26,7 @@ function escapeMarkdown(value: string): string {
       token.includes("//") ||
       (dot >= 0 && /[/?#]/u.test(token.slice(dot + 1)))
     ) {
-      urls.push({ start: match.index, end: match.index + token.length });
+      inUrl.fill(1, match.index, match.index + token.length);
     }
   }
   const webLink =
@@ -46,7 +44,7 @@ function escapeMarkdown(value: string): string {
   );
   return value.replace(pattern, (match, link, word, offset: number) => {
     if (link !== undefined) {
-      const url = match.replace(/[.,:;!?]+$/u, "");
+      const url = match.replace(/(?<![.,:;!?])[.,:;!?]+$/u, "");
       if (!url.replace(wordUnderscore, "").includes("_")) return match;
       const label = url.replace(
         new RegExp("[_~]|" + entityAmp.source, "gu"),
@@ -56,8 +54,7 @@ function escapeMarkdown(value: string): string {
       return `[${label}](<${target.replaceAll("&", "&amp;")}>)${match.slice(url.length)}`;
     }
     return match.length > 1 ||
-      ((match === "&" || word !== undefined) &&
-        urls.some(({ start, end }) => start <= offset && offset < end))
+      ((match === "&" || word !== undefined) && inUrl[offset])
       ? match
       : "\\" + match;
   });

@@ -53,13 +53,15 @@ def markdown_threat_model_content(model: dict[str, Any]) -> str | None:
 
 def _escape_markdown(value: str, *, link_label: bool = False) -> str:
     # Locate whole URLs before matching code spans: a URL can contain backticks.
-    urls = [match.span() for match in re.finditer(WWW_LINK_RE, value)]
+    in_url = bytearray(len(value))
+    for match in re.finditer(WWW_LINK_RE, value):
+        in_url[match.start() : match.end()] = b"\x01" * len(match[0])
     # Preserve protocol-relative and fuzzy links without a domain/TLD table.
     for match in re.finditer(r"[^\s<>]+", value):
         token = match[0]
         dot = token.split("/", 1)[0].find(".")
         if "//" in token or (dot >= 0 and re.search(r"[/?#]", token[dot + 1 :])):
-            urls.append(match.span())
+            in_url[match.start() : match.end()] = b"\x01" * len(token)
     punctuation = r"[\\`*_\[\]<>]|" + ENTITY_AMP_RE
     pattern = (
         f"(?P<code>{INLINE_CODE_RE})|(?P<link>{WEB_LINK_RE})"
@@ -81,9 +83,7 @@ def _escape_markdown(value: str, *, link_label: bool = False) -> str:
             return f"[{label}](<{target.replace('&', '&amp;')}>)" + match[0][len(url) :]
         # GFM autolinks retain backslashes literally, including in query strings.
         # An underscore between ASCII letters or digits cannot delimit emphasis.
-        if (match[0] == "&" or match.lastgroup == "word") and any(
-            start <= match.start() < end for start, end in urls
-        ):
+        if (match[0] == "&" or match.lastgroup == "word") and in_url[match.start()]:
             return match[0]
         return "\\" + match[0]
 
