@@ -4375,6 +4375,8 @@ if __name__ == "__main__":
   });
 
   const refusal = "This content was flagged for possible cybersecurity risk.";
+  const requestRefusal =
+    "This request has been flagged for possible cybersecurity risk.";
   const nativeFailure = "Synthetic native turn failure";
   test.each([
     ["turn.failed", refusal, null, 1],
@@ -4387,8 +4389,8 @@ if __name__ == "__main__":
     ["error", `Command failed: ${refusal}`, null, 2],
     ["turn.failed", nativeFailure, "before", 1],
     ["turn.failed", nativeFailure, "after", 1],
-    ["error", refusal, "before", 1],
-    ["error", refusal, "after", 1],
+    ["error", requestRefusal, "before", 1],
+    ["error", requestRefusal, "after", 1],
   ] as const)(
     "records the scan outcome and Standard follow-up for %s (%s, cancel %p)",
     async (type, message, cancel, turns) => {
