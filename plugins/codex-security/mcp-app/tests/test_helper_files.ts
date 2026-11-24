@@ -6,15 +6,12 @@ import { join, toNamespacedPath, win32 } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
-import { importModule, importSource } from "./import-module.ts";
+import { bundledMcpUrl, importModule, importSource } from "./import-module.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import { registerWorkerExecutableFirstLaunchTests } from "./windows_executable_first_launch_cases.ts";
 import { registerWorkerExecutableCancellationTests } from "./windows_executable_cancellation_cases.ts";
 
-const packagedHelper = new URL(
-  "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
-  import.meta.url,
-);
+const packagedHelper = bundledMcpUrl("helpers");
 const { resolvedPathText, isMissingPathError } = (await importSource(
   "src/helpers/helper-files.ts",
   {
@@ -36,7 +33,7 @@ const directories = createTemporaryDirectories(true);
 after(() => directories.cleanup());
 
 const { replaceArtifactText } = (await importSource(
-  join(import.meta.dirname, "../src/artifact-io.ts"),
+  "src/artifact-io.ts",
 )) as typeof import("../src/artifact-io.js");
 
 const { writeJsonAtomic } = (await importSource(

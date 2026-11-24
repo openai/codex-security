@@ -28,17 +28,23 @@ function findingFor(
 
 type FixtureFinding = ReturnType<typeof findingFor>;
 
-function findingAt(
-  fixture: Fixture,
-  path: string,
-  source: string,
-  cwe: string,
-) {
-  const line =
-    fixture.files[path].split("\n").findIndex((row) => row.includes(source)) +
-    1;
-  assert.ok(line > 0, `Missing fixture source: ${source}`);
-  return findingFor(fixture, { id: source, path, line, cwes: [cwe] }, "sink");
+function sourceFixture(path: string) {
+  const fixture = createFixture();
+  const lines = fixture.files[path].split("\n");
+  return {
+    lines,
+    grade: (...findings: FixtureFinding[]) =>
+      gradeResult({ findings }, fixture),
+    findingAt(source: string, cwe: string) {
+      const line = lines.findIndex((row) => row.includes(source)) + 1;
+      assert.ok(line > 0, `Missing fixture source: ${source}`);
+      return findingFor(
+        fixture,
+        { id: source, path, line, cwes: [cwe] },
+        "sink",
+      );
+    },
+  };
 }
 
 function completeResult(fixture: Fixture) {
@@ -80,27 +86,15 @@ test("missing SSRF reduces recall even when every other case is found", () => {
 });
 
 test("SSRF earns credit at the user-selected destination and flags the allowlisted destination for review", () => {
-  const fixture = createFixture();
-  const path = "src/partners.py";
-  const positive = gradeResult(
-    {
-      findings: [
-        findingAt(
-          fixture,
-          path,
-          'requests.head(request.args["url"]',
-          "CWE-918",
-        ),
-      ],
-    },
-    fixture,
+  const source = sourceFixture("src/partners.py");
+  const positive = source.grade(
+    source.findingAt('requests.head(request.args["url"]', "CWE-918"),
   );
   assert.deepEqual(positive.matchedIds, ["partner-status-ssrf"]);
   assert.equal(positive.safeControlFindings, 0);
 
-  const control = gradeResult(
-    { findings: [findingAt(fixture, path, "requests.head(url,", "CWE-918")] },
-    fixture,
+  const control = source.grade(
+    source.findingAt("requests.head(url,", "CWE-918"),
   );
   assert.deepEqual(control.matchedIds, []);
   assert.deepEqual(
@@ -111,76 +105,34 @@ test("SSRF earns credit at the user-selected destination and flags the allowlist
 });
 
 test("path containment and tenant selection are independent controls", () => {
-  const fixture = createFixture();
-  const path = "src/statements.py";
+  const source = sourceFixture("src/statements.py");
   const callerSelected = "send_file(statement_path(tenant_id, name)";
-  const report = gradeResult(
-    {
-      findings: [
-        findingAt(fixture, path, callerSelected, "CWE-639"),
-        findingAt(
-          fixture,
-          path,
-          "send_file(statement_path(g.tenant_id, name)",
-          "CWE-639",
-        ),
-        findingAt(
-          fixture,
-          path,
-          "if not target.is_relative_to(root):",
-          "CWE-22",
-        ),
-      ],
-    },
-    fixture,
+  const report = source.grade(
+    source.findingAt(callerSelected, "CWE-639"),
+    source.findingAt("send_file(statement_path(g.tenant_id, name)", "CWE-639"),
+    source.findingAt("if not target.is_relative_to(root):", "CWE-22"),
   );
   assert.deepEqual(report.matchedIds, ["statement-tenant-selection"]);
   assert.deepEqual(
     report.safeControlDetails.map((entry) => entry.controlIds),
     [["statement-session-tenant"], ["statement-contained-path"]],
   );
-  const traversal = gradeResult(
-    { findings: [findingAt(fixture, path, callerSelected, "CWE-22")] },
-    fixture,
-  );
+  const traversal = source.grade(source.findingAt(callerSelected, "CWE-22"));
   assert.deepEqual(traversal.matchedIds, []);
   assert.equal(traversal.unmatchedFindings.length, 1);
 });
 
 test("grant verification distinguishes the selected tenant from the verified tenant", () => {
-  const fixture = createFixture();
-  const path = "src/grants.py";
+  const source = sourceFixture("src/grants.py");
   for (const cwe of ["CWE-639", "CWE-862", "CWE-349", "CWE-252"]) {
-    const report = gradeResult(
-      {
-        findings: [
-          findingAt(
-            fixture,
-            path,
-            'return invoice_report(batch[0]["tenant_id"])',
-            cwe,
-          ),
-          findingAt(
-            fixture,
-            path,
-            'return invoice_report(grant["tenant_id"])',
-            cwe,
-          ),
-          findingAt(
-            fixture,
-            path,
-            "SELECT id, recipient, total FROM invoices WHERE tenant_id",
-            cwe,
-          ),
-          findingAt(
-            fixture,
-            path,
-            'tenant = signer.loads(grant["proof"],',
-            cwe,
-          ),
-        ],
-      },
-      fixture,
+    const report = source.grade(
+      source.findingAt('return invoice_report(batch[0]["tenant_id"])', cwe),
+      source.findingAt('return invoice_report(grant["tenant_id"])', cwe),
+      source.findingAt(
+        "SELECT id, recipient, total FROM invoices WHERE tenant_id",
+        cwe,
+      ),
+      source.findingAt('tenant = signer.loads(grant["proof"],', cwe),
     );
     assert.deepEqual(report.matchedIds, ["report-unverified-grant"]);
     assert.deepEqual(
@@ -193,24 +145,16 @@ test("grant verification distinguishes the selected tenant from the verified ten
 });
 
 test("the discarded verification result is a grounded root control for the grant finding", () => {
-  const fixture = createFixture();
-  const path = "src/grants.py";
-  const finding = findingAt(
-    fixture,
-    path,
-    "    verified_grant(batch)",
-    "CWE-862",
-  );
+  const source = sourceFixture("src/grants.py");
+  const finding = source.findingAt("    verified_grant(batch)", "CWE-862");
   finding.locations[0].role = "root_control";
-  const grade = () => gradeResult({ findings: [finding] }, fixture);
+  const grade = () => source.grade(finding);
   assert.deepEqual(grade().matchedIds, ["report-unverified-grant"]);
 
   finding.locations[0].role = "supporting";
   assert.deepEqual(grade().matchedIds, []);
   finding.locations[0].role = "root_control";
-  finding.codeEvidence = findingAt(
-    fixture,
-    path,
+  finding.codeEvidence = source.findingAt(
     "    batch = submitted_grants()",
     "CWE-863",
   ).codeEvidence;
@@ -219,16 +163,11 @@ test("the discarded verification result is a grounded root control for the grant
 });
 
 test("an unlabelled affected location can use the role on authentic evidence at the same gold line", () => {
-  const fixture = createFixture();
-  const finding = findingAt(
-    fixture,
-    "src/grants.py",
-    "    verified_grant(batch)",
-    "CWE-863",
-  );
+  const source = sourceFixture("src/grants.py");
+  const finding = source.findingAt("    verified_grant(batch)", "CWE-863");
   const [location] = finding.locations;
   const [snippet] = finding.codeEvidence;
-  const grade = () => gradeResult({ findings: [finding] }, fixture);
+  const grade = () => source.grade(finding);
   delete location.role;
   for (const role of ["root_control", "sink", "entrypoint"]) {
     snippet.role = role;
@@ -264,17 +203,12 @@ test("an unlabelled affected location can use the role on authentic evidence at 
 });
 
 test("a safe sibling cited as a comparison stays clear, while an accusation is flagged", () => {
-  const fixture = createFixture();
-  const path = "src/statements.py";
-  const finding = findingAt(
-    fixture,
-    path,
+  const source = sourceFixture("src/statements.py");
+  const finding = source.findingAt(
     "send_file(statement_path(tenant_id, name)",
     "CWE-639",
   );
-  const safe = findingAt(
-    fixture,
-    path,
+  const safe = source.findingAt(
     "send_file(statement_path(g.tenant_id, name)",
     "CWE-639",
   );
@@ -285,7 +219,7 @@ test("a safe sibling cited as a comparison stays clear, while an accusation is f
   const compare = (evidenceRole?: string, locationRole?: string) => {
     safe.locations[0].role = locationRole;
     safe.codeEvidence[0].role = evidenceRole;
-    return gradeResult({ findings: [finding] }, fixture);
+    return source.grade(finding);
   };
   const comparison = compare("expected_control");
   assert.deepEqual(comparison.matchedIds, ["statement-tenant-selection"]);
@@ -315,7 +249,7 @@ test("a safe sibling cited as a comparison stays clear, while an accusation is f
   const conflictSnippet = {
     ...safe.codeEvidence[0],
     role: "sink",
-    endLine: fixture.files[path].split("\n").length + 1,
+    endLine: source.lines.length + 1,
   };
   finding.codeEvidence.push(conflictSnippet);
   const conflict = compare("expected_control");
@@ -327,8 +261,7 @@ test("a safe sibling cited as a comparison stays clear, while an accusation is f
   );
   conflictSnippet.endLine = conflictSnippet.startLine;
   conflictSnippet.startLine--;
-  conflictSnippet.code =
-    fixture.files[path].split("\n")[conflictSnippet.startLine - 1];
+  conflictSnippet.code = source.lines[conflictSnippet.startLine - 1];
   const partialQuote = compare("expected_control");
   assert.deepEqual(partialQuote.evidenceErrors, []);
   assert.deepEqual(

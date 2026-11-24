@@ -147,6 +147,14 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         self.write_json("coverage.json", self.coverage)
         (self.scan_dir / "report.md").write_text("# Existing report\n", encoding="utf-8")
 
+    def prepare_recovery(self, status: str):
+        self.write_scan()
+        return FINALIZER._prepare_scan_finalization(
+            self.scan_dir,
+            completion_binding={**self.completion_binding(), "status": status},
+            recover_unsealed=True,
+        )
+
     def completion_binding(self) -> dict[str, object]:
         return {
             "scanId": "scan_001",
@@ -2251,13 +2259,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
             " Raise if the vulnerable path becomes internet-reachable. ",
             "Lower if the input is constrained before parsing.",
         ]
-        self.write_scan()
-
-        prepared = FINALIZER._prepare_scan_finalization(
-            self.scan_dir,
-            completion_binding={**self.completion_binding(), "status": "interrupted"},
-            recover_unsealed=True,
-        )
+        prepared = self.prepare_recovery("interrupted")
 
         finding = prepared.findings["findings"][0]
         self.assertEqual(
@@ -2292,13 +2294,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
                 second[evidence_field] = [copy.deepcopy(evidence)]
                 second["root_cause"] = None
                 self.findings["findings"] = [first, second]
-                self.write_scan()
-
-                prepared = FINALIZER._prepare_scan_finalization(
-                    self.scan_dir,
-                    completion_binding={**self.completion_binding(), "status": "interrupted"},
-                    recover_unsealed=True,
-                )
+                prepared = self.prepare_recovery("interrupted")
 
                 self.assertEqual(prepared.findings["findings"][0]["summary"], "SECOND")
                 self.assertIsNone(prepared.findings["findings"][0]["root_cause"])
@@ -2331,13 +2327,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
                 second["summary"] = "SECOND"
                 second["rootCause"] = root_cause
                 self.findings["findings"] = [first, second]
-                self.write_scan()
-
-                prepared = FINALIZER._prepare_scan_finalization(
-                    self.scan_dir,
-                    completion_binding={**self.completion_binding(), "status": "interrupted"},
-                    recover_unsealed=True,
-                )
+                prepared = self.prepare_recovery("interrupted")
 
                 self.assertEqual(prepared.findings["findings"][0]["summary"], "SECOND")
                 self.assertEqual(
@@ -2361,13 +2351,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         finding["rootCause"] = {"summary": "Source review.", "evidenceRefs": refs}
         finding["validation"] = {"evidence_refs": refs}
         finding["attackPath"] = {"dataFlow": {"evidenceRefs": refs}}
-        self.write_scan()
-
-        prepared = FINALIZER._prepare_scan_finalization(
-            self.scan_dir,
-            completion_binding={**self.completion_binding(), "status": "interrupted"},
-            recover_unsealed=True,
-        )
+        prepared = self.prepare_recovery("interrupted")
         FINALIZER._write_prepared_scan_finalization(prepared)
         (saved,) = self.read_json("findings.json")["findings"]
         self.assertEqual(saved["codeEvidence"], [SOURCE_EVIDENCE])
@@ -2408,13 +2392,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         del missing_rationale["confidence"]["rationale"]
         missing_rationale["codeEvidence"] = "A source excerpt."
         self.findings["findings"] = [missing_cwe, invalid_cwe, missing_identity, missing_rationale]
-        self.write_scan()
-
-        prepared = FINALIZER._prepare_scan_finalization(
-            self.scan_dir,
-            completion_binding={**self.completion_binding(), "status": "canceled"},
-            recover_unsealed=True,
-        )
+        prepared = self.prepare_recovery("canceled")
         FINALIZER._write_prepared_scan_finalization(prepared)
         (saved,) = self.read_json("findings.json")["findings"]
         self.assertEqual(saved["title"], missing_cwe["title"])
@@ -2446,13 +2424,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         ):
             with self.subTest(field=field, value=value):
                 self.findings["findings"] = [{**self.finding, field: value}]
-                self.write_scan()
-
-                prepared = FINALIZER._prepare_scan_finalization(
-                    self.scan_dir,
-                    completion_binding={**self.completion_binding(), "status": "interrupted"},
-                    recover_unsealed=True,
-                )
+                prepared = self.prepare_recovery("interrupted")
 
                 self.assertEqual(len(prepared.findings["findings"]), 1)
                 self.assertNotIn(field, prepared.findings["findings"][0])
@@ -2472,11 +2444,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         ]
         for status in ("completed", "interrupted"):
             with self.subTest(status=status):
-                self.write_scan()
-                binding = {**self.completion_binding(), "status": status}
-                prepared = FINALIZER._prepare_scan_finalization(
-                    self.scan_dir, completion_binding=binding, recover_unsealed=True
-                )
+                prepared = self.prepare_recovery(status)
                 manifest, findings, coverage = FINALIZER._write_prepared_scan_finalization(prepared)
 
                 self.assertEqual(manifest["scan"]["status"], status)

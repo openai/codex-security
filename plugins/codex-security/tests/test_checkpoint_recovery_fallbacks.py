@@ -12,9 +12,11 @@ import pytest
 from workbench_test_support import (
     interrupt_publication,
     read_review_state,
+    review_surface,
     saved_draft,
     select_checkpoint,
     write_checkpoint,
+    write_draft_checkpoint,
     write_result_draft,
 )
 
@@ -97,8 +99,8 @@ def test_early_head_error_keeps_captured_records_during_sibling_capture(
     for directory, anchor in [(first, "before"), (second, "second")]:
         finding = copy.deepcopy(scan.findings[0])
         finding["identity"]["anchor"] = anchor
-        checkpoint = write_checkpoint(
-            directory / "checkpoints", saved_draft(scan.scan_id, complete=True, findings=[finding])
+        checkpoint = write_draft_checkpoint(
+            directory, scan.scan_id, complete=True, findings=[finding]
         )
         head = select_checkpoint(directory, checkpoint, mtime_ns=100)
         if directory == first:
@@ -115,8 +117,8 @@ def test_early_head_error_keeps_captured_records_during_sibling_capture(
             changed = True
             finding = copy.deepcopy(scan.findings[0])
             finding["identity"]["anchor"] = "after"
-            checkpoint = write_checkpoint(
-                first / "checkpoints", saved_draft(scan.scan_id, complete=True, findings=[finding])
+            checkpoint = write_draft_checkpoint(
+                first, scan.scan_id, complete=True, findings=[finding]
             )
             (first / "checkpoint-head.json").write_text(json.dumps({"checkpoint": checkpoint.name}))
             os.utime(first / "checkpoint-head.json", ns=(200, 200))
@@ -191,11 +193,7 @@ def test_frozen_model_capture_keeps_earlier_worker_finding(
         scan.fail()
     if not restore_capture:
         assert len(initial) == len(initial[0]) == 1
-    retained = json.loads(
-        workbench_db.execute(
-            "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan.scan_id,)
-        ).fetchone()[0]
-    )
+    retained = json.loads(scan.scan_row()["retained_source_digests_json"])
     capture = scan.scan_dir / retained["threatModelSource"]
     assert retained["threatModelSource"] == model_path
     assert capture.exists() is not restore_capture
@@ -249,11 +247,7 @@ def test_frozen_model_ignores_unselected_live_manifest_changes(
             workbench_db,
             Namespace(scan_id=scan.scan_id, thread_id=None, claim_token=None),
         )
-    retained = json.loads(
-        workbench_db.execute(
-            "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan.scan_id,)
-        ).fetchone()[0]
-    )
+    retained = json.loads(scan.scan_row()["retained_source_digests_json"])
     digest = saved._digest(canonical)
     assert retained["sources"][f"checkpoints/{digest}.json"] == digest
     if late_model:
@@ -387,9 +381,7 @@ def test_early_head_failure_keeps_frozen_model_choice(
             saved._capture_saved_source(scan.scan_dir, "checkpoint-head.json", scan.scan_id)
     if failure == "worker-head":
         directory = scan.add_worker(status="canceled").parent
-        worker_checkpoint = write_checkpoint(
-            directory / "checkpoints", saved_draft(scan.scan_id, complete=True)
-        )
+        worker_checkpoint = write_draft_checkpoint(directory, scan.scan_id, complete=True)
         select_checkpoint(directory, worker_checkpoint, mtime_ns=200)
     write = saved.write_scan_local_bytes
 
@@ -568,9 +560,7 @@ def test_rejected_historical_model_does_not_poison_recovery(
     assert published["scan"]["threatModel"] == (
         {"summary": "Replacement model"} if replacement == "valid" else model
     )
-    retained = workbench_db.execute(
-        "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan.scan_id,)
-    ).fetchone()[0]
+    retained = scan.scan_row()["retained_source_digests_json"]
     assert json.loads(retained)["threatModelSource"] == (
         selected_source if replacement == "valid" else canonical_source
     )
@@ -622,14 +612,7 @@ def test_partial_head_retains_previous_terminal_coverage_boundary(
         draft["coverage"] = {**coverage, **draft["coverage"]}
         if label != "Partial":
             draft["coverage"].update(
-                surfaces=[
-                    {
-                        "id": label,
-                        "label": label,
-                        "disposition": "no_issue_found",
-                        "receiptRefs": [],
-                    }
-                ],
+                surfaces=[review_surface(label, label, "no_issue_found")],
                 explicitExclusions=[{"pattern": label + "/**", "reason": label}],
                 openQuestions=[{"question": label}],
             )
@@ -824,12 +807,7 @@ def test_restored_terminal_keeps_surfaces_for_surviving_deferred_work(
     task = {"id": "review-task", "reason": "Review remains pending."}
     if pending != "unlinked":
         task["surfaceIds"] = ["pending-surface"]
-    surface = {
-        "id": "pending-surface",
-        "label": "Unfinished authorization review",
-        "disposition": "needs_follow_up",
-        "receiptRefs": [],
-    }
+    surface = review_surface("pending-surface", "Unfinished authorization review")
     partial = saved_draft(scan.scan_id, complete=False, deferred=[task], surfaces=[surface])
     partial["coverage"] = {**coverage, **partial["coverage"]}
     sequence = [(terminal, 100), (partial, 200)]
@@ -1007,11 +985,7 @@ def test_interrupted_recovery_keeps_frozen_parent_reconciliation(
         with pytest.raises(OSError, match="Synthetic publication interruption"):
             saved.recover_scan_results(context, workbench_db, args)
     if selection == "old-journal":
-        retained = json.loads(
-            workbench_db.execute(
-                "SELECT retained_checkpoint_heads_json FROM scans WHERE id = ?", (scan.scan_id,)
-            ).fetchone()[0]
-        )
+        retained = json.loads(scan.scan_row()["retained_checkpoint_heads_json"])
         del retained["legacyParent"]
         with workbench_db:
             workbench_db.execute(

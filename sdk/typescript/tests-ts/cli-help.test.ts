@@ -5,7 +5,7 @@ import { main } from "../src/cli.js";
 import { DEFAULT_CODEX_CONFIG, scanModelConfiguration } from "../src/config.js";
 import { DEFAULT_DEEP_SCAN_SETTINGS } from "../src/deep-scan-defaults.js";
 import { capture, dependencies } from "./cli-fixtures.js";
-import { createCliTest } from "./support/cli-run.js";
+import { createCliTest, captureCli } from "./support/cli-run.js";
 
 async function help(args: readonly string[], columns?: number) {
   const stdout = capture(true);
@@ -365,11 +365,8 @@ describe("CLI help", () => {
   )(
     "rejects unknown discovery paths or surplus words (%j)",
     async ({ args }) => {
-      const stdout = capture();
-      const stderr = capture();
-      expect(
-        await main(args, stdout.stream, stderr.stream, dependencies()),
-      ).toBe(2);
+      const { stdout, stderr, runCli } = createCliTest(main);
+      expect(await runCli(args, dependencies())).toBe(2);
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toMatch(
         /Unknown command|not a command|Unexpected positional/,
@@ -382,15 +379,8 @@ describe("CLI help", () => {
     ["mcp", "doctr", "doctor"],
     ["skills", "lsit", "list"],
   ])("preserves suggested verbs for %s %s", async (group, typo, verb) => {
-    const stderr = capture();
-    expect(
-      await main(
-        [group, typo],
-        capture().stream,
-        stderr.stream,
-        dependencies(),
-      ),
-    ).toBe(2);
+    const stderr = captureCli(main, "stderr");
+    expect(await stderr.run([group, typo], dependencies())).toBe(2);
     expect(stderr.text()).toContain(`Did you mean '${verb}'?`);
   });
 
@@ -444,11 +434,8 @@ describe("CLI help", () => {
       ["scan", ".", "--dry-run", "--incur-update-check"],
     ].map((args) => ({ args })),
   )("rejects mixed or private actions (%j)", async ({ args }) => {
-    const stdout = capture();
-    const stderr = capture();
-    expect(await main(args, stdout.stream, stderr.stream, dependencies())).toBe(
-      2,
-    );
+    const { stdout, stderr, runCli } = createCliTest(main);
+    expect(await runCli(args, dependencies())).toBe(2);
     expect(stdout.text()).toBe("");
     expect(stderr.text()).toMatch(/must be used alone|Unknown flag/);
   });
@@ -472,15 +459,10 @@ describe("CLI help", () => {
         "--full-output",
         "-c",
       ]) {
-        const stderr = capture();
-        expect(
-          await main(
-            [flag, next, "init", "new.yaml"],
-            capture().stream,
-            stderr.stream,
-            deps,
-          ),
-        ).toBe(2);
+        const stderr = captureCli(main, "stderr");
+        expect(await stderr.run([flag, next, "init", "new.yaml"], deps)).toBe(
+          2,
+        );
         expect(stderr.text()).toMatch(
           /Missing value|must be used alone|Unknown flag/,
         );

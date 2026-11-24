@@ -533,24 +533,20 @@ type SignalName = "SIGINT" | "SIGTERM";
 
 const DEFAULT_SCAN_MODEL_CONFIGURATION =
   scanModelConfiguration(DEFAULT_CODEX_CONFIG);
+const booleanFlag = z.boolean().default(false);
+const optionalArgument = z.string().min(1).optional();
 const MODEL_OPTIONS = modelOptions();
 type ModelCliOptions = z.infer<typeof MODEL_OPTIONS>;
 const MATCHING_OPTIONS = modelOptions(
   "Model for finding matching (default: Codex's configured model).",
   "Matching reasoning effort (default: medium).",
 ).extend({
-  force: z
-    .boolean()
-    .default(false)
-    .describe("Recompute saved finding matches."),
+  force: booleanFlag.describe("Recompute saved finding matches."),
 });
 const SKILL_CODEX_OVERRIDE_DESCRIPTION =
   'Repeat TOML model="gpt-5.6-terra", model_reasoning_effort="high", model_provider="gateway", model_providers.<name>.<key>=VALUE, daybreak=true, or analytics.enabled=false.';
 const SKILL_CONFIG_OPTIONS = MODEL_OPTIONS.extend({
-  codex: z
-    .array(optionValue("--codex"))
-    .default([])
-    .describe(SKILL_CODEX_OVERRIDE_DESCRIPTION),
+  codex: repeatedValue("--codex").describe(SKILL_CODEX_OVERRIDE_DESCRIPTION),
 });
 type SkillConfiguration = z.infer<typeof SKILL_CONFIG_OPTIONS>;
 const RUNTIME_OPTION_SCHEMAS = runtimeOptions(optionValue);
@@ -573,6 +569,9 @@ function runtimeOptions(value: typeof optionValue) {
       ),
   };
 }
+const SCAN_AUTH_OPTION = ScanSettingsSchema.shape.auth.describe(
+  "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
+);
 const SKILL_AUTH_OPTION = z
   .enum(SCAN_AUTH_MODES)
   .default("auto")
@@ -582,11 +581,13 @@ const SKILL_AUTH_OPTION = z
 const VERIFICATION_MODE_OPTION = VerificationModeSchema.optional().describe(
   "Use static source review or standard verification (default: standard).",
 );
-const PROJECT_CONFIG_OPTION = optionValue("--config")
-  .optional()
-  .describe(
-    "Load a trusted YAML/JSON file (default: CODEX_SECURITY_PROJECT_CONFIG, otherwise no file).",
-  );
+const PROJECT_CONFIG_OPTION = optionalValue("--config").describe(
+  "Load a trusted YAML/JSON file (default: CODEX_SECURITY_PROJECT_CONFIG, otherwise no file).",
+);
+const VALIDATION_PROMPT_OPTION = optionalValue("--validation-prompt-file");
+const POST_SCAN_PROMPT_OPTION = optionalValue(
+  "--post-scan-prompt-file",
+).describe("Run FILE after each scan, including failures.");
 const EXPORT_DEFAULT_OUTPUTS = ARTIFACT_EXPORT_FILENAMES;
 const PROVIDER_OPTION = z
   .enum([
@@ -600,20 +601,21 @@ const PROVIDER_OPTION = z
   .describe("Inference provider for scans.");
 const positiveInteger = z.number().int().positive();
 
-const SHOW_COST_OPTION = z
-  .boolean()
-  .default(false)
-  .describe("Show estimated USD cost; always shown when a cost limit is set.");
-const CREATE_PR_OPTION = z
-  .boolean()
-  .default(false)
-  .describe(
-    "Create a draft GitHub pull request or GitLab merge request after verified patches.",
-  );
-const ASSESS_PATCH_RISK_OPTION = z
-  .boolean()
-  .default(false)
-  .describe("Assess the completed patch and return the risk report.");
+const ARCHIVE_EXISTING_OPTION = booleanFlag.describe(
+  "Archive existing results; requires --output-dir.",
+);
+const VERBOSE_OPTION = booleanFlag.describe(
+  "Print additional scan diagnostics to stderr.",
+);
+const SHOW_COST_OPTION = booleanFlag.describe(
+  "Show estimated USD cost; always shown when a cost limit is set.",
+);
+const CREATE_PR_OPTION = booleanFlag.describe(
+  "Create a draft GitHub pull request or GitLab merge request after verified patches.",
+);
+const ASSESS_PATCH_RISK_OPTION = booleanFlag.describe(
+  "Assess the completed patch and return the risk report.",
+);
 
 function optionValue(flag: string) {
   return z
@@ -626,31 +628,39 @@ function optionValue(flag: string) {
     .min(1, `${flag} must not be empty.`);
 }
 
+function optionalValue(flag: string) {
+  return optionValue(flag).optional();
+}
+
+function repeatedValue(flag: string) {
+  return z.array(optionValue(flag)).default([]);
+}
+
+// Keep absent scan options undefined so that project settings still apply.
+function optionalRepeatedValue(flag: string) {
+  return z.array(optionValue(flag)).optional().meta({ default: [] });
+}
+
 function remediationInputOptions(verb: "Patch" | "Verify") {
   return z.object({
-    scan: optionValue("--scan")
-      .optional()
-      .describe(
-        `${verb} open findings from a saved scan ID or the latest completed scan.`,
-      ),
+    scan: optionalValue("--scan").describe(
+      `${verb} open findings from a saved scan ID or the latest completed scan.`,
+    ),
     severity: z
       .enum(REPORTABLE_SEVERITIES)
       .optional()
       .describe(`${verb} saved findings at or above LEVEL.`),
-    linearIssue: z
-      .array(optionValue("--linear-issue"))
-      .default([])
-      .describe("Linear issue identifier or URL; repeat for more issues."),
-    linearProject: optionValue("--linear-project")
-      .optional()
-      .describe(
-        verb === "Patch"
-          ? "Patch every open issue in this Linear project."
-          : "Verify issues in this Linear project.",
-      ),
-    linearFilter: optionValue("--linear-filter")
-      .optional()
-      .describe("JSON Linear issue filter for --linear-project."),
+    linearIssue: repeatedValue("--linear-issue").describe(
+      "Linear issue identifier or URL; repeat for more issues.",
+    ),
+    linearProject: optionalValue("--linear-project").describe(
+      verb === "Patch"
+        ? "Patch every open issue in this Linear project."
+        : "Verify issues in this Linear project.",
+    ),
+    linearFilter: optionalValue("--linear-filter").describe(
+      "JSON Linear issue filter for --linear-project.",
+    ),
     linearApiKey: linearApiKeyOption(),
   });
 }
@@ -671,24 +681,19 @@ const PUBLICATION_DESTINATION_OPTIONS = z.object({
     .literal("linear")
     .default("linear")
     .describe("Publication destination."),
-  linearTeam: optionValue("--linear-team")
-    .optional()
-    .describe("Linear team ID; defaults to CODEX_SECURITY_LINEAR_TEAM."),
+  linearTeam: optionalValue("--linear-team").describe(
+    "Linear team ID; defaults to CODEX_SECURITY_LINEAR_TEAM.",
+  ),
   linearApiKey: linearApiKeyOption(),
-  linearProject: optionValue("--linear-project")
-    .optional()
-    .describe(
-      "Optional Linear project ID; defaults to CODEX_SECURITY_LINEAR_PROJECT.",
-    ),
-  project: optionValue("--project")
-    .optional()
+  linearProject: optionalValue("--linear-project").describe(
+    "Optional Linear project ID; defaults to CODEX_SECURITY_LINEAR_PROJECT.",
+  ),
+  project: optionalValue("--project")
     .describe("Alias for --linear-project.")
     .meta({ deprecated: true }),
-  linearAssignee: optionValue("--linear-assignee")
-    .optional()
-    .describe(
-      "Linear assignee email or user ID; omit to leave issues unassigned.",
-    ),
+  linearAssignee: optionalValue("--linear-assignee").describe(
+    "Linear assignee email or user ID; omit to leave issues unassigned.",
+  ),
 });
 
 function publicationDestination(
@@ -1268,12 +1273,10 @@ function modelOptions(
   effortDescription = `Model reasoning effort (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort}).`,
 ) {
   return z.object({
-    model: optionValue("--model").optional().describe(modelDescription),
-    effort: optionValue("--effort")
-      .optional()
-      .describe(
-        `${effortDescription} Passed through to Codex; supported values depend on the model, provider, and Codex version.`,
-      ),
+    model: optionalValue("--model").describe(modelDescription),
+    effort: optionalValue("--effort").describe(
+      `${effortDescription} Passed through to Codex; supported values depend on the model, provider, and Codex version.`,
+    ),
   });
 }
 
@@ -2837,7 +2840,6 @@ export async function main(
     );
     return (result["scans"] as WorktreeScan[])[0];
   };
-  const historyId = z.string().min(1).optional();
   const resolveHistoryId = async (id: string, status: "complete" | "any") =>
     id === "latest"
       ? (await latestScans(1, status, { preferWorktree: true }))?.[0]?.scanId
@@ -3190,15 +3192,14 @@ export async function main(
       description: "Show the results and saved configuration for a scan.",
       hint: "Without an ID, show selects the latest completed scan; logs selects the latest scan of any status. Pass the same ID to inspect one run.",
       args: z.object({
-        scanId: historyId.describe(
+        scanId: optionalArgument.describe(
           "Scan ID, unique prefix, or latest (default: latest completed).",
         ),
       }),
       options: z.object({
-        showLinkedFindings: z
-          .boolean()
-          .default(false)
-          .describe("Show findings linked across previous scans."),
+        showLinkedFindings: booleanFlag.describe(
+          "Show findings linked across previous scans.",
+        ),
       }),
       examples: [
         { args: {}, description: "Show the latest completed scan." },
@@ -3245,7 +3246,7 @@ export async function main(
       description: "Show saved activity for a scan and its workers.",
       hint: "Without an ID, logs selects the latest scan, including failed and active runs; show selects the latest completed scan. Pass the same ID to inspect one run.",
       args: z.object({
-        scanId: historyId.describe(
+        scanId: optionalArgument.describe(
           "Scan ID, unique prefix, or latest (default: latest, any status).",
         ),
       }),
@@ -3315,10 +3316,7 @@ export async function main(
       }),
       options: z.object({
         showCost: SHOW_COST_OPTION,
-        verbose: z
-          .boolean()
-          .default(false)
-          .describe("Print additional scan diagnostics to stderr."),
+        verbose: VERBOSE_OPTION,
       }),
       output: scanOutputSchema("SCAN_FAILED", "SCAN_RESUME_UNAVAILABLE"),
       async run({ args, error: incurError, format, options }) {
@@ -3383,30 +3381,19 @@ export async function main(
       hint: "Execution failures keep available scan results under data in failed full-output JSON, JSONL, YAML, or TOON envelopes.",
       destructive: true,
       args: z.object({
-        scanId: z
-          .string()
-          .min(1)
-          .optional()
-          .describe(
-            "Saved scan identifier (default: latest completed in this worktree).",
-          ),
+        scanId: optionalArgument.describe(
+          "Saved scan identifier (default: latest completed in this worktree).",
+        ),
       }),
       options: z.object({
         showCost: SHOW_COST_OPTION,
-        scanPromptFile: optionValue("--scan-prompt-file")
-          .optional()
-          .describe(
-            "Supply additional scan instructions; required when the saved scan used them.",
-          ),
-        validationPromptFile: optionValue("--validation-prompt-file")
-          .optional()
-          .describe(
-            "Use FILE for custom validation; required when rerunning a custom-validation scan.",
-          ),
-        verbose: z
-          .boolean()
-          .default(false)
-          .describe("Print additional scan diagnostics to stderr."),
+        scanPromptFile: optionalValue("--scan-prompt-file").describe(
+          "Supply additional scan instructions; required when the saved scan used them.",
+        ),
+        validationPromptFile: VALIDATION_PROMPT_OPTION.describe(
+          "Use FILE for custom validation; required when rerunning a custom-validation scan.",
+        ),
+        verbose: VERBOSE_OPTION,
       }),
       output: scanOutputSchema(
         "SCAN_FAILED",
@@ -3528,22 +3515,13 @@ export async function main(
       hint: "For a pair, use scans compare BEFORE AFTER. The older scans match BEFORE AFTER spelling also works.",
       destructive: true,
       args: z.object({
-        beforeId: z
-          .string()
-          .min(1)
-          .optional()
-          .describe("Earlier saved scan identifier."),
-        afterId: z
-          .string()
-          .min(1)
-          .optional()
-          .describe("Later saved scan identifier."),
+        beforeId: optionalArgument.describe("Earlier saved scan identifier."),
+        afterId: optionalArgument.describe("Later saved scan identifier."),
       }),
       options: z.object({
-        all: z
-          .boolean()
-          .default(false)
-          .describe("Match all completed scans of the current repository."),
+        all: booleanFlag.describe(
+          "Match all completed scans of the current repository.",
+        ),
         ...MATCHING_OPTIONS.shape,
       }),
       output: z.record(z.string(), z.unknown()).optional(),
@@ -3589,16 +3567,10 @@ export async function main(
       ],
       destructive: true,
       args: z.object({
-        beforeId: z
-          .string()
-          .min(1)
-          .optional()
-          .describe("Earlier saved scan identifier."),
-        afterId: z
-          .string()
-          .min(1)
-          .optional()
-          .describe("Later saved scan identifier (default: latest completed)."),
+        beforeId: optionalArgument.describe("Earlier saved scan identifier."),
+        afterId: optionalArgument.describe(
+          "Later saved scan identifier (default: latest completed).",
+        ),
       }),
       options: MATCHING_OPTIONS,
       output: z.record(z.string(), z.unknown()).optional(),
@@ -3666,29 +3638,18 @@ export async function main(
         .describe("Completed scan directory; omit to select a saved scan."),
     }),
     options: PUBLICATION_DESTINATION_OPTIONS.extend({
-      findingId: z
-        .array(optionValue("--finding-id"))
-        .default([])
-        .describe(
-          "Publish only this finding ID; repeat to select deduplicated findings (Linear only).",
-        ),
-      workflowId: optionValue("--workflow-id")
-        .optional()
-        .describe(
-          "Resume the named local scan, custom publication, and dedupe workflow.",
-        ),
-      scan: z
-        .array(optionValue("--scan"))
-        .default([])
-        .describe(
-          "Saved scan ID, unique prefix, or latest; Linear and custom accept one scan.",
-        ),
-      scanDir: z
-        .array(optionValue("--scan-dir"))
-        .default([])
-        .describe(
-          "Use the positional directory for one scan. Repeat this flag for destinations that accept multiple scans.",
-        ),
+      findingId: repeatedValue("--finding-id").describe(
+        "Publish only this finding ID; repeat to select deduplicated findings (Linear only).",
+      ),
+      workflowId: optionalValue("--workflow-id").describe(
+        "Resume the named local scan, custom publication, and dedupe workflow.",
+      ),
+      scan: repeatedValue("--scan").describe(
+        "Saved scan ID, unique prefix, or latest; Linear and custom accept one scan.",
+      ),
+      scanDir: repeatedValue("--scan-dir").describe(
+        "Use the positional directory for one scan. Repeat this flag for destinations that accept multiple scans.",
+      ),
       // Cloud remains an internal destination, omitted from public discovery.
       to: z
         .string()
@@ -3707,21 +3668,15 @@ export async function main(
         .describe(
           "Findings API base URL; required with --to custom (for example http://localhost:3000).",
         ),
-      dryRun: z
-        .boolean()
-        .default(false)
-        .describe("Preview the findings without publishing them."),
-      csv: optionValue("--csv")
-        .optional()
-        .describe(
-          "Findings CSV for internal publication; not supported with linear or custom.",
-        ),
-      skipExisting: z
-        .boolean()
-        .default(false)
-        .describe(
-          "Skip findings already recorded for this exact Linear destination.",
-        ),
+      dryRun: booleanFlag.describe(
+        "Preview the findings without publishing them.",
+      ),
+      csv: optionalValue("--csv").describe(
+        "Findings CSV for internal publication; not supported with linear or custom.",
+      ),
+      skipExisting: booleanFlag.describe(
+        "Skip findings already recorded for this exact Linear destination.",
+      ),
     }),
     output: z.record(z.string(), z.unknown()).optional(),
     async run({ args, format, formatExplicit, options }) {
@@ -4333,38 +4288,26 @@ export async function main(
         provider: z
           .enum(EXTERNAL_FINDINGS_READERS)
           .describe(
-            "Select the file reader for this report. OpenGrep findings use the semgrep storage provider. Tenable requires --to local and --source-repository-url. CrowdStrike requires --to local.",
+            "Select the file reader for this report. OpenGrep findings use the semgrep storage provider. Tenable and Tenzai require --to local and --source-repository-url. CrowdStrike requires --to local.",
           ),
-        sourceRepositoryUrl: optionValue("--source-repository-url")
-          .optional()
-          .describe(
-            "Source repository URL when required by the selected reader. Checked against the Cloud destination or configured local Git remotes.",
-          ),
-        inspectorProjectArn: optionValue("--inspector-project-arn")
-          .optional()
-          .describe(
-            "Full Inspector project ARN independently verified for --source-repository-url. Required when the report does not identify its repository by URL.",
-          ),
-        trivyScanRoot: optionValue("--trivy-scan-root")
-          .optional()
-          .describe(
-            "Repository-relative directory scanned by Trivy. Use . for the repository root. Required unless Git metadata confirms a whole-checkout scan.",
-          ),
+        sourceRepositoryUrl: optionalValue("--source-repository-url").describe(
+          "Source repository URL when required by the selected reader. Checked against the Cloud destination or configured local Git remotes.",
+        ),
+        inspectorProjectArn: optionalValue("--inspector-project-arn").describe(
+          "Full Inspector project ARN independently verified for --source-repository-url. Required when the report does not identify its repository by URL.",
+        ),
+        trivyScanRoot: optionalValue("--trivy-scan-root").describe(
+          "Repository-relative directory scanned by Trivy. Use . for the repository root. Required unless Git metadata confirms a whole-checkout scan.",
+        ),
         sourceKey: optionValue("--source-key").describe(
           "Stable vendor tenant and finding namespace; not a project selection filter.",
         ),
-        dryRun: z
-          .boolean()
-          .default(false)
-          .describe(
-            "Read and preview the destination and findings without storing them.",
-          ),
-        yes: z
-          .boolean()
-          .default(false)
-          .describe(
-            "Confirm the previewed input without a prompt. Continuum inbox updates require a matching --dry-run.",
-          ),
+        dryRun: booleanFlag.describe(
+          "Read and preview the destination and findings without storing them.",
+        ),
+        yes: booleanFlag.describe(
+          "Confirm the previewed input without a prompt. Continuum inbox updates require a matching --dry-run.",
+        ),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, options, format, formatExplicit, error: incurError }) {
@@ -4749,9 +4692,9 @@ export async function main(
         .describe(
           "Exact alert number, regardless of state; repeat to select a subset.",
         ),
-      githubRef: optionValue("--github-ref")
-        .optional()
-        .describe("Git reference to inspect (default: default branch)."),
+      githubRef: optionalValue("--github-ref").describe(
+        "Git reference to inspect (default: default branch).",
+      ),
       githubState: z
         .enum(GITHUB_ALERT_STATES)
         .default("open")
@@ -4876,16 +4819,12 @@ export async function main(
       args: z.object({ environmentId: continuumEnvironmentId }),
       options: z
         .object({
-          awsProfile: optionValue("--aws-profile")
-            .optional()
-            .describe(
-              "AWS CLI profile (default: use the AWS CLI's configured credentials).",
-            ),
-          awsRegion: optionValue("--aws-region")
-            .optional()
-            .describe(
-              "AWS Region (default: use the AWS CLI's configured Region).",
-            ),
+          awsProfile: optionalValue("--aws-profile").describe(
+            "AWS CLI profile (default: use the AWS CLI's configured credentials).",
+          ),
+          awsRegion: optionalValue("--aws-region").describe(
+            "AWS Region (default: use the AWS CLI's configured Region).",
+          ),
           findingId: continuumFindingId.optional(),
           sourceRoot: optionValue("--source-root")
             .refine(isAbsolute, {
@@ -4895,11 +4834,9 @@ export async function main(
             .describe(
               "Absolute path of the selected checkout for --finding-id.",
             ),
-          repositoryName: optionValue("--repository-name")
-            .optional()
-            .describe(
-              "Exact AWS source name for the selected finding's repository. Required unless the environment has one Git repository and no S3 sources.",
-            ),
+          repositoryName: optionalValue("--repository-name").describe(
+            "Exact AWS source name for the selected finding's repository. Required unless the environment has one Git repository and no S3 sources.",
+          ),
         })
         .refine(
           (options) =>
@@ -5051,11 +4988,9 @@ export async function main(
           .enum(["open-source", "code"])
           .default("open-source")
           .describe("Snyk product to retrieve."),
-        snykApiOrigin: optionValue("--snyk-api-origin")
-          .optional()
-          .describe(
-            "Official regional Snyk API origin (default: https://api.snyk.io).",
-          ),
+        snykApiOrigin: optionalValue("--snyk-api-origin").describe(
+          "Official regional Snyk API origin (default: https://api.snyk.io).",
+        ),
         sourceRepositoryUrl: optionValue("--source-repository-url").describe(
           "Explicit source-control repository mapping for the monitored project.",
         ),
@@ -5135,11 +5070,9 @@ export async function main(
           .enum(SEMGREP_PLATFORM_PRODUCTS)
           .default("sast")
           .describe("Semgrep Findings API issue type."),
-        sourceRepositoryUrl: optionValue("--source-repository-url")
-          .optional()
-          .describe(
-            "Explicit mapping when the Semgrep project has no SCM URL.",
-          ),
+        sourceRepositoryUrl: optionalValue("--source-repository-url").describe(
+          "Explicit mapping when the Semgrep project has no SCM URL.",
+        ),
       }),
       output: z
         .object({
@@ -5192,51 +5125,34 @@ export async function main(
       hint: "Uses the active sonar CLI login. --to cloud also publishes the locally imported selection to the connected Cloud repository. --dry-run saves a private evidence copy for live and saved inputs and prints its path for confirmation.",
       destructive: true,
       args: z.object({
-        capture: z
-          .string()
-          .min(1)
-          .optional()
-          .describe(
-            "Replay a saved sonar-issues/v1 capture without connecting to Sonar.",
-          ),
+        capture: optionalArgument.describe(
+          "Replay a saved sonar-issues/v1 capture without connecting to Sonar.",
+        ),
       }),
       options: z.object({
-        sonarProject: optionValue("--sonar-project")
-          .optional()
-          .describe(
-            "Sonar project key (defaults to the checkout’s project binding).",
-          ),
-        sonarBranch: optionValue("--sonar-branch")
-          .optional()
-          .describe(
-            "Analyzed Sonar branch (default: the project's main branch).",
-          ),
-        sonarPullRequest: optionValue("--sonar-pull-request")
-          .optional()
-          .describe("Sonar pull request key, instead of a branch."),
-        sonarIssue: z
-          .array(optionValue("--sonar-issue"))
-          .default([])
-          .describe(
-            "Exact Sonar security issue key. Repeat to import a selection. Defaults to open and confirmed security issues.",
-          ),
-        sourceRepositoryUrl: optionValue("--source-repository-url")
-          .optional()
-          .describe("Verified repository URL when Sonar has no SCM binding."),
+        sonarProject: optionalValue("--sonar-project").describe(
+          "Sonar project key (defaults to the checkout’s project binding).",
+        ),
+        sonarBranch: optionalValue("--sonar-branch").describe(
+          "Analyzed Sonar branch (default: the project's main branch).",
+        ),
+        sonarPullRequest: optionalValue("--sonar-pull-request").describe(
+          "Sonar pull request key, instead of a branch.",
+        ),
+        sonarIssue: repeatedValue("--sonar-issue").describe(
+          "Exact Sonar security issue key. Repeat to import a selection. Defaults to open and confirmed security issues.",
+        ),
+        sourceRepositoryUrl: optionalValue("--source-repository-url").describe(
+          "Verified repository URL when Sonar has no SCM binding.",
+        ),
         to: z
           .enum(["local", "cloud"])
           .default("local")
           .describe("Store locally, or also publish to Codex Security Cloud."),
-        dryRun: z
-          .boolean()
-          .default(false)
-          .describe(
-            "Save a private evidence copy and preview the selected findings and destinations.",
-          ),
-        yes: z
-          .boolean()
-          .default(false)
-          .describe("Confirm import of the reviewed selection."),
+        dryRun: booleanFlag.describe(
+          "Save a private evidence copy and preview the selected findings and destinations.",
+        ),
+        yes: booleanFlag.describe("Confirm import of the reviewed selection."),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
       async run({ args, options, format, formatExplicit, error: incurError }) {
@@ -5493,30 +5409,19 @@ export async function main(
           ),
       }),
       options: z.object({
-        path: optionValue("--path")
-          .optional()
-          .describe(
-            "Generate SECURITY.md for this repository-relative component directory.",
-          ),
-        knowledgeBase: z
-          .array(optionValue("--knowledge-base"))
-          .default([])
-          .describe(
-            "Add architecture or security-context files; repeat for multiple paths.",
-          ),
-        outputDir: optionValue("--output-dir")
-          .optional()
-          .describe(
-            "Private artifact directory outside the repository (default: Codex Security state).",
-          ),
-        headless: z
-          .boolean()
-          .default(false)
-          .describe("Skip questions and sign-in prompts."),
-        dryRun: z
-          .boolean()
-          .default(false)
-          .describe("Check inputs without generating a policy."),
+        path: optionalValue("--path").describe(
+          "Generate SECURITY.md for this repository-relative component directory.",
+        ),
+        knowledgeBase: repeatedValue("--knowledge-base").describe(
+          "Add architecture or security-context files; repeat for multiple paths.",
+        ),
+        outputDir: optionalValue("--output-dir").describe(
+          "Private artifact directory outside the repository (default: Codex Security state).",
+        ),
+        headless: booleanFlag.describe("Skip questions and sign-in prompts."),
+        dryRun: booleanFlag.describe(
+          "Check inputs without generating a policy.",
+        ),
         auth: SKILL_AUTH_OPTION,
         ...MODEL_OPTIONS.shape,
         provider: PROVIDER_OPTION.describe(
@@ -5681,81 +5586,51 @@ export async function main(
       options: z
         .object({
           config: PROJECT_CONFIG_OPTION,
-          host: z
-            .boolean()
-            .default(false)
-            .describe(
-              "Run one hosted Standard scan over JSON-RPC stdin/stdout; use alone.",
-            ),
-          workflowId: optionValue("--workflow-id")
-            .optional()
-            .describe(
-              "Reuse completed work in the named local findings workflow.",
-            ),
-          cyberAccessProgram: ScanSettingsSchema.shape.cyberAccessProgram,
-          auth: ScanSettingsSchema.shape.auth.describe(
-            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
+          host: booleanFlag.describe(
+            "Run one hosted Standard scan over JSON-RPC stdin/stdout; use alone.",
           ),
-          verbose: z
-            .boolean()
-            .default(false)
-            .describe("Print additional scan diagnostics to stderr."),
-          safetyIdentifier: optionValue("--safety-identifier")
-            .optional()
-            .describe(
-              "Stable hashed end-user ID for model requests (1–64 characters). Requires a compatible Codex runtime.",
-            ),
-          path: z
-            .array(optionValue("--path"))
-            .optional()
-            .meta({ default: [] })
-            .describe(
-              "Scan only PATH; repeat for multiple repository-relative paths.",
-            ),
-          excludePath: z
-            .array(optionValue("--exclude-path"))
-            .optional()
-            .meta({ default: [] })
-            .describe(
-              "Exclude a literal repository-relative file or directory; repeat for multiple paths.",
-            ),
-          knowledgeBase: z
-            .array(optionValue("--knowledge-base"))
-            .optional()
-            .meta({ default: [] })
-            .describe(
-              "Add security-context files or directories; repeat for multiple paths.",
-            ),
-          rubric: optionValue("--rubric")
-            .optional()
-            .describe(
-              "Use this Markdown file to grade findings. Takes precedence over the default severity rubric.",
-            ),
-          scanPromptFile: optionValue("--scan-prompt-file")
-            .optional()
-            .describe("Append scan instructions from FILE."),
-          validationPromptFile: optionValue("--validation-prompt-file")
-            .optional()
-            .describe(
-              "Replace final validation with the workflow in FILE (not Deep).",
-            ),
-          postScanPromptFile: optionValue("--post-scan-prompt-file")
-            .optional()
-            .describe("Run FILE after each scan, including failures."),
-          diff: optionValue("--diff")
-            .optional()
-            .describe("Scan committed Git changes from BASE to --head."),
+          workflowId: optionalValue("--workflow-id").describe(
+            "Reuse completed work in the named local findings workflow.",
+          ),
+          cyberAccessProgram: ScanSettingsSchema.shape.cyberAccessProgram,
+          auth: SCAN_AUTH_OPTION,
+          verbose: VERBOSE_OPTION,
+          safetyIdentifier: optionalValue("--safety-identifier").describe(
+            "Stable hashed end-user ID for model requests (1–64 characters). Requires a compatible Codex runtime.",
+          ),
+          path: optionalRepeatedValue("--path").describe(
+            "Scan only PATH; repeat for multiple repository-relative paths.",
+          ),
+          excludePath: optionalRepeatedValue("--exclude-path").describe(
+            "Exclude a literal repository-relative file or directory; repeat for multiple paths.",
+          ),
+          knowledgeBase: optionalRepeatedValue("--knowledge-base").describe(
+            "Add security-context files or directories; repeat for multiple paths.",
+          ),
+          rubric: optionalValue("--rubric").describe(
+            "Use this Markdown file to grade findings. Takes precedence over the default severity rubric.",
+          ),
+          scanPromptFile: optionalValue("--scan-prompt-file").describe(
+            "Append scan instructions from FILE.",
+          ),
+          validationPromptFile: VALIDATION_PROMPT_OPTION.describe(
+            "Replace final validation with the workflow in FILE (not Deep).",
+          ),
+          postScanPromptFile: POST_SCAN_PROMPT_OPTION,
+          diff: optionalValue("--diff").describe(
+            "Scan committed Git changes from BASE to --head.",
+          ),
           workingTree: z
             .boolean()
             .optional()
             .meta({ default: false })
             .describe("Scan staged and unstaged changes against --base."),
-          head: optionValue("--head")
-            .optional()
-            .describe("Git head ref for --diff (default: HEAD)."),
-          base: optionValue("--base")
-            .optional()
-            .describe("Git base ref for --working-tree (default: HEAD)."),
+          head: optionalValue("--head").describe(
+            "Git head ref for --diff (default: HEAD).",
+          ),
+          base: optionalValue("--base").describe(
+            "Git base ref for --working-tree (default: HEAD).",
+          ),
           mode: ScanSettingsSchema.shape.mode.describe(
             "Scan mode (default: standard); deep supports repository and path targets.",
           ),
@@ -5765,31 +5640,20 @@ export async function main(
             `OpenAI model to use (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
           ).shape,
           provider: PROVIDER_OPTION,
-          outputDir: optionValue("--output-dir")
-            .optional()
-            .describe(
-              "Artifact directory outside the repository (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
-            ),
-          archiveExisting: z
-            .boolean()
-            .default(false)
-            .describe("Archive existing results; requires --output-dir."),
+          outputDir: optionalValue("--output-dir").describe(
+            "Artifact directory outside the repository (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
+          ),
+          archiveExisting: ARCHIVE_EXISTING_OPTION,
           ...RUNTIME_OPTION_SCHEMAS,
           failOnSeverity: FailureSeveritySchema.optional().describe(
             "Exit 1 for findings at or above LEVEL.",
           ),
-          patch: z
-            .boolean()
-            .default(false)
-            .describe(
-              "Patch and verify findings after a scan without a cost limit.",
-            ),
-          validate: z
-            .boolean()
-            .default(false)
-            .describe(
-              "Validate after sealing the scan. Uses the configured provider, or the existing Codex validator. --validate=NAME overrides the provider.",
-            ),
+          patch: booleanFlag.describe(
+            "Patch and verify findings after a scan without a cost limit.",
+          ),
+          validate: booleanFlag.describe(
+            "Validate after sealing the scan. Uses the configured provider, or the existing Codex validator. --validate=NAME overrides the provider.",
+          ),
           patchSeverity: z
             .enum(REPORTABLE_SEVERITIES)
             .optional()
@@ -5802,22 +5666,15 @@ export async function main(
           ),
           ownerSuggestions: ScanSettingsSchema.shape.ownerSuggestions,
           showCost: SHOW_COST_OPTION,
-          headless: z
-            .boolean()
-            .default(false)
-            .describe(
-              "Use plain text progress instead of the interactive dashboard.",
-            ),
-          dryRun: z
-            .boolean()
-            .default(false)
-            .describe("Validate local scan inputs without starting a scan."),
-          mock: z
-            .boolean()
-            .default(false)
-            .describe(
-              "Save synthetic Standard scan findings without calling an LLM.",
-            ),
+          headless: booleanFlag.describe(
+            "Use plain text progress instead of the interactive dashboard.",
+          ),
+          dryRun: booleanFlag.describe(
+            "Validate local scan inputs without starting a scan.",
+          ),
+          mock: booleanFlag.describe(
+            "Save synthetic Standard scan findings without calling an LLM.",
+          ),
         })
         .refine(
           (options) => options.patchSeverity === undefined || options.patch,
@@ -5966,19 +5823,13 @@ export async function main(
             .enum(["csv", "json"])
             .optional()
             .describe("Input format (default: inferred from .csv or .json)."),
-          outputDir: optionValue("--output-dir")
-            .optional()
-            .describe(
-              "Artifact directory (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
-            ),
-          archiveExisting: z
-            .boolean()
-            .default(false)
-            .describe("Archive existing results; requires --output-dir."),
-          dryRun: z
-            .boolean()
-            .default(false)
-            .describe("Validate the input without saving a scan."),
+          outputDir: optionalValue("--output-dir").describe(
+            "Artifact directory (default: Codex Security state; CODEX_SECURITY_STATE_DIR).",
+          ),
+          archiveExisting: ARCHIVE_EXISTING_OPTION,
+          dryRun: booleanFlag.describe(
+            "Validate the input without saving a scan.",
+          ),
         })
         .refine(
           (options) =>
@@ -6124,11 +5975,9 @@ export async function main(
           .describe("Codex Security findings JSON file."),
       }),
       options: z.object({
-        sourceRoot: optionValue("--source-root")
-          .optional()
-          .describe(
-            "Local Git repository (default: current directory); analyzes committed HEAD.",
-          ),
+        sourceRoot: optionalValue("--source-root").describe(
+          "Local Git repository (default: current directory); analyzes committed HEAD.",
+        ),
         ...modelOptions(
           "Model for owner suggestions (default: Codex Security model).",
           "Reasoning effort (default: Codex Security effort).",
@@ -6193,41 +6042,27 @@ export async function main(
         runs: reviewRunsOption.describe(
           `Number of independent classification runs (1–10; default: ${DEFAULT_REVIEW_RUNS}).`,
         ),
-        records: z
-          .boolean()
-          .default(false)
-          .describe(
-            "Classify canonical records through host-provided reviews over version 1 JSON-RPC. Accepts --runs. Hosts can enable CLI diagnostics with the Node condition codex-security-records-logs-v1.",
-          ),
-        reprocess: z
-          .boolean()
-          .default(false)
-          .describe(
-            "Reclassify selected findings even when a matching assessment is saved.",
-          ),
-        scan: optionValue("--scan")
-          .optional()
-          .describe("Saved scan ID, unique prefix, or latest."),
-        scanDir: optionValue("--scan-dir")
-          .optional()
-          .describe("External completed scan directory."),
-        rubric: optionValue("--rubric")
-          .optional()
-          .describe(
-            "Classification policy document. Takes precedence over the default rubric.",
-          ),
-        knowledgeBase: z
-          .array(optionValue("--knowledge-base"))
-          .default([])
-          .describe(
-            "Supporting security context; repeat for more files or directories.",
-          ),
-        findingId: z
-          .array(optionValue("--finding-id"))
-          .default([])
-          .describe(
-            "Classify only this finding ID; repeat to select deduplicated findings.",
-          ),
+        records: booleanFlag.describe(
+          "Classify canonical records through host-provided reviews over version 1 JSON-RPC. Accepts --runs. Hosts can enable CLI diagnostics with the Node condition codex-security-records-logs-v1.",
+        ),
+        reprocess: booleanFlag.describe(
+          "Reclassify selected findings even when a matching assessment is saved.",
+        ),
+        scan: optionalValue("--scan").describe(
+          "Saved scan ID, unique prefix, or latest.",
+        ),
+        scanDir: optionalValue("--scan-dir").describe(
+          "External completed scan directory.",
+        ),
+        rubric: optionalValue("--rubric").describe(
+          "Classification policy document. Takes precedence over the default rubric.",
+        ),
+        knowledgeBase: repeatedValue("--knowledge-base").describe(
+          "Supporting security context; repeat for more files or directories.",
+        ),
+        findingId: repeatedValue("--finding-id").describe(
+          "Classify only this finding ID; repeat to select deduplicated findings.",
+        ),
         ...modelOptions(
           "Model for rubric classification.",
           "Classification reasoning effort (default: medium).",
@@ -6323,26 +6158,18 @@ export async function main(
           .describe(
             "Maximum concurrent dedupe jobs across Luna and Sol; use 1 for serial execution.",
           ),
-        records: z
-          .boolean()
-          .default(false)
-          .describe(
-            "Run the versioned records JSON-RPC protocol on stdin/stdout; use alone.",
-          ),
-        workflowId: optionValue("--workflow-id")
-          .optional()
-          .describe(
-            "Resume the named local findings workflow; reuses its saved scan.",
-          ),
-        scan: optionValue("--scan")
-          .optional()
-          .describe("Saved scan ID, unique prefix, or latest."),
-        allRepositories: z
-          .boolean()
-          .default(false)
-          .describe(
-            "Search all repositories instead of only the saved scan's repository.",
-          ),
+        records: booleanFlag.describe(
+          "Run the versioned records JSON-RPC protocol on stdin/stdout; use alone.",
+        ),
+        workflowId: optionalValue("--workflow-id").describe(
+          "Resume the named local findings workflow; reuses its saved scan.",
+        ),
+        scan: optionalValue("--scan").describe(
+          "Saved scan ID, unique prefix, or latest.",
+        ),
+        allRepositories: booleanFlag.describe(
+          "Search all repositories instead of only the saved scan's repository.",
+        ),
         findingsUrl: z
           .string()
           .url()
@@ -6525,63 +6352,45 @@ export async function main(
       destructive: true,
       alias: { config: "c" },
       args: z.object({
-        repository: z
-          .string()
-          .min(1)
-          .optional()
-          .describe("Project directory (default: current directory)."),
+        repository: optionalArgument.describe(
+          "Project directory (default: current directory).",
+        ),
       }),
       options: z
         .object({
           config: PROJECT_CONFIG_OPTION,
           cyberAccessProgram: ScanSettingsSchema.shape.cyberAccessProgram,
-          auth: ScanSettingsSchema.shape.auth.describe(
-            "Select ChatGPT, OPENAI_API_KEY/CODEX_API_KEY, or automatic authentication (default: auto).",
+          auth: SCAN_AUTH_OPTION,
+          component: repeatedValue("--component").describe(
+            "Scan this repository-relative path as a component; repeat for more.",
           ),
-          component: z
-            .array(optionValue("--component"))
-            .default([])
-            .describe(
-              "Scan this repository-relative path as a component; repeat for more.",
-            ),
-          componentsFile: optionValue("--components-file")
-            .optional()
-            .describe("Read a component plan from JSON."),
-          auto: z
-            .boolean()
-            .default(false)
-            .describe("Ask Codex to divide the project into components."),
-          planOnly: z
-            .boolean()
-            .default(false)
-            .describe(
-              "Save components.json and print a command to run it. Explicit plans work offline.",
-            ),
-          headless: z
-            .boolean()
-            .default(false)
-            .describe(
-              "Print status lines instead of the interactive dashboard.",
-            ),
-          outputDir: optionValue("--output-dir")
-            .optional()
-            .describe("Empty results directory outside the repository."),
+          componentsFile: optionalValue("--components-file").describe(
+            "Read a component plan from JSON.",
+          ),
+          auto: booleanFlag.describe(
+            "Ask Codex to divide the project into components.",
+          ),
+          planOnly: booleanFlag.describe(
+            "Save components.json and print a command to run it. Explicit plans work offline.",
+          ),
+          headless: booleanFlag.describe(
+            "Print status lines instead of the interactive dashboard.",
+          ),
+          outputDir: optionalValue("--output-dir").describe(
+            "Empty results directory outside the repository.",
+          ),
           workers: positiveInteger
             .default(4)
             .describe(
               "Concurrent component scans; deep workers are configured per scan.",
             ),
-          knowledgeBase: z
-            .array(optionValue("--knowledge-base"))
-            .optional()
-            .meta({ default: [] })
-            .describe("Read shared security docs for every component."),
-          scanPromptFile: optionValue("--scan-prompt-file")
-            .optional()
-            .describe("Append instructions from FILE to every scan."),
-          postScanPromptFile: optionValue("--post-scan-prompt-file")
-            .optional()
-            .describe("Run FILE after each scan, including failures."),
+          knowledgeBase: optionalRepeatedValue("--knowledge-base").describe(
+            "Read shared security docs for every component.",
+          ),
+          scanPromptFile: optionalValue("--scan-prompt-file").describe(
+            "Append instructions from FILE to every scan.",
+          ),
+          postScanPromptFile: POST_SCAN_PROMPT_OPTION,
           ...modelOptions("Model for planning and component scans.").shape,
           provider: PROVIDER_OPTION,
           maxCost: ScanSettingsSchema.shape.maxCostUsd.describe(
@@ -6851,22 +6660,15 @@ export async function main(
       destructive: true,
       alias: { config: "c" },
       args: z.object({
-        input: z
-          .string()
-          .min(1)
-          .optional()
-          .describe(
-            "CSV repository list; omit to discover repositories interactively.",
-          ),
+        input: optionalArgument.describe(
+          "CSV repository list; omit to discover repositories interactively.",
+        ),
       }),
       options: z.object({
         config: PROJECT_CONFIG_OPTION,
-        recover: z
-          .boolean()
-          .default(false)
-          .describe(
-            "Recover failed or interrupted attempts in an existing campaign, preserving their artifacts and checkouts.",
-          ),
+        recover: booleanFlag.describe(
+          "Recover failed or interrupted attempts in an existing campaign, preserving their artifacts and checkouts.",
+        ),
         outputDir: z
           .string()
           .min(1, "--output-dir must not be empty.")
@@ -6874,11 +6676,9 @@ export async function main(
           .describe(
             "Results directory. Required with a CSV and used as the initial directory in the wizard.",
           ),
-        knowledgeBase: z
-          .array(optionValue("--knowledge-base"))
-          .optional()
-          .meta({ default: [] })
-          .describe("Read shared security docs for every repository."),
+        knowledgeBase: optionalRepeatedValue("--knowledge-base").describe(
+          "Read shared security docs for every repository.",
+        ),
         workers: positiveInteger
           .default(4)
           .describe(
@@ -6887,17 +6687,13 @@ export async function main(
         mode: ScanSettingsSchema.shape.mode.describe(
           "Default scan mode for repositories without a CSV mode.",
         ),
-        scanPromptFile: optionValue("--scan-prompt-file")
-          .optional()
-          .describe("Append instructions from FILE to every scan."),
-        validationPromptFile: optionValue("--validation-prompt-file")
-          .optional()
-          .describe(
-            "Replace final validation with FILE for every standard scan.",
-          ),
-        postScanPromptFile: optionValue("--post-scan-prompt-file")
-          .optional()
-          .describe("Run FILE after each scan, including failures."),
+        scanPromptFile: optionalValue("--scan-prompt-file").describe(
+          "Append instructions from FILE to every scan.",
+        ),
+        validationPromptFile: VALIDATION_PROMPT_OPTION.describe(
+          "Replace final validation with FILE for every standard scan.",
+        ),
+        postScanPromptFile: POST_SCAN_PROMPT_OPTION,
         ...modelOptions(
           `OpenAI model for each repository (default: ${DEFAULT_SCAN_MODEL_CONFIGURATION.model}).`,
         ).shape,
@@ -7186,35 +6982,27 @@ export async function main(
             .enum(["findings", "threat-model"])
             .default("findings")
             .describe("Saved artifact to export."),
-          scan: optionValue("--scan")
-            .optional()
-            .describe(
-              "Saved scan ID, unique prefix, or latest completed scan ('latest').",
-            ),
+          scan: optionalValue("--scan").describe(
+            "Saved scan ID, unique prefix, or latest completed scan ('latest').",
+          ),
           exportFormat: z
             .enum(["csv", "html", "json", "sarif", "md", "servicenow-avit"])
             .optional()
             .describe(
               "Findings: csv, html, json, servicenow-avit, or sarif (default). Threat models use md.",
             ),
-          avitTemplate: optionValue("--avit-template")
-            .optional()
-            .describe(
-              "Per-application CSV template required for servicenow-avit exports.",
-            ),
-          output: optionValue("--output")
-            .optional()
-            .describe(
-              "FILE to replace or '-' for raw stdout. Default filenames are created only if absent.",
-            ),
-          sourceRoot: optionValue("--source-root")
-            .optional()
-            .describe(
-              "Repository checkout used for SARIF source-line fingerprints.",
-            ),
-          python: optionValue("--python")
-            .optional()
-            .describe("Python interpreter for the bundled plugin exporter."),
+          avitTemplate: optionalValue("--avit-template").describe(
+            "Per-application CSV template required for servicenow-avit exports.",
+          ),
+          output: optionalValue("--output").describe(
+            "FILE to replace or '-' for raw stdout. Default filenames are created only if absent.",
+          ),
+          sourceRoot: optionalValue("--source-root").describe(
+            "Repository checkout used for SARIF source-line fingerprints.",
+          ),
+          python: optionalValue("--python").describe(
+            "Python interpreter for the bundled plugin exporter.",
+          ),
         })
         .refine(
           (options) =>
@@ -7374,36 +7162,26 @@ export async function main(
       }),
       options: z.object({
         config: PROJECT_CONFIG_OPTION,
-        scan: optionValue("--scan")
-          .optional()
-          .describe(
-            "Submit open findings from a saved scan ID or latest using the configured provider.",
-          ),
-        records: z
-          .boolean()
-          .default(false)
-          .describe(
-            "Run the versioned validation JSON-RPC protocol on stdin/stdout; use alone.",
-          ),
+        scan: optionalValue("--scan").describe(
+          "Submit open findings from a saved scan ID or latest using the configured provider.",
+        ),
+        records: booleanFlag.describe(
+          "Run the versioned validation JSON-RPC protocol on stdin/stdout; use alone.",
+        ),
         auth: SKILL_AUTH_OPTION,
         ...SKILL_CONFIG_OPTIONS.shape,
-        context: optionValue("--context")
-          .optional()
-          .describe("Add inline security context and reviewer feedback."),
-        contextFile: optionValue("--context-file")
-          .optional()
-          .describe(
-            "Read security context and reviewer feedback from a UTF-8 file.",
-          ),
-        knowledgeBase: z
-          .array(optionValue("--knowledge-base"))
-          .default([])
-          .describe(
-            "Add context files or directories (text, PDF, DOCX); repeat for multiple paths.",
-          ),
-        outputSchema: optionValue("--output-schema")
-          .optional()
-          .describe("Return JSON matching a Codex-supported JSON Schema file."),
+        context: optionalValue("--context").describe(
+          "Add inline security context and reviewer feedback.",
+        ),
+        contextFile: optionalValue("--context-file").describe(
+          "Read security context and reviewer feedback from a UTF-8 file.",
+        ),
+        knowledgeBase: repeatedValue("--knowledge-base").describe(
+          "Add context files or directories (text, PDF, DOCX); repeat for multiple paths.",
+        ),
+        outputSchema: optionalValue("--output-schema").describe(
+          "Return JSON matching a Codex-supported JSON Schema file.",
+        ),
       }),
       async run({ options, format }) {
         let knowledgeBase: PreparedKnowledgeBase | undefined;
@@ -7593,12 +7371,9 @@ export async function main(
           ),
       }),
       options: z.object({
-        host: z
-          .boolean()
-          .default(false)
-          .describe(
-            "Run one hosted fix verification over JSON-RPC stdin/stdout; use alone.",
-          ),
+        host: booleanFlag.describe(
+          "Run one hosted fix verification over JSON-RPC stdin/stdout; use alone.",
+        ),
         verificationMode: VERIFICATION_MODE_OPTION,
         auth: SKILL_AUTH_OPTION,
         ...MODEL_OPTIONS.shape,
@@ -7843,34 +7618,24 @@ export async function main(
           ),
       }),
       options: z.object({
-        host: z
-          .boolean()
-          .default(false)
-          .describe(
-            "Run one hosted patch over JSON-RPC stdin/stdout; use alone.",
-          ),
+        host: booleanFlag.describe(
+          "Run one hosted patch over JSON-RPC stdin/stdout; use alone.",
+        ),
         verificationMode: VERIFICATION_MODE_OPTION,
         auth: SKILL_AUTH_OPTION,
         ...MODEL_OPTIONS.shape,
-        externalSandbox: z
-          .boolean()
-          .default(false)
-          .describe(
-            "Use the container's isolation instead of the Codex sandbox (default: false).",
-          ),
+        externalSandbox: booleanFlag.describe(
+          "Use the container's isolation instead of the Codex sandbox (default: false).",
+        ),
         ...remediationInputOptions("Patch").shape,
         createPr: CREATE_PR_OPTION,
         assessPatchRisk: ASSESS_PATCH_RISK_OPTION,
-        validationPromptFile: optionValue("--validation-prompt-file")
-          .optional()
-          .describe(
-            "Read custom patch validation instructions from a UTF-8 file.",
-          ),
-        resumePr: optionValue("--resume-pr")
-          .optional()
-          .describe(
-            "Resume publication of a saved patch branch without patching again.",
-          ),
+        validationPromptFile: VALIDATION_PROMPT_OPTION.describe(
+          "Read custom patch validation instructions from a UTF-8 file.",
+        ),
+        resumePr: optionalValue("--resume-pr").describe(
+          "Resume publication of a saved patch branch without patching again.",
+        ),
         codex: SKILL_CONFIG_OPTIONS.shape.codex,
       }),
       examples: [
@@ -8188,18 +7953,13 @@ export async function main(
         hint: "Check the effective sign-in with codex-security login status. For a remote machine use --device-auth if your workspace permits it. For SSH, on your local machine run:\n    ssh -L 1455:localhost:1455 user@remote\nThen, in that SSH session:\n    codex-security login\nOpen the sign-in URL locally and keep SSH connected until login finishes.\nhttps://learn.chatgpt.com/docs/auth?surface=cli#cli-fallback-forward-the-localhost-callback-over-ssh",
         destructive: true,
         options: z.object({
-          deviceAuth: z
-            .boolean()
-            .default(false)
-            .describe("Use device auth if your workspace allows it."),
-          withApiKey: z
-            .boolean()
-            .default(false)
-            .describe("Read an API key from stdin."),
-          withAccessToken: z
-            .boolean()
-            .default(false)
-            .describe("Read an access token from stdin."),
+          deviceAuth: booleanFlag.describe(
+            "Use device auth if your workspace allows it.",
+          ),
+          withApiKey: booleanFlag.describe("Read an API key from stdin."),
+          withAccessToken: booleanFlag.describe(
+            "Read an access token from stdin.",
+          ),
         }),
         examples: [
           { options: {}, description: "Sign in using the browser." },
@@ -8359,11 +8119,9 @@ export async function main(
       hint: "Use the generated file with scan . -c FILE --dry-run. Existing files are never overwritten.",
       destructive: true,
       args: z.object({
-        file: z
-          .string()
-          .min(1)
-          .optional()
-          .describe("YAML or JSON destination (default: codex-security.yaml)."),
+        file: optionalArgument.describe(
+          "YAML or JSON destination (default: codex-security.yaml).",
+        ),
       }),
       output: z.object({ path: z.string() }).optional(),
       async run({ args, format }) {
@@ -8400,22 +8158,15 @@ export async function main(
       description: "Send feedback to OpenAI and return a feedback ID.",
       destructive: true,
       args: z.object({
-        scanId: z
-          .string()
-          .min(1)
-          .optional()
-          .describe(
-            "Scan ID or unique prefix (default: most recently started scan in the current repository).",
-          ),
+        scanId: optionalArgument.describe(
+          "Scan ID or unique prefix (default: most recently started scan in the current repository).",
+        ),
       }),
       options: z.object({
         reason: z.string().trim().min(1).describe("Describe the problem."),
-        includeLogs: z
-          .boolean()
-          .default(false)
-          .describe(
-            "Upload diagnostic logs, including scan and worker conversations and tool output. Defaults to off.",
-          ),
+        includeLogs: booleanFlag.describe(
+          "Upload diagnostic logs, including scan and worker conversations and tool output. Defaults to off.",
+        ),
       }),
       output: z.object({
         feedbackId: z.string(),

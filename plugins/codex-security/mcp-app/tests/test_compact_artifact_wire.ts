@@ -5,7 +5,6 @@ import { mkdir, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { createInterface } from "node:readline";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
@@ -14,9 +13,7 @@ import { importSource } from "./import-module.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
 const { registerCompactArtifactTools } = await importSource(
-  fileURLToPath(
-    new URL("../src/server/compact-artifact-tools.ts", import.meta.url),
-  ),
+  "src/server/compact-artifact-tools.ts",
   { loader: { ".md": "text" } },
 );
 const sdkRequire = createRequire(import.meta.resolve("@openai/codex-sdk"));

@@ -11,6 +11,7 @@ import {
   readScanLogs,
 } from "../src/scan-logs.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
+import { legacyMessage, parentMetadata } from "./support/usage-rollout.js";
 
 const { temporaryDirectory: temporaryHome, cleanup } = createApiTestFixtures(
   "codex-security-scan-logs-",
@@ -18,13 +19,27 @@ const { temporaryDirectory: temporaryHome, cleanup } = createApiTestFixtures(
 
 afterEach(cleanup);
 
+function parentScan() {
+  return {
+    scanId: "scan-1",
+    continuationThreadId: "parent",
+    executionThreadIds: ["parent"],
+  };
+}
+
+function readParentLogs(codexHome: string | readonly string[]) {
+  return readScanLogs({ scanId: "scan-1", threadId: "parent", codexHome });
+}
+
 async function writeSession(
   home: string,
   threadId: string,
   events: Record<string, unknown>[],
-  parentThreadId?: string,
-  startedAt?: string,
-  workingDirectory?: string,
+  {
+    parent,
+    timestamp,
+    cwd,
+  }: { parent?: string; timestamp?: string; cwd?: string } = {},
 ): Promise<void> {
   const directory = join(home, "sessions", "2026", "08", "11");
   await mkdir(directory, { recursive: true });
@@ -33,17 +48,9 @@ async function writeSession(
       type: "session_meta",
       payload: {
         id: threadId,
-        ...(startedAt === undefined ? {} : { timestamp: startedAt }),
-        ...(workingDirectory === undefined ? {} : { cwd: workingDirectory }),
-        ...(parentThreadId === undefined
-          ? {}
-          : {
-              source: {
-                subagent: {
-                  thread_spawn: { parent_thread_id: parentThreadId },
-                },
-              },
-            }),
+        ...(timestamp === undefined ? {} : { timestamp }),
+        ...(cwd === undefined ? {} : { cwd }),
+        ...(parent === undefined ? {} : parentMetadata(parent, "source")),
       },
     },
     ...events,
@@ -104,7 +111,7 @@ describe("saved scan logs", () => {
           home,
           "worker",
           copies[index]!.map((event) => activity[event]!),
-          "parent",
+          { parent: "parent" },
         );
       }
       if (compressed) {
@@ -126,11 +133,7 @@ describe("saved scan logs", () => {
         );
       }
       const result = await readSavedScanLogs(
-        {
-          scanId: "scan-1",
-          continuationThreadId: "parent",
-          executionThreadIds: ["parent"],
-        },
+        parentScan(),
         archived ? [...homes].reverse() : homes,
       );
       expect(result.sessions.map(({ threadId }) => threadId)).toEqual([
@@ -161,16 +164,9 @@ describe("saved scan logs", () => {
     const second = await temporaryHome();
     const event = commandEvent("scan work", "scan-call");
     await writeSession(first, "parent", []);
-    await writeSession(first, "worker", [event], "unrelated");
-    await writeSession(second, "worker", [event, event], "parent");
-    const result = await readSavedScanLogs(
-      {
-        scanId: "scan-1",
-        continuationThreadId: "parent",
-        executionThreadIds: ["parent"],
-      },
-      [first, second],
-    );
+    await writeSession(first, "worker", [event], { parent: "unrelated" });
+    await writeSession(second, "worker", [event, event], { parent: "parent" });
+    const result = await readSavedScanLogs(parentScan(), [first, second]);
     expect(result.sessions.map(({ threadId }) => threadId)).toEqual(["parent"]);
   });
 
@@ -185,48 +181,30 @@ describe("saved scan logs", () => {
       const home = await temporaryHome();
       const scanDir = join(home, "scan");
       const cwd = join(scanDir, "artifacts", "deep_discovery");
-      await writeSession(home, "owner", [], undefined, "2026-08-01T00:00:00Z");
-      await writeSession(home, "other-task", [], "owner");
-      await writeSession(
-        home,
-        "worker",
-        [],
-        undefined,
-        "2026-08-02T00:30:00Z",
-        join(cwd, "workers", "discovery-0001", "output"),
-      );
-      await writeSession(
-        home,
-        "replacement-comparison",
-        [],
-        undefined,
-        "2026-08-02T02:00:00Z",
+      await writeSession(home, "owner", [], {
+        timestamp: "2026-08-01T00:00:00Z",
+      });
+      await writeSession(home, "other-task", [], { parent: "owner" });
+      await writeSession(home, "worker", [], {
+        timestamp: "2026-08-02T00:30:00Z",
+        cwd: join(cwd, "workers", "discovery-0001", "output"),
+      });
+      await writeSession(home, "replacement-comparison", [], {
+        timestamp: "2026-08-02T02:00:00Z",
         cwd,
-      );
-      await writeSession(
-        home,
-        "older-comparison",
-        [],
-        undefined,
-        "2026-08-01T01:00:00Z",
+      });
+      await writeSession(home, "older-comparison", [], {
+        timestamp: "2026-08-01T01:00:00Z",
         cwd,
-      );
-      await writeSession(
-        home,
-        "comparison",
-        [],
-        undefined,
-        "2026-08-02T01:00:00Z",
+      });
+      await writeSession(home, "comparison", [], {
+        timestamp: "2026-08-02T01:00:00Z",
         cwd,
-      );
-      await writeSession(
-        home,
-        "unbound-sibling",
-        [],
-        undefined,
-        "2026-08-02T01:00:00Z",
-        join(home, "scan-other", "artifacts"),
-      );
+      });
+      await writeSession(home, "unbound-sibling", [], {
+        timestamp: "2026-08-02T01:00:00Z",
+        cwd: join(home, "scan-other", "artifacts"),
+      });
       const digest = createHash("sha256")
         .update(layout === "unrelated short archive" ? "scan-other" : "scan")
         .digest("hex");
@@ -272,7 +250,7 @@ describe("saved scan logs", () => {
       desktop,
       "worker-child",
       [commandEvent("archived child", "child-call")],
-      "worker",
+      { parent: "worker" },
     );
     await writeSession(desktop, "unrelated", [
       commandEvent("unrelated archived scan", "unrelated-call"),
@@ -281,7 +259,7 @@ describe("saved scan logs", () => {
     await writeSession(cli, "worker", [
       commandEvent("active worker", "worker-call"),
     ]);
-    await writeSession(cli, "owner-child", [], "desktop-owner");
+    await writeSession(cli, "owner-child", [], { parent: "desktop-owner" });
     await writeSession(cli, "other-scan", [
       commandEvent("unrelated CLI scan", "other-call"),
     ]);
@@ -319,12 +297,14 @@ describe("saved scan logs", () => {
     "feedback collects known worker descendants without the owner log with %s continuation",
     async (_label, continuationThreadId) => {
       const home = await temporaryHome();
-      await writeSession(home, "owner-child", [], "missing-owner");
+      await writeSession(home, "owner-child", [], { parent: "missing-owner" });
       await writeSession(home, "worker", [
         commandEvent("independent worker", "worker-call"),
       ]);
-      await writeSession(home, "worker-child", [], "worker");
-      await writeSession(home, "unrelated-child", [], "another-owner");
+      await writeSession(home, "worker-child", [], { parent: "worker" });
+      await writeSession(home, "unrelated-child", [], {
+        parent: "another-owner",
+      });
       const scan = {
         scanId: "scan-1",
         ...(continuationThreadId === undefined ? {} : { continuationThreadId }),
@@ -375,14 +355,10 @@ describe("saved scan logs", () => {
         taskStarted("followup-turn", afterCompletion),
         commandEvent("post-scan followup", "post-call"),
       ];
-      await writeSession(
-        home,
-        "parent",
-        [...resumed, ...followup],
-        undefined,
-        "2026-08-11T12:00:00.000Z",
-        scanDirectory,
-      );
+      await writeSession(home, "parent", [...resumed, ...followup], {
+        timestamp: "2026-08-11T12:00:00.000Z",
+        cwd: scanDirectory,
+      });
       for (const [threadId, startedAt, directory] of [
         ["recorded-worker", afterCompletion, artifacts],
         ["resumed-worker", justBeforeCompletion, artifacts],
@@ -393,15 +369,17 @@ describe("saved scan logs", () => {
           join(home, "other-scan", "artifacts"),
         ],
       ] as const) {
-        await writeSession(home, threadId, [], undefined, startedAt, directory);
+        await writeSession(home, threadId, [], {
+          timestamp: startedAt,
+          cwd: directory,
+        });
       }
 
       await writeSession(
         home,
         "followup-child",
         [commandEvent("post-scan child work", "child-call")],
-        "parent",
-        afterCompletion,
+        { parent: "parent", timestamp: afterCompletion },
       );
 
       const result = await readSavedScanLogs(
@@ -459,7 +437,7 @@ describe("saved scan logs", () => {
       home,
       "worker",
       [commandEvent("available worker", "worker-call")],
-      "parent",
+      { parent: "parent" },
     );
     const parentPath = join(
       home,
@@ -482,15 +460,9 @@ describe("saved scan logs", () => {
       },
     );
     try {
-      const result = await readSavedScanLogs(
-        {
-          scanId: "scan-1",
-          continuationThreadId: "parent",
-          executionThreadIds: ["parent"],
-        },
-        home,
-        { allowMissingRoot: true },
-      );
+      const result = await readSavedScanLogs(parentScan(), home, {
+        allowMissingRoot: true,
+      });
       expect(removed).toBe(true);
       expect(result.events.map(({ threadId }) => threadId)).toEqual([
         "worker",
@@ -529,20 +501,13 @@ describe("saved scan logs", () => {
           },
         },
       ],
-      "parent",
+      { parent: "parent" },
     );
     await writeSession(home, "unrelated", [
-      {
-        type: "event_msg",
-        payload: { type: "agent_message", message: "private unrelated scan" },
-      },
+      legacyMessage("private unrelated scan"),
     ]);
 
-    const result = await readScanLogs({
-      scanId: "scan-1",
-      threadId: "parent",
-      codexHome: home,
-    });
+    const result = await readParentLogs(home);
 
     expect(result.sessions.map(({ threadId }) => threadId).sort()).toEqual([
       "parent",
@@ -573,15 +538,13 @@ describe("saved scan logs", () => {
       home,
       "parent",
       [commandEvent("parent work", "parent-call")],
-      undefined,
-      undefined,
-      "/scan",
+      { cwd: "/scan" },
     );
     await writeSession(
       home,
       "worker",
       [commandEvent("worker work", "worker-call")],
-      "parent",
+      { parent: "parent" },
     );
     const directory = join(home, "sessions", "2026", "08", "11");
     for (const threadId of ["parent", "worker"]) {
@@ -601,11 +564,7 @@ describe("saved scan logs", () => {
       workingDirectory: "/scan",
       path: join(directory, "rollout-parent.jsonl.zst"),
     });
-    const result = await readScanLogs({
-      scanId: "scan-1",
-      threadId: "parent",
-      codexHome: home,
-    });
+    const result = await readParentLogs(home);
     expect(result.events).toEqual([
       expect.objectContaining({ threadId: "parent" }),
       {
@@ -652,9 +611,7 @@ describe("saved scan logs", () => {
         tail.subarray(0, tail.length - 1),
       ]),
     );
-    await expect(
-      readScanLogs({ scanId: "scan-1", threadId: "parent", codexHome: home }),
-    ).rejects.toThrow();
+    await expect(readParentLogs(home)).rejects.toThrow();
   });
 
   test("excludes inherited parent history from worker logs", async () => {
@@ -676,13 +633,7 @@ describe("saved scan logs", () => {
             started_at: Date.parse("2026-08-11T12:00:00.000Z") / 1_000,
           },
         },
-        {
-          type: "event_msg",
-          payload: {
-            type: "agent_message",
-            message: "PRIVATE PRE-SCAN CONVERSATION",
-          },
-        },
+        legacyMessage("PRIVATE PRE-SCAN CONVERSATION"),
         {
           type: "event_msg",
           payload: {
@@ -690,23 +641,12 @@ describe("saved scan logs", () => {
             started_at: Math.floor(Date.parse(startedAt) / 1_000),
           },
         },
-        {
-          type: "event_msg",
-          payload: {
-            type: "agent_message",
-            message: "Reviewing authorization",
-          },
-        },
+        legacyMessage("Reviewing authorization"),
       ],
-      "parent",
-      startedAt,
+      { parent: "parent", timestamp: startedAt },
     );
 
-    const result = await readScanLogs({
-      scanId: "scan-1",
-      threadId: "parent",
-      codexHome: home,
-    });
+    const result = await readParentLogs(home);
     expect(JSON.stringify(result)).toContain("Reviewing authorization");
     expect(JSON.stringify(result)).not.toContain("PRIVATE PRE-SCAN");
   });
@@ -715,14 +655,10 @@ describe("saved scan logs", () => {
     const home = await temporaryHome();
     const scanDirectory = join(home, "scans", "current");
     const artifacts = join(scanDirectory, "artifacts");
-    await writeSession(
-      home,
-      "parent",
-      [],
-      undefined,
-      "2026-08-11T12:00:00.900Z",
-      scanDirectory,
-    );
+    await writeSession(home, "parent", [], {
+      timestamp: "2026-08-11T12:00:00.900Z",
+      cwd: scanDirectory,
+    });
     const workerDirectory = join(
       artifacts,
       "deep_discovery",
@@ -734,21 +670,24 @@ describe("saved scan logs", () => {
       home,
       "worker",
       [commandEvent("review current worker", "worker-call")],
-      undefined,
-      "2026-08-11T12:00:00.950Z",
-      process.platform === "win32"
-        ? workerDirectory.toUpperCase()
-        : workerDirectory,
+      {
+        timestamp: "2026-08-11T12:00:00.950Z",
+        cwd:
+          process.platform === "win32"
+            ? workerDirectory.toUpperCase()
+            : workerDirectory,
+      },
     );
     await writeSession(
       home,
       "reducer",
       [commandEvent("reduce current findings", "reducer-call")],
-      undefined,
-      "2026-08-11T12:02:00.000Z",
-      process.platform === "win32" ? artifacts.toUpperCase() : artifacts,
+      {
+        timestamp: "2026-08-11T12:02:00.000Z",
+        cwd: process.platform === "win32" ? artifacts.toUpperCase() : artifacts,
+      },
     );
-    await writeSession(home, "worker-child", [], "worker");
+    await writeSession(home, "worker-child", [], { parent: "worker" });
     for (const [threadId, directory, startedAt] of [
       [
         "stale-worker",
@@ -778,18 +717,16 @@ describe("saved scan logs", () => {
         home,
         threadId,
         [commandEvent(`exclude ${threadId}`, `${threadId}-call`)],
-        undefined,
-        startedAt,
-        directory,
+        { timestamp: startedAt, cwd: directory },
       );
     }
     await writeSession(
       home,
       "unknown-start",
       [commandEvent("exclude unknown-start", "unknown-call")],
-      undefined,
-      undefined,
-      join(artifacts, "deep_discovery", "workers", "unknown", "output"),
+      {
+        cwd: join(artifacts, "deep_discovery", "workers", "unknown", "output"),
+      },
     );
 
     const result = await readScanLogs({
@@ -816,29 +753,34 @@ describe("saved scan logs", () => {
     const original = join(home, "scans", "results");
     const archived = `${original}.previous-20260811T120300-a1b2c3d4`;
     const completedAt = "2026-08-11T12:02:00.000Z";
-    await writeSession(
-      home,
-      "archived-parent",
-      [],
-      undefined,
-      "2026-08-11T12:00:00.000Z",
-      original,
-    );
+    await writeSession(home, "archived-parent", [], {
+      timestamp: "2026-08-11T12:00:00.000Z",
+      cwd: original,
+    });
     await writeSession(
       home,
       "archived-worker",
       [commandEvent("review archived scan", "archived-call")],
-      undefined,
-      "2026-08-11T12:01:00.000Z",
-      join(original, "artifacts", "deep_discovery", "workers", "old", "output"),
+      {
+        timestamp: "2026-08-11T12:01:00.000Z",
+        cwd: join(
+          original,
+          "artifacts",
+          "deep_discovery",
+          "workers",
+          "old",
+          "output",
+        ),
+      },
     );
     await writeSession(
       home,
       "replacement-worker",
       [commandEvent("PRIVATE REPLACEMENT SCAN", "replacement-call")],
-      undefined,
-      "2026-08-11T12:03:00.000Z",
-      join(original, "artifacts"),
+      {
+        timestamp: "2026-08-11T12:03:00.000Z",
+        cwd: join(original, "artifacts"),
+      },
     );
 
     const options = {
@@ -1005,11 +947,7 @@ describe("saved scan logs", () => {
       );
 
       try {
-        const result = await readScanLogs({
-          scanId: "scan-1",
-          threadId: "parent",
-          codexHome: homes,
-        });
+        const result = await readParentLogs(homes);
         expect(result.sessions.map(({ threadId }) => threadId)).toEqual([
           "parent",
         ]);
@@ -1036,11 +974,7 @@ describe("saved scan logs", () => {
     );
     await writeFile(path, `not json\n42\n${await readFile(path, "utf8")}`);
 
-    const result = await readScanLogs({
-      scanId: "scan-1",
-      threadId: "parent",
-      codexHome: home,
-    });
+    const result = await readParentLogs(home);
 
     expect(result.events.at(-1)?.["event"]).toMatchObject({
       payload: { output },

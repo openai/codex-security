@@ -26,6 +26,7 @@ import { TestClient } from "./support/api-client.js";
 import {
   codexFactory,
   completedEvents,
+  completedTurn,
   failedPostScanEvents,
   preparedRuntime,
 } from "./support/api-events.js";
@@ -271,16 +272,7 @@ describe("completed scan follow-up instructions", () => {
               text: "Follow-up complete.",
             },
           };
-          yield {
-            type: "turn.completed",
-            usage: {
-              input_tokens: 1000,
-              cached_input_tokens: 0,
-              cache_write_input_tokens: 0,
-              output_tokens: 100,
-              reasoning_output_tokens: 0,
-            },
-          };
+          yield completedTurn({ input_tokens: 1000, output_tokens: 100 });
         },
       });
       try {
