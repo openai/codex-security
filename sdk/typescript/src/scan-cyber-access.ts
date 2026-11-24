@@ -21,7 +21,6 @@ import {
   CODEX_AUTH_CONFIG_KEYS,
   hasCommandAuth,
   inlineToml,
-  resolveCodexProfile,
   writeCodexConfig,
   type JsonObject,
   type JsonValue,
@@ -113,21 +112,15 @@ function openAiProvider(providers: unknown) {
   return asRecord(asRecord(providers)?.["openai"]);
 }
 
-// File settings are below the SDK's literal dotted flags. TOML normalization
-// places scalars before tables; a whole-table flag can also clear an inherited URL.
+// Catalog URLs use private provider files. A remaining whole-table override
+// can clear an inherited URL when Codex replaces the provider table.
 function catalogRoute(
   config: JsonObject,
   nativeProfile = false,
 ): { url?: string } | undefined {
   const table = asRecord(config["model_providers.openai"]);
-  const override = table?.["model_catalog_url"];
-  if (typeof override === "string") return { url: override };
   if (table && (nativeProfile || !Object.keys(table).length)) return {};
-  const leaf = config["model_providers.openai.model_catalog_url"];
-  const url =
-    typeof leaf === "string"
-      ? leaf
-      : openAiProvider(config["model_providers"])?.["model_catalog_url"];
+  const url = openAiProvider(config["model_providers"])?.["model_catalog_url"];
   return typeof url === "string" ? { url } : undefined;
 }
 
@@ -283,14 +276,15 @@ export async function resolveScanCyberAccessProgram({
   command,
   cwd,
   environment,
-  config,
+  config: resolved,
   model,
   nativeProfile,
   signal,
 }: ScanCyberAccessOptions): Promise<CyberAccessProgram | undefined> {
   if (command.args?.length || !isBundledExecutable(command.command))
     return undefined;
-  const resolved = resolveCodexProfile(config);
+  // The launcher has already resolved its profile. Re-serializing into TOML
+  // here would move dotted overrides before the tables they override.
   if (
     resolved["daybreak"] != null ||
     (resolved["model_provider"] ?? "openai") !== "openai" ||

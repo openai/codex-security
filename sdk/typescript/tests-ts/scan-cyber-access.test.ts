@@ -6,7 +6,12 @@ import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { scanPreflightCodexConfig } from "../src/api.js";
 import { resolveBundledCodexExecutable } from "../src/codex-sdk-environment.js";
 import { planComponents } from "../src/component-plan.js";
-import type { JsonObject } from "../src/config.js";
+import {
+  resolveCodexProfile,
+  structuredCodexConfig,
+  type JsonObject,
+} from "../src/config.js";
+import { restoreProviderProfile } from "../src/provider-profile.js";
 import { resolveScanCyberAccessProgram } from "../src/scan-cyber-access.js";
 import * as runtime from "../src/runtime.js";
 import catalogFixture from "./fixtures/native-skill-model-catalog.json" with { type: "json" };
@@ -81,14 +86,14 @@ function select(
     command: options.command ?? { command: resolveBundledCodexExecutable() },
     environment: { ...keyEnvironment(), ...options.environment },
     model,
-    config: {
+    config: resolveCodexProfile({
       model_catalog_json: catalog,
       cli_auth_credentials_store: "file",
       openai_base_url: endpoint + "/v1",
       chatgpt_base_url: endpoint,
       analytics: { enabled: false },
       ...config,
-    },
+    }),
     signal: new AbortController().signal,
   });
 }
@@ -322,6 +327,65 @@ test("native preferences and non-OpenAI authentication bypass automatic selectio
     ).toBeUndefined();
   }
 });
+
+test.each(["leaf", "table"])(
+  "reruns retain the private %s catalog route and profile opt-out",
+  async (kind) => {
+    const repository = await temporaryDirectory();
+    const scanDir = await temporaryDirectory();
+    const environment = {
+      ...keyEnvironment(),
+      CODEX_SECURITY_STATE_DIR: join(home, "state"),
+    };
+    const url = "https://chatgpt.com/example/models";
+    const codexOverrides: JsonObject = {
+      model: "red",
+      model_catalog_json: catalog,
+      features: { cli_daybreak: true },
+      profile: "selected",
+      profiles: {
+        selected: {
+          "features.cli_daybreak": false,
+          ...(kind === "leaf"
+            ? { "model_providers.openai.model_catalog_url": url }
+            : { "model_providers.openai": { model_catalog_url: url } }),
+        },
+      },
+    };
+    const attempt = async (overrides: JsonObject) => {
+      expect(JSON.stringify(structuredCodexConfig(overrides))).not.toContain(
+        url,
+      );
+      let replay: JsonObject | undefined;
+      await using client = new TestClient(
+        { codexOverrides: overrides },
+        {
+          ...scanRuntimeDependencies(home, scanDir),
+          environment,
+          resolveScanCyberAccessProgram,
+          runWorkbench: async (_options, args, input) => {
+            expect(args[0]).toBe("register-cli-scan");
+            const recipe = JSON.parse(input!).recipe;
+            expect(recipe.requestedCyberAccessProgram).toBeUndefined();
+            expect(JSON.stringify(recipe)).not.toContain(url);
+            replay = await restoreProviderProfile(
+              recipe.config,
+              recipe.providerProfile,
+              environment,
+            );
+            expect(JSON.stringify(replay)).toContain(url);
+            throw new Error("registration verified");
+          },
+        },
+      );
+      await expect(client.run(repository)).rejects.toThrow(
+        "registration verified",
+      );
+      return replay!;
+    };
+    await attempt(await attempt(codexOverrides));
+  },
+);
 
 test("custom executables and launch arguments skip discovery", async () => {
   for (const command of [

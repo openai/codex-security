@@ -7840,9 +7840,9 @@ function selectedWorkerRuntimeConfig(
 ): JsonObject {
   const provider =
     typeof selectedProvider === "string" ? selectedProvider : undefined;
-  const resolved = resolveCodexProfile(config);
+  const resolved = structuredCodexConfig(config);
   resolveNestedConfigPaths(resolved, workingDirectory);
-  const providers = resolved["model_providers"];
+  const providers = resolveCodexProfile(config)["model_providers"];
   const providerEnvironment =
     nativeProviderEnvironment ??
     declaredProviderEnvironment(providers, environment);
@@ -7854,7 +7854,7 @@ function selectedWorkerRuntimeConfig(
     }
   }
   return {
-    ...structuredCodexConfig(resolved),
+    ...resolved,
     ...(provider === undefined ? {} : { model_provider: provider }),
     ...(Object.keys(providerEnvironment).length === 0
       ? {}

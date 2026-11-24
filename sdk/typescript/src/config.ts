@@ -352,6 +352,25 @@ export function resolveCodexProfile(config: JsonObject): JsonObject {
   const resolved = deepMerge(normalized, selectedScanProfile(normalized) ?? {});
   delete resolved["profile"];
   delete resolved["profiles"];
+  // Keep literal OpenAI catalog overrides in the private provider table,
+  // including on replay. The SDK would otherwise emit their URLs as flags.
+  const leaf = resolved["model_providers.openai.model_catalog_url"];
+  const table = resolved["model_providers.openai"];
+  if (
+    typeof leaf === "string" ||
+    (isObject(table) && typeof table["model_catalog_url"] === "string")
+  ) {
+    const providers = isObject(resolved["model_providers"])
+      ? resolved["model_providers"]
+      : {};
+    const provider = providers["openai"];
+    providers["openai"] = isObject(table)
+      ? table
+      : { ...(isObject(provider) ? provider : {}), model_catalog_url: leaf! };
+    resolved["model_providers"] = providers;
+    delete resolved["model_providers.openai"];
+    delete resolved["model_providers.openai.model_catalog_url"];
+  }
   return resolved;
 }
 
