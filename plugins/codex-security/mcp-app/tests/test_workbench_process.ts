@@ -21,9 +21,7 @@ interface WorkbenchModule {
 
 const { executeWorkbench, runWorkbench, workbenchTimeout } =
   await loadWorkbenchProcess();
-const { workbenchArgs } = await importSource(
-  path.join(import.meta.dirname, "../src/workbench-arguments.ts"),
-);
+const { workbenchArgs } = await importSource("src/workbench-arguments.ts");
 await test("token-bearing context reads share the get-scan timeout", () => {
   assert.equal(workbenchTimeout(["mark-handoff-delivered"]), 30_000);
   assert.equal(workbenchTimeout(["get-scan"]), 300_000);
