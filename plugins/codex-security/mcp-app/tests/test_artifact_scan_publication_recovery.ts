@@ -4,6 +4,7 @@ import { createHash } from "node:crypto";
 import { copyFile, mkdir, writeFile, readdir, utimes } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
+import { reviewSurface } from "./scan-draft-fixture.ts";
 import {
   draftFixture,
   interruptDraftWrite,
@@ -301,12 +302,7 @@ for (const reversed of [false, true]) {
   test(`tied legacy surface observations retain distinct rows and frozen IDs (reversed=${reversed})`, async (t) => {
     const { normal, recovered, recover } = await recoveryPair(t, "deep");
     const surfaces = ["First legacy surface", "Second legacy surface"].map(
-      (label) => ({
-        id: "legacy-shared",
-        label,
-        disposition: "needs_follow_up",
-        receiptRefs: [],
-      }),
+      (label) => reviewSurface("legacy-shared", label, "needs_follow_up"),
     );
     if (reversed) surfaces.reverse();
     const deferred = [

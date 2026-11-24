@@ -17,9 +17,11 @@ import re
 import stat
 import struct
 import sys
+from collections import deque
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
 from datetime import datetime, timezone
+from itertools import chain
 from pathlib import Path, PurePosixPath
 from typing import Any, NamedTuple, TextIO
 from urllib.parse import quote, urlsplit
@@ -2387,61 +2389,35 @@ def _github_line_hashes(
     handle: TextIO,
     requested_lines: set[int] | None = None,
 ) -> dict[int, str]:
-    window = [0] * GITHUB_HASH_BLOCK_SIZE
-    line_numbers = [-1] * GITHUB_HASH_BLOCK_SIZE
+    """Hash each line's first window of normalized UTF-16 units, continuing across lines."""
+    window = deque([0] * GITHUB_HASH_BLOCK_SIZE)
     hash_counts: dict[str, int] = {}
     hashes: dict[int, str] = {}
     first_mod = pow(GITHUB_HASH_MOD, GITHUB_HASH_BLOCK_SIZE, 1 << 64)
     hash_raw = 0
-    index = 0
     line_number = 0
-    line_start = True
-    previous_was_cr = False
+    newlines = io.IncrementalNewlineDecoder(None, translate=True)
 
-    def output_hash() -> None:
-        nonlocal index
-        hash_value = format(hash_raw & GITHUB_HASH_MASK, "x")
-        hash_counts[hash_value] = hash_counts.get(hash_value, 0) + 1
-        line_number = line_numbers[index]
-        if requested_lines is None or line_number in requested_lines:
-            hashes[line_number] = f"{hash_value}:{hash_counts[hash_value]}"
-        line_numbers[index] = -1
-
-    def update_hash(current: int) -> None:
-        nonlocal hash_raw, index
-        beginning = window[index]
-        window[index] = current
-        hash_raw = (GITHUB_HASH_MOD * hash_raw + current - first_mod * beginning) & GITHUB_HASH_MASK
-        index = (index + 1) % GITHUB_HASH_BLOCK_SIZE
-
-    def process_character(current: int) -> None:
-        nonlocal line_number, line_start, previous_was_cr
-        if current in {ord(" "), ord("\t")} or (previous_was_cr and current == ord("\n")):
-            previous_was_cr = False
-            return
-        if current == ord("\r"):
-            current = ord("\n")
-            previous_was_cr = True
-        else:
-            previous_was_cr = False
-        if line_numbers[index] != -1:
-            output_hash()
-        if line_start:
-            line_start = False
-            line_number += 1
-            line_numbers[index] = line_number
-        if current == ord("\n"):
-            line_start = True
-        update_hash(current)
-
-    while chunk := handle.read(SOURCE_READ_CHUNK_SIZE):
-        for (code_unit,) in struct.iter_unpack("<H", chunk.encode("utf-16-le")):
-            process_character(code_unit)
-    process_character(GITHUB_HASH_EOF)
-    for _ in range(GITHUB_HASH_BLOCK_SIZE):
-        if line_numbers[index] != -1:
-            output_hash()
-        update_hash(0)
+    # A line's window is complete when its preceding newline leaves the window.
+    # Supply that newline for the first line and pad the final window after EOF.
+    chunks = iter(lambda: handle.read(SOURCE_READ_CHUNK_SIZE), "")
+    tail = chr(GITHUB_HASH_EOF) + "\0" * (GITHUB_HASH_BLOCK_SIZE - 1)
+    for chunk in chain(("\n",), chunks, (tail,)):
+        chunk = newlines.decode(chunk)
+        for space in (" ", "\t"):
+            chunk = chunk.replace(space, "")
+        for (current,) in struct.iter_unpack("<H", chunk.encode("utf-16-le")):
+            beginning = window.popleft()
+            window.append(current)
+            hash_raw = (
+                GITHUB_HASH_MOD * hash_raw + current - first_mod * beginning
+            ) & GITHUB_HASH_MASK
+            if beginning == ord("\n"):
+                line_number += 1
+                hash_value = format(hash_raw, "x")
+                hash_counts[hash_value] = hash_counts.get(hash_value, 0) + 1
+                if requested_lines is None or line_number in requested_lines:
+                    hashes[line_number] = f"{hash_value}:{hash_counts[hash_value]}"
     return hashes
 
 

@@ -2,6 +2,7 @@ import { writeJsonLine as writeResult } from "./support/json.ts";
 import {
   apiSurface,
   finding,
+  reviewSurface,
   scanId,
   workerDraft as draft,
 } from "./scan-draft-fixture.ts";
@@ -1056,12 +1057,9 @@ async function testCurrentAnonymousReceiptSelection(
     reviewState: {
       explicitExclusions: [],
       surfaces: [
-        {
-          id: "writer",
-          label: "Retained review",
-          disposition: "needs_follow_up",
-          receiptRefs: [historicalRef],
-        },
+        reviewSurface("writer", "Retained review", "needs_follow_up", [
+          historicalRef,
+        ]),
       ],
       deferred: [
         { id: "review", reason: "Review remains.", surfaceIds: ["writer"] },
@@ -1102,12 +1100,9 @@ async function testCurrentAnonymousReceiptSelection(
       deferred: [],
       resolvedDeferred: [{ id: "review", reason: "Review completed." }],
       surfaces: [
-        {
-          id: "writer",
-          label: "Retained review",
-          disposition: "no_issue_found",
-          receiptRefs: ["artifacts/replacement.md"],
-        },
+        reviewSurface("writer", "Retained review", "no_issue_found", [
+          "artifacts/replacement.md",
+        ]),
         {
           ...(candidate ? { candidateId: "anonymous" } : {}),
           label: "Current anonymous review",
@@ -1232,12 +1227,9 @@ async function testCurrentReceiptSelectionBeforeArchivedHistory(
               surfaces: candidate
                 ? []
                 : [
-                    {
-                      id: repairId,
-                      label: repairId,
-                      disposition: "no_issue_found",
-                      receiptRefs: ["artifacts/replacement.md"],
-                    },
+                    reviewSurface(repairId, repairId, "no_issue_found", [
+                      "artifacts/replacement.md",
+                    ]),
                   ],
               resolvedDeferred: candidate
                 ? []

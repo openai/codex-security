@@ -389,7 +389,7 @@ test("successive large collections remain queryable within the response budget",
     ["second-workload", "receipt-second"],
   ] as const) {
     const node = graph.query(`${name}-function-63`);
-    assert("node" in node && node.witnesses?.length);
+    assert("node" in node && "witnesses" in node && node.witnesses.length);
     assert.equal(node.witnesses_found, 1000);
     assert.equal(node.witnesses[0]!.native_id, `${name}-sample-0`);
     const calls = graph.query(node.node.id, { witness: node.witnesses[0]!.id });
