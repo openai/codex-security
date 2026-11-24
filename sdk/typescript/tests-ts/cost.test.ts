@@ -38,6 +38,10 @@ import {
   scanProgress,
   legacyUsageRecord,
   progressMarker,
+  commandHead,
+  commandTail,
+  persistedCommandOutput,
+  commandOutput,
   nativeCommand,
   completedCommand,
   childUuid7Thread,
@@ -54,13 +58,6 @@ import {
 } from "./support/usage-rollout.js";
 
 import { createApiTestFixtures } from "./support/temporary-directories.js";
-
-// Exact ASCII fixture for the pinned native 64 KiB persistence representation.
-const commandHead = "h".repeat(32_743);
-const commandTail = "t".repeat(32_743);
-const persistedCommandOutput = `${commandHead}\n... command output truncated for persistence ...\n${commandTail}`;
-const commandOutput = (middle: string) =>
-  `${commandHead}\n${middle}\n${commandTail}`;
 
 const { temporaryDirectory: codexHome, cleanup } = createApiTestFixtures(
   "codex-security-cost-",
@@ -115,6 +112,9 @@ test("a partial owned subtotal includes spending absent from local session logs"
       readScanBudgetUsage(
         async () => ({
           ...ownedPythonUsage,
+          cachedInputTokens: complete ? 17 : 0,
+          cacheWriteInputTokens: complete ? 9 : 0,
+          reasoningOutputTokens: complete ? 3 : 0,
           coverage: complete ? "complete" : "partial",
           threadCount: complete ? 2 : 1,
           missingThreadCount: complete ? 0 : 1,
@@ -146,7 +146,12 @@ test("a partial owned subtotal includes spending absent from local session logs"
       missingThreadCount: 0,
       coverageScope: ["thread:primary", "thread:worker"],
     });
-    expect(final.measurement.usage).toEqual(ownedSdkUsage);
+    expect(final.measurement.usage).toEqual({
+      ...ownedSdkUsage,
+      cached_input_tokens: 17,
+      cache_write_input_tokens: 9,
+      reasoning_output_tokens: 3,
+    });
     expect(final.cost?.inputTokens).toBe(ownedSdkUsage.input_tokens);
     expect(observed.at(-1)).toEqual([ownedSdkUsage.input_tokens, true]);
   } finally {
