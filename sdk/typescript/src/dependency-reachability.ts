@@ -1,3 +1,5 @@
+// One advisory can lead to different verdicts for different callers. The report
+// puts assessed calls in uses and accounts for the remaining leads in coverage.
 import { z } from "zod";
 import { dependencyClaimReferenceSchema } from "./dependency-stack-claims.js";
 import {
@@ -30,6 +32,8 @@ const condition = z
     },
   );
 
+// The sink is the operation under review. Each condition is a prerequisite
+// from the advisory. Its citations point into this use's source excerpts.
 const dependencyUseProofSchema = z.strictObject({
   sink: z
     .strictObject({
@@ -91,6 +95,8 @@ const evidence = z.strictObject({
       "Facts these lines establish for this use. affected_copy identifies the affected build, including local patches; affected_use shows the operation and its advisory prerequisites in this code. running requires an observation of this deployed revision. access requires observed evidence that the relevant caller can reach that deployment under the advisory's conditions. A desired deployment or route alone cannot establish either runtime fact. Use [] for other citations.",
     ),
 });
+// One caller's use of one dependency copy. An affected copy and an applicable
+// call can be potentially_exploitable even when deployment is unknown.
 export const dependencyUseSchema = z
   .strictObject({
     location: z
@@ -151,8 +157,7 @@ export const dependencyVerdictLabels = {
   ruled_out: "Ruled out",
 } satisfies Record<DependencyVerdict, string>;
 
-// The first independently reviewed reports included only the server, quoted record and facts.
-// Some saved reports additionally identified the receipt here. Keep those records readable.
+// An observation quotes a tool response. Older reports omit the tool and receipt hash.
 const observation = z.strictObject({
   server: text.describe(
     "Configured inventory MCP server that returned the observation.",
@@ -172,6 +177,8 @@ const observation = z.strictObject({
     ),
 });
 const placeText = text.nullable();
+// The place identifies which build or workload the evidence covers. Two workers
+// at the same source revision can load different copies of a library.
 export const dependencyPlaceSchema = z.strictObject({
   kind: z
     .enum([
@@ -218,6 +225,8 @@ export const dependencyPlaceSchema = z.strictObject({
     ),
 });
 
+// A reviewer can cite source lines or a saved tool response (a receipt).
+// A selection identifies the particular record within that response.
 const reviewReference = z.discriminatedUnion("kind", [
   z.strictObject({
     kind: z.literal("source"),
@@ -307,6 +316,8 @@ const inspectionTarget = z.strictObject({
   platform: text.optional(),
   observationWindow: text.optional(),
 });
+// Record what was checked and where. A build fact can apply to another worker
+// running the same artifact. A measured call count belongs to the sampled worker.
 const inspection = z
   .strictObject({
     question: text,
@@ -392,6 +403,8 @@ const site = lineReference.extend({
 const argument = text.describe(
   "Exact single-line expression carrying the input at the cited site. Omit when ambiguous.",
 );
+// Follow the input through cited calls. A gap marks a transfer we couldn't
+// verify. The final operation, when known, is in proof.sink.
 export const dependencyTraceSchema = z
   .array(
     z.discriminatedUnion("kind", [
@@ -439,6 +452,8 @@ export const dependencyCoverageHandoffSchema = z.strictObject({
   missing: text,
 });
 
+// Evidence and observations include supporting context. Deciding evidence
+// identifies the sources and receipts the reviewer relied on for this verdict.
 export const reviewedDependencyUseSchema = dependencyUseSchema.safeExtend({
   proof: repositoryUseProofSchema.optional(),
   observations: z.array(observation).prefault([]),
@@ -453,6 +468,10 @@ export type ReviewedDependencyUse = z.infer<typeof reviewedDependencyUseSchema>;
 export const dependencyTestScopeClassification = z.literal(
   "test_only_outside_scope",
 );
+// A disposition explains why a lead has no verdict. Dismissed leads can fall
+// outside the caller scope. Unresolved leads still need investigation.
+// For an assessed use, unknown means a deciding fact is missing and ruled_out
+// means the evidence disproved a prerequisite.
 export const dependencyCoverageDispositionSchema = z.strictObject({
   kind: z.enum(["dismissed", "unresolved"]),
   reason: z.string().min(1),
@@ -477,6 +496,9 @@ export const dependencyCoverageDispositionSchema = z.strictObject({
     .optional(),
 });
 
+// A claim can record a reusable fact (a premise), a use, a disposition or
+// overall coverage. Approval applies to one revision and hash. Dependencies
+// identify the exact earlier claims on which that approval relies.
 export const dependencyApprovedClaimSchema =
   dependencyClaimReferenceSchema.extend({
     state: z.literal("approved"),
@@ -499,12 +521,15 @@ export const dependencyApprovedClaimSchema =
     }),
   });
 
+// Look up the excerpts and tool responses by the evidence IDs on each claim.
 export const dependencyClaimEvidenceSchema = z.strictObject({
   sources: z.record(text, stackJsonValue),
   receipts: z.record(text, stackJsonValue),
 });
 
 const tokens = z.number().int().nonnegative();
+// Keep the result and completeness separate. Zero matches in a partial search
+// cannot rule out callers in files the tool never examined.
 const dependencySearchSchema = z.strictObject({
   source: z.string(),
   tool: z.string(),
@@ -559,8 +584,8 @@ export const dependencyReachabilityReportSchema = z
 export const reviewedDependencyCheckSchema =
   dependencyReachabilityReportSchema.omit({ cve: true });
 
-// The CVE form keeps its original result. A package can have zero or more
-// independent issues, so each reviewed verdict belongs to a particular check.
+// A CVE request returns one report. A package request groups checks by
+// advisory. Each check has its own uses, verdicts and evidence.
 export const dependencyPackageCheckOutputSchema = z.object({
   target: dependencyTargetSchema.optional(),
   package: z.object({ ecosystem: z.string(), name: z.string() }),
@@ -604,6 +629,8 @@ const unavailableDataCoverage = z.discriminatedUnion("basis", [
     requiredCheck: text,
   }),
 ]);
+// A missing fact about one use can leave its verdict unknown. Stopping the
+// investigation requires evidence of a wider loss of required data.
 export const dependencyAbortInputSchema = z.strictObject({
   reason: text,
   category: z.literal("widespread_required_data_unavailable"),
