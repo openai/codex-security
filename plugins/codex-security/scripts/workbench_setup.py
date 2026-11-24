@@ -225,13 +225,14 @@ def validation_selection(snapshot: dict[str, Any]) -> dict[str, str]:
     if not validation:
         return {}
     config = validation.get("continuum") or {}
+    details = "include" if config.get("include_local_validation") else "omit"
     destination = config.get("environment_id")
     region = config.get("aws_region", "AWS CLI Region")
     return {
         "validationProvider": validation["provider"],
         "validationNotice": (
             f"After sealing, send reported findings to AWS Continuum environment {destination}"
-            f" ({region}). Submissions omit the local validation method and summary."
+            f" ({region}). Submissions {details} the local validation method and summary."
         ),
     }
 

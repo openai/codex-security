@@ -14,6 +14,11 @@ import {
 import type { ImportedPackage, Provider } from "./external-import-models.js";
 import { isRecord } from "./record.js";
 import {
+  linkedIssueIds,
+  selectFindingValidationArtifact,
+  singleFindingValidationIssue,
+} from "./continuum-validation-evidence.js";
+import {
   array,
   awsTimestampSeconds,
   concreteVersion,
@@ -230,6 +235,9 @@ export function readPatch(value: unknown) {
     patch,
     patchSha256,
     sizeBytes,
+    ...(artifact["issueArn"] !== undefined && {
+      issueArn: requiredText(artifact["issueArn"], "Continuum patch issue ARN"),
+    }),
     ...(artifact["format"] !== undefined && {
       format: requiredText(artifact["format"], "Continuum patch format"),
     }),
@@ -240,6 +248,34 @@ export function readPatch(value: unknown) {
       ),
     }),
   };
+}
+
+export function checkRetainedContinuumPatches(
+  data: ExternalFinding["evidence"]["source_data"],
+) {
+  if (isRecord(data?.["finding"]) && Array.isArray(data["patches"]))
+    findingPatchDestination(data["finding"], data["patches"]);
+}
+
+function findingPatchDestination(
+  finding: Record<string, unknown>,
+  patches: readonly unknown[],
+) {
+  const links = linkedIssueIds(finding);
+  const destination = links[0];
+  if (!patches.length) return destination;
+  if (!destination)
+    throw new Error("Continuum patches require a finding linked to an issue.");
+  const expected = `${findingIdentity(finding).scope}/code-issues/${destination}`;
+  // Older collectors could have fetched a merged finding's patch from the original issue.
+  for (const patch of patches) {
+    const arn = record(patch, "Continuum patch artifact")["issueArn"];
+    if (arn !== expected && (arn !== undefined || links.length > 1))
+      throw new Error(
+        "Cannot confirm the patch belongs to the destination issue. Recollect this finding with codex-security import continuum ENVIRONMENT_ID --finding-id FINDING_ID --source-root CHECKOUT before publishing.",
+      );
+  }
+  return destination;
 }
 
 interface ArtifactGroups {
@@ -462,56 +498,6 @@ function issueEvidenceDescriptor(artifact: Record<string, unknown>) {
     ...(artifact["createdAt"] != null && { createdAt: artifact["createdAt"] }),
     ...(artifact["mediaType"] != null && { mediaType: artifact["mediaType"] }),
     ...(artifact["producer"] != null && { producer: artifact["producer"] }),
-  };
-}
-
-export function singleFindingValidationIssue(
-  issue: unknown,
-  issueId: unknown,
-  finding: ReturnType<typeof findingIdentity>,
-) {
-  if (!isRecord(issue) || typeof issueId !== "string") return null;
-  const arn = `${finding.scope}/code-issues/${issueId}`;
-  const ids = issue["findingIds"];
-  if (
-    issue["issueArn"] !== arn ||
-    issue["issueId"] !== issueId ||
-    !Array.isArray(ids) ||
-    ids.length !== 1 ||
-    ids[0] !== finding.id
-  )
-    return null;
-  return { issueArn: arn, issueId, findingIds: [finding.id] };
-}
-
-export function selectFindingValidationArtifact(
-  artifact: Record<string, unknown>,
-  findingId: unknown,
-) {
-  if (artifact["artifactType"] !== "VALIDATION_EVIDENCE") return;
-  const body = issueEvidenceBody(artifact);
-  if (!body) return;
-  const results = body.validationEvidence?.["perFindingResults"];
-  if (results === undefined) return { scope: "issue", artifact };
-  // A bundle's top-level proof can belong to a different finding.
-  const matches = array(results, "Continuum per-finding results")
-    .map((value) => record(value, "Continuum per-finding result"))
-    .filter((result) => result["findingId"] === findingId);
-  if (matches.length === 0) return;
-  return {
-    scope: "finding",
-    artifact: {
-      ...issueEvidenceDescriptor(artifact),
-      body: {
-        validationEvidence: {
-          ...(matches.length === 1 &&
-            "exploitable" in matches[0]! && {
-              exploitable: matches[0]!["exploitable"],
-            }),
-          perFindingResults: matches,
-        },
-      },
-    },
   };
 }
 
@@ -772,8 +758,7 @@ export function normalizeContinuumFindings(
         capture?.["patches"],
         "Continuum patches",
       ).map(readPatch);
-      const linkedIssue =
-        text(row["createdIssueId"]) ?? text(row["duplicateOfIssueId"]);
+      const linkedIssue = findingPatchDestination(row, patches);
       let validationIssue:
         ReturnType<typeof singleFindingValidationIssue> | undefined;
       const evidenceArtifacts = issueEvidenceArtifacts(
@@ -797,9 +782,9 @@ export function normalizeContinuumFindings(
           return [selected.artifact];
         }),
       );
-      if ((patches.length || evidenceArtifacts.length) && !linkedIssue)
+      if (evidenceArtifacts.length && !linkedIssue)
         throw new Error(
-          `Continuum ${patches.length ? "patches" : "validation artifacts"} require a finding linked to an issue.`,
+          "Continuum validation artifacts require a finding linked to an issue.",
         );
       if (
         row["type"] !== "CONTINUUM_CODE_VULN" &&

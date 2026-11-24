@@ -67,7 +67,9 @@ const binding = z.object({
 });
 type Destination = z.infer<typeof binding>["continuum"];
 const cached = z.object({
-  schemaVersion: z.literal(continuumAssessmentVersion),
+  schemaVersion: z
+    .literal([2, 3, 4, 5, 6, continuumAssessmentVersion])
+    .optional(),
   configuration: z.unknown(),
   repositoryPath: z.string(),
   result: z.object({ provider: z.literal("continuum") }),
@@ -75,7 +77,7 @@ const cached = z.object({
     schemaVersion: z.literal(1),
     items: z.array(z.looseObject({ itemId: id })),
   }),
-  retry: z.array(z.unknown()).nullable(),
+  retry: z.array(z.unknown()).nullable().optional(),
 });
 
 function scopeOf(record: Admission, destination?: Destination) {
@@ -94,12 +96,33 @@ function scopeOf(record: Admission, destination?: Destination) {
   return scope;
 }
 
+/** A null admission is ambiguous. Only an absent or unsubmitted occurrence is unbound. */
+export function verifiedAdmissions(
+  records: readonly unknown[],
+  configuration: unknown,
+) {
+  const destination = binding.safeParse(configuration).data?.continuum;
+  const pins = new Map<string, Admission | null | undefined>();
+  if (!destination) return pins;
+  for (const raw of records) {
+    const item = raw as Record<string, unknown> | null;
+    const itemId = item?.["itemId"];
+    if (!item || typeof itemId !== "string") continue;
+    const pin = admission.safeParse(raw).data;
+    if (pins.has(itemId) || item["admissionConflict"]) pins.set(itemId, null);
+    else if (pin && scopeOf(pin, destination)) pins.set(itemId, pin);
+    else pins.set(itemId, unsubmitted(item) ? undefined : null);
+  }
+  return pins;
+}
+
 /** A failure before acceptance leaves the occurrence unbound. */
 function unsubmitted(item: Record<string, unknown>) {
   return (
     item["provider"] === "continuum" &&
     item["verdict"] === "UNAVAILABLE" &&
     ![
+      "admissionConflict",
       "findingId",
       "findingArn",
       "submittedAt",
@@ -289,11 +312,17 @@ async function readAssessments(
   if (
     result !== undefined &&
     (saved?.repositoryPath !== repositoryPath ||
-      !isDeepStrictEqual(config, saved.configuration))
+      !isDeepStrictEqual(config, saved.configuration) ||
+      (saved.schemaVersion === continuumAssessmentVersion &&
+        saved.retry === undefined))
   )
     return assessments;
   const items = saved?.records.items ?? [];
   const grouped = Map.groupBy(items, ({ itemId }) => itemId);
+  const legacy =
+    saved && saved.schemaVersion !== continuumAssessmentVersion
+      ? verifiedAdmissions(items, config)
+      : undefined;
   const requested = new Set(occurrenceIds);
   const snapshots = await store.readSnapshots(
     requested,
@@ -304,18 +333,21 @@ async function readAssessments(
     const entries = snapshots.get(occurrence);
     if ((group && group.length !== 1) || entries === null) continue;
     const item = group?.[0];
-    const plugin = destination && item ? project(item, destination) : undefined;
-    if (item && !plugin && !unsubmitted(item)) continue;
+    if (item?.["admissionConflict"]) continue;
+    const plugin =
+      !legacy && destination && item ? project(item, destination) : undefined;
+    const pin = plugin ?? legacy?.get(occurrence);
+    if (item && !pin && !unsubmitted(item)) continue;
     const candidates = (entries ?? []).flatMap(
       ({ record, environmentId }) =>
         project(record, destination ?? { environment_id: environmentId }) ?? [],
     );
-    const selected = plugin ?? candidates.at(-1);
+    const selected = pin ?? candidates.at(-1);
     if (!selected) continue;
     // Only a CLI-only scan can switch admissions on explicit validation.
     // Never pick between distinct AWS accounts, regions or environments.
     if (
-      !plugin &&
+      !pin &&
       candidates.some((item) =>
         destination
           ? !sameAdmission(item, selected)

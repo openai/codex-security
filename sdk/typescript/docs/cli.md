@@ -989,7 +989,10 @@ occurrence IDs. Use `--scan latest` for the latest completed scan in the
 current directory. Omitting the IDs submits all open findings in that scan.
 
 Continuum receives titles, summaries, identifiers, severities, CWEs and code
-locations. For a local review before submission, run the CLI scan without `--validate`
+locations. Setting `scan.validation.continuum.include_local_validation` to
+`true` also sends the full local `validation.method` and `validation.summary`,
+including any secrets in those fields. This setting defaults to `false`.
+For a local review before submission, run the CLI scan without `--validate`
 and export the complete sealed findings. `scans show` may shorten these fields.
 
 ```sh

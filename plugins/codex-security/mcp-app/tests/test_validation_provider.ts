@@ -137,8 +137,9 @@ await test("unconfigured plugin scans never invoke a validation provider", async
   assert.equal(calls, 0);
 });
 
-for (const mixed of [false, true]) {
-  await test(`legacy ${mixed ? "mixed retry" : "completed"} assessments refresh only on explicit completion`, async () => {
+for (const schemaVersion of [undefined, 2, 4, 5, 6]) {
+  const mixed = schemaVersion === 2;
+  await test(`legacy version ${schemaVersion} assessments refresh only on explicit completion`, async () => {
     const root = await temporaryDirectory("plugin-validation-upgrade-");
     const oldState = process.env.CODEX_SECURITY_STATE_DIR;
     process.env.CODEX_SECURITY_STATE_DIR = join(root, "state");
@@ -162,13 +163,13 @@ for (const mixed of [false, true]) {
       const record = {
         itemId: ids[0],
         verdict: "EXPLOITABLE",
-        claimMatch: "on_target",
+        claimMatch: (schemaVersion ?? 0) >= 4 ? "unknown" : "on_target",
         resultScope: "finding",
         severityBefore: "high",
-        severityAfter: "critical",
+        severityAfter: (schemaVersion ?? 0) >= 4 ? "high" : "critical",
       };
       const old = JSON.stringify({
-        schemaVersion: mixed ? 2 : undefined,
+        schemaVersion,
         configuration,
         repositoryPath,
         records: { schemaVersion: 1, items: [record] },
@@ -368,6 +369,67 @@ await test("explicit completion retries pending assessments and preserves termin
     else process.env.CODEX_SECURITY_STATE_DIR = oldState;
     await rm(root, { recursive: true, force: true });
   }
+});
+
+await test("a conflicting rejoin blocks automatic upload by the original caller", async (t) => {
+  const root = await temporaryDirectory("plugin-consent-");
+  const oldState = process.env.CODEX_SECURITY_STATE_DIR;
+  process.env.CODEX_SECURITY_STATE_DIR = join(root, "state");
+  t.after(async () => {
+    if (oldState === undefined) delete process.env.CODEX_SECURITY_STATE_DIR;
+    else process.env.CODEX_SECURITY_STATE_DIR = oldState;
+    await rm(root, { recursive: true, force: true });
+  });
+  const enabled = {
+    ...configuration,
+    continuum: { ...configuration.continuum, include_local_validation: true },
+  };
+  const resolveProvider = t.mock.fn(() => {
+    throw new Error("unexpected upload");
+  });
+  for (const mode of ["standard", "deep"] as const) {
+    const { scan } = await sealedScan(root, root, mode);
+    const file = join(root, "project.json");
+    const selection = { file, target: root, mode };
+    await bindValidationProviderConfiguration(scan.scanId, enabled, true);
+    await writeFile(
+      file,
+      JSON.stringify({ scan: { mode, validation: enabled } }),
+    );
+    assert.equal(
+      await bindValidationProviderConfiguration(
+        scan.scanId,
+        enabled,
+        false,
+        selection,
+      ),
+      undefined,
+    );
+    // A scan-ID-only recovery keeps the original grant without reading the file.
+    await rm(file);
+    assert.equal(
+      await bindValidationProviderConfiguration(scan.scanId, enabled, false),
+      undefined,
+    );
+    await writeFile(
+      file,
+      JSON.stringify({ scan: { mode, validation: configuration } }),
+    );
+    const notice = await bindValidationProviderConfiguration(
+      scan.scanId,
+      enabled,
+      false,
+      selection,
+    );
+    assert.match(String(notice), /Automatic Continuum validation is disabled/);
+    // Neither a detached original caller nor later recovery can reuse the old grant.
+    await bindValidationProviderConfiguration(scan.scanId, enabled, true);
+    const result = await validateCompletedScan(scan, resolveProvider);
+    assert.equal(result?.status, "failed");
+    assert.equal(result?.message, notice);
+    assert.deepEqual(await readCompletedValidation(scan), result);
+  }
+  assert.equal(resolveProvider.mock.callCount(), 0);
 });
 
 await test("only the selected completed scan can start a validation batch", async (t) => {

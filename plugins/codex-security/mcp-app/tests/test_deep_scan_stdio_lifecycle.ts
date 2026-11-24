@@ -587,6 +587,10 @@ service_tier = "ultrafast"
     assert.equal((await readLogLines(startLogPath)).length, 1);
 
     const failureThreadId = "deep-scan-stdio-failure-thread";
+    await writeFile(
+      projectConfigPath,
+      "scan: {validation: {provider: continuum, continuum: {environment_id: synthetic, include_local_validation: true}}}\n",
+    );
     server.sendRequest(
       20,
       "tools/call",
@@ -596,6 +600,7 @@ service_tier = "ultrafast"
           targetPath: failedTargetPath,
           scope: ".",
           userContext: "stdio failure fixture",
+          projectConfigPath,
         },
         failureThreadId,
         {
@@ -661,6 +666,22 @@ service_tier = "ultrafast"
     assert.equal(activeFailureState.workers.length, 1);
     assert.equal(activeFailureState.workers[0].kind, "discovery");
     assert.equal(activeFailureState.workers[0].status, "running");
+    // Withdrawing permission must notify the joining caller before local work finishes.
+    await writeFile(projectConfigPath, "{}");
+    const conflict = await server.callSuccessfulTool(
+      201,
+      toolCall(
+        "start_codex_security_deep_scan",
+        { targetPath: failedTargetPath, projectConfigPath },
+        failureThreadId,
+      ),
+    );
+    assert.equal(conflict.structuredContent.scanId, failedScanId);
+    assert.match(
+      JSON.stringify(conflict.content),
+      /Automatic Continuum validation is disabled/,
+    );
+    assert.equal(server.response(20), undefined);
     assertProcessAlive(failedWorker.pid);
 
     const failureMessage = "fixture unrecoverable failure\0source";

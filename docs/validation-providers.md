@@ -29,6 +29,9 @@ scan:
 AWS receives the repository, finding identifiers, titles, summaries, severities,
 CWEs when available, and paths and line ranges. These fields may contain
 sensitive information. Posture questions and other deferred work are excluded.
+By default the local validation method and summary stay on the host. Setting
+`include_local_validation: true` under `continuum` sends both in full, including
+any secrets in them. Oversized findings fail individually.
 
 ## Start a scan
 
@@ -49,7 +52,16 @@ file in scan setup or explicitly request it.
 
 Review the destination in setup. The plugin saves the selection before the
 scan and submits the findings automatically after sealing. Rejoining keeps
-the saved settings. A standalone plugin source build has no AWS provider.
+the saved settings. If the scan opted into sending local validation text and
+you explicitly select a file on rejoin, the file must still opt in for the
+same provider, environment, Region and profile. A conflict or unreadable file
+disables automatic submission for this scan, including later completion by
+the original caller. For a running Deep Scan, the rejoin returns a notice
+immediately. Rejoin by scan ID alone to wait for the local result.
+A batch already uploading may finish. Finish
+locally and use `validate --scan` to submit the findings you review. Omit
+the file on rejoin to retain the original grant when recovering a scan.
+A standalone plugin source build has no AWS provider.
 
 ## Review a saved scan before sending
 
@@ -100,6 +112,11 @@ an older conclusive member result. A reason labelled `FINDING` comes from
 submitted context. `GRAPH`, `CODE` and `INFERRED` distinguish deployment
 evidence, source evidence and inference.
 
+An earlier plugin version could mark an assessment complete before AWS
+published its score. After upgrading, request completion again if the plugin
+marks the saved assessment outdated. Keep the original receipts to resume
+without a new upload.
+
 Issue scoring can lag validation. Codex looks for the newest unambiguous
 score tied to the same issue, validation artifact and issue verdict. If
 scoring is still pending at the deadline, `scoringPending` is true. The
@@ -128,6 +145,8 @@ run statuses before deciding how to proceed.
 A missing code location or oversized document sets `invalidInput` on the
 item. No upload was attempted for that item. Completion skips it on retry.
 Correct the input and rescan instead of editing sealed findings.
+If local validation text pushed the document over the limit, submit the
+selected occurrence with `include_local_validation` disabled.
 
 After a finding loses its issue membership, `issueUnlinked` stays true
 until validation can confirm the link again. An issue ID shown with that
@@ -162,8 +181,39 @@ provider free text and proof stay out of the remediation context.
 The original finding and its remediation tests remain
 the criteria for the fix. Apply uses the recorded patch unchanged.
 
+After an upgrade, an `outdated` result needs an explicit refresh. Repeat
+plugin completion or rerun the saved CLI command on the original host.
+Older results can identify the accepted submission but cannot supply a
+remediation conclusion. Preserve the original state directory when moving
+between installations. If a failed refresh reports `admissionConflict`,
+remediation skips the occurrence. Restore provider access and repeat plugin
+completion to establish the submission identity.
+
 If CLI and plugin results disagree on issue membership, refresh the
 entry point reporting `issueUnlinked` before using its assessment for remediation.
+
+## Inspect AWS evidence and patches
+
+Import is optional. Use the same AWS profile and Region and the
+`findingId` returned by validation.
+
+```sh
+codex-security import continuum ENVIRONMENT_ID --finding-id FINDING_ID --source-root CHECKOUT --format json
+```
+
+A bulk import stores one record per AWS issue. To match contributors, set
+`issue_arn` to its ARN, `import_json` to the output of
+`publish findings --to local --format json`, and `assessment` to the scan's
+`validation.json` or saved validation output.
+
+```sh
+jq -r --arg issue "$issue_arn" --slurpfile validation "$assessment" '
+  .findings[] | select(.sourceFindingId == $issue)
+  | (.evidence.source_data.findings[]?.findingArn // empty) as $arn
+  | $validation[0].items[] | select(.findingArn == $arn)
+  | [.findingArn, .itemId] | @tsv
+' "$import_json"
+```
 
 ## AWS permissions
 

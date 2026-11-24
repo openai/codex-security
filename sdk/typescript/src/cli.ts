@@ -7348,7 +7348,7 @@ export async function main(
         { suffix: "--records" },
       ],
       examples: [{ args: { "findings...": "findings.json" } }],
-      hint: "With --scan, submit all open findings or pass IDs to narrow the selection. Review full findings locally with codex-security export --scan ID --export-format json --output -. Use --records alone for host-provided reviews over JSON-RPC.",
+      hint: "With --scan, submit all open findings or pass IDs to narrow the selection. Review full findings locally with codex-security export --scan ID --export-format json --output -. With include_local_validation enabled, Continuum receives the complete validation method and summary, including any secrets. Use --records alone for host-provided reviews over JSON-RPC.",
       output: jsonDocument.optional(),
       description:
         "Assess candidate security findings using source evidence, or submit sealed findings to a validation provider.",
@@ -14403,8 +14403,11 @@ function announceContinuum(
 ) {
   const settings = configuration?.continuum;
   if (!settings || !count) return;
+  const detail = settings.include_local_validation
+    ? " New submissions include the full local validation method and summary, including any secrets."
+    : "";
   stderr.write(
-    `Continuum environment ${diagnosticValue(settings.environment_id)}. Submitting or polling ${count} selected findings.\n`,
+    `Continuum environment ${diagnosticValue(settings.environment_id)}. Submitting or polling ${count} selected findings.${detail}\n`,
   );
 }
 

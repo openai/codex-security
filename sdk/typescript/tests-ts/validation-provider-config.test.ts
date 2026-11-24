@@ -19,6 +19,7 @@ const configured = {
     environment_id: "environment-1",
     aws_profile: "continuum-personal",
     aws_region: "us-east-1",
+    include_local_validation: true,
     wait_minutes: 45,
   },
 };
@@ -146,6 +147,7 @@ test("validates only the requested saved occurrence and reports its receipt on f
       status: "incomplete",
       items: [record],
     });
+    expect(cli.stderr.text()).toContain("including any secrets");
     expect(cli.stderr.text()).toContain("environment-1");
     expect(cli.stderr.text()).toContain("validate --scan scan -c");
     expect(cli.stderr.text()).toContain("occ_1");

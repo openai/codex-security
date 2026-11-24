@@ -98,7 +98,10 @@ scan start. These modes accept `scan.validation` and an optional
 error before a new scan starts. Inspection returns the
 provider name in `setup.validationProvider`. Saving setup or
 starting a conversational scan stores the selection before analysis begins.
-Rejoining the same scan uses the saved settings even if the file changes.
+Rejoining the same scan uses the saved settings. When local validation text
+sharing is enabled, an explicitly reselected file must confirm the original
+grant and destination. See [validation providers](validation-providers.md)
+for recovery after a conflict.
 
 ## Desktop and conversational Deep Scans
 
@@ -204,17 +207,30 @@ scan:
 All keys below belong to `scan.validation.continuum`. Schema validation does not
 insert defaults; the adapter and AWS CLI apply them at runtime.
 
-| Key                | Meaning                                                | Default                                           |
-| ------------------ | ------------------------------------------------------ | ------------------------------------------------- |
-| `environment_id`   | Continuum environment containing the matching source   | Required                                          |
-| `aws_region`       | AWS Region for provider calls                          | AWS CLI Region settings                           |
-| `aws_profile`      | Named AWS credential profile                           | AWS CLI credential chain                          |
-| `wait_minutes`     | Shared polling deadline; positive, at most 240 minutes | 45                                                |
-| `console_base_url` | Continuum console root used to construct issue links   | `https://REGION.console.aws.amazon.com/continuum` |
+| Key                        | Meaning                                                | Default                                           |
+| -------------------------- | ------------------------------------------------------ | ------------------------------------------------- |
+| `environment_id`           | Continuum environment containing the matching source   | Required                                          |
+| `include_local_validation` | Send the full local validation method and summary      | `false`                                           |
+| `aws_region`               | AWS Region for provider calls                          | AWS CLI Region settings                           |
+| `aws_profile`              | Named AWS credential profile                           | AWS CLI credential chain                          |
+| `wait_minutes`             | Shared polling deadline; positive, at most 240 minutes | 45                                                |
+| `console_base_url`         | Continuum console root used to construct issue links   | `https://REGION.console.aws.amazon.com/continuum` |
 
 Issue links use the Region from the AWS issue ARN.
 
-Unacknowledged requests
+Set `include_local_validation: true` in the selected project file to append
+each finding's local `validation.method` and `validation.summary` to the
+descriptions sent to AWS. The default is `false`. SDK callers can set
+`includeLocalValidation` on `ContinuumValidationProvider`. AWS stores the
+text verbatim, including any secrets. For a local review, run the CLI scan
+without `--validate`. Then use
+`codex-security export --scan SCAN_ID --export-format json --output -`
+to inspect the full fields for each occurrence. `scans show` can shorten
+them. Pass the selected occurrence IDs to `validate --scan`. Omitting the
+IDs selects all open findings. Plugin scans send automatically if a provider
+is configured.
+
+Changing this setting can create a new AWS finding. Unacknowledged requests
 retain the submitted text in private host state until a receipt is saved.
 The adapter rejects descriptions over 65,536 characters or documents over 256 KiB
 before saving the request. [AWS document limits](https://docs.aws.amazon.com/continuum/latest/APIReference/API_CreateCodeFinding.html)

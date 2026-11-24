@@ -1,5 +1,6 @@
 import { compareTimestamps } from "./timestamps.js";
 import { validationSummary } from "./validation-provider-report.js";
+import { verifiedAdmissions } from "./saved-continuum-assessment.js";
 import { validationProviderFromConfiguration } from "./validation-providers.js";
 import {
   supplementalValidationStatus,
@@ -23,6 +24,7 @@ export async function assessPluginFindings(
   context: ValidationProviderContext,
   resolveProvider = validationProviderFromConfiguration,
   previous: ValidationProviderAssessment[] = [],
+  legacyRecords: readonly unknown[] = [],
 ) {
   const provider = resolveProvider(configuration);
   // Each assessment corresponds to the same position in the sealed findings.
@@ -45,7 +47,8 @@ export async function assessPluginFindings(
         }),
       );
   let next = 0;
-  const assessments = findings.map((_, index) => {
+  const pins = verifiedAdmissions(legacyRecords, configuration);
+  const assessments = findings.map((finding, index) => {
     const saved = previous[index];
     if (saved && !retryableAssessment(saved)) return saved;
     const update = updates[next++]!;
@@ -97,6 +100,33 @@ export async function assessPluginFindings(
       ) {
         update.record = { ...prior, unavailable: update.unavailable };
         if (prior.scoringPending) update.report = validationSummary([update]);
+      } else if (!current?.findingArn) {
+        const itemId = String(finding["occurrenceId"]);
+        const pin = pins.get(itemId);
+        const conflict = prior?.admissionConflict || pin === null;
+        if (pin || conflict) {
+          if (conflict) {
+            const reason =
+              "Saved Continuum submission identity is ambiguous. Refresh this occurrence before using its assessment for remediation.";
+            update.unavailable += " " + reason;
+            update.report += "\n\n" + reason;
+          }
+          update.record = {
+            verdict: "UNAVAILABLE",
+            claimMatch: "unknown",
+            severityBefore: "unknown",
+            severityAfter: "unknown",
+            reasons: [],
+            freshness: { stale: false, reasons: [] },
+            ...current,
+            ...(pin ?? {
+              provider: "continuum",
+              itemId,
+              admissionConflict: true as const,
+            }),
+            unavailable: update.unavailable,
+          };
+        }
       }
     }
     return update;

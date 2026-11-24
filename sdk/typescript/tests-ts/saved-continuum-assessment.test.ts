@@ -423,16 +423,32 @@ const expectedCompleted = {
   freshness: { stale: false, validatedAt: completed.freshness.validatedAt },
   terminalStatus: "COMPLETED",
 } as const;
-test.each([undefined, 2, 3])(
-  "withholds older workbench conclusions until refreshed (version %s)",
+test.each([undefined, 2, 3, 4, 5, 6])(
+  "a legacy plugin verdict only binds the original admission for a fresh CLI assessment (version %s)",
   async (schemaVersion) => {
-    await save([completed], { schemaVersion });
-    await saveCli([completed]);
+    await save(
+      [
+        {
+          ...completed,
+          ...(schemaVersion === undefined || schemaVersion < 4
+            ? {
+                claimMatch: "on_target",
+                proofObservation: { kind: "execution" },
+              }
+            : {}),
+        },
+      ],
+      { schemaVersion },
+    );
     expect((await read()).size).toBe(0);
+    await saveCli([{ ...completed, submittedAt: "2026-11-21T01:20:00Z" }]);
+    expect((await read()).size).toBe(0);
+    await saveCli([conclusion]);
+    expect((await read()).get("occ_a")).toEqual(expected);
   },
 );
 
-test.each([1, 2, 3])(
+test.each([1, 2, 3, 4, 5, 6])(
   "v%i CLI snapshots cannot supply or mask a refreshed assessment",
   async (schemaVersion) => {
     const repositoryPath = await realpath(repo);
@@ -445,17 +461,19 @@ test.each([1, 2, 3])(
         digest(JSON.stringify([repositoryPath, "scan"])),
     );
     await mkdir(directory, { mode: 0o700 });
+    const entry = { environmentId: "env", record: completed };
+    const entries = [entry];
     const raw = JSON.stringify({
       schemaVersion,
       repositoryPath,
       scanId: "scan",
-      environmentId: "env",
-      record: completed,
+      ...(schemaVersion >= 4
+        ? { entries, checksum: digest(JSON.stringify(entries)) }
+        : entry),
     });
-    const filename = join(
-      directory,
-      ["occ_a", "env", raw].map(digest).join(".") + ".json",
-    );
+    const parts = ["occ_a", "env"];
+    if (schemaVersion < 4) parts.push(raw);
+    const filename = join(directory, parts.map(digest).join(".") + ".json");
     await writeFile(filename, raw);
     expect((await read()).size).toBe(0);
     await saveCli([conclusion]);
@@ -664,7 +682,7 @@ test("workbench bindings follow CODEX_HOME and explicit state overrides", async 
   );
 });
 
-test("revised submission and a return to the original receipt select the requested admission", async () => {
+test("changed CLI opt-in and a return to the original receipt select the requested admission", async () => {
   await rm(path);
   const other = {
     ...conclusion,
@@ -678,7 +696,10 @@ test("revised submission and a return to the original receipt select the request
       { CODEX_SECURITY_STATE_DIR: root },
       repo,
       "scan",
-      config,
+      {
+        ...config,
+        continuum: { ...config.continuum, include_local_validation: true },
+      },
       [other],
     );
     expect((await read()).get("occ_a")).toEqual(expected);
@@ -694,6 +715,119 @@ test("revised submission and a return to the original receipt select the request
   ]);
   expect((await read()).size).toBe(0);
 });
+
+test("a failed legacy refresh retains only the admission for a valid same-submission CLI result", async () => {
+  const legacy = {
+    ...completed,
+    claimMatch: "on_target",
+    proofObservation: { kind: "execution" },
+  };
+  const provider = () => ({
+    name: "continuum",
+    version: "1",
+    async validate() {
+      throw Error("signed out");
+    },
+  });
+  const result = await assessPluginFindings(
+    config,
+    [{ occurrenceId: "occ_a" }],
+    { repositoryPath: repo },
+    provider,
+    [],
+    [legacy],
+  );
+  expect(result.records.items[0]).toMatchObject({
+    findingArn: completed.findingArn,
+    submittedAt: completed.submittedAt,
+    claimMatch: "unknown",
+    verdict: "UNAVAILABLE",
+  });
+  expect(result.records.items[0]).not.toHaveProperty("proofObservation");
+  await save(result.records.items, { retry: result.retry });
+  await saveCli([conclusion]);
+  expect((await read()).get("occ_a")).toEqual(expected);
+});
+
+test.each(["duplicate", "invalid"])(
+  "failed refreshes of a %s legacy admission keep unrelated CLI evidence out until recovery",
+  async (kind) => {
+    const third = {
+      ...completed,
+      findingId: "third",
+      findingArn: prefix + "/code-findings/third",
+      verdict: "NOT_EXPLOITABLE",
+    };
+    const legacy =
+      kind === "duplicate"
+        ? [
+            completed,
+            {
+              ...completed,
+              findingId: "other",
+              findingArn: prefix + "/code-findings/other",
+            },
+          ]
+        : [{ ...completed, findingId: "wrong" }];
+    await save(legacy, { schemaVersion: kind === "duplicate" ? 4 : 3 });
+    await saveCli([third]);
+    expect((await read()).size).toBe(0);
+    const provider = () => ({
+      name: "continuum",
+      version: "1",
+      async validate() {
+        throw Error("signed out");
+      },
+    });
+    const findings = [{ occurrenceId: "occ_a" }];
+    const context = { repositoryPath: repo };
+    let result = await assessPluginFindings(
+      config,
+      findings,
+      context,
+      provider,
+      [],
+      legacy,
+    );
+    for (const again of [false, true]) {
+      if (again)
+        result = await assessPluginFindings(
+          config,
+          findings,
+          context,
+          provider,
+          result.retry!,
+        );
+      expect(result.summary).toContain("ambiguous");
+      await save(result.records.items, { retry: result.retry });
+      expect((await read()).size).toBe(0);
+    }
+    const recovered = await assessPluginFindings(
+      config,
+      findings,
+      context,
+      () => ({
+        name: "continuum",
+        version: "1",
+        async validate() {
+          return {
+            disposition: "reportable",
+            report: "refreshed",
+            provenance: { provider: "continuum", providerVersion: "1" },
+            record: {
+              ...completed,
+              severityBefore: "high",
+              severityAfter: "high",
+            },
+          };
+        },
+      }),
+      result.retry!,
+    );
+    await save(recovered.records.items, { retry: recovered.retry });
+    expect((await read()).get("occ_a")).toEqual(expectedCompleted);
+  },
+);
 
 test("a confirmed unlink suppresses previous verdicts until the issue is established again", async () => {
   const unlinked = {

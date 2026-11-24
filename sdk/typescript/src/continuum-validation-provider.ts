@@ -10,7 +10,10 @@ import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { setTimeout as waitFor } from "node:timers/promises";
 import { prepareContinuumAws } from "./continuum-aws.js";
-import { selectFindingValidationArtifact } from "./continuum-validation-evidence.js";
+import {
+  linkedIssueId,
+  selectFindingValidationArtifact,
+} from "./continuum-validation-evidence.js";
 import type { Finding } from "./models.js";
 import { resourceNames } from "./validation-provider-report.js";
 import {
@@ -56,6 +59,8 @@ export interface ContinuumValidationOptions {
   environmentId: string;
   awsProfile?: string;
   awsRegion?: string;
+  /** Send each finding’s local validation method and summary to AWS. Defaults to false. */
+  includeLocalValidation?: boolean;
   waitMinutes?: number;
   consoleBaseUrl?: string;
   launcher?: ContinuumAwsLauncher;
@@ -195,10 +200,19 @@ function severityId(level: string): number {
 export function findingToOcsf(
   finding: AnyFinding,
   now = new Date(),
+  includeLocalValidation = false,
 ): Record<string, unknown> {
   const id = occurrence(finding);
   const title = text(finding["title"]) ?? id;
-  const summary = text(finding["summary"]) ?? title;
+  let summary = text(finding["summary"]) ?? title;
+  if (includeLocalValidation === true) {
+    const validation = object(finding["validation"]);
+    for (const field of ["method", "summary"]) {
+      const value = validation[field];
+      if (typeof value === "string" && /\S/u.test(value))
+        summary += `\n\nCodex local validation ${field}\n${value}`;
+    }
+  }
   const selected = locations(finding);
   if (selected.length === 0)
     throw new Error(`${id} has no code location with real lines`);
@@ -592,7 +606,11 @@ export class ContinuumValidationProvider implements ValidationProvider {
             throw new Error(
               "not submittable: no structured item or code location",
             );
-          document = findingToOcsf(item, time);
+          document = findingToOcsf(
+            item,
+            time,
+            this.#options.includeLocalValidation,
+          );
         } catch (error) {
           invalid.add(index);
           const reason = error instanceof Error ? error.message : String(error);
@@ -767,10 +785,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
       );
     const status = text(current["status"]);
     const terminal = status && TERMINAL_WITHOUT_ISSUE.has(status);
-    const issueId =
-      text(current["mergedIntoIssueId"]) ??
-      text(current["duplicateOfIssueId"]) ??
-      text(current["createdIssueId"]);
+    const issueId = linkedIssueId(current)?.trim();
     if (terminal) {
       delete submission.issueUnlinked;
       delete submission.issueId;
@@ -1067,6 +1082,7 @@ export function continuumProviderFromConfig(
     environmentId: text(config["environment_id"]) ?? "",
     awsProfile: text(config["aws_profile"]),
     awsRegion: text(config["aws_region"]),
+    includeLocalValidation: config["include_local_validation"] === true,
     waitMinutes:
       typeof config["wait_minutes"] === "number"
         ? config["wait_minutes"]

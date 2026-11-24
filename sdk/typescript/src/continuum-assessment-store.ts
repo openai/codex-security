@@ -20,7 +20,8 @@ import {
 import { nullIfMissingFile } from "./targets.js";
 
 // Earlier assessments could infer a match from issue membership or keywords.
-export const continuumAssessmentVersion = 6;
+// Require explicit refresh for versions before the combined scoring and migration fixes.
+export const continuumAssessmentVersion = 7;
 
 type Entry = {
   environmentId: string;
