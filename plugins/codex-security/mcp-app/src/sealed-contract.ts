@@ -64,6 +64,7 @@ export async function loadSealedContract(
   options: {
     pluginRoot?: string;
     expectedScanId?: string;
+    expectedManifestDigest?: string;
     signal?: AbortSignal;
     // Preserve the existing readers' admission rules without changing public SDK options.
     profile?: ContractProfile;
@@ -101,6 +102,15 @@ export async function loadSealedContract(
       fileDigests,
       options.signal,
     );
+    if (
+      options.expectedManifestDigest !== undefined &&
+      options.expectedManifestDigest !==
+        `sha256:${fileDigests.get(manifestFile)}`
+    ) {
+      throw new ContractValidationError(
+        "The sealed scan manifest changed after completion.",
+      );
+    }
     payloads[manifestFile] = rawManifest;
     const hasCoverage =
       isRecord(rawManifest["scan"]) &&

@@ -1279,6 +1279,31 @@ test("rejects escaped component paths and output inside the enclosing worktree",
   ).rejects.toThrow();
 });
 
+test.skipIf(process.platform === "win32")(
+  "follows symlink parent traversal through component planning and execution",
+  async () => {
+    const paths = await fixture();
+    await mkdir(join(paths.repository, "api"));
+    await writeFile(join(paths.repository, "api", "decoy.ts"), "export {};\n");
+    await symlink("apps/web", join(paths.repository, "link"));
+    const proposed = { components: [{ name: "API", paths: ["link/../api"] }] };
+    const planned = await planComponents(paths.repository, {
+      codex: fakeCodex(() => proposed),
+    });
+    const run = mock(completed);
+    const summary = await scan(paths, {
+      ...proposed,
+      createSecurity: client(run),
+    });
+    const expected = { name: "API", paths: ["apps/api"] };
+    expect(planned.components[0]).toEqual(expected);
+    expect(await json(summary.planPath)).toEqual({ components: [expected] });
+    expect(run.mock.calls.map(([, options]) => options.target)).toEqual([
+      [join(paths.repository, "apps/api")],
+    ]);
+  },
+);
+
 test("keeps literal component paths through planning and execution", async () => {
   const name = "keeps literal component paths through planning and execution";
   if (runTestInSubprocess(import.meta.path, name)) return;
