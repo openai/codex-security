@@ -4,11 +4,13 @@ import type { ExternalFindings } from "./external-findings.js";
 import type { ExternalFindingEvidence } from "./external-import-models.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 import { isRecord } from "./record.js";
+import { isSafeNonNegativeInteger } from "./value.js";
 import {
   normalizeRecords,
   record,
   repositoryFilePath,
   requiredText,
+  scannerSeverity,
   strings,
   text,
 } from "./scanner-import.js";
@@ -49,10 +51,7 @@ function armorCodeLocations(finding: ArmorCodeFinding) {
       return [
         {
           path,
-          line:
-            Number.isSafeInteger(line) && Number(line) > 0
-              ? Number(line)
-              : null,
+          line: isSafeNonNegativeInteger(line) && line > 0 ? line : null,
         },
       ];
     });
@@ -107,7 +106,6 @@ export function normalizeArmorCodeFindings(
   return normalizeRecords(
     raw as ArmorCodeFinding[],
     (finding) => {
-      const severity = (text(finding["severity"]) ?? "unknown").toLowerCase();
       const description = text(
         finding["description"] ??
           finding["details"] ??
@@ -139,15 +137,7 @@ export function normalizeArmorCodeFindings(
           finding["title"] ?? finding["name"] ?? finding["findingName"],
           "ArmorCode finding title",
         ),
-        severity: ([
-          "critical",
-          "high",
-          "medium",
-          "low",
-          "informational",
-        ].includes(severity)
-          ? severity
-          : "unknown") as ExternalFindingEvidence["severity"],
+        severity: scannerSeverity(text(finding["severity"])?.toLowerCase()),
         description: isSast
           ? description
           : description && mitigation
