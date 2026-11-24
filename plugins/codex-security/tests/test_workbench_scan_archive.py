@@ -11,31 +11,7 @@ import threading
 from pathlib import Path
 
 import pytest
-from workbench_test_support import fail_scan, run_workbench
-
-
-def register_scan(
-    state_dir: Path, repository: Path, scan_dir: Path, *arguments: str, check: bool = True
-) -> dict[str, object]:
-    return run_workbench(
-        state_dir,
-        "register-cli-scan",
-        "--repository",
-        str(repository),
-        "--scan-dir",
-        str(scan_dir),
-        "--recipe-json",
-        json.dumps(
-            {
-                "config": {},
-                "mode": "standard",
-                "repository": str(repository),
-                "target": {"kind": "repository", "paths": []},
-            }
-        ),
-        *arguments,
-        check=check,
-    )
+from workbench_test_support import fail_scan, get_scan, register_scan, repository_recipe
 
 
 @pytest.mark.parametrize("output_mode", [0o700, 0o755, 0o775])
@@ -231,17 +207,8 @@ def test_nonempty_output_is_rejected_before_parsing_the_recipe(
         previous_dir.mkdir(mode=0o700)
         arguments = ["--archive-existing", "--archived-scan-dir", str(previous_dir)]
 
-    rejected = run_workbench(
-        tmp_path / "state",
-        "register-cli-scan",
-        "--repository",
-        str(repository),
-        "--scan-dir",
-        str(scan_dir),
-        "--recipe-json",
-        "{}",
-        *arguments,
-        check=False,
+    rejected = register_scan(
+        tmp_path / "state", repository, scan_dir, *arguments, recipe={}, check=False
     )
 
     assert rejected["returncode"] != 0
@@ -295,7 +262,7 @@ def test_archive_cannot_move_the_active_workbench_database(
     assert (scan_dir / "previous.txt").read_text() == "keep existing output"
     assert (previous_dir / "report.md").read_text() == "saved report"
     assert not list(tmp_path.glob("scan.previous-*"))
-    saved = run_workbench(state_dir, "get-scan", "--scan-id", str(previous["scanId"]))
+    saved = get_scan(state_dir, str(previous["scanId"]))
     assert saved["scan"]["scanId"] == previous["scanId"]
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         assert connection.execute("SELECT COUNT(*) FROM scans").fetchone()[0] == 1
@@ -322,14 +289,7 @@ def test_registration_rechecks_empty_output_after_competing_archive_rolls_back(
         registration_json_stdin=False,
         recipe_json_stdin=False,
         parent_scan_id=None,
-        recipe_json=json.dumps(
-            {
-                "config": {},
-                "mode": "standard",
-                "repository": str(repository),
-                "target": {"kind": "repository", "paths": []},
-            }
-        ),
+        recipe_json=json.dumps(repository_recipe(repository)),
     )
     register = workbench_api["register_cli_scan"]
     waiting = threading.Event()

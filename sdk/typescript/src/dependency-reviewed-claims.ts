@@ -1298,27 +1298,26 @@ function publishedFindingEvidence(
     ],
   };
 }
+
+function findingDetails(use: VerifiedUse | VerifiedDisposition) {
+  return {
+    ...(use.services && { services: use.services }),
+    ...(use.openConditions && { openConditions: use.openConditions }),
+    ...(use.inspections && { inspections: use.inspections }),
+    ...(use.inputSource && { inputSource: use.inputSource }),
+    ...(use.runtimeContext && { runtimeContext: use.runtimeContext }),
+    ...(use.tags && { tags: use.tags }),
+  };
+}
+
 export function reportedDisposition(
   disposition: VerifiedDisposition,
   claim: Claim,
   evidenceKeys: readonly string[],
   selected: { evidence: DependencyReviewReference[]; claims: PremiseRef[] },
 ) {
-  const {
-    kind,
-    reason,
-    location,
-    locations,
-    place,
-    handoff,
-    classification,
-    services,
-    openConditions,
-    inspections,
-    inputSource,
-    runtimeContext,
-    tags,
-  } = disposition;
+  const { kind, reason, location, locations, place, handoff, classification } =
+    disposition;
   return {
     kind,
     reason,
@@ -1327,12 +1326,7 @@ export function reportedDisposition(
     ...(place && { place }),
     ...(handoff && { handoff }),
     ...(classification && { classification }),
-    ...(services && { services }),
-    ...(openConditions && { openConditions }),
-    ...(inspections && { inspections }),
-    ...(inputSource && { inputSource }),
-    ...(runtimeContext && { runtimeContext }),
-    ...(tags && { tags }),
+    ...findingDetails(disposition),
     ...publishedFindingEvidence(disposition, evidenceKeys, selected.evidence),
     conclusionClaim: reference(claim),
     ...(selected.claims.length && { supportingClaims: selected.claims }),
@@ -1354,34 +1348,25 @@ export function reportedUse(
     evidenceKeys,
     premiseEvidence,
   );
+  const deploymentBasis =
+    use.configured || use.place?.deploymentBasis === "configured"
+      ? ("configured" as const)
+      : ("unknown" as const);
   return {
     location: use.location,
     component: use.component,
     version: use.version,
     verdict: use.verdict,
     reason: use.reason,
-    deployment: running
-      ? ("confirmed" as const)
-      : use.configured || use.place?.deploymentBasis === "configured"
-        ? ("configured" as const)
-        : ("unknown" as const),
+    deployment: running ? ("confirmed" as const) : deploymentBasis,
     ...published,
-    ...(use.services && { services: use.services }),
-    ...(use.openConditions && { openConditions: use.openConditions }),
-    ...(use.inspections && { inspections: use.inspections }),
-    ...(use.inputSource && { inputSource: use.inputSource }),
-    ...(use.runtimeContext && { runtimeContext: use.runtimeContext }),
-    ...(use.tags && { tags: use.tags }),
+    ...findingDetails(use),
     place: {
       kind: use.placeKind ?? "unknown",
       environment: null,
       artifact: null,
       observationWindow: null,
-      deploymentBasis: running
-        ? ("observed" as const)
-        : use.configured || use.place?.deploymentBasis === "configured"
-          ? ("configured" as const)
-          : ("unknown" as const),
+      deploymentBasis,
       deploymentDetail: running
         ? use.observations
             .filter((r) => r.supports.includes("running"))

@@ -28,6 +28,7 @@ type Entry = {
   record: { itemId: string };
   /** Host time when validation began. Older entries preserve file order. */
   requestedAt?: number;
+  completedAt?: number;
 };
 const digest = (value: string) => hash("sha256", value);
 
@@ -144,6 +145,7 @@ export async function assessmentStore(
       records: readonly { itemId: string }[],
       requestedAt: number,
     ) {
+      const completedAt = performance.timeOrigin + performance.now();
       const dir = await directory(cli, true);
       await withPublicationLock(dir, "snapshots", undefined, async () => {
         for (const record of records) {
@@ -156,20 +158,24 @@ export async function assessmentStore(
           const duplicate = entries.findIndex(
             (entry) => JSON.stringify(entry.record) === raw,
           );
-          if (duplicate >= 0) {
-            if ((entries[duplicate]!.requestedAt ?? 0) > requestedAt) continue;
-            entries.splice(duplicate, 1);
+          const prior = entries[duplicate];
+          // Identical results keep the latest start for CLI ordering and the
+          // latest completion for detecting overlap with a workbench poll.
+          const end = Math.max(completedAt, prior?.completedAt ?? 0);
+          if (prior && (prior.requestedAt ?? 0) > requestedAt) {
+            prior.completedAt = end;
+          } else {
+            if (prior) entries.splice(duplicate, 1);
+            const next = entries.findIndex(
+              (entry) => (entry.requestedAt ?? 0) > requestedAt,
+            );
+            entries.splice(next < 0 ? entries.length : next, 0, {
+              environmentId,
+              record,
+              requestedAt,
+              completedAt: end,
+            });
           }
-          // A slower poll may return after a different submission was selected.
-          // Preserve both results, ordered by the start of each CLI request.
-          const next = entries.findIndex(
-            (entry) => (entry.requestedAt ?? 0) > requestedAt,
-          );
-          entries.splice(next < 0 ? entries.length : next, 0, {
-            environmentId,
-            record,
-            requestedAt,
-          });
           await writeAtomicJson(join(dir, name), {
             ...scope,
             entries,

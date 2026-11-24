@@ -1,8 +1,6 @@
 import { setImmediate } from "node:timers/promises";
 
-type Match = [a: number, b: number, size: number];
 type Range = [aStart: number, aEnd: number, bStart: number, bEnd: number];
-type Opcode = [equal: boolean, ...Range];
 type Work<T> = Generator<void, T>;
 
 function* lines(text: string): Work<string[]> {
@@ -21,7 +19,7 @@ function* lines(text: string): Work<string[]> {
 
 // Match Python's SequenceMatcher(None, a, b), including its default autojunk
 // heuristic. A different longest-common-subsequence algorithm changes the diff.
-function* matchingBlocks(a: string[], b: string[]): Work<Match[]> {
+function* changedRanges(a: string[], b: string[]): Work<Range[]> {
   const positions = new Map<string, number[]>();
   for (let j = 0; j < b.length; j++) {
     const line = b[j]!;
@@ -38,26 +36,16 @@ function* matchingBlocks(a: string[], b: string[]): Work<Match[]> {
     }
   }
 
-  const pending: (Range | Match)[] = [[0, a.length, 0, b.length]];
-  const matches: Match[] = [];
+  const pending: Range[] = [[0, a.length, 0, b.length]];
+  const changes: Range[] = [];
   while (pending.length) {
     const range = pending.pop()!;
-    if (range.length === 3) {
-      const previous = matches.at(-1);
-      if (
-        previous &&
-        previous[0] + previous[2] === range[0] &&
-        previous[1] + previous[2] === range[1]
-      ) {
-        previous[2] += range[2];
-      } else {
-        matches.push(range);
-      }
+    const [alo, ahi, blo, bhi] = range;
+    if (alo === ahi || blo === bhi) {
+      if (alo < ahi || blo < bhi) changes.push(range);
       yield;
       continue;
     }
-
-    const [alo, ahi, blo, bhi] = range;
     let bestA = alo;
     let bestB = blo;
     let size = 0;
@@ -95,19 +83,19 @@ function* matchingBlocks(a: string[], b: string[]): Work<Match[]> {
       yield;
     }
     if (size) {
-      // Visit matches in order, avoiding a blocking sort of the result.
-      if (bestA + size < ahi && bestB + size < bhi) {
+      // Visit the unmatched ranges left to right, including insertions and deletions.
+      if (bestA + size < ahi || bestB + size < bhi) {
         pending.push([bestA + size, ahi, bestB + size, bhi]);
       }
-      pending.push([bestA, bestB, size]);
-      if (alo < bestA && blo < bestB) {
+      if (alo < bestA || blo < bestB) {
         pending.push([alo, bestA, blo, bestB]);
       }
+    } else {
+      changes.push(range);
     }
     yield;
   }
-  matches.push([a.length, b.length, 0]);
-  return matches;
+  return changes;
 }
 
 function formatRange(start: number, end: number): string {
@@ -125,72 +113,54 @@ function* unifiedDiff(
 ): Work<string> {
   const a = yield* lines(before);
   const b = yield* lines(after);
-  const matches = yield* matchingBlocks(a, b);
-  const codes: Opcode[] = [];
-  let i = 0;
-  let j = 0;
-  for (const [ai, bj, size] of matches) {
-    if (i < ai || j < bj) codes.push([false, i, ai, j, bj]);
-    i = ai + size;
-    j = bj + size;
-    if (size) codes.push([true, ai, i, bj, j]);
-    yield;
-  }
-  const first = codes[0];
-  const last = codes.at(-1);
-  if (first?.[0]) {
-    first[1] = Math.max(first[1], first[2] - 3);
-    first[3] = Math.max(first[3], first[4] - 3);
-  }
-  if (last?.[0]) {
-    last[2] = Math.min(last[2], last[1] + 3);
-    last[4] = Math.min(last[4], last[3] + 3);
-  }
+  const changes = yield* changedRanges(a, b);
+  if (!changes.length) return "";
 
-  const output: string[] = [];
-  function* emit(group: Opcode[]): Work<void> {
-    if (!group.length || (group.length === 1 && group[0]![0])) return;
-    if (!output.length) output.push(`--- ${fromfile}\n+++ ${tofile}\n`);
-    const first = group[0]!;
-    const last = group.at(-1)!;
-    output.push(
-      `@@ -${formatRange(first[1], last[2])} +${formatRange(first[3], last[4])} @@\n`,
-    );
-    for (const [equal, aStart, aEnd, bStart, bEnd] of group) {
-      for (let index = aStart; index < aEnd; index++) {
-        const line = a[index]!;
-        output.push((equal ? " " : "-") + line);
-        if (!line.endsWith("\n")) {
-          output.push("\n\\ No newline at end of file\n");
-        }
-        yield;
-      }
-      if (!equal) {
-        for (let index = bStart; index < bEnd; index++) {
-          const line = b[index]!;
-          output.push("+" + line);
-          if (!line.endsWith("\n")) {
-            output.push("\n\\ No newline at end of file\n");
-          }
-          yield;
-        }
-      }
+  const output = [`--- ${fromfile}\n+++ ${tofile}\n`];
+  function* emit(
+    prefix: " " | "-" | "+",
+    start: number,
+    end: number,
+  ): Work<void> {
+    const source = prefix === "+" ? b : a;
+    for (let i = start; i < end; i++) {
+      const line = source[i]!;
+      output.push(prefix + line);
+      if (!line.endsWith("\n")) output.push("\n\\ No newline at end of file\n");
       yield;
     }
   }
 
-  let group: Opcode[] = [];
-  for (const [equal, aStart, aEnd, bStart, bEnd] of codes) {
-    if (equal && aEnd - aStart > 6) {
-      group.push([true, aStart, aStart + 3, bStart, bStart + 3]);
-      yield* emit(group);
-      group = [[true, aEnd - 3, aEnd, bEnd - 3, bEnd]];
-    } else {
-      group.push([equal, aStart, aEnd, bStart, bEnd]);
+  const context = 3;
+  let next = 0;
+  while (next < changes.length) {
+    const first = changes[next]!;
+    let end = next + 1;
+    while (
+      end < changes.length &&
+      changes[end]![0] - changes[end - 1]![1] <= 2 * context
+    ) {
+      end++;
+      yield;
     }
-    yield;
+    const last = changes[end - 1]!;
+    let line = Math.max(0, first[0] - context);
+    const stop = Math.min(a.length, last[1] + context);
+    const oldRange = formatRange(line, stop);
+    const newRange = formatRange(
+      Math.max(0, first[2] - context),
+      Math.min(b.length, last[3] + context),
+    );
+    output.push(`@@ -${oldRange} +${newRange} @@\n`);
+    while (next < end) {
+      const [aStart, aEnd, bStart, bEnd] = changes[next++]!;
+      yield* emit(" ", line, aStart);
+      yield* emit("-", aStart, aEnd);
+      yield* emit("+", bStart, bEnd);
+      line = aEnd;
+    }
+    yield* emit(" ", line, stop);
   }
-  yield* emit(group);
   return output.join("");
 }
 

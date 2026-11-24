@@ -1,3 +1,4 @@
+import { readJson } from "./support/json.ts";
 import { fixturePython } from "./support/python.ts";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -34,63 +35,39 @@ const { parsePersistedScanDraft, retainRecordedReceiptOwnership } =
     absWorkingDir: import.meta.dirname,
   });
 
-// Project an archived worker exactly as the loop does after admission.
-async function readScanCoverage(
-  context: ReturnTypeFixture["reducer"] & { includePaths?: string[] },
-) {
-  const discoveries = await Promise.all(
-    context.deepReducer.claimedWorkers.map(async (worker) => {
-      const saved = JSON.parse(await readFile(worker.resultPath, "utf8"));
-      await retainRecordedReceiptOwnership(
-        { ...context, root: path.dirname(worker.resultPath), layout: "worker" },
-        saved,
-      );
-      const result = parsePersistedScanDraft(saved);
-      const coverage = scanCoverage(
-        { ...worker, result },
-        context.deepReducer.scanRoot,
-      );
-      return { coverage, result };
-    }),
-  );
-  return { discoveries };
-}
-type ReturnTypeFixture = Awaited<ReturnType<typeof fixture>>;
 const { recordCodexSecurityWorkerScanDraft, saveScanDraftCheckpoint } =
-  await importSource(
-    path.join(import.meta.dirname, "../src/artifact-scan-draft.ts"),
-  );
+  await importSource("src/artifact-scan-draft.ts");
 
-const { archiveDirectory } = await importSource(
-  path.join(import.meta.dirname, "../src/deep-scan/artifacts.ts"),
-);
+const { archiveDirectory } = await importSource("src/deep-scan/artifacts.ts");
 
 async function fixture() {
   const root = await temporaryDirectory("receipt-ownership-", true);
   const prefix = "artifacts/deep_discovery/workers/discovery-0001/output";
   const workerRoot = path.join(root, prefix);
-  const reducerRoot = path.join(
-    root,
-    "artifacts/deep_discovery/dedup/run/output",
-  );
   await mkdir(workerRoot, { recursive: true });
-  await mkdir(reducerRoot, { recursive: true });
+  const source = {
+    id: "worker-1",
+    resultPath: path.join(workerRoot, "result.json"),
+  };
+  const worker = { root: workerRoot, repoRoot: root, scanId, layout: "worker" };
   return {
     root,
     prefix,
     workerRoot,
-    worker: { root: workerRoot, repoRoot: root, scanId, layout: "worker" },
-    reducer: {
-      root: reducerRoot,
-      repoRoot: root,
-      scanId,
-      layout: "reducer",
-      deepReducer: {
-        scanRoot: root,
-        claimedWorkers: [
-          { id: "worker-1", resultPath: path.join(workerRoot, "result.json") },
-        ],
-      },
+    worker,
+    write: (input: unknown) =>
+      recordCodexSecurityWorkerScanDraft(worker, input),
+    // Project an archived worker exactly as the loop does after admission.
+    async readCoverage(includePaths?: string[]) {
+      const saved = await readJson(source.resultPath);
+      await retainRecordedReceiptOwnership(
+        { ...worker, ...(includePaths ? { includePaths } : {}) },
+        saved,
+      );
+      return scanCoverage(
+        { ...source, result: parsePersistedScanDraft(saved) },
+        root,
+      );
     },
   };
 }
@@ -230,8 +207,8 @@ for (const sharedExists of [false, true]) {
           draft([ref], { provenance: { scanReceiptRefs: [ref] } }),
         ),
       );
-      const sources = await readScanCoverage(f.reducer);
-      const [projected] = sources.discoveries[0].coverage.surfaces;
+      const coverage = await f.readCoverage();
+      const [projected] = coverage.surfaces;
       assert.deepEqual(projected.receiptRefs, [`${f.prefix}/${ref}`]);
       assert.equal(
         await readFile(path.join(f.root, projected.receiptRefs[0]), "utf8"),
@@ -249,18 +226,17 @@ for (const update of ["notes", "receipt order"] as const) {
     try {
       const refs = ["artifacts/first.txt", "artifacts/second.txt"];
       for (const ref of refs) await receipt(f.root, ref, "Shared evidence\n");
-      await recordCodexSecurityWorkerScanDraft(f.worker, draft(refs));
+      await f.write(draft(refs));
       for (const ref of refs)
         await receipt(f.workerRoot, ref, "Unrelated local evidence\n");
-      await recordCodexSecurityWorkerScanDraft(
-        f.worker,
+      await f.write(
         draft(
           update === "receipt order" ? [...refs].reverse() : refs,
           update === "notes" ? { notes: "Updated review notes." } : {},
         ),
       );
-      const sources = await readScanCoverage(f.reducer);
-      const [projected] = sources.discoveries[0].coverage.surfaces;
+      const coverage = await f.readCoverage();
+      const [projected] = coverage.surfaces;
       assert.deepEqual([...projected.receiptRefs].sort(), [...refs].sort());
       for (const ref of projected.receiptRefs)
         assert.equal(
@@ -279,11 +255,11 @@ for (const changed of ["result provenance", "checkpoint contents"] as const) {
     try {
       const ref = "artifacts/evidence.txt";
       await receipt(f.root, ref, "Shared evidence\n");
-      await recordCodexSecurityWorkerScanDraft(f.worker, draft([ref]));
+      await f.write(draft([ref]));
       await receipt(f.workerRoot, ref, "Local evidence\n");
       const resultPath = path.join(f.workerRoot, "result.json");
       if (changed === "result provenance") {
-        const saved = JSON.parse(await readFile(resultPath, "utf8"));
+        const saved = await readJson(resultPath);
         saved.reviewState.surfaces[0].provenance.extra =
           "Directly authored extension";
         await writeFile(resultPath, JSON.stringify(saved));
@@ -291,16 +267,15 @@ for (const changed of ["result provenance", "checkpoint contents"] as const) {
         const checkpointRoot = path.join(f.workerRoot, "checkpoints");
         for (const name of await readdir(checkpointRoot)) {
           const checkpoint = path.join(checkpointRoot, name);
-          const saved = JSON.parse(await readFile(checkpoint, "utf8"));
+          const saved = await readJson(checkpoint);
           saved.reviewState.surfaces[0].provenance.extra = "Changed checkpoint";
           await writeFile(checkpoint, JSON.stringify(saved));
         }
       }
-      const sources = await readScanCoverage(f.reducer);
-      assert.deepEqual(
-        sources.discoveries[0].coverage.surfaces[0].receiptRefs,
-        [`${f.prefix}/${ref}`],
-      );
+      const coverage = await f.readCoverage();
+      assert.deepEqual(coverage.surfaces[0].receiptRefs, [
+        `${f.prefix}/${ref}`,
+      ]);
     } finally {
       await rm(f.root, { recursive: true, force: true });
     }
@@ -316,7 +291,7 @@ for (const fileScope of [false, true]) {
           const ref = "artifacts/evidence.txt";
           await receipt(f.root, ref, "Shared evidence\n");
           // Older workers saved progress without the requested-path binding.
-          await recordCodexSecurityWorkerScanDraft(f.worker, {
+          await f.write({
             ...draft([ref]),
             findings: [
               finding("inherited", inScope ? "src/route.ts" : "other/route.ts"),
@@ -334,18 +309,13 @@ for (const fileScope of [false, true]) {
             },
             { ...workerDraft([]), complete },
           );
-          const published = JSON.parse(
-            await readFile(path.join(f.workerRoot, "result.json"), "utf8"),
-          );
+          const published = await readJson(f.workerRoot, "result.json");
           assert.equal(published.findings.length, inScope ? 1 : 0);
-          const sources = complete
-            ? await readScanCoverage(f.reducer)
-            : undefined;
+          const coverage = complete ? await f.readCoverage() : undefined;
           const recovered = recoverCoverage(f, complete);
           assert.deepEqual(
             {
-              reduction:
-                sources?.discoveries[0].coverage.surfaces[0].receiptRefs,
+              reduction: coverage?.surfaces[0].receiptRefs,
               recovery: recovered.refs,
             },
             { reduction: complete ? [ref] : undefined, recovery: [ref] },
@@ -356,19 +326,9 @@ for (const fileScope of [false, true]) {
             await readFile(path.join(f.root, recovered.refs[0]), "utf8"),
             "Shared evidence\n",
           );
-          const head = JSON.parse(
-            await readFile(
-              path.join(f.workerRoot, "checkpoint-head.json"),
-              "utf8",
-            ),
-          );
+          const head = await readJson(f.workerRoot, "checkpoint-head.json");
           assert.deepEqual(
-            JSON.parse(
-              await readFile(
-                path.join(f.workerRoot, "checkpoints", head.checkpoint),
-                "utf8",
-              ),
-            ),
+            await readJson(f.workerRoot, "checkpoints", head.checkpoint),
             published,
           );
         } finally {
@@ -391,14 +351,9 @@ for (const scenario of [
       const f = await fixture();
       try {
         // Captured from the writer before it checkpointed the final scope filter.
-        const legacy = JSON.parse(
-          await readFile(
-            path.join(
-              import.meta.dirname,
-              "fixtures/legacy-scoped-worker-receipts.json",
-            ),
-            "utf8",
-          ),
+        const legacy = await readJson(
+          import.meta.dirname,
+          "fixtures/legacy-scoped-worker-receipts.json",
         );
         const ref = "artifacts/evidence.txt";
         await receipt(f.root, ref, "Shared evidence\n");
@@ -414,12 +369,7 @@ for (const scenario of [
           path.join(f.workerRoot, "result.json"),
           JSON.stringify(result),
         );
-        const head = JSON.parse(
-          await readFile(
-            path.join(f.workerRoot, "checkpoint-head.json"),
-            "utf8",
-          ),
-        );
+        const head = await readJson(f.workerRoot, "checkpoint-head.json");
         // Filesystems can give sequential writes equal mtimes. Bind the intended
         // observation order explicitly instead of depending on clock resolution.
         await Promise.all([
@@ -437,19 +387,13 @@ for (const scenario of [
             : scenario === "wrong scope"
               ? ["other"]
               : ["src"];
-        const sources = await readScanCoverage({
-          ...f.reducer,
-          includePaths,
-        });
+        const coverage = await f.readCoverage(includePaths);
         const recovered = recoverCoverage(f, true, 1, includePaths);
         const expected =
           scenario === "scoped" || scenario === "unscoped"
             ? ref
             : `${f.prefix}/${ref}`;
-        assert.deepEqual(
-          sources.discoveries[0].coverage.surfaces[0].receiptRefs,
-          [expected],
-        );
+        assert.deepEqual(coverage.surfaces[0].receiptRefs, [expected]);
         if (resultIsNewer) {
           assert.deepEqual(recovered.refs, [expected]);
         } else {
@@ -472,7 +416,7 @@ for (const explicit of [false, true]) {
       try {
         const ref = "artifacts/evidence.txt";
         await receipt(f.root, ref, "Shared evidence\n");
-        await recordCodexSecurityWorkerScanDraft(f.worker, draft([ref]));
+        await f.write(draft([ref]));
         const checkpointRoot = path.join(f.workerRoot, "checkpoints");
         const initialCheckpoints = new Set(await readdir(checkpointRoot));
         const initial = await Promise.all(
@@ -482,7 +426,7 @@ for (const explicit of [false, true]) {
           ),
         );
         await receipt(f.workerRoot, ref, "Unrelated local evidence\n");
-        await recordCodexSecurityWorkerScanDraft(f.worker, {
+        await f.write({
           ...draft([ref]),
           scope: { summary: "Additional scope context" },
         });
@@ -544,14 +488,9 @@ for (const fileScope of [false, true])
       executor.run = async (request) => {
         const result = await run(request);
         if (request.kind === "discovery") {
-          const legacy = JSON.parse(
-            await readFile(
-              path.join(
-                import.meta.dirname,
-                "fixtures/legacy-scoped-worker-receipts.json",
-              ),
-              "utf8",
-            ),
+          const legacy = await readJson(
+            import.meta.dirname,
+            "fixtures/legacy-scoped-worker-receipts.json",
           );
           if (fileScope)
             legacy.checkpoint.findings[1].locations[0].path =
@@ -630,22 +569,18 @@ test("a retained surface keeps only retained shared references and resolves new 
     const added = "artifacts/added.txt";
     for (const ref of [retained, removed, added])
       await receipt(f.root, ref, "Shared evidence\n");
-    await recordCodexSecurityWorkerScanDraft(
-      f.worker,
-      draft([retained, removed]),
-    );
+    await f.write(draft([retained, removed]));
     for (const ref of [retained, added])
       await receipt(f.workerRoot, ref, "Local evidence\n");
-    const result = await recordCodexSecurityWorkerScanDraft(
-      f.worker,
+    const result = await f.write(
       draft([retained, added], { notes: "Updated review." }),
     );
     assert.deepEqual(
       result.reviewState.surfaces[0].provenance.scanReceiptRefs,
       [retained],
     );
-    const sources = await readScanCoverage(f.reducer);
-    assert.deepEqual(sources.discoveries[0].coverage.surfaces[0].receiptRefs, [
+    const coverage = await f.readCoverage();
+    assert.deepEqual(coverage.surfaces[0].receiptRefs, [
       retained,
       `${f.prefix}/${added}`,
     ]);
@@ -659,21 +594,18 @@ test("ambiguous saved surface IDs do not transfer shared ownership to an edited 
   try {
     const ref = "artifacts/evidence.txt";
     await receipt(f.root, ref, "Shared evidence\n");
-    await recordCodexSecurityWorkerScanDraft(f.worker, draft([ref]));
+    await f.write(draft([ref]));
     const resultPath = path.join(f.workerRoot, "result.json");
-    const previous = JSON.parse(await readFile(resultPath, "utf8"));
+    const previous = await readJson(resultPath);
     previous.reviewState.surfaces.push({
       ...previous.reviewState.surfaces[0],
       label: "Separate review with a reused ID",
     });
     await writeFile(resultPath, JSON.stringify(previous));
     await receipt(f.workerRoot, ref, "Local evidence\n");
-    await recordCodexSecurityWorkerScanDraft(
-      f.worker,
-      draft([ref], { notes: "Updated review." }),
-    );
-    const sources = await readScanCoverage(f.reducer);
-    const edited = sources.discoveries[0].coverage.surfaces.find(
+    await f.write(draft([ref], { notes: "Updated review." }));
+    const coverage = await f.readCoverage();
+    const edited = coverage.surfaces.find(
       (surface: { notes?: string }) => surface.notes === "Updated review.",
     );
     assert.deepEqual(edited.receiptRefs, [`${f.prefix}/${ref}`]);
@@ -706,12 +638,11 @@ for (const archived of [false, true]) {
         await mkdir(f.workerRoot);
         prefix = `${f.prefix}/artifacts/archived-receipts/attempt-01`;
       }
-      await recordCodexSecurityWorkerScanDraft(
-        f.worker,
+      await f.write(
         archived ? workerDraft([]) : draft([ref], { notes: "Updated review." }),
       );
-      const sources = await readScanCoverage(f.reducer);
-      const [surface] = sources.discoveries[0].coverage.surfaces;
+      const coverage = await f.readCoverage();
+      const [surface] = coverage.surfaces;
       assert.deepEqual(surface.receiptRefs, [`${prefix}/${ref}`]);
       assert.equal(
         await readFile(path.join(f.root, surface.receiptRefs[0]), "utf8"),
@@ -728,14 +659,11 @@ test("newly resolved shared receipts survive a later local collision alongside i
   try {
     const refs = ["artifacts/first.txt", "artifacts/second.txt"];
     for (const ref of refs) await receipt(f.root, ref, "Shared evidence\n");
-    await recordCodexSecurityWorkerScanDraft(f.worker, draft([refs[0]!]));
-    await recordCodexSecurityWorkerScanDraft(f.worker, draft(refs));
+    await f.write(draft([refs[0]!]));
+    await f.write(draft(refs));
     await receipt(f.workerRoot, refs[1]!, "Unrelated local evidence\n");
-    const sources = await readScanCoverage(f.reducer);
-    assert.deepEqual(
-      sources.discoveries[0].coverage.surfaces[0].receiptRefs,
-      refs,
-    );
+    const coverage = await f.readCoverage();
+    assert.deepEqual(coverage.surfaces[0].receiptRefs, refs);
   } finally {
     await rm(f.root, { recursive: true, force: true });
   }
@@ -750,7 +678,7 @@ for (const complete of [false, true]) {
           const ref = "artifacts/evidence.txt";
           await receipt(f.workerRoot, ref, "Local evidence\n");
           await receipt(f.root, ref, "Unrelated shared evidence\n");
-          await recordCodexSecurityWorkerScanDraft(f.worker, {
+          await f.write({
             ...draft([ref]),
             complete,
           });
@@ -766,18 +694,15 @@ for (const complete of [false, true]) {
           if (lost) await rm(path.join(output, ref));
           if (archived) {
             await mkdir(f.workerRoot);
-            await recordCodexSecurityWorkerScanDraft(f.worker, workerDraft([]));
+            await f.write(workerDraft([]));
           }
           const expected =
             archived && !lost
               ? `${f.prefix}/artifacts/archived-receipts/attempt-01/${ref}`
               : `${path.relative(f.root, output).split(path.sep).join("/")}/${ref}`;
           if (complete) {
-            const sources = await readScanCoverage(f.reducer);
-            assert.deepEqual(
-              sources.discoveries[0].coverage.surfaces[0].receiptRefs,
-              [expected],
-            );
+            const coverage = await f.readCoverage();
+            assert.deepEqual(coverage.surfaces[0].receiptRefs, [expected]);
           }
           const recovered = recoverCoverage(f, complete);
           assert.deepEqual(recovered.refs, [expected]);
@@ -807,17 +732,12 @@ test("a draft preserved after a malformed result keeps its local receipt after l
     await receipt(f.root, ref, "Unrelated shared evidence\n");
     const resultPath = path.join(f.workerRoot, "result.json");
     await writeFile(resultPath, "{broken");
-    await assert.rejects(
-      recordCodexSecurityWorkerScanDraft(f.worker, draft([ref])),
-      /stored JSON is malformed/,
-    );
+    await assert.rejects(f.write(draft([ref])), /stored JSON is malformed/);
     await rm(resultPath);
     await rm(path.join(f.workerRoot, ref));
-    await recordCodexSecurityWorkerScanDraft(f.worker, workerDraft([]));
-    const sources = await readScanCoverage(f.reducer);
-    assert.deepEqual(sources.discoveries[0].coverage.surfaces[0].receiptRefs, [
-      `${f.prefix}/${ref}`,
-    ]);
+    await f.write(workerDraft([]));
+    const coverage = await f.readCoverage();
+    assert.deepEqual(coverage.surfaces[0].receiptRefs, [`${f.prefix}/${ref}`]);
   } finally {
     await rm(f.root, { recursive: true, force: true });
   }
@@ -839,10 +759,7 @@ for (const spelling of ["original", "returned"] as const) {
             await receipt(f.workerRoot, ref, "Original local evidence\n");
             if (sharedExists)
               await receipt(f.root, ref, "Unrelated shared evidence\n");
-            const first = await recordCodexSecurityWorkerScanDraft(
-              f.worker,
-              draft([ref]),
-            );
+            const first = await f.write(draft([ref]));
             const submitted =
               spelling === "original"
                 ? ref
@@ -879,8 +796,7 @@ for (const spelling of ["original", "returned"] as const) {
                 observation === "new id"
                   ? `new-route-${attempt}`
                   : "reviewed-route";
-              await recordCodexSecurityWorkerScanDraft(
-                f.worker,
+              await f.write(
                 draft([submitted], {
                   id,
                   ...(observation === "notes"
@@ -894,8 +810,8 @@ for (const spelling of ["original", "returned"] as const) {
                     : {}),
                 }),
               );
-              const sources = await readScanCoverage(f.reducer);
-              const projected = sources.discoveries[0].coverage.surfaces.find(
+              const coverage = await f.readCoverage();
+              const projected = coverage.surfaces.find(
                 (surface: { provenance?: { sourceId?: string } }) =>
                   surface.provenance?.sourceId === id,
               );
@@ -942,18 +858,14 @@ for (const spelling of ["original", "returned"] as const) {
       const ref = "artifacts/evidence.txt";
       await receipt(f.workerRoot, ref, "Original local evidence\n");
       await receipt(f.root, ref, "Unrelated shared evidence\n");
-      const first = await recordCodexSecurityWorkerScanDraft(
-        f.worker,
-        draft([ref]),
-      );
+      const first = await f.write(draft([ref]));
       const archive = path.join(
         path.dirname(f.workerRoot),
         "attempts/attempt-01",
       );
       await archiveDirectory(f.workerRoot, archive);
       await rm(path.join(archive, ref));
-      await recordCodexSecurityWorkerScanDraft(
-        f.worker,
+      await f.write(
         draft([
           spelling === "original"
             ? ref
@@ -961,11 +873,8 @@ for (const spelling of ["original", "returned"] as const) {
         ]),
       );
       const expected = `${path.relative(f.root, archive).split(path.sep).join("/")}/${ref}`;
-      const sources = await readScanCoverage(f.reducer);
-      assert.deepEqual(
-        sources.discoveries[0].coverage.surfaces[0].receiptRefs,
-        [expected],
-      );
+      const coverage = await f.readCoverage();
+      assert.deepEqual(coverage.surfaces[0].receiptRefs, [expected]);
       const recovered = recoverCoverage(f, true, 2);
       assert.deepEqual(recovered.refs, [expected]);
       assert.equal(recovered.surfaces[0].disposition, "needs_follow_up");
@@ -988,10 +897,7 @@ for (const disposition of ["rejected", "not_applicable"]) {
         const ref = "artifacts/evidence.txt";
         const candidateId = "candidate-1";
         await receipt(f.root, ref, "Old shared evidence\n");
-        await recordCodexSecurityWorkerScanDraft(
-          f.worker,
-          draft([ref], { disposition, candidateId }),
-        );
+        await f.write(draft([ref], { disposition, candidateId }));
         for (const [index, next] of [
           "needs_follow_up",
           disposition,
@@ -1011,7 +917,7 @@ for (const disposition of ["rejected", "not_applicable"]) {
             index ? "New final local evidence\n" : "Reopened local evidence\n",
           );
           const input = draft([ref], { disposition: next, candidateId });
-          const result = await recordCodexSecurityWorkerScanDraft(f.worker, {
+          const result = await f.write({
             ...input,
             reviewState: {
               ...input.reviewState,
@@ -1036,10 +942,9 @@ for (const disposition of ["rejected", "not_applicable"]) {
         for (const reconstructed of [false, true]) {
           if (reconstructed) {
             await rm(path.join(f.workerRoot, "result.json"));
-            await recordCodexSecurityWorkerScanDraft(f.worker, workerDraft([]));
+            await f.write(workerDraft([]));
           }
-          const sources = await readScanCoverage(f.reducer);
-          const coverage = sources.discoveries[0].coverage;
+          const coverage = await f.readCoverage();
           assert.deepEqual(coverage.deferred, []);
           assert.equal(coverage.surfaces.length, 1);
           assert.equal(coverage.surfaces[0].disposition, disposition);
