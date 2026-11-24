@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { normalizeBlackDuckFindings } from "./blackduck-findings.js";
 import {
   continuumIssueFormat,
+  checkRetainedContinuumPatches,
   normalizeContinuumFindings,
 } from "./continuum-findings.js";
 import { normalizeEndorFindings } from "./endor-findings.js";
@@ -68,9 +69,12 @@ function* nativeReaders(
       );
   if (row.provider === "continuum" && isRecord(data["finding"])) {
     // The list and detail APIs can return the same raw record with different SAST projections.
-    const detail = data["patches"]
-      ? { finding: data["finding"], patches: data["patches"] }
-      : data["finding"];
+    const detail = {
+      finding: data["finding"],
+      patches: data["patches"] ?? [],
+      evidenceArtifacts: data["evidence_artifacts"] ?? [],
+      validationIssue: data["validation_issue"],
+    };
     yield (target) => normalizeContinuumFindings(detail, url, target);
     yield (target) =>
       normalizeContinuumFindings({ items: [data["finding"]] }, url, target);
@@ -130,6 +134,8 @@ function cloudEvidence(
   sourceRepositories: readonly ExternalSourceRepository[],
   inspectorMap?: ReadonlyMap<string, string>,
 ) {
+  if (row.provider === "continuum")
+    checkRetainedContinuumPatches(row.evidence.source_data);
   try {
     return validateExternalEvidence(row.evidence, "cloud");
   } catch (error) {

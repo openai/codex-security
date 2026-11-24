@@ -53,7 +53,12 @@ async function nativeRequest(
     [...args, "app-server", "--stdio"],
     {
       cwd,
-      env: { PATH: process.env["PATH"], ...environment },
+      // Keep the background marketplace fetch from holding the temporary Codex home open.
+      env: {
+        PATH: process.env["PATH"],
+        ...environment,
+        GIT_ALLOW_PROTOCOL: "file",
+      },
       windowsHide: true,
     },
   );

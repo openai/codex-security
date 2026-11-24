@@ -5,6 +5,11 @@ import { explicitlyCanceled } from "./scan-executor.js";
 import { workbenchArgs } from "./workbench-arguments.js";
 import { listenForAbort } from "./cli-signals.js";
 import { appServerCyberAccessProgram } from "./cli-daybreak.js";
+import type {
+  DependencyCoordinatorRecovery,
+  DependencyResourceEvents,
+} from "./dependency-resource-session.js";
+import type { DependencyAgentRequest } from "./dependency-stack-cli.js";
 import {
   providerPreflightCommand,
   restoreProviderProfile,
@@ -66,6 +71,7 @@ import {
 } from "node:util";
 import { Cli, Formatter, z } from "incur";
 import {
+  cliOutputFormats,
   completeCli,
   completionShell,
   serveIntegration,
@@ -136,10 +142,12 @@ import { publishScanToCustom } from "./custom-publish.js";
 import {
   ExternalPublicationError,
   prepareExternalPublication,
+  reviewContinuumPublication,
   type ExternalPublicationProgress,
   type ExternalPublicationResult,
 } from "./external-findings-publish.js";
 import { prepareLocalExternalImport } from "./external-findings-import.js";
+import { continuumRowErrors } from "./private-finding-import.js";
 import {
   collectContinuumFinding,
   collectContinuumIssues,
@@ -175,6 +183,10 @@ import {
   savedScanWorkbench,
 } from "./saved-scan-bootstrap.js";
 import { deduplicateScanInternal } from "./deduplication/scan.js";
+import {
+  createSeverityDiagnostics,
+  severityDiagnosticsEnabled,
+} from "./classify-severity-diagnostics.js";
 import { runHostRecordsProtocol } from "./host-records-protocol.js";
 import { runHostedScanProtocol } from "./hosted-scan-protocol.js";
 import { runHostedRemediationProtocol } from "./hosted-remediation-protocol.js";
@@ -182,6 +194,7 @@ import {
   FindingPatchSchema as findingPatchSchema,
   parseFindingVerifications,
   remediationPrompt,
+  standaloneRemediationText,
   verificationBatches,
   VerificationModeSchema,
   type FindingPatch,
@@ -246,6 +259,7 @@ import {
   formatScanCost,
   formatScanCostTokens,
   formatTokenUsage,
+  tokenUsage,
   type ScanTokenUsage,
 } from "./cost-model.js";
 import { readRegularInputFile, resolveScanPrompts } from "./prompt-files.js";
@@ -354,6 +368,7 @@ import {
 } from "./runtime.js";
 import {
   comparisonFindingGroups,
+  disabledMcpServers,
   resolveMatchingBatch,
   selectedComparisonContext,
   comparisonForScan,
@@ -453,6 +468,19 @@ import {
   type ProjectConfigProvenance,
 } from "./project-config.js";
 import type { ProjectScope } from "./project-config-schema.js";
+import {
+  saveCliContinuumAssessments,
+  savedContinuumAssessments,
+} from "./saved-continuum-assessment.js";
+import { validationSummary } from "./validation-provider-report.js";
+import { validationProviderFromConfiguration } from "./validation-providers.js";
+import {
+  retryableAssessment,
+  supplementalValidationStatus,
+  unavailableAssessment,
+  type ValidationItemRecord,
+  type ValidationProviderAssessment,
+} from "./validation-provider.js";
 import { resolveConfigPath, type AbsolutePath } from "./config-path.js";
 import { deepScanOptions, resolveDeepScanConfig } from "./deep-config.js";
 import { SCAN_MODES } from "./scan-modes.js";
@@ -750,7 +778,7 @@ function fitProgressLine(line: string, width: number): string {
   let ellipsisIndex = 0;
   let used = 0;
   for (const { index, segment } of graphemes.segment(plain)) {
-    used += stringWidth(segment.toWellFormed());
+    used += stringWidth(segment);
     if (used > width)
       return width > 0 ? `${plain.slice(0, ellipsisIndex)}…` : "";
     if (used < width) ellipsisIndex = index + segment.length;
@@ -858,6 +886,11 @@ function renderExternalPublicationSummary(
       : `Excluded: ${result.excluded.length}  Awaiting acknowledgement: ${result.unacknowledged}  Verified: ${result.verified}`,
     ...(result.privateJob?.error
       ? [diagnosticValue(result.privateJob.error.message)]
+      : []),
+    ...(continuumRowErrors(result.privateJob)
+      ? [
+          "Check the job errors in the private inbox. For conflicting evidence, compare the current inbox records with a new --dry-run --format json before retrying.",
+        ]
       : []),
     ...result.failures.map(
       (item) =>
@@ -1395,7 +1428,12 @@ interface SkillCommandOutput {
   readonly auth?: ScanAuthMode;
   readonly modelProvider?: string;
   readonly codexOverrides?: JsonObject;
-  readonly command: "validate" | "patch" | "verify-fix";
+  readonly stackTarget?: string;
+  readonly readOnly?: boolean;
+  readonly investigationServers?: JsonObject;
+  readonly onExecEvent?: (event: Readonly<Record<string, unknown>>) => void;
+  readonly command:
+    "validate" | "patch" | "verify-fix" | "exploitability check";
   readonly telemetryCommand?: OperationTelemetryEvent["command"];
   readonly stdout: Writable;
   readonly stderr: Writable;
@@ -1403,6 +1441,10 @@ interface SkillCommandOutput {
     readonly directory: string;
     readonly prompt: string;
     readonly threadSource: SkillThreadSource;
+    readonly linkedEvidence?: DependencyResourceEvents;
+    readonly resumableCoordinator?: boolean;
+    readonly onCoordinatorAnswer?: DependencyAgentRequest["onCoordinatorAnswer"];
+    readonly onAccessProgram?: DependencyAgentRequest["onAccessProgram"];
     readonly sandbox?: "read-only" | "workspace-write";
     readonly externalSandbox?: boolean;
     readonly cyberAccessProgram?: ScanOptions["cyberAccessProgram"];
@@ -1865,6 +1907,7 @@ async function runCodexSkillProcess(
   input?: string,
 ): Promise<number> {
   let releaseCredentialHome: (() => Promise<void>) | undefined;
+  let stackHome: string | undefined;
   try {
     let apiKey: string | undefined;
     let authentication: ScanAuthentication | null = null;
@@ -1872,7 +1915,8 @@ async function runCodexSkillProcess(
     // runSkill selects auth; other process callers supply their own environment.
     if (output?.auth !== undefined) {
       const ambientConfig =
-        output.appServer === undefined
+        output.appServer === undefined &&
+        output.command !== "exploitability check"
           ? {}
           : resolveCodexProfile(await readCodexHomeConfig(processEnvironment));
       const resolved = resolveSkillAuthentication(
@@ -2019,19 +2063,54 @@ async function runCodexSkillProcess(
           selected = { ...selected, [providerEnvKey]: providerKey };
         }
       }
-      if (output.appServer === undefined) {
+      if (
+        (output.stackTarget || output.appServer?.linkedEvidence) &&
+        releaseCredentialHome === undefined
+      ) {
+        const protectedRoots = [
+          await realpath(output.directory!),
+          ...(await enclosingGitWorktreeRoots(
+            output.stackTarget ?? output.directory!,
+            output.signal,
+          )),
+        ];
+        stackHome = await createIsolatedHome(undefined, (path) =>
+          requireOutputOutsideRepositories(protectedRoots, path, "runtime"),
+        );
+        credentialConfig = ambientConfig;
+        selected = { ...selected, CODEX_HOME: stackHome };
+        args = [
+          ...args,
+          "--config",
+          `permissions.dependency_investigation=${inlineToml(
+            dependencyAgentPermissions(
+              output.stackTarget && !output.readOnly
+                ? output.directory
+                : undefined,
+              [
+                configuredCodexHome(processEnvironment),
+                codexSecurityCredentialHome(processEnvironment),
+                stackHome,
+              ],
+            ),
+          )}`,
+        ];
+      }
+      if (output.appServer === undefined || output.appServer.linkedEvidence) {
         const authConfig =
           credentialConfig ?? (await readCodexHomeConfig(selected));
         args = [
           ...args,
           ...CODEX_AUTH_CONFIG_KEYS.flatMap((key) =>
-            authConfig[key] === undefined
+            authConfig[key] === undefined ||
+            (output.appServer && apiKey && key === "cli_auth_credentials_store")
               ? []
               : ["--config", `${key}=${inlineToml(authConfig[key])}`],
           ),
         ];
       }
-      if (output.appServer === undefined) await releaseCredentialHome?.();
+      if (output.appServer === undefined && !output.stackTarget)
+        await releaseCredentialHome?.();
       processEnvironment = selected;
     }
     const configuredHome =
@@ -2047,188 +2126,287 @@ async function runCodexSkillProcess(
         expandHome(configuredHome, processEnvironment),
       );
     }
-    output?.signal?.throwIfAborted();
-    const invocation = spawn(
-      executablePathForSpawn(command.command),
-      [...args],
-      {
-        env: environment,
-        cwd: output?.appServer?.directory ?? NEUTRAL_CODEX_CWD,
-        stdio:
-          output === undefined
-            ? [input === undefined ? "inherit" : "pipe", "inherit", "pipe"]
-            : [
-                output.appServer !== undefined || input !== undefined
-                  ? "pipe"
-                  : "ignore",
-                "pipe",
-                "pipe",
-              ],
-        windowsHide: true,
-      },
-    );
-    if (input !== undefined) {
-      invocation.stdin?.on("error", () => {});
-      invocation.stdin?.end(input);
-    }
-    let requestedSignal: SignalName | null = null;
-    let forcedTermination: ReturnType<typeof setTimeout> | undefined;
-    let forceStatusCompletion: (() => void) | null = null;
-    let forceCaptureCompletion: (() => void) | null = null;
-    let invocationStatus: Promise<number> | undefined;
-    const requestTermination = (signal: SignalName): void => {
-      requestedSignal = signal;
-      invocation.kill(signal);
-      if (forcedTermination !== undefined) return;
-      forcedTermination = setTimeout(() => {
-        forcedTermination = undefined;
-        if (invocation.exitCode === null && invocation.signalCode === null) {
-          invocation.kill("SIGKILL");
-        } else {
-          forceStatusCompletion?.();
+    if (output?.investigationServers !== undefined) {
+      // Exec ignores user config. With app-server, inspect its actual private
+      // home too. Disable inherited servers because native Codex merges MCP tables.
+      const emptyHome = await mkdtemp(join(tmpdir(), "dependency-mcp-"));
+      try {
+        const inherited = await disabledMcpServers(
+          command,
+          undefined,
+          {
+            ...Object.fromEntries(
+              Object.entries(environment).filter(
+                (entry): entry is [string, string] => entry[1] !== undefined,
+              ),
+            ),
+            CODEX_HOME: output.appServer?.linkedEvidence
+              ? (environment["CODEX_HOME"] ?? emptyHome)
+              : emptyHome,
+          },
+          { workingDirectory: NEUTRAL_CODEX_CWD, signal: output.signal },
+        );
+        for (const name of Object.keys(output.investigationServers)) {
+          if (Object.hasOwn(inherited, name))
+            throw new ConfigurationError(
+              `Evidence source ${JSON.stringify(name)} conflicts with an inherited MCP server. Use a distinct name in the project config.`,
+            );
         }
-        forceCaptureCompletion?.();
+        args = [
+          ...args,
+          "--config",
+          `mcp_servers=${inlineToml({ ...inherited, ...output.investigationServers })}`,
+        ];
+      } finally {
+        await rm(emptyHome, { recursive: true, force: true });
+      }
+    }
+    const recovery: DependencyCoordinatorRecovery | undefined = output
+      ?.appServer?.resumableCoordinator
+      ? {
+          sent: false,
+          terminalError: false,
+          pendingWrites: new Set(),
+          parents: new Map(),
+          usage: new Map(),
+        }
+      : undefined;
+    for (let attempt = 0; ; attempt++) {
+      output?.signal?.throwIfAborted();
+      const invocation = spawn(
+        executablePathForSpawn(command.command),
+        [...args],
+        {
+          env: environment,
+          cwd: output?.appServer?.linkedEvidence
+            ? NEUTRAL_CODEX_CWD
+            : (output?.appServer?.directory ?? NEUTRAL_CODEX_CWD),
+          stdio:
+            output === undefined
+              ? [input === undefined ? "inherit" : "pipe", "inherit", "pipe"]
+              : [
+                  output.appServer !== undefined || input !== undefined
+                    ? "pipe"
+                    : "ignore",
+                  "pipe",
+                  "pipe",
+                ],
+          windowsHide: true,
+        },
+      );
+      // A killed native process can close stdin during an outstanding RPC.
+      // Its exit and the corresponding missing response are handled below.
+      if (input !== undefined || recovery)
+        invocation.stdin?.on("error", () => {});
+      if (input !== undefined) {
+        invocation.stdin?.end(input);
+      }
+      let requestedSignal: SignalName | null = null;
+      let forcedTermination: ReturnType<typeof setTimeout> | undefined;
+      let forceStatusCompletion: (() => void) | null = null;
+      let forceCaptureCompletion: (() => void) | null = null;
+      let invocationStatus: Promise<number> | undefined;
+      const requestTermination = (signal: SignalName): void => {
+        requestedSignal = signal;
+        invocation.kill(signal);
+        if (forcedTermination !== undefined) return;
+        forcedTermination = setTimeout(() => {
+          forcedTermination = undefined;
+          if (invocation.exitCode === null && invocation.signalCode === null) {
+            invocation.kill("SIGKILL");
+          } else {
+            forceStatusCompletion?.();
+          }
+          forceCaptureCompletion?.();
+          invocation.stdout?.destroy();
+          invocation.stderr?.destroy();
+        }, CHILD_TERMINATION_GRACE_MS);
+      };
+      const onInterrupt = (): void => {
+        requestTermination("SIGINT");
+      };
+      const onTerminate = (): void => {
+        requestTermination("SIGTERM");
+      };
+      const signal = output?.signal;
+      const onAbort = (): void => {
+        // A process signal also invokes the handlers below in the same turn.
+        queueMicrotask(() => {
+          if (requestedSignal === null && forceStatusCompletion !== null) {
+            requestTermination(
+              signal?.reason === "SIGINT" ? "SIGINT" : "SIGTERM",
+            );
+          }
+        });
+      };
+      signal?.addEventListener("abort", onAbort, { once: true });
+      process.on("SIGINT", onInterrupt);
+      process.on("SIGTERM", onTerminate);
+      try {
+        let diagnostic = "";
+        let forwarded: Promise<void> | undefined;
+        if (output === undefined && invocation.stderr) {
+          forwarded = forwardSignInHints(invocation.stderr, processEnvironment);
+        } else {
+          invocation.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
+            diagnostic += chunk;
+          });
+        }
+        const captured = Promise.race([
+          output === undefined || invocation.stdout === null
+            ? forwarded?.then(() => undefined)
+            : readSkillCommandOutput(
+                invocation.stdout,
+                output.appServer === undefined
+                  ? undefined
+                  : {
+                      ...output.appServer,
+                      apiKey,
+                      modelProvider,
+                      onThreadStarted: releaseCredentialHome,
+                      recovery,
+                      input: invocation.stdin!,
+                    },
+                output.onExecEvent,
+              ),
+          new Promise<undefined>((resolve) => {
+            forceCaptureCompletion = () => resolve(undefined);
+          }),
+        ]);
+        invocationStatus = new Promise<number>((resolve, reject) => {
+          const complete = (
+            code: number | null,
+            signal: NodeJS.Signals | null,
+          ): void => {
+            resolve(
+              requestedSignal === "SIGINT" || signal === "SIGINT"
+                ? 130
+                : requestedSignal === "SIGTERM" || signal === "SIGTERM"
+                  ? 143
+                  : (code ?? 1),
+            );
+          };
+          forceStatusCompletion = () => complete(null, null);
+          invocation.once("error", reject);
+          invocation.once(output === undefined ? "exit" : "close", complete);
+        });
+        let [status, events] = await Promise.all([invocationStatus, captured]);
+        if (
+          attempt === 0 &&
+          recovery?.threadId &&
+          !recovery.terminalError &&
+          !recovery.pendingWrites.size &&
+          !requestedSignal &&
+          !signal?.aborted &&
+          events?.completed === false &&
+          !events.error &&
+          !events.message &&
+          unexpectedInvestigationExit(status, invocation.signalCode, diagnostic)
+        ) {
+          await writeCliOutput(
+            output!.stderr,
+            "Resuming the investigation after the native connection closed.\n",
+          );
+          continue;
+        }
+
+        if (events?.sandboxUnavailable && requestedSignal === null) {
+          throw new PatchCommandError(
+            "SANDBOX_UNAVAILABLE",
+            `${SANDBOX_UNAVAILABLE_MESSAGE}${events.error ? `\n${events.error}` : ""}`,
+          );
+        }
+        if (status === 0 && output?.appServer !== undefined && events?.error) {
+          status = 1;
+        }
+        if (output === undefined || status === 130 || status === 143)
+          return status;
+        if (status !== 0) {
+          const failure = skillCommandFailure(
+            output.command,
+            status,
+            events?.error ?? diagnostic,
+            authentication,
+          );
+          await writeCliOutput(
+            output.stderr,
+            `codex-security: ${diagnosticLines(failure)}\n`,
+          );
+          return status;
+        }
+        if (
+          (output.appServer !== undefined && events?.completed !== true) ||
+          events?.message === undefined ||
+          events.message.trim().length === 0
+        ) {
+          await writeCliOutput(
+            output.stderr,
+            `codex-security: Codex did not return a completed ${output.command} response.\n`,
+          );
+          return 2;
+        }
+        let message = events.message.trimEnd();
+        if (output.responseSchema !== undefined) {
+          const result: unknown = JSON.parse(message);
+          if (output.responseSchema(result) !== true) {
+            throw new CodexSecurityError(
+              `Validation output does not match the requested schema: ${new Ajv2020().errorsText(output.responseSchema.errors)}`,
+            );
+          }
+          message = JSON.stringify(result, null, 2);
+        }
+        await writeCliOutput(output.stdout, `${message}\n`);
+        return status;
+      } catch (error) {
         invocation.stdout?.destroy();
         invocation.stderr?.destroy();
-      }, CHILD_TERMINATION_GRACE_MS);
-    };
-    const onInterrupt = (): void => {
-      requestTermination("SIGINT");
-    };
-    const onTerminate = (): void => {
-      requestTermination("SIGTERM");
-    };
-    const signal = output?.signal;
-    const onAbort = (): void => {
-      // A process signal also invokes the handlers below in the same turn.
-      queueMicrotask(() => {
-        if (requestedSignal === null && forceStatusCompletion !== null) {
-          requestTermination(
-            signal?.reason === "SIGINT" ? "SIGINT" : "SIGTERM",
-          );
-        }
-      });
-    };
-    signal?.addEventListener("abort", onAbort, { once: true });
-    process.on("SIGINT", onInterrupt);
-    process.on("SIGTERM", onTerminate);
-    try {
-      let diagnostic = "";
-      let forwarded: Promise<void> | undefined;
-      if (output === undefined && invocation.stderr) {
-        forwarded = forwardSignInHints(invocation.stderr, processEnvironment);
-      } else {
-        invocation.stderr?.setEncoding("utf8").on("data", (chunk: string) => {
-          diagnostic += chunk;
-        });
+        requestTermination("SIGTERM");
+        await invocationStatus?.catch(() => undefined);
+        // The sign-in diagnostic stream is closed; a second diagnostic cannot be delivered.
+        if (
+          output === undefined &&
+          (error as NodeJS.ErrnoException)?.code === "EPIPE"
+        )
+          return 1;
+        throw error;
+      } finally {
+        if (forcedTermination !== undefined) clearTimeout(forcedTermination);
+        forceStatusCompletion = null;
+        forceCaptureCompletion = null;
+        signal?.removeEventListener("abort", onAbort);
+        process.off("SIGINT", onInterrupt);
+        process.off("SIGTERM", onTerminate);
       }
-      const captured = Promise.race([
-        output === undefined || invocation.stdout === null
-          ? forwarded?.then(() => undefined)
-          : readSkillCommandOutput(
-              invocation.stdout,
-              output.appServer === undefined
-                ? undefined
-                : {
-                    ...output.appServer,
-                    apiKey,
-                    modelProvider,
-                    onThreadStarted: releaseCredentialHome,
-                    input: invocation.stdin!,
-                  },
-            ),
-        new Promise<undefined>((resolve) => {
-          forceCaptureCompletion = () => resolve(undefined);
-        }),
-      ]);
-      invocationStatus = new Promise<number>((resolve, reject) => {
-        const complete = (
-          code: number | null,
-          signal: NodeJS.Signals | null,
-        ): void => {
-          resolve(
-            requestedSignal === "SIGINT" || signal === "SIGINT"
-              ? 130
-              : requestedSignal === "SIGTERM" || signal === "SIGTERM"
-                ? 143
-                : (code ?? 1),
-          );
-        };
-        forceStatusCompletion = () => complete(null, null);
-        invocation.once("error", reject);
-        invocation.once(output === undefined ? "exit" : "close", complete);
-      });
-      let [status, events] = await Promise.all([invocationStatus, captured]);
-      if (events?.sandboxUnavailable && requestedSignal === null) {
-        throw new PatchCommandError(
-          "SANDBOX_UNAVAILABLE",
-          `${SANDBOX_UNAVAILABLE_MESSAGE}${events.error ? `\n${events.error}` : ""}`,
-        );
-      }
-      if (status === 0 && output?.appServer !== undefined && events?.error) {
-        status = 1;
-      }
-      if (output === undefined || status === 130 || status === 143)
-        return status;
-      if (status !== 0) {
-        const failure = skillCommandFailure(
-          output.command,
-          status,
-          events?.error ?? diagnostic,
-          authentication,
-        );
-        await writeCliOutput(
-          output.stderr,
-          `codex-security: ${diagnosticLines(failure)}\n`,
-        );
-        return status;
-      }
-      if (
-        (output.appServer !== undefined && events?.completed !== true) ||
-        events?.message === undefined ||
-        events.message.trim().length === 0
-      ) {
-        await writeCliOutput(
-          output.stderr,
-          `codex-security: Codex did not return a completed ${output.command} response.\n`,
-        );
-        return 2;
-      }
-      let message = events.message.trimEnd();
-      if (output.responseSchema !== undefined) {
-        const result: unknown = JSON.parse(message);
-        if (output.responseSchema(result) !== true) {
-          throw new CodexSecurityError(
-            `Validation output does not match the requested schema: ${new Ajv2020().errorsText(output.responseSchema.errors)}`,
-          );
-        }
-        message = JSON.stringify(result, null, 2);
-      }
-      await writeCliOutput(output.stdout, `${message}\n`);
-      return status;
-    } catch (error) {
-      invocation.stdout?.destroy();
-      invocation.stderr?.destroy();
-      requestTermination("SIGTERM");
-      await invocationStatus?.catch(() => undefined);
-      // The sign-in diagnostic stream is closed; a second diagnostic cannot be delivered.
-      if (
-        output === undefined &&
-        (error as NodeJS.ErrnoException)?.code === "EPIPE"
-      )
-        return 1;
-      throw error;
-    } finally {
-      if (forcedTermination !== undefined) clearTimeout(forcedTermination);
-      forceStatusCompletion = null;
-      forceCaptureCompletion = null;
-      signal?.removeEventListener("abort", onAbort);
-      process.off("SIGINT", onInterrupt);
-      process.off("SIGTERM", onTerminate);
     }
   } finally {
     await releaseCredentialHome?.();
+    if (stackHome) await rm(stackHome, { recursive: true, force: true });
   }
+}
+
+/** Only recover an incomplete transport, never a reported model or policy failure. */
+function unexpectedInvestigationExit(
+  status: number,
+  signal: NodeJS.Signals | null,
+  stderr: string,
+): boolean {
+  if (status === 130 || status === 143) return false;
+  const diagnostic = stderr.replace(
+    /^WARNING: proceeding, even though we could not create PATH aliases:[^\n]*$/gmu,
+    "",
+  );
+  if (
+    /denied|blocked|refus|forbidden|unauthori[sz]ed|schema|sandbox|\b(?:401|403|429)\b/iu.test(
+      diagnostic,
+    )
+  )
+    return false;
+  return (
+    status === 0 ||
+    signal !== null ||
+    !diagnostic.trim() ||
+    /broken pipe|connection (?:reset|closed)|unexpected eof/iu.test(diagnostic)
+  );
 }
 
 /** Forward native prompts immediately, including commands split across stderr writes. */
@@ -2475,6 +2653,18 @@ export async function main(
   const separator = argv.indexOf("--");
   const literalArgs = separator < 0 ? [] : argv.slice(separator + 1);
   if (separator >= 0) argv = argv.slice(0, separator);
+  // Keep the bare boolean form from consuming the repository positional.
+  let validationProviderOverride: string | undefined;
+  argv = argv.map((argument) => {
+    if (
+      !argument.startsWith("--validate=") ||
+      argument === "--validate=true" ||
+      argument === "--validate=false"
+    )
+      return argument;
+    validationProviderOverride = argument.slice("--validate=".length);
+    return "--validate";
+  });
   const inspection = argv.some((arg) => INSPECTION_FLAGS.includes(arg));
   const actionFlags = argv.filter(
     (arg) => arg === "--mcp" || arg === "--update",
@@ -4176,7 +4366,7 @@ export async function main(
           .boolean()
           .default(false)
           .describe(
-            "Confirm publication of the previewed input without a terminal prompt.",
+            "Confirm the previewed input without a prompt. Continuum inbox updates require a matching --dry-run.",
           ),
       }),
       output: z.record(z.string(), z.unknown()).optional(),
@@ -4364,8 +4554,12 @@ export async function main(
             const showPreview = () => {
               showScannerReport(preview);
               writeDiagnostic(
-                `Cloud API: ${diagnosticValue(preview.cloudApiUrl)}\nAccount: ${diagnosticValue(preview.accountId)}\nDestination: ${diagnosticValue(preview.destination.url)} (${diagnosticValue(preview.destination.id)})\n${preview.privateImport ? `Visibility: Private inbox\nReport: ${preview.privateImport.format} (${preview.privateImport.bytes} bytes)\nReport SHA-256: ${preview.privateImport.sha256}${preview.privateImport.retryOfJobId ? `\nRetrying private job: ${diagnosticValue(preview.privateImport.retryOfJobId)}` : ""}` : `Environment: ${[...new Set(preview.requests.map((request) => request.repository.environment_id))].map(diagnosticValue).join(", ")}`}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}${preview.resumed ? "\nResuming the saved submission." : ""}\n`,
+                `Cloud API: ${diagnosticValue(preview.cloudApiUrl)}\nAccount: ${diagnosticValue(preview.accountId)}\nDestination: ${diagnosticValue(preview.destination.url)} (${diagnosticValue(preview.destination.id)})\n${preview.privateImport ? `Visibility: Private inbox\nReport: ${preview.privateImport.format} (${preview.privateImport.bytes} bytes)\nReport SHA-256: ${preview.privateImport.sha256}${preview.privateImport.retryOfJobId ? `\nPrior private job: ${diagnosticValue(preview.privateImport.retryOfJobId)}` : ""}` : `Environment: ${[...new Set(preview.requests.map((request) => request.repository.environment_id))].map(diagnosticValue).join(", ")}`}\nSource: ${preview.source.provider} / ${diagnosticValue(preview.source.source_key)}\nRead: ${preview.read}  Ready: ${preview.findings.length}  Excluded: ${preview.excluded.length}${preview.resumed ? "\nResuming the saved submission." : ""}\n`,
               );
+              if (preview.privateImport?.sourceCheckpoint)
+                writeDiagnostic(
+                  `Confirming this import can update evidence for matching ARNs in your inbox.\nSource checkpoint: ${diagnosticValue(preview.privateImport.sourceCheckpoint)}\n${preview.privateImport.retryOfJobId && !preview.resumed ? "This retries the full selection, including any previously accepted items.\n" : ""}`,
+                );
               if (preview.cloudUrl)
                 writeDiagnostic(
                   `Cloud app: ${diagnosticValue(preview.cloudUrl)}\n`,
@@ -4396,6 +4590,14 @@ export async function main(
               );
             };
             if (!structured) showPreview();
+            if (options.dryRun || options.yes)
+              await reviewContinuumPublication(
+                preview,
+                report,
+                dependencies.environment,
+                options.dryRun,
+                controller.signal,
+              );
             if (options.dryRun) {
               if (humanSummary)
                 renderedOutput = "Dry run complete. No findings uploaded.\n";
@@ -4671,7 +4873,7 @@ export async function main(
         },
       ],
       description:
-        "Read all AWS Continuum issues or collect one finding with its repository's patches.",
+        "Read all AWS Continuum issues or collect one finding with its matching validation evidence and patches.",
       hint: "Requires AWS CLI v2.38.5 or later installed outside the checkout. Bulk collection requires exactly one Git repository and allows S3 sources. For one finding, pass --finding-id and --source-root. The CLI checks for one Git repository and no S3 sources when --repository-name is omitted. Save --format json output for publish findings --provider continuum.",
       destructive: false,
       args: z.object({ environmentId: continuumEnvironmentId }),
@@ -5588,7 +5790,9 @@ export async function main(
           validate: z
             .boolean()
             .default(false)
-            .describe("Run standalone finding validation after the scan."),
+            .describe(
+              "Validate after sealing the scan. Uses the configured provider, or the existing Codex validator. --validate=NAME overrides the provider.",
+            ),
           patchSeverity: z
             .enum(REPORTABLE_SEVERITIES)
             .optional()
@@ -5691,6 +5895,19 @@ export async function main(
             directory,
             scope.sources,
           );
+          if (validationProviderOverride !== undefined) {
+            if (!validationProviderOverride.trim())
+              throw new CodexSecurityError(
+                "--validate=NAME requires a provider name.",
+              );
+            settings.validationProvider = {
+              ...settings.validationProvider,
+              provider: validationProviderOverride,
+            };
+          }
+          if (options.validate && settings.validationProvider) {
+            validationProviderFromConfiguration(settings.validationProvider);
+          }
           if (options.archiveExisting && settings.outputDir === undefined) {
             throw new CodexSecurityError(
               "--archive-existing requires --output-dir.",
@@ -5983,7 +6200,7 @@ export async function main(
           .boolean()
           .default(false)
           .describe(
-            "Classify canonical records through host-provided reviews over version 1 JSON-RPC; accepts --runs.",
+            "Classify canonical records through host-provided reviews over version 1 JSON-RPC. Accepts --runs. Hosts can enable CLI diagnostics with the Node condition codex-security-records-logs-v1.",
           ),
         reprocess: z
           .boolean()
@@ -7127,21 +7344,34 @@ export async function main(
       },
     })
     .command("validate", {
-      usage: [{ suffix: "<findings...> [options]" }, { suffix: "--records" }],
+      alias: { config: "c" },
+      usage: [
+        { suffix: "<findings...> [options]" },
+        { suffix: "--scan ID -c FILE [FINDING_ID...]" },
+        { suffix: "--records" },
+      ],
       examples: [{ args: { "findings...": "findings.json" } }],
-      hint: "Use --records alone for host-provided reviews over JSON-RPC.",
+      hint: "With --scan, submit all open findings or pass IDs to narrow the selection. Review full findings locally with codex-security export --scan ID --export-format json --output -. With include_local_validation enabled, Continuum receives the complete validation method and summary, including any secrets. Use --records alone for host-provided reviews over JSON-RPC.",
+      output: jsonDocument.optional(),
       description:
-        "Assess candidate security findings using source evidence only.",
+        "Assess candidate security findings using source evidence, or submit sealed findings to a validation provider.",
       destructive: false,
       args: z.object({
         "findings...": z
           .string()
           .min(1, "A finding must not be empty.")
+          .optional()
           .describe(
-            "Finding text, a local file path or file URL. Use text:VALUE to pass path-shaped prose.",
+            "Finding text, a local file path or file URL. Use text:VALUE to pass path-shaped prose. With --scan, pass saved finding identifiers.",
           ),
       }),
       options: z.object({
+        config: PROJECT_CONFIG_OPTION,
+        scan: optionValue("--scan")
+          .optional()
+          .describe(
+            "Submit open findings from a saved scan ID or latest using the configured provider.",
+          ),
         records: z
           .boolean()
           .default(false)
@@ -7168,11 +7398,132 @@ export async function main(
           .optional()
           .describe("Return JSON matching a Codex-supported JSON Schema file."),
       }),
-      async run({ options }) {
+      async run({ options, format }) {
         let knowledgeBase: PreparedKnowledgeBase | undefined;
         try {
           if (options.records)
             throw new CodexSecurityError("Use validate --records alone.");
+          if (options.scan !== undefined) {
+            if (
+              options.model !== undefined ||
+              options.effort !== undefined ||
+              options.auth !== "auto" ||
+              options.codex.length ||
+              options.knowledgeBase.length ||
+              options.outputSchema ||
+              options.context ||
+              options.contextFile
+            )
+              throw new CodexSecurityError(
+                "Use only a selected project file and finding identifiers with validate --scan.",
+              );
+            const project = await selectedProjectConfig(
+              options.config,
+              dependencies,
+            );
+            const configuration = project?.input.scan?.validation;
+            if (!configuration)
+              throw new CodexSecurityError(
+                "Select a project file with scan.validation.provider using -c FILE.",
+              );
+            const provider = validationProviderFromConfiguration(configuration);
+            const selected = await selectSavedFindings(
+              positionals,
+              options.scan,
+              undefined,
+              dependencies,
+              "validation",
+            );
+            const openIds = new Set(
+              selected.findings.flatMap((f) => [f.occurrenceId, f.findingId]),
+            );
+            if (positionals.some((id) => !openIds.has(id)))
+              throw new CodexSecurityError(
+                "Choose open findings for validation.",
+              );
+            const controller = new AbortController();
+            const removeSignals = listenForAbort(dependencies, controller);
+            try {
+              const context = {
+                repositoryPath: selected.repository,
+                signal: controller.signal,
+                checkSubmissionTarget: (signal?: AbortSignal) =>
+                  checkValidationTarget(
+                    dependencies,
+                    selected.scanId,
+                    selected.repository,
+                    signal,
+                  ),
+              };
+              announceContinuum(
+                errorOutput,
+                configuration,
+                selected.findings.length,
+              );
+              const requestedAt = performance.timeOrigin + performance.now();
+              const results = !selected.findings.length
+                ? []
+                : provider.validateBatch
+                  ? await provider.validateBatch(selected.findings, context)
+                  : await Promise.all(
+                      selected.findings.map((finding) =>
+                        provider.validate(finding, context),
+                      ),
+                    );
+              const status = supplementalValidationStatus(provider, results);
+              const items = results.map((result) => result.record);
+              await saveForRemediation(
+                errorOutput,
+                dependencies.environment,
+                selected.repository,
+                selected.scanId,
+                configuration,
+                items,
+                requestedAt,
+              );
+              exitCode = controller.signal.aborted
+                ? controller.signal.reason === "SIGTERM"
+                  ? 143
+                  : 130
+                : results.some((r) => r.unavailable)
+                  ? 1
+                  : 0;
+              showValidationRetry(
+                errorOutput,
+                selected.scanId,
+                project.path,
+                results,
+              );
+              if (format === "json" || format === "jsonl") {
+                return {
+                  schemaVersion: 1,
+                  scanId: selected.scanId,
+                  status,
+                  items,
+                };
+              }
+              await writeCliOutput(
+                output,
+                [
+                  `Supplemental validation ${status} (${items.length} findings).`,
+                  ...(results.length > 1 ? [validationSummary(results)] : []),
+                  ...results.map(
+                    (result, index) =>
+                      `## ${escapeTerminalText(selected.findings[index]!.occurrenceId)} — ${result.disposition}\n\n${escapeTerminalText(result.report, true)}`,
+                  ),
+                ].join("\n\n") + "\n",
+              );
+              return;
+            } finally {
+              removeSignals();
+            }
+          }
+          if (options.config !== undefined)
+            throw new CodexSecurityError("Use --config with validate --scan.");
+          if (!positionals.length)
+            throw new CodexSecurityError(
+              "Validation requires a finding or --scan.",
+            );
           if (options.knowledgeBase.length > 0) {
             const directory = dependencies.currentDirectory();
             const checkout = await gitMarkerRoot(
@@ -7336,7 +7687,7 @@ export async function main(
                 : withoutLinearCredentials(dependencies.environment);
             const batches = selected
               ? await verificationBatches(
-                  selected.findings,
+                  await remediationFindings(selected, dependencies),
                   await bundledPluginRoot(),
                   options.verificationMode,
                 )
@@ -8205,6 +8556,40 @@ export async function main(
       },
     });
 
+  if (
+    environmentEntry(
+      dependencies.environment,
+      "CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY",
+    ) === "1"
+  ) {
+    const { createExploitabilityCli } =
+      await import("./dependency-stack-cli.js");
+    cli.command(
+      createExploitabilityCli({
+        hasOutputFilter: () => frameworkFlags.filters.length > 0,
+        htmlReportRequested: () => frameworkFlags.htmlReport,
+        currentDirectory: dependencies.currentDirectory,
+        environment: dependencies.environment,
+        stderr: errorOutput,
+        setExitCode(code) {
+          exitCode = code;
+        },
+        recordsInput: dependencies.recordsInput ?? process.stdin,
+        async withSignal(run) {
+          const controller = new AbortController();
+          const remove = listenForAbort(dependencies, controller);
+          try {
+            return await run(controller.signal);
+          } finally {
+            remove();
+          }
+        },
+        runAgent: (request) =>
+          runDependencyAgent(request, dependencies, errorOutput),
+      }),
+    );
+  }
+
   if (completion.success) {
     await writeCliOutput(
       output,
@@ -8281,12 +8666,30 @@ export async function main(
     following !== undefined &&
     entry.commands.has(following);
   const subcommand = nested ? following : undefined;
-  const selected =
+  let selected =
     entry && "_group" in entry
       ? subcommand
         ? entry.commands.get(subcommand)
         : entry.root
       : entry;
+  let selectedIndex = nested ? verbIndex : commandIndex;
+  let nestedCommandError: string | undefined;
+  while (selected && "_group" in selected) {
+    const nextIndex = firstNonGlobal(argv, selectedIndex + 1);
+    const token = argv[nextIndex];
+    const next = token === undefined ? undefined : selected.commands.get(token);
+    if (!next) {
+      if (inspection && token && !token.startsWith("-"))
+        nestedCommandError =
+          "Unknown command " +
+          diagnosticValue(argv.slice(commandIndex, nextIndex + 1).join(" ")) +
+          ".";
+      selected = selected.root;
+      break;
+    }
+    selected = next;
+    selectedIndex = nextIndex;
+  }
   const protocolFlag =
     ["scan", "patch", "verify-fix"].includes(command ?? "") && !scanImport
       ? "--host"
@@ -8303,6 +8706,7 @@ export async function main(
       return "Select a command before --.";
     if (importArgs.error) return importArgs.error;
     if (frameworkFlags.argumentError) return frameworkFlags.argumentError;
+    if (nestedCommandError) return nestedCommandError;
     if (command === undefined) return frameworkFlags.tokenError;
     if (!entry) {
       if (["skills", "skill", "mcp", "completions"].includes(command))
@@ -8359,7 +8763,9 @@ export async function main(
     const structuredOutput = frameworkFlags.formats.some(isJsonFormat);
     if (
       structuredOutput &&
-      (["validate", "logout"].includes(command) ||
+      ((command === "validate" &&
+        !argv.some((arg) => arg === "--scan" || arg.startsWith("--scan="))) ||
+        command === "logout" ||
         (command === "login" && following !== "status")) &&
       !inspection
     ) {
@@ -8374,7 +8780,7 @@ export async function main(
       }
     }
     if (
-      frameworkFlags.rawStructuredOutput &&
+      frameworkFlags.rawOutput &&
       !(command === "scans" && subcommand === "logs")
     ) {
       // Saved logs include the framework's CTA after streamed events. Other
@@ -8393,11 +8799,7 @@ export async function main(
       }
     }
     let lastPositionalIndex = -1;
-    for (
-      let index = nested ? verbIndex + 1 : commandIndex + 1;
-      index < argv.length;
-      index += 1
-    ) {
+    for (let index = selectedIndex + 1; index < argv.length; index += 1) {
       const value = argv[index]!;
       if (value === "-" || !value.startsWith("-")) {
         positionals.push(value);
@@ -8465,7 +8867,14 @@ export async function main(
     }
     return frameworkFlags.tokenError;
   }
-  const frameworkFlags = parseFrameworkArguments(argv);
+  // The report-file option marks the exploitability operations that publish a
+  // completed report (check and run finalize).
+  const dependencyReport =
+    command === "exploitability" &&
+    !!selected &&
+    "options" in selected &&
+    !!selected.options?.shape["reportFile"];
+  const frameworkFlags = parseFrameworkArguments(argv, dependencyReport);
   const frameworkArgv = frameworkFlags.args;
   const { jsonFormat } = frameworkFlags;
   const policyFullOutput =
@@ -8521,6 +8930,11 @@ export async function main(
           ? await runHostRecordsProtocol(recordsCommand, input, output, {
               signal: controller.signal,
               classificationRuns,
+              diagnostics:
+                recordsCommand === "classify-severity" &&
+                severityDiagnosticsEnabled()
+                  ? createSeverityDiagnostics(() => dependencies.now())
+                  : undefined,
             })
           : remediationOperation !== undefined
             ? await runHostedRemediationProtocol(
@@ -8738,7 +9152,11 @@ export async function main(
         )}\n`;
       }
     }
-    const help = formatCliHelp(frameworkOutput, output.columns);
+    const help = formatCliHelp(
+      frameworkOutput,
+      output.columns,
+      dependencyReport,
+    );
     let response = renderedOutput ?? help ?? frameworkOutput;
     // Incur writes menus and completion scripts directly as plain text.
     if (
@@ -9169,7 +9587,10 @@ function normalizeImportArguments(
   return { args };
 }
 
-function parseFrameworkArguments(argv: readonly string[]) {
+function parseFrameworkArguments(
+  argv: readonly string[],
+  dependencyReport: boolean,
+) {
   const args: string[] = [];
   const formats: string[] = [];
   const filters: (string | undefined)[] = [];
@@ -9235,19 +9656,35 @@ function parseFrameworkArguments(argv: readonly string[]) {
       continue;
     }
     args.push(flag);
-    if (operand !== undefined) args.push(operand);
+    if (operand !== undefined) {
+      // The handler writes HTML to disk. Incur carries its plain-text summary.
+      const html =
+        dependencyReport && flag === "--format" && operand === "html";
+      args.push(html ? "toon" : operand);
+    }
     if (flag === "--format" && operand) formats.push(operand);
   }
-  // Invalid format operands still go to Incur. Preserve a valid request for
-  // JSON diagnostics if parsing a later operand fails.
-  const format = formats.findLast((value) =>
-    ["json", "jsonl", "toon", "yaml", "md"].includes(value),
-  );
+  const htmlReport = dependencyReport && formats.includes("html");
+  if (htmlReport && formats.some((value) => value !== "html"))
+    argumentError ??=
+      "--format html conflicts with other output formats, including --json.";
+  if (htmlReport && filters.length)
+    argumentError ??=
+      "--filter-output requires a structured result. Use --json with --filter-output.";
+  // Preserve a valid request for JSON diagnostics if a later operand fails.
+  const choices = cliOutputFormats(dependencyReport);
+  if (dependencyReport) {
+    const invalid = formats.find((name) => !choices.includes(name));
+    if (invalid)
+      argumentError ??= `Invalid format: ${diagnosticValue(invalid)}. Expected one of: ${choices.join(", ")}`;
+  }
+  const format = formats.findLast((value) => choices.includes(value));
   const jsonFormat = isJsonFormat(format) ? format : undefined;
   if (!jsonFormat) args.push(...tokenArguments);
   return {
     args,
     formats,
+    htmlReport,
     jsonFormat,
     fullOutput,
     argumentError,
@@ -9255,8 +9692,9 @@ function parseFrameworkArguments(argv: readonly string[]) {
     tokenArguments,
     tokenView,
     tokenError,
-    rawStructuredOutput:
-      !fullOutput && (jsonFormat !== undefined || format === "yaml"),
+    rawOutput:
+      !fullOutput &&
+      (dependencyReport || jsonFormat !== undefined || format === "yaml"),
   };
 }
 
@@ -9488,15 +9926,35 @@ async function* workbenchFindings(
   } while (offset !== undefined);
 }
 
+async function saveForRemediation(
+  stderr: Writable,
+  ...args: Parameters<typeof saveCliContinuumAssessments>
+): Promise<void> {
+  try {
+    const warning = await saveCliContinuumAssessments(...args);
+    if (warning)
+      await writeCliOutput(
+        stderr,
+        `codex-security: ${diagnosticValue(warning)}\n`,
+      ).catch(() => {});
+  } catch (error) {
+    await writeCliOutput(
+      stderr,
+      `codex-security: Could not save validation for remediation: ${diagnosticValue(errorMessage(error))}\n`,
+    ).catch(() => {});
+  }
+}
+
 async function selectSavedFindings(
   identifiers: readonly string[],
   requestedScanId: string | undefined,
   severity: FailureSeverity | undefined,
   dependencies: CliDependencies,
+  purpose?: "validation",
 ): Promise<SelectedFindings> {
   if (identifiers.some((identifier) => !isFindingIdentifier(identifier))) {
     throw new CodexSecurityError(
-      "Saved scan patching accepts only finding identifiers.",
+      "Saved scan selection accepts only finding identifiers.",
     );
   }
 
@@ -9551,6 +10009,8 @@ async function selectSavedFindings(
     | {
         scanId: string;
         targetPath: string;
+        progress?: { status?: string };
+        sealManifestDigest?: string | null;
         findings?: Finding[];
         findingsTruncated?: boolean;
       }
@@ -9565,6 +10025,13 @@ async function selectSavedFindings(
     );
   }
 
+  if (
+    purpose === "validation" &&
+    (scan.progress?.status !== "complete" || !scan.sealManifestDigest)
+  )
+    throw new CodexSecurityError(
+      "External validation requires a completed scan with a recorded seal.",
+    );
   let findings = scan.findings ?? [];
   if (scan.findingsTruncated) {
     findings = [];
@@ -9605,6 +10072,7 @@ async function selectSavedFindings(
       : await (dependencies.readSavedFindings ?? readSavedFindings)(
           scan.scanId,
           dependencies.runWorkbench,
+          scan.sealManifestDigest ?? undefined,
         );
   const byOccurrence = new Map(
     fullFindings.map((finding) => [finding.occurrenceId, finding]),
@@ -9635,14 +10103,35 @@ async function selectSavedFindings(
         if (Object.hasOwn(finding, key)) hydrated[key] = finding[key];
         else delete hydrated[key];
       }
+      delete hydrated["continuumAssessment"];
       return hydrated;
     }),
   };
 }
 
+/** Use the same host-only evidence for inline and reopened remediation. */
+async function remediationFindings(
+  { scanId, repository, findings }: SelectedFindings,
+  dependencies: CliDependencies,
+): Promise<Finding[]> {
+  const assessments = await savedContinuumAssessments(
+    dependencies.environment,
+    scanId,
+    repository,
+    findings.map((finding) => finding.occurrenceId),
+  );
+  return findings.map(({ continuumAssessment: _ignored, ...finding }) => {
+    const assessment = assessments.get(finding.occurrenceId);
+    return assessment
+      ? { ...finding, continuumAssessment: assessment }
+      : finding;
+  });
+}
+
 async function readSavedFindings(
   scanId: string,
   workbench: CliDependencies["runWorkbench"],
+  expectedManifestDigest?: string,
 ): Promise<readonly Finding[]> {
   const directory = await resolveSavedArtifactDirectory(
     scanId,
@@ -9652,6 +10141,7 @@ async function readSavedFindings(
   const { findings } = await loadContract(directory, {
     pluginRoot: await bundledPluginRoot(),
     expectedScanId: scanId,
+    expectedManifestDigest,
   });
   return findings.findings;
 }
@@ -10382,7 +10872,7 @@ async function runFindingPatches(
     `\nPatching ${formatItemCount(selected.findings.length, "confirmed finding")}...\n`,
   );
   const patches: FindingPatch[] = [];
-  for (const finding of selected.findings) {
+  for (const finding of await remediationFindings(selected, dependencies)) {
     const response = captureOutput();
     const instruction = options.findingInstructions?.[finding.occurrenceId];
     const progress = new FindingProgressPresenter(
@@ -10521,6 +11011,343 @@ function captureOutput() {
   };
 }
 
+function dependencyAgentPermissions(
+  writableDirectory: string | undefined,
+  deniedHomes: string[],
+): JsonObject {
+  return {
+    filesystem: {
+      ":root": "read",
+      ...(writableDirectory && { [writableDirectory]: { ".": "write" } }),
+      ...Object.fromEntries(deniedHomes.map((path) => [path, { ".": "deny" }])),
+    },
+    network: { enabled: false },
+  };
+}
+
+/** Use one host tool session for the coordinator and its native child threads. */
+async function runDependencyAgent(
+  request: DependencyAgentRequest,
+  dependencies: CliDependencies,
+  stderr: Writable,
+): Promise<string> {
+  if (!request.investigationTools)
+    return executeDependencyAgent(request, dependencies, stderr);
+  const { startInvestigationTools } =
+    await import("./dependency-investigation-session.js");
+  const bridge = await startInvestigationTools(request.investigationTools);
+  try {
+    return await executeDependencyAgent(
+      request,
+      dependencies,
+      stderr,
+      bridge.url,
+    );
+  } finally {
+    await bridge.close();
+  }
+}
+
+async function executeDependencyAgent(
+  request: DependencyAgentRequest,
+  dependencies: CliDependencies,
+  stderr: Writable,
+  toolsUrl?: string,
+): Promise<string> {
+  const project = await selectedProjectConfig(request.config, dependencies);
+  const explicit = parseCodexOverrides(
+    request.codex ?? [],
+    request.model,
+    request.effort,
+  );
+  // The independent reviewer checks a prepared evidence packet at low effort.
+  if (request.coordinator === false) explicit["model_reasoning_effort"] = "low";
+  const modelSettings = [
+    "model",
+    "model_reasoning_effort",
+    "model_provider",
+    "model_providers",
+    "daybreak",
+    "service_tier",
+    "analytics",
+  ];
+  // The original investigator CLI accepts the native multi-agent-v2 capacity spelling.
+  let capacity: JsonValue | undefined;
+  const features = explicit["features"];
+  if (
+    request.coordinator !== undefined &&
+    isJsonObject(features) &&
+    Object.keys(features).length === 1
+  ) {
+    const native = features["multi_agent_v2"];
+    if (
+      isJsonObject(native) &&
+      Object.keys(native).length === 1 &&
+      Object.hasOwn(native, "max_concurrent_threads_per_session")
+    ) {
+      capacity = native["max_concurrent_threads_per_session"];
+      delete explicit["features"];
+    }
+  }
+  for (const key of Object.keys(explicit)) {
+    if (!modelSettings.includes(key))
+      throw new CodexSecurityError(
+        "Unsupported investigator --codex setting: " + key,
+      );
+  }
+  const profile = mergeCodexOverrides(
+    resolveCodexProfile(await readCodexHomeConfig(dependencies.environment)),
+    project?.input.codex ?? {},
+  );
+  const agents = profile["agents"];
+  const nativeFeatures = profile["features"];
+  const multiAgent = isJsonObject(nativeFeatures)
+    ? nativeFeatures["multi_agent_v2"]
+    : undefined;
+  const configuredCapacity =
+    (isJsonObject(multiAgent)
+      ? multiAgent["max_concurrent_threads_per_session"]
+      : undefined) ??
+    (isJsonObject(agents)
+      ? agents["max_concurrent_threads_per_session"]
+      : undefined);
+  if (request.coordinator) {
+    capacity ??= configuredCapacity ?? 16;
+    if (
+      typeof capacity !== "number" ||
+      !Number.isSafeInteger(capacity) ||
+      capacity < 1
+    )
+      throw new ConfigurationError(
+        "Investigator capacity must be a positive integer.",
+      );
+  }
+  const configured = Object.fromEntries(
+    Object.entries(profile).filter(([key]) => modelSettings.includes(key)),
+  );
+  const overrides = resolveCommandAuthConfig(
+    mergeCodexOverrides(configured, explicit),
+    scanCodexHome(dependencies.environment),
+  );
+  const model = scanModelConfiguration(
+    await mergedCodexConfig({ codexOverrides: overrides }),
+  );
+  const provider =
+    typeof overrides["model_provider"] === "string"
+      ? overrides["model_provider"]
+      : undefined;
+  const deny = [
+    configuredCodexHome(dependencies.environment),
+    codexSecurityCredentialHome(dependencies.environment),
+  ];
+  const permissions = dependencyAgentPermissions(
+    request.readOnly ? undefined : request.directory,
+    deny,
+  );
+  const evidence = request.onEvidence
+    ? await import("./dependency-evidence-sources.js")
+    : undefined;
+  const servers = evidence
+    ? evidence.selectDependencyEvidenceServers(
+        project?.input.exploitability?.evidence_sources ?? [],
+        project?.input.codex?.["mcp_servers"],
+      )
+    : {};
+  const captureEvidence = evidence?.createDependencyEvidenceCapture(
+    servers,
+    request.onEvidenceFailure,
+  );
+  const linked =
+    request.coordinator && request.onEvidence && Object.keys(servers).length
+      ? (
+          await import("./dependency-linked-resources.js")
+        ).createDependencyLinkedResourceCapture({
+          servers: { ...servers },
+          onEvidence: request.onEvidence,
+          onDiagnostic: (message) => {
+            request.onEvidenceDiagnostic?.(message);
+            stderr.write(message + "\n");
+          },
+        })
+      : undefined;
+  const linkedEvidence: DependencyResourceEvents | undefined =
+    request.coordinator
+      ? {
+          async item(event, read, invocation) {
+            const origin = captureEvidence?.(event);
+            if (!origin) return;
+            request.onEvidence?.(origin);
+            await linked?.(origin, read, invocation);
+          },
+          usage: request.onUsage,
+          startup(name, status, error) {
+            if (!Object.hasOwn(servers, name)) return;
+            const settings = servers[name];
+            if (isJsonObject(settings))
+              request.onEvidenceStartup?.(
+                name,
+                status,
+                settings["required"] === true,
+                error,
+              );
+          },
+          ...(request.abortInvestigation && {
+            abort: {
+              ...(await import("./dependency-blocked-evidence.js"))
+                .dependencyAbortTool,
+              call: request.abortInvestigation,
+            },
+          }),
+        }
+      : undefined;
+  if (toolsUrl) {
+    const { investigationServer } =
+      await import("./dependency-evidence-sources.js");
+    if (Object.hasOwn(servers, investigationServer))
+      throw new ConfigurationError(
+        "The project MCP server name conflicts with the built-in investigation tools.",
+      );
+    // This endpoint is created and authenticated by this process. Its tools are
+    // the CLI's own investigation operations, including writes to the temporary ledger.
+    servers[investigationServer] = {
+      url: toolsUrl,
+      required: true,
+      default_tools_approval_mode: "approve",
+    };
+  }
+  const trustKey =
+    process.platform === "win32"
+      ? request.directory.replace(/[A-Z]/g, (letter) => letter.toLowerCase())
+      : request.directory;
+  const command = "exploitability check";
+  const settings: JsonObject = {
+    ...overrides,
+    responses_api_metadata: codexSecurityRequestContext(overrides, {
+      surface: "cli",
+      command,
+      providerResolved: false,
+    }).metadata,
+    model: model.model,
+    model_reasoning_effort: request.coordinator
+      ? "high"
+      : model.reasoningEffort,
+    permissions: { dependency_investigation: permissions },
+    default_permissions: "dependency_investigation",
+    approval_policy: "never",
+    web_search: "disabled",
+    allow_login_shell: false,
+    shell_environment_policy: {
+      inherit: "core",
+      set: { CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY: "1" },
+    },
+    project_doc_max_bytes: 0,
+    project_root_markers: [],
+    projects: { [trustKey]: { trust_level: "untrusted" } },
+    mcp_servers: servers,
+    features: {
+      // App tools are discovered independently of the native MCP server table.
+      apps: false,
+      multi_agent: false,
+      multi_agent_v2: request.coordinator === true,
+      ...(request.coordinator && { multi_agent_v2_dynamic_tools: true }),
+    },
+    ...(request.coordinator && {
+      agents: {
+        max_concurrent_threads_per_session: capacity ?? 16,
+        default_subagent_reasoning_effort:
+          isJsonObject(agents) &&
+          typeof agents["default_subagent_reasoning_effort"] === "string"
+            ? agents["default_subagent_reasoning_effort"]
+            : model.reasoningEffort,
+      },
+      tools: { update_plan: { enabled: true } },
+    }),
+  };
+  const chunks: string[] = [];
+  const status = await dependencies.runCodex(
+    [
+      ...(linkedEvidence
+        ? ["app-server", "--stdio"]
+        : [
+            "exec",
+            "--ignore-user-config",
+            "--ephemeral",
+            "--color",
+            "never",
+            "--json",
+            "--thread-source",
+            CODEX_SECURITY_THREAD_SOURCES.validation,
+          ]),
+      "--disable",
+      "plugins",
+      ...Object.entries(settings).flatMap(([key, value]) => [
+        "--config",
+        key + "=" + inlineToml(value),
+      ]),
+      ...(linkedEvidence
+        ? []
+        : ["--skip-git-repo-check", "--cd", request.directory, "-"]),
+    ],
+    {
+      command,
+      directory: request.directory,
+      signal: request.signal,
+      auth: "auto",
+      modelProvider: provider,
+      codexOverrides: overrides,
+      investigationServers: servers,
+      ...(linkedEvidence && {
+        appServer: {
+          directory: request.directory,
+          prompt: request.prompt,
+          threadSource: CODEX_SECURITY_THREAD_SOURCES.validation,
+          linkedEvidence,
+          resumableCoordinator: true,
+          onCoordinatorAnswer: request.onCoordinatorAnswer,
+          onAccessProgram: request.onAccessProgram,
+        },
+      }),
+      ...(request.stackTarget && { stackTarget: request.stackTarget }),
+      ...(request.readOnly && { readOnly: true }),
+      ...((request.onEvidence ||
+        request.onUsage ||
+        request.onAccessProgram) && {
+        onExecEvent(event) {
+          // The exec turn-start event does not expose the selected program.
+          if (!linkedEvidence && event["type"] === "turn.started")
+            request.onAccessProgram?.(undefined);
+          if (event["type"] === "turn.completed") {
+            const usage = tokenUsage(event["usage"]);
+            if (usage) request.onUsage?.(usage);
+          }
+          const record = captureEvidence?.(event);
+          if (record) request.onEvidence?.(record);
+        },
+      }),
+      stdout: {
+        write(value) {
+          chunks.push(String(value));
+          return true;
+        },
+      },
+      stderr,
+    },
+    dependencies.environment,
+    linkedEvidence ? undefined : request.prompt,
+  );
+  request.signal.throwIfAborted();
+  if (status !== 0)
+    throw new CodexSecurityError(
+      "Dependency investigator exited with status " + status + ".",
+    );
+  const response = chunks.join("").trim();
+  if (!response)
+    throw new CodexSecurityError(
+      "The dependency investigator returned no answer.",
+    );
+  return response;
+}
+
 async function runSkill(
   skill: "validation" | "fix-finding" | "verify-fix" | "assess-patch-risk",
   inputs: readonly (string | ImportedIssue)[],
@@ -10603,6 +11430,10 @@ async function runSkill(
       : new Ajv2020({ strict: false }).compile(
           JSON.parse(await readRegularInputFile(schemaPath, directory)),
         );
+  const directInput = (value: string) =>
+    skill === "fix-finding" || skill === "verify-fix"
+      ? standaloneRemediationText(value)
+      : value;
   const contents: Array<string | Finding> = [...(options.findings ?? [])];
   let standaloneFileContents: string | undefined;
   for (const input of inputs) {
@@ -10623,10 +11454,11 @@ async function runSkill(
         throw new CodexSecurityError(
           "Finding or issue inputs must not be empty.",
         );
-      contents.push(literal);
+      contents.push(directInput(literal));
       continue;
     }
     let contentsOrLiteral = input;
+    let fromFile = false;
     const explicitFile = /^file:\/\//iu.test(input)
       ? new URL(input)
       : undefined;
@@ -10704,12 +11536,13 @@ async function runSkill(
             "Finding or issue inputs must not be empty.",
           );
         }
-        if (inputs.length === 1 && contents.length === 0) {
-          standaloneFileContents = contentsOrLiteral;
-        }
+        fromFile = true;
       }
     }
-    contents.push(contentsOrLiteral);
+    const data = directInput(contentsOrLiteral);
+    if (fromFile && inputs.length === 1 && contents.length === 0)
+      standaloneFileContents = data;
+    contents.push(data);
   }
   const plugin = await bundledPluginRoot();
   const pluginVersion = await pluginMetadata(plugin).then(
@@ -10931,12 +11764,18 @@ export async function readSkillCommandOutput(
     readonly directory?: string;
     readonly prompt: string;
     readonly threadSource: SkillThreadSource;
+    readonly linkedEvidence?: DependencyResourceEvents;
+    readonly resumableCoordinator?: boolean;
+    readonly onCoordinatorAnswer?: DependencyAgentRequest["onCoordinatorAnswer"];
+    readonly onAccessProgram?: DependencyAgentRequest["onAccessProgram"];
+    readonly recovery?: DependencyCoordinatorRecovery;
     readonly input: NodeJS.WritableStream;
     readonly sandbox?: "read-only" | "workspace-write";
     readonly externalSandbox?: boolean;
     readonly cyberAccessProgram?: ScanOptions["cyberAccessProgram"];
     readonly onEvent?: (event: Readonly<Record<string, unknown>>) => void;
   },
+  onExecEvent?: (event: Readonly<Record<string, unknown>>) => void,
 ): Promise<{
   message?: string;
   error?: string;
@@ -10966,7 +11805,22 @@ export async function readSkillCommandOutput(
   const send = (request: JsonObject): void => {
     appServer?.input.write(`${JSON.stringify(request)}\n`);
   };
-  const startTurn = (): void => {
+  const recovery = appServer?.recovery;
+  const resumeId = recovery?.threadId;
+  const resources = appServer?.linkedEvidence
+    ? (
+        await import("./dependency-resource-session.js")
+      ).createDependencyResourceSession(
+        appServer.linkedEvidence,
+        send,
+        recovery,
+      )
+    : undefined;
+  let connectionClosed = false;
+  let settling: Promise<void> | undefined;
+  let callbackFailure: { cause: unknown } | undefined;
+  const startTurn = (prompt = appServer!.prompt): void => {
+    if (connectionClosed) return;
     const selected = appServer?.cyberAccessProgram;
     const program =
       selected === undefined
@@ -10991,6 +11845,13 @@ export async function readSkillCommandOutput(
           );
     void program.then(
       (cyberAccessProgram) => {
+        if (connectionClosed) return;
+        if (recovery) recovery.sent = true;
+        try {
+          appServer?.onAccessProgram?.(cyberAccessProgram);
+        } catch {
+          // Optional progress cannot change the turn.
+        }
         send({
           id: 3,
           method: "turn/start",
@@ -10998,9 +11859,7 @@ export async function readSkillCommandOutput(
             threadId: threadId!,
             ...(cyberAccessProgram === undefined ? {} : { cyberAccessProgram }),
             ...(externalSandbox ? { sandboxPolicy: externalSandbox } : {}),
-            input: [
-              { type: "text", text: appServer!.prompt, text_elements: [] },
-            ],
+            input: [{ type: "text", text: prompt, text_elements: [] }],
           },
         });
       },
@@ -11010,22 +11869,76 @@ export async function readSkillCommandOutput(
       },
     );
   };
+  // Service resource replies on the read loop while the host checks a submission.
+  const finishTurn = (): void => {
+    if (!appServer || settling) return;
+    settling = (async () => {
+      try {
+        await resources?.drain();
+        if (completed && appServer.onCoordinatorAnswer) {
+          if (!turnId || !message)
+            throw new Error("The investigator returned no completed answer.");
+          const feedback =
+            recovery?.pendingCorrection?.afterTurn === turnId
+              ? recovery.pendingCorrection.prompt
+              : await appServer.onCoordinatorAnswer(message);
+          if (feedback !== undefined) {
+            if (recovery) {
+              recovery.pendingCorrection = {
+                afterTurn: turnId,
+                prompt: feedback,
+              };
+              recovery.turnId = undefined;
+            }
+            completed = false;
+            message = undefined;
+            turnId = undefined;
+            startTurn(feedback);
+            return;
+          }
+        }
+      } catch (cause) {
+        callbackFailure = { cause };
+      } finally {
+        settling = undefined;
+      }
+      appServer.input.end();
+    })();
+  };
   const startThread = (threadConfig?: JsonObject): void => {
     if (appServer === undefined) return;
     send({
       id: 2,
-      method: "thread/start",
+      method: resumeId ? "thread/resume" : "thread/start",
       // An explicit cwd makes Codex persist trust for a new project.
       // Inherit the child process cwd and preserve the user's decision.
       params: {
-        threadSource: appServer.threadSource,
+        ...(resumeId
+          ? { threadId: resumeId, excludeTurns: false }
+          : { threadSource: appServer.threadSource }),
         ...(appServer.modelProvider === undefined
           ? {}
           : { modelProvider: appServer.modelProvider }),
         approvalPolicy:
           appServer?.sandbox === "read-only" ? "on-request" : "never",
-        sandbox: appServer?.sandbox ?? "workspace-write",
-        ...(config["daybreak"] === true ? { daybreakEnabled: true } : {}),
+        ...(resources
+          ? {
+              permissions: "dependency_investigation",
+              ...(!resumeId &&
+                resources.abortTool && {
+                  dynamicTools: [resources.abortTool as JsonObject],
+                }),
+              ...(resumeId
+                ? {}
+                : { ephemeral: !appServer.resumableCoordinator }),
+              cwd: appServer.directory!,
+            }
+          : { sandbox: appServer?.sandbox ?? "workspace-write" }),
+        ...(!resumeId &&
+        (!resources || appServer.resumableCoordinator) &&
+        config["daybreak"] === true
+          ? { daybreakEnabled: true }
+          : {}),
         ...(threadConfig === undefined ? {} : { config: threadConfig }),
       },
     });
@@ -11049,6 +11962,11 @@ export async function readSkillCommandOutput(
     }
     const value = event as Record<string, unknown>;
     if (appServer !== undefined) {
+      if (
+        resources?.receive(value) ||
+        resources?.abortCall(value, completed ? undefined : turnId)
+      )
+        continue;
       const params = value["params"];
       if (
         typeof params === "object" &&
@@ -11112,7 +12030,8 @@ export async function readSkillCommandOutput(
               ...(appServer.directory === undefined
                 ? {}
                 : { cwd: appServer.directory }),
-              includeLayers: appServer.sandbox === "read-only",
+              includeLayers:
+                Boolean(resources) || appServer.sandbox === "read-only",
             },
           });
         } else if (value["id"] === 4) {
@@ -11121,7 +12040,7 @@ export async function readSkillCommandOutput(
             isJsonObject(result) && isJsonObject(result["config"])
               ? (result["config"] as JsonObject)
               : {};
-          if (appServer.sandbox !== "read-only") {
+          if (!resources && appServer.sandbox !== "read-only") {
             startThread();
             continue;
           }
@@ -11130,8 +12049,15 @@ export async function readSkillCommandOutput(
               ? result.layers
               : undefined;
           if (!Array.isArray(layers)) {
+            error = resources
+              ? "Codex did not provide the configuration layers required for the investigation."
+              : "Codex did not provide the configuration layers required for read-only verification.";
+            appServer.input.end();
+            continue;
+          }
+          if (resources && !resources.permissionsMatch(config, layers)) {
             error =
-              "Codex did not provide the configuration layers required for read-only verification.";
+              "Codex did not resolve the requested investigation permission profile.";
             appServer.input.end();
             continue;
           }
@@ -11166,7 +12092,9 @@ export async function readSkillCommandOutput(
             configuredServers.has(server),
           );
           if (conflict !== undefined) {
-            error = `Repository-local MCP server ${JSON.stringify(conflict)} overrides a configured integration; remove the repository override before verifying fixes.`;
+            error = resources
+              ? `Repository-local MCP server ${JSON.stringify(conflict)} conflicts with a selected investigation source.`
+              : `Repository-local MCP server ${JSON.stringify(conflict)} overrides a configured integration; remove the repository override before verifying fixes.`;
             appServer.input.end();
             continue;
           }
@@ -11185,12 +12113,27 @@ export async function readSkillCommandOutput(
         } else if (value["id"] === 2) {
           await appServer.onThreadStarted?.();
           const result = value["result"] as {
-            thread: { id: string };
+            thread: { id: string; ephemeral?: boolean; turns?: unknown[] };
+            activePermissionProfile?: { id: string };
             sandbox: JsonObject;
             model: string;
             modelProvider: string;
           };
+          if (
+            resources &&
+            (result.activePermissionProfile?.id !==
+              "dependency_investigation" ||
+              result.thread.ephemeral !== !appServer.resumableCoordinator ||
+              (resumeId && result.thread.id !== resumeId))
+          ) {
+            error =
+              "Codex did not start the investigation with its requested permission profile.";
+            appServer.input.end();
+            continue;
+          }
           threadId = result.thread.id;
+          if (recovery) recovery.threadId = threadId;
+          resources?.register(threadId);
           model = result.model;
           provider = result.modelProvider;
           if (
@@ -11207,7 +12150,23 @@ export async function readSkillCommandOutput(
             });
             continue;
           }
-          startTurn();
+          if (resumeId && recovery) {
+            const { recoveredDependencyTurn, continueDependencyInvestigation } =
+              await import("./dependency-resource-session.js");
+            const saved = recoveredDependencyTurn(result.thread, recovery);
+            if (saved.kind === "completed") {
+              completed = true;
+              message = saved.message;
+              turnId = saved.id;
+              finishTurn();
+            } else if (saved.kind === "active") turnId = saved.id;
+            else
+              startTurn(
+                saved.kind === "continue"
+                  ? continueDependencyInvestigation
+                  : appServer.prompt,
+              );
+          } else startTurn();
         } else if (value["id"] === 5) {
           const result = value["result"] as {
             exitCode: number;
@@ -11223,6 +12182,7 @@ export async function readSkillCommandOutput(
           startTurn();
         } else if (value["id"] === 3) {
           turnId = (value["result"] as { turn: { id: string } }).turn.id;
+          if (recovery) recovery.turnId = turnId;
         }
       } else if (value["method"] === "turn/started") {
         const params = value["params"] as {
@@ -11231,6 +12191,7 @@ export async function readSkillCommandOutput(
         };
         if (params.threadId === threadId && turnId === undefined) {
           turnId = params.turn.id;
+          if (recovery) recovery.turnId = turnId;
         }
       } else if (value["method"] === "turn/completed") {
         const params = value["params"] as {
@@ -11243,7 +12204,7 @@ export async function readSkillCommandOutput(
           error =
             params.turn.error?.message ?? "Codex did not complete the patch.";
         }
-        appServer.input.end();
+        finishTurn();
       } else if (value["method"] === "item/completed") {
         const params = value["params"] as {
           threadId: string;
@@ -11261,7 +12222,10 @@ export async function readSkillCommandOutput(
       }
       continue;
     }
+    if (value["type"] === "turn.started" || value["type"] === "turn.completed")
+      onExecEvent?.(value);
     if (value["type"] === "item.completed") {
+      onExecEvent?.(value);
       const item = value["item"];
       if (
         isJsonObject(item) &&
@@ -11282,6 +12246,11 @@ export async function readSkillCommandOutput(
       error = value["message"];
     }
   }
+  connectionClosed = true;
+  resources?.close();
+  await settling;
+  if (callbackFailure) throw callbackFailure.cause;
+  await resources?.drain();
   return {
     ...(message === undefined ? {} : { message }),
     ...(error === undefined ? {} : { error }),
@@ -11291,7 +12260,7 @@ export async function readSkillCommandOutput(
 }
 
 export function skillCommandFailure(
-  command: "validate" | "patch" | "verify-fix",
+  command: "validate" | "patch" | "verify-fix" | "exploitability check",
   status: number,
   detail: string,
   authentication: ScanAuthentication | null = null,
@@ -12280,33 +13249,28 @@ async function executeScan(
       );
       if (arguments_.validate) {
         const scanId = result.manifest.scan.id;
-        const checkTarget = async () => {
-          const context = await dependencies.runWorkbench(
-            ["get-scan", "--scan-id", scanId, "--check-target"],
-            undefined,
-            preparationAbortController.signal,
-            config.pythonPath,
+        const checkTarget = (signal = preparationAbortController.signal) =>
+          checkValidationTarget(
+            dependencies,
+            scanId,
             repository,
+            signal,
+            config,
             options.knowledgeBaseSnapshot?.protectedRoots,
-            config.pluginPath,
           );
-          const scan = context["scan"];
-          if (
-            !isJsonObject(scan) ||
-            scan["targetPath"] !== (await realpath(repository))
-          ) {
-            throw new CodexSecurityError(
-              "The recorded scan target does not match the validation repository.",
-            );
-          }
-        };
         const findings = result.findings.findings;
+        const configuredValidation = arguments_.validationProvider;
+        const validationProvider =
+          configuredValidation === undefined
+            ? undefined
+            : validationProviderFromConfiguration(configuredValidation);
+        const validationInputs = findings;
         if (targetWarnings.length > 0) {
           validation = {
             status: "skipped",
             reason: "The scan target changed during execution.",
           };
-        } else if (findings.length === 0) {
+        } else if (validationInputs.length === 0) {
           try {
             await checkTarget();
             validation = { status: "complete", findings: 0 };
@@ -12321,7 +13285,9 @@ async function executeScan(
         } else {
           stopPresentation();
           try {
-            progress?.stage(`Validating ${findings.length} scan findings`);
+            progress?.stage(
+              `Validating ${validationInputs.length} scan findings`,
+            );
           } catch {}
           try {
             const scanDirectory = result.scanDir;
@@ -12339,22 +13305,72 @@ async function executeScan(
             );
             validation = { status: "failed", findings: 0, reportPath };
             let completed = 0;
+            const records: ValidationItemRecord[] = [];
+            let providerAssessments: ValidationProviderAssessment[] | undefined;
+            const requestedAt = performance.timeOrigin + performance.now();
             try {
-              for (const finding of findings) {
-                const assessment = await security.validate({
-                  repositoryPath: repository,
-                  scanId: result.manifest.scan.id,
-                  workflowId: arguments_.workflowId,
-                  knowledgeBasePaths: options.knowledgeBasePaths,
-                  knowledgeBaseSnapshot: options.knowledgeBaseSnapshot,
-                  finding,
-                  auth,
-                  cyberAccessProgram: arguments_.cyberAccessProgram,
-                  safetyIdentifier: arguments_.safetyIdentifier,
-                  signal: preparationAbortController.signal,
-                });
+              announceContinuum(
+                errorOutput,
+                configuredValidation,
+                validationInputs.length,
+              );
+              providerAssessments =
+                validationProvider?.validateBatch === undefined
+                  ? undefined
+                  : await validationProvider
+                      .validateBatch(validationInputs, {
+                        checkSubmissionTarget: checkTarget,
+                        repositoryPath: repository,
+                        signal: preparationAbortController.signal,
+                      })
+                      .catch((error: unknown) =>
+                        validationInputs.map(() =>
+                          unavailableAssessment(validationProvider, error),
+                        ),
+                      );
+              if (
+                providerAssessments &&
+                validationProvider?.name === "continuum"
+              )
+                errorOutput.write(
+                  validationSummary(providerAssessments) + "\n",
+                );
+              if (providerAssessments)
+                showValidationRetry(
+                  errorOutput,
+                  scanId,
+                  arguments_.projectConfig?.path,
+                  providerAssessments,
+                );
+              for (const [index, finding] of validationInputs.entries()) {
+                const assessment =
+                  providerAssessments?.[index] ??
+                  (await security.validate({
+                    repositoryPath: repository,
+                    scanId: result.manifest.scan.id,
+                    workflowId: arguments_.workflowId,
+                    knowledgeBasePaths: options.knowledgeBasePaths,
+                    knowledgeBaseSnapshot: options.knowledgeBaseSnapshot,
+                    finding,
+                    validationProvider,
+                    auth,
+                    cyberAccessProgram: arguments_.cyberAccessProgram,
+                    safetyIdentifier: arguments_.safetyIdentifier,
+                    signal: preparationAbortController.signal,
+                  }));
+                if (assessment.record) records.push(assessment.record);
+                const provenance = assessment.provenance;
+                const evidence =
+                  "outputDir" in assessment && assessment.outputDir
+                    ? `Evidence: ${assessment.outputDir}\n\n`
+                    : "";
+                const label = String(
+                  finding["occurrenceId"] ??
+                    finding["id"] ??
+                    `item-${index + 1}`,
+                );
                 await report.writeFile(
-                  `${completed === 0 ? "" : "\n---\n\n"}## ${finding.occurrenceId}\n\nDisposition: ${assessment.disposition}\n\nEvidence: ${assessment.outputDir}\n\n${assessment.report}\n`,
+                  `${completed === 0 ? "" : "\n---\n\n"}## ${label}\n\nDisposition: ${assessment.disposition}\n\n${evidence}${assessment.report}${provenance === undefined ? "" : `\n\nProvider provenance: ${provenance.provider} ${provenance.providerVersion}; reference ${provenance.referenceId ?? "unavailable"}${provenance.validatedAt ? `; validated ${provenance.validatedAt}` : ""}${provenance.referenceUrl ? `; ${provenance.referenceUrl}` : ""}.`}\n`,
                 );
                 completed += 1;
                 validation = { ...validation, findings: completed };
@@ -12362,11 +13378,35 @@ async function executeScan(
             } finally {
               await report.close();
             }
+            const recordsPath = validationProvider
+              ? reportPath.replace(/\.md$/u, ".json")
+              : undefined;
+            if (recordsPath)
+              await writeFile(
+                recordsPath,
+                JSON.stringify({ schemaVersion: 1, items: records }, null, 2) +
+                  "\n",
+                { flag: "wx", mode: 0o600 },
+              );
             await checkTarget();
+            if (configuredValidation)
+              await saveForRemediation(
+                errorOutput,
+                dependencies.environment,
+                repository,
+                result.manifest.scan.id,
+                configuredValidation,
+                records,
+                requestedAt,
+              );
             validation = {
-              status: "complete",
-              findings: findings.length,
+              status: supplementalValidationStatus(
+                validationProvider,
+                providerAssessments,
+              ),
+              findings: validationInputs.length,
               reportPath,
+              ...(recordsPath ? { recordsPath } : {}),
             };
             try {
               progress?.stage(`Finding validation saved to ${reportPath}`);
@@ -13336,6 +14376,68 @@ function importedFindingsCommand(repository: string): string {
     return "From the repository directory, run codex-security findings imported.";
   const path = quoteCliPath(repository);
   return `Stored evidence${cliShellLabel(path)}: codex-security findings imported ${path}`;
+}
+
+async function checkValidationTarget(
+  dependencies: CliDependencies,
+  scanId: string,
+  repository: string,
+  signal?: AbortSignal,
+  config?: { pythonPath?: string; pluginPath?: string },
+  protectedRoots?: readonly string[],
+) {
+  const { scan } = await dependencies.runWorkbench(
+    ["get-scan", "--scan-id", scanId, "--check-target"],
+    undefined,
+    signal,
+    config?.pythonPath,
+    repository,
+    protectedRoots,
+    config?.pluginPath,
+  );
+  if (
+    !isJsonObject(scan) ||
+    scan["targetPath"] !== (await realpath(repository))
+  ) {
+    throw new CodexSecurityError(
+      "The recorded scan target does not match the validation repository.",
+    );
+  }
+}
+
+function announceContinuum(
+  stderr: Writable,
+  configuration: ResolvedScanSettings["validationProvider"],
+  count: number,
+) {
+  const settings = configuration?.continuum;
+  if (!settings || !count) return;
+  const detail = settings.include_local_validation
+    ? " New submissions include the full local validation method and summary, including any secrets."
+    : "";
+  stderr.write(
+    `Continuum environment ${diagnosticValue(settings.environment_id)}. Submitting or polling ${count} selected findings.${detail}\n`,
+  );
+}
+
+function showValidationRetry(
+  stderr: Writable,
+  scanId: string,
+  file: string | undefined,
+  results: readonly ValidationProviderAssessment[],
+) {
+  const pending = results.flatMap((item) =>
+    item.record?.provider === "continuum" && retryableAssessment(item)
+      ? [item.record.itemId]
+      : [],
+  );
+  if (!pending.length) return;
+  const config =
+    file && escapeTerminalText(file) === file ? quoteCliPath(file) : "FILE";
+  const ids = pending.map((id) => quoteCliPath(diagnosticValue(id))).join(" ");
+  stderr.write(
+    `To retry pending findings, make sure the file sets scan.validation.provider to continuum. Keep the other settings and host state, then run${cliShellLabel(config)} codex-security validate --scan ${quoteCliPath(diagnosticValue(scanId))} -c ${config} ${ids}\nChanging the payload or destination can create a new finding.\n`,
+  );
 }
 
 async function selectedProjectConfig(

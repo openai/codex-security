@@ -932,7 +932,7 @@ describe("CLI", () => {
       "bulk-scan [input]",
       "export [scanDir]",
       "import github <repository>",
-      "validate <findings...>",
+      "validate [findings...]",
       "verify-fix [findings...]",
       "patch [issues...]",
       "findings false-positive <occurrenceId>",
@@ -3958,7 +3958,7 @@ describe("CLI", () => {
       [["export", "scan", "--format", "sarif"], "Invalid format"],
       [["export", "scan", "--export-format", "xml"], "Invalid option"],
       [["export", "scan-a", "scan-b"], "Unexpected positional"],
-      [["validate"], "findings..."],
+      [["validate"], "requires a finding or --scan"],
       [["validate", ""], "A finding must not be empty"],
       [
         ["patch"],

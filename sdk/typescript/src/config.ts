@@ -4,7 +4,7 @@ import { mkdir, open, readFile, rename, unlink } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import type { CyberAccessProgram } from "@openai/codex-sdk";
 import { parse, stringify } from "smol-toml";
-import { ConfigurationError } from "./errors.js";
+import { ConfigurationError, errorMessage } from "./errors.js";
 
 export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonValue[] | JsonObject;
@@ -399,12 +399,12 @@ export function quoteTomlString(value: string): string {
   return JSON.stringify(value).replaceAll("\u007f", "\\u007f");
 }
 
+const NULL_TOML_VALUE_MESSAGE =
+  "Codex TOML overrides cannot contain null values.";
+
 /** @internal Serialize one Codex CLI override value without flattening its keys. */
 export function inlineToml(value: JsonValue): string {
-  if (value === null)
-    throw new ConfigurationError(
-      "Codex TOML overrides cannot contain null values.",
-    );
+  if (value === null) throw new ConfigurationError(NULL_TOML_VALUE_MESSAGE);
   // Match the Codex SDK's numeric spelling, including integers above 2**53 - 1.
   if (typeof value === "number" && Number.isFinite(value)) return String(value);
   if (Array.isArray(value)) return `[${value.map(inlineToml).join(",")}]`;
@@ -426,7 +426,8 @@ export function scanApprovalPolicy(
   return configured === "never" ? "never" : "on-request";
 }
 
-function selectedScanProfile(
+/** @internal */
+export function selectedScanProfile(
   config: Readonly<JsonObject>,
 ): Record<string, JsonValue> | undefined {
   const profileName = config["profile"];
@@ -441,7 +442,7 @@ function selectedScanProfile(
 }
 
 export function resolveCodexProfile(config: JsonObject): JsonObject {
-  const normalized = parse(stringify(config)) as JsonObject;
+  const normalized = parse(serializeCodexConfig(config)) as JsonObject;
   const resolved = deepMerge(normalized, selectedScanProfile(normalized) ?? {});
   delete resolved["profile"];
   delete resolved["profiles"];
@@ -632,19 +633,31 @@ export function normalizeLegacyWindowsSandboxOverride(
   };
 }
 
+function containsNullArrayElement(value: JsonValue): boolean {
+  if (Array.isArray(value))
+    return value.some(
+      (item) => item === null || containsNullArrayElement(item),
+    );
+  return isObject(value) && Object.values(value).some(containsNullArrayElement);
+}
+
+function serializeCodexConfig(config: JsonObject): string {
+  try {
+    return stringify(config);
+  } catch (error) {
+    const message =
+      error instanceof TypeError && containsNullArrayElement(config)
+        ? NULL_TOML_VALUE_MESSAGE
+        : `Invalid Codex configuration: ${errorMessage(error)}`;
+    throw new ConfigurationError(message, { cause: error });
+  }
+}
+
 export async function writeCodexConfig(
   path: string,
   config: JsonObject,
 ): Promise<void> {
-  let contents: string;
-  try {
-    contents = stringify(config);
-  } catch (error) {
-    throw new ConfigurationError("Invalid Codex configuration.", {
-      cause: error,
-    });
-  }
-  await writePrivateConfig(path, contents);
+  await writePrivateConfig(path, serializeCodexConfig(config));
 }
 
 /** @internal Write private configuration without changing its serialized contents. */

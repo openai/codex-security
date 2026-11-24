@@ -119,6 +119,13 @@ test("inline Codex overrides omit optional null fields like the file writer", as
   });
 });
 
+test("reports null array entries when resolving a Codex profile", () => {
+  const resolveProfile = () =>
+    resolveCodexProfile({ skills: { config: [null] } });
+  expect(resolveProfile).toThrow(ConfigurationError);
+  expect(resolveProfile).toThrow("cannot contain null");
+});
+
 function runPinnedCodex(
   codexHome: string,
   arguments_: readonly string[],
