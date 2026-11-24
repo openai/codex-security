@@ -5,27 +5,27 @@ import type {
   Variant,
 } from "./experiment.mts";
 
-const variants = ["baseline", "time-aware"] as const;
-const usageFields = [
+export const variants = ["baseline", "time-aware"] as const;
+export const usageFields = [
   "input_tokens",
   "cached_input_tokens",
   "output_tokens",
 ] as const;
 type UsageField = (typeof usageFields)[number];
 
-function mean(values: number[]) {
+export function mean(values: number[]) {
   return values.length
     ? values.reduce((total, value) => total + value, 0) / values.length
     : null;
 }
 
-function usageValue(record: RunRecord, field: UsageField) {
+function usageValue(record: Pick<RunRecord, "usage">, field: UsageField) {
   const usage = record.usage as Partial<Record<UsageField, number>> | undefined;
   const value = usage?.[field];
   return typeof value === "number" && Number.isFinite(value) ? value : null;
 }
 
-function totalTokens(record: RunRecord) {
+function totalTokens(record: Pick<RunRecord, "usage">) {
   const input = usageValue(record, "input_tokens");
   const output = usageValue(record, "output_tokens");
   return input === null || output === null ? null : input + output;
@@ -36,6 +36,21 @@ function sumKnown(values: (number | null)[]) {
     values.every((value): value is number => value !== null)
     ? values.reduce((total, value) => total + value, 0)
     : null;
+}
+
+export function summarizeUsage(records: Pick<RunRecord, "usage">[]) {
+  return {
+    ...(Object.fromEntries(
+      usageFields.map((field) => [
+        field,
+        sumKnown(records.map((record) => usageValue(record, field))),
+      ]),
+    ) as Record<UsageField, number | null>),
+    total_tokens: sumKnown(records.map(totalTokens)),
+    missingUsageRuns: records.filter((record) =>
+      usageFields.some((field) => usageValue(record, field) === null),
+    ).length,
+  };
 }
 
 function summarizeArm(records: RunRecord[]) {
@@ -60,18 +75,7 @@ function summarizeArm(records: RunRecord[]) {
       (report) => report.unmatchedFindings.length,
     ),
     evidenceErrors: qualityCount((report) => report.evidenceErrors.length),
-    usage: {
-      ...(Object.fromEntries(
-        usageFields.map((field) => [
-          field,
-          sumKnown(records.map((record) => usageValue(record, field))),
-        ]),
-      ) as Record<UsageField, number | null>),
-      total_tokens: sumKnown(records.map(totalTokens)),
-      missingUsageRuns: records.filter((record) =>
-        usageFields.some((field) => usageValue(record, field) === null),
-      ).length,
-    },
+    usage: summarizeUsage(records),
   };
 }
 

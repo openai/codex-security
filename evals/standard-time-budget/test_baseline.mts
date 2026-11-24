@@ -152,6 +152,19 @@ function createFiveCaseFixture(): Fixture {
   };
 }
 
+test("snapshot digests order paths independently of the host locale", () => {
+  const digest = hashText("fixture");
+  assert.equal(
+    hashSnapshotMap({ "ä.py": digest, "z.py": digest }),
+    hashText(
+      JSON.stringify([
+        ["z.py", digest],
+        ["ä.py", digest],
+      ]),
+    ),
+  );
+});
+
 test("export strips host paths and raw source while round-tripping comparison results", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "baseline-export-"));
   t.after(() => rm(root, { recursive: true, force: true }));

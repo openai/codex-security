@@ -140,11 +140,22 @@ node --experimental-strip-types evals/standard-time-budget/baseline.mts export e
 node --experimental-strip-types evals/standard-time-budget/baseline.mts compare baseline.json evals/standard-time-budget/reports/run-candidate
 ```
 
-Exported baselines preserve experiment settings, evaluator/source/plugin/SDK/executable SHA-256 digests, positive and safe-control case definitions with per-file SHA-256 hashes, and per-attempt semantic outcomes, while omitting structured host path fields (`scanDir`, `reportPath`, executable paths) and raw fixture source text. Failed attempts keep `error` diagnostics verbatim in both `baseline.json` and `compare` output so execution failures remain inspectable; because failure messages can include absolute local paths, command output, or secrets, complete a disclosure review before sharing or publishing exported baselines or comparison reports.
+The export records the experiment settings, source and tool digests, case
+definitions, and outcomes of each attempt. It omits the fixture source and
+structured host paths. **Review exports and comparisons before sharing.**
+Failure messages are preserved verbatim and may contain local paths, command
+output, or secrets.
 
-Comparisons match `comparable` cases only when both the case ID and its definition (relative path, line span, accepted CWE set, and cited source-file SHA-256) are unchanged. Added, removed, and changed cases, plus changes to shared source or context files (`sourceFiles`), are reported separately so expanding the corpus does not mask regressions or fabricate recall drops. Failed runs, unattempted pairs (`missing`), unknown token usage, duplicate findings, safe-control overlaps, evidence errors, per-run recall ranges (`min`/`max`/`mean`), and `needsAdjudication` runs stay explicit alongside comparable-case deltas.
+Use `comparableRecall` to compare discovery across corpus revisions. A case
+is comparable when its ID, relative path, line span, accepted CWE set, and
+source-file hash are unchanged. Check the separate lists of added, removed,
+and changed cases and files. A change to a shared context file can affect a
+case even if its own source file is unchanged.
 
-Use this suite to measure end-to-end Standard-scan discovery recall across the synthetic corpus's vulnerability families, verbatim source-evidence grounding, safe-control separation, completion rate, and per-run token/latency shifts across prompt, validation, deduplication, or model/provider changes (accounting for stochastic variance across pairs). Manual review or separate suites are still required to adjudicate unmatched findings and control overlaps, test secret discovery ([`../secret-discovery/README.md`](../secret-discovery/README.md)), triage supplied findings ([`../triage-finding/README.md`](../triage-finding/README.md)), verify workflow routing ([`../workflow-routing/README.md`](../workflow-routing/README.md)), exercise Deep Scan iteration, recovery, and publication ([`../../plugins/codex-security/mcp-app/TESTING.md`](../../plugins/codex-security/mcp-app/TESTING.md)), or evaluate generalization on larger public repositories.
+Compare completion rates alongside recall. Failed and unattempted runs do not
+contribute to recall. Token totals stay unknown when usage is missing.
+Review unmatched findings and safe-control overlaps by hand. A lower observed
+recall flags a case for investigation and can reflect variation across runs.
 
 ## Interpretation and checks
 

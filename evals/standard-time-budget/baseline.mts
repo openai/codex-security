@@ -10,24 +10,14 @@ import {
   type Variant,
 } from "./experiment.mts";
 import type { Fixture, SourceCase } from "./fixtures.mts";
+import { mean, summarizeUsage, usageFields, variants } from "./summary.mts";
 
 export const BASELINE_SCHEMA_VERSION = 1 as const;
 
-const variants = ["baseline", "time-aware"] as const;
-const usageFields = [
-  "input_tokens",
-  "cached_input_tokens",
-  "output_tokens",
-] as const;
 type UsageField = (typeof usageFields)[number];
 const sha256Pattern = /^[a-f0-9]{64}$/u;
 
-export interface BaselineCase {
-  id: string;
-  path: string;
-  line: number;
-  endLine?: number;
-  cwes: string[];
+export interface BaselineCase extends SourceCase {
   fileSha256: string;
 }
 
@@ -114,95 +104,8 @@ export interface CaseRate {
   recall: number | null;
 }
 
-export interface ArmSummary {
-  configured: number;
-  attempted: number;
-  completed: number;
-  failed: number;
-  missing: number;
-  successRate: number | null;
-  completionRate: number | null;
-  failures: Array<{ pair: number; error: string }>;
-  comparableRecall: {
-    mean: number | null;
-    min: number | null;
-    max: number | null;
-  };
-  comparableFoundCount: number | null;
-  comparableExpectedCount: number | null;
-  rawRecall: { mean: number | null; min: number | null; max: number | null };
-  rawFoundCount: number | null;
-  rawExpectedCount: number | null;
-  duplicateFindings: number | null;
-  meanDuplicateFindings: number | null;
-  safeControlFindings: number | null;
-  meanSafeControlFindings: number | null;
-  comparableSafeControlFindings: number | null;
-  meanComparableSafeControlFindings: number | null;
-  unmatchedFindings: number | null;
-  meanUnmatchedFindings: number | null;
-  evidenceErrors: number | null;
-  meanEvidenceErrors: number | null;
-  adjudicationRequiredRuns: number;
-  adjudicationRate: number | null;
-  meanElapsedMs: number | null;
-  meanCompletedElapsedMs: number | null;
-  usage: {
-    totals: Record<UsageField | "total_tokens", number | null>;
-    meanPerRun: Record<UsageField | "total_tokens", number | null>;
-    missingUsageRuns: number;
-  };
-}
-
-export interface ArmComparison {
-  baseline: ArmSummary;
-  candidate: ArmSummary;
-  delta: {
-    comparableRecall: number | null;
-    rawRecall: number | null;
-    successRate: number | null;
-    completionRate: number | null;
-    meanElapsedMs: number | null;
-    meanCompletedElapsedMs: number | null;
-    meanDuplicateFindings: number | null;
-    meanComparableSafeControlFindings: number | null;
-    meanSafeControlFindings: number | null;
-    meanUnmatchedFindings: number | null;
-    meanEvidenceErrors: number | null;
-    meanUsage: Record<UsageField | "total_tokens", number | null>;
-  };
-  cases: {
-    comparable: Array<{
-      id: string;
-      baseline: CaseRate;
-      candidate: CaseRate;
-      recallDelta: number | null;
-      status: "unchanged" | "improved" | "regressed" | "unmeasured";
-    }>;
-    added: Array<{ id: string; candidate: CaseRate }>;
-    removed: Array<{ id: string; baseline: CaseRate }>;
-    changed: Array<{ id: string; baseline: CaseRate; candidate: CaseRate }>;
-  };
-  controls: Array<{
-    id: string;
-    baselineAccusedRuns: number;
-    candidateAccusedRuns: number;
-    baselineFindings: number;
-    candidateFindings: number;
-  }>;
-  flags: {
-    regressedCases: string[];
-    improvedCases: string[];
-    hasRunFailures: boolean;
-    hasMissingRuns: boolean;
-    hasUnknownUsage: boolean;
-    needsAdjudication: boolean;
-    corpusChanged: boolean;
-    evidenceErrorsIncreased: boolean;
-    duplicatesIncreased: boolean;
-    comparableControlAccusationsIncreased: boolean;
-  };
-}
+export type ArmSummary = ReturnType<typeof summarizeArm>["summary"];
+export type ArmComparison = ReturnType<typeof compareArm>;
 
 function assertSha256(value: unknown, label: string): string {
   if (typeof value !== "string" || !sha256Pattern.test(value)) {
@@ -231,7 +134,9 @@ function normalizeRelativePath(path: string, label: string): string {
 
 function sortRecord<T>(record: Record<string, T>): Record<string, T> {
   return Object.fromEntries(
-    Object.entries(record).sort(([a], [b]) => a.localeCompare(b)),
+    Object.keys(record)
+      .sort()
+      .map((key) => [key, record[key]!]),
   );
 }
 
@@ -239,12 +144,12 @@ export function hashSnapshotMap(files: Record<string, string>): string {
   if (typeof files !== "object" || files === null || Array.isArray(files)) {
     throw new Error("Snapshot map must be an object.");
   }
-  const sorted = Object.entries(files)
-    .map(([key, digest]) => {
+  const sorted = Object.keys(files)
+    .sort()
+    .map((key) => {
       if (!key.trim()) throw new Error("Snapshot map keys must be non-empty.");
-      return [key, assertSha256(digest, `Snapshot digest for ${key}`)] as const;
-    })
-    .sort(([a], [b]) => a.localeCompare(b));
+      return [key, assertSha256(files[key], `Snapshot digest for ${key}`)];
+    });
   return hashText(JSON.stringify(sorted));
 }
 
@@ -575,15 +480,10 @@ export function createReleaseBaseline({
       throw new Error(`Duplicate fixture path: ${clean}`);
     fixtureFiles[clean] = contents;
   }
-  const sourceKeys = Object.keys(source);
-  const fixtureKeys = Object.keys(fixtureFiles).sort((a, b) =>
-    a.localeCompare(b),
-  );
   if (
-    sourceKeys.length !== fixtureKeys.length ||
-    !sourceKeys.every(
-      (key, i) =>
-        key === fixtureKeys[i] && hashText(fixtureFiles[key]!) === source[key],
+    Object.keys(source).length !== Object.keys(fixtureFiles).length ||
+    !Object.entries(fixtureFiles).every(
+      ([path, text]) => hashText(text) === source[path],
     )
   ) {
     throw new Error("experiment.source hashes do not match fixture.files.");
@@ -785,7 +685,7 @@ function diffSourceFiles(
   const changed: string[] = [];
   const keys = [
     ...new Set([...Object.keys(baseSource), ...Object.keys(candSource)]),
-  ].sort((a, b) => a.localeCompare(b));
+  ].sort();
   for (const key of keys) {
     if (!(key in baseSource)) added.push(key);
     else if (!(key in candSource)) removed.push(key);
@@ -793,12 +693,6 @@ function diffSourceFiles(
     else changed.push(key);
   }
   return { unchanged, added, removed, changed };
-}
-
-function sumKnown(values: Array<number | null>): number | null {
-  return values.length > 0 && values.every((v): v is number => v !== null)
-    ? values.reduce((total, v) => total + v, 0)
-    : null;
 }
 
 function compareRatios(
@@ -834,21 +728,12 @@ function nullableDelta(
   return cand === base ? 0 : cand - base;
 }
 
-function mean(values: number[]): number | null {
-  return values.length > 0
-    ? values.reduce((total, value) => total + value, 0) / values.length
-    : null;
-}
-
 function summarizeArm(
   baseline: ReleaseBaseline,
   variant: Variant,
   comparablePositiveIds: string[],
   comparableControlIds: string[],
-): {
-  summary: ArmSummary;
-  completedRuns: Array<Extract<BaselineAttempt, { status: "completed" }>>;
-} {
+) {
   const configured = baseline.experiment.pairs;
   const attempts = baseline.runs.filter((run) => run.variant === variant);
   const completedRuns = attempts.filter(
@@ -875,7 +760,7 @@ function summarizeArm(
 
   let comparableFoundCount: number | null = null;
   let comparableExpectedCount: number | null = null;
-  let comparableRecall: ArmSummary["comparableRecall"] = {
+  let comparableRecall: Record<"mean" | "min" | "max", number | null> = {
     mean: null,
     min: null,
     max: null,
@@ -924,21 +809,7 @@ function summarizeArm(
     (run) => run.report.needsAdjudication,
   ).length;
 
-  const totalTokensFor = (run: BaselineAttempt) => {
-    const input = run.usage?.input_tokens ?? null;
-    const output = run.usage?.output_tokens ?? null;
-    return input === null || output === null ? null : input + output;
-  };
-  const totals = {
-    input_tokens: sumKnown(attempts.map((r) => r.usage?.input_tokens ?? null)),
-    cached_input_tokens: sumKnown(
-      attempts.map((r) => r.usage?.cached_input_tokens ?? null),
-    ),
-    output_tokens: sumKnown(
-      attempts.map((r) => r.usage?.output_tokens ?? null),
-    ),
-    total_tokens: sumKnown(attempts.map(totalTokensFor)),
-  };
+  const { missingUsageRuns, ...totals } = summarizeUsage(attempts);
   const meanPerRun = Object.fromEntries(
     Object.entries(totals).map(([k, v]) => [
       k,
@@ -987,9 +858,7 @@ function summarizeArm(
       usage: {
         totals,
         meanPerRun,
-        missingUsageRuns: attempts.filter((r) =>
-          usageFields.some((field) => (r.usage?.[field] ?? null) === null),
-        ).length,
+        missingUsageRuns,
       },
     },
   };
@@ -1020,7 +889,7 @@ function compareArm(
     sourceFiles: ReturnType<typeof diffSourceFiles>;
   },
   fixtureIdentical: boolean,
-): ArmComparison {
+) {
   const baseArm = summarizeArm(
     baseline,
     variant,
@@ -1153,14 +1022,7 @@ function compareArm(
         cand.evidenceErrors,
       ),
       meanUsage: Object.fromEntries(
-        (
-          [
-            "input_tokens",
-            "cached_input_tokens",
-            "output_tokens",
-            "total_tokens",
-          ] as const
-        ).map((field) => [
+        ([...usageFields, "total_tokens"] as const).map((field) => [
           field,
           nullableDelta(
             base.usage.meanPerRun[field],
@@ -1265,7 +1127,7 @@ export function compareBaselines(
       ...Object.keys(baseline.experiment.packageVersions),
       ...Object.keys(candidate.experiment.packageVersions),
     ]),
-  ].sort((a, b) => a.localeCompare(b));
+  ].sort();
 
   return {
     schemaVersion: BASELINE_SCHEMA_VERSION,
