@@ -315,7 +315,9 @@ def display_locations(repository: Path) -> int:
         "id": "synthetic-scan",
         "started_at": "2026-08-01T00:00:00Z",
         "scan_dir": str(repository.parent / "scan"),
+        "target_id": None,
         "target_path": str(repository),
+        "target_device": serialize_filesystem_identity(repository.stat().st_dev),
         "target_inode": serialize_filesystem_identity(repository.stat().st_ino),
         "scope": "selected",
     }
@@ -354,7 +356,9 @@ def display_locations(repository: Path) -> int:
     )
     with (
         patch.object(db, "finding_remediation_result", return_value=None),
-        patch.object(db, "finding_triage_result", return_value=None),
+        patch.object(
+            db.finding_results, "finding_triage_result", return_value={"status": "open"}
+        ),
         patch.object(db.scan_history, "finding_matches", return_value=([], None, [])),
     ):
         result = db.finding_result(connection, record, occurrence, related=[])

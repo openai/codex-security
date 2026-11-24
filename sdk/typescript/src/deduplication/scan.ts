@@ -161,9 +161,14 @@ export async function deduplicateScanInternal(
       ((args, input) =>
         dependencies.runWorkbench!(args, input, options.signal)),
   });
+  const target = scan["targetPath"];
+  if (scan["checkoutAvailable"] !== true || typeof target !== "string")
+    throw new CodexSecurityError(
+      "Deduplication is unavailable for the current checkout owner.",
+    );
   return await deduplicateResolvedScan(
     scan.scanDir,
-    scan["targetPath"] as string,
+    target,
     scan.scanId,
     options,
     bootstrap

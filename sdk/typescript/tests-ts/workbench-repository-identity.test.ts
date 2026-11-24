@@ -375,6 +375,7 @@ elif scenario == "history":
         connection,
         comparison_args,
         require_scan=require_scan,
+        finding_triage=lambda *_: {},
         read_coverage=lambda _scan: {"completeness": "complete"},
     )
     connection.commit()
@@ -383,12 +384,14 @@ elif scenario == "history":
         comparison_args,
         now=lambda: timestamp,
         require_scan=require_scan,
+        finding_triage=lambda *_: {},
         read_coverage=lambda _scan: {"completeness": "complete"},
     )
     explicit_clone = history.compare_scans(
         connection,
         argparse.Namespace(before_scan_id="canonical-root", after_scan_id="spoof-root"),
         require_scan=require_scan,
+        finding_triage=lambda *_: {},
         read_coverage=lambda _scan: {"completeness": "complete"},
     )
 

@@ -120,7 +120,15 @@ EXPECTED_MIGRATIONS = [
     (70, "retain checkout roots for Git discovery"),
     (71, "retain rejected workspace checkout boundaries"),
     (72, "retain external finding import selections and provenance"),
+    (73, "preserve finding decision append chronology"),
+    (74, "bind new finding decisions to admitted scans"),
+    (75, "record first scan result admission order"),
 ]
+
+
+def recorded_migrations(connection: sqlite3.Connection) -> list[tuple[int, str]]:
+    rows = connection.execute("SELECT version, name FROM schema_migrations ORDER BY version")
+    return [(version, name) for version, name in rows]
 
 
 @pytest.mark.parametrize(
@@ -212,12 +220,7 @@ def test_repository_previews_52_and_53_preserve_classification_and_import_schema
 
     for _ in range(2):
         migrate(connection)
-        assert [
-            tuple(row)
-            for row in connection.execute(
-                "SELECT version, name FROM schema_migrations ORDER BY version"
-            )
-        ] == [(version, name) for version, name, _ in SCHEMA.MIGRATIONS]
+        assert recorded_migrations(connection) == EXPECTED_MIGRATIONS
         for table in (
             "finding_severity_assessments",
             "scan_severity_assessments",
@@ -270,12 +273,7 @@ def test_scan_git_preview_upgrades_to_released_repository_identity(prefix_versio
 
     migrate(connection)
     migrate(connection)
-    assert [
-        tuple(row)
-        for row in connection.execute(
-            "SELECT version, name FROM schema_migrations ORDER BY version"
-        )
-    ] == EXPECTED_MIGRATIONS
+    assert recorded_migrations(connection) == EXPECTED_MIGRATIONS
     assert tuple(
         connection.execute(
             "SELECT target_git_prefix, target_git_identity_json FROM scans WHERE id = 'legacy-scan'"
@@ -1774,10 +1772,7 @@ def test_workbench_creates_single_final_schema(tmp_path: Path) -> None:
     run_workbench(state_dir, "database-info")
 
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
-        assert (
-            connection.execute("SELECT version, name FROM schema_migrations").fetchall()
-            == EXPECTED_MIGRATIONS
-        )
+        assert recorded_migrations(connection) == EXPECTED_MIGRATIONS
         assert {row[1] for row in connection.execute("PRAGMA table_info(workspaces)")} >= {
             "diff_target_kind",
             "diff_base_revision",
@@ -2794,10 +2789,7 @@ def test_workbench_upgrades_released_database_schema(tmp_path: Path) -> None:
     run_workbench(state_dir, "database-info")
 
     with sqlite3.connect(database) as connection:
-        assert (
-            connection.execute("SELECT version, name FROM schema_migrations").fetchall()
-            == EXPECTED_MIGRATIONS
-        )
+        assert recorded_migrations(connection) == EXPECTED_MIGRATIONS
         assert "capability_preflight_json" in {
             row[1] for row in connection.execute("PRAGMA table_info(workspaces)")
         }
@@ -2844,12 +2836,7 @@ def test_workbench_upgrades_pre_release_phase_and_preflight_progress_migration(
     run_workbench(state_dir, "database-info")
 
     with sqlite3.connect(database) as connection:
-        assert (
-            connection.execute(
-                "SELECT version, name FROM schema_migrations WHERE version >= 12 ORDER BY version"
-            ).fetchall()
-            == EXPECTED_MIGRATIONS[11:]
-        )
+        assert recorded_migrations(connection) == EXPECTED_MIGRATIONS
         assert "continuation_thread_id" in {
             row[1] for row in connection.execute("PRAGMA table_info(scans)")
         }

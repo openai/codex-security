@@ -428,7 +428,20 @@ test.each([
         "--thread-id",
         randomUUID(),
       ]);
-    const before = await f.command(["get-scan", "--scan-id", f.scanId]);
+    const before =
+      scenario === "replaced"
+        ? undefined
+        : await f.command(["get-scan", "--scan-id", f.scanId]);
+    const savedState = () => {
+      const result = runPython(f.python, [
+        "-c",
+        'from pathlib import Path; import sqlite3, sys; connection = sqlite3.connect(Path(sys.argv[1]).resolve().as_uri() + "?mode=ro", uri=True); print("\\n".join(connection.iterdump())); connection.close()',
+        join(f.root, "state", "workbench.sqlite3"),
+      ]);
+      expect(result.exitCode, result.stderr.toString()).toBe(0);
+      return result.stdout.toString();
+    };
+    const stateBefore = savedState();
     expect(
       await f.command([
         "get-cli-scan-resume",
@@ -448,9 +461,16 @@ test.each([
             ? "original owning CLI session"
             : "running scan; completed, failed, and canceled",
     );
-    expect(await f.command(["get-scan", "--scan-id", f.scanId])).toEqual(
-      before,
-    );
+    expect(savedState()).toBe(stateBefore);
+    if (before === undefined) {
+      await expect(
+        f.command(["get-scan", "--scan-id", f.scanId]),
+      ).rejects.toThrow("unavailable for the current checkout owner");
+    } else {
+      expect(await f.command(["get-scan", "--scan-id", f.scanId])).toEqual(
+        before,
+      );
+    }
     expect(await readFile(f.checkpoint, "utf8")).toBe(
       '{"completed":"setup"}\n',
     );
@@ -1902,8 +1922,12 @@ test.each([
     expect(prompts, stderr.text()).toHaveLength(2);
     expect(prompts[1]).toBe(settings.postScanPrompt);
     expect(f.environment.OPENAI_API_KEY).toBe("synthetic-resume-key");
+    const readState = workbenchCommand(
+      f.python,
+      f.environment.CODEX_SECURITY_STATE_DIR,
+    );
     expect(
-      (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
+      (await readState(["get-scan", "--scan-id", f.scanId]))["scan"],
     ).toMatchObject({
       progress: { status: "complete" },
       continuationThreadId: f.threadId,

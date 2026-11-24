@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import hashlib
 import importlib.util
 import json
@@ -1064,3 +1065,139 @@ def usage_counts(
         "reasoningOutputTokens": 0,
         "totalTokens": input_tokens + output_tokens,
     }
+
+
+def scan_finding(state: Path, scan: dict) -> dict:
+    return get_scan(state, scan["scanId"])["scan"]["findings"][0]
+
+
+def finding_detail(state: Path, occurrence: str) -> dict:
+    return run_workbench(state, "get-finding", "--occurrence-id", occurrence)["scan"]["findings"][0]
+
+
+def close_finding(state: Path, occurrence: str, reason: str, note: str | None = None, **options):
+    extra = ["--note", note] if note is not None else []
+    return set_triage(state, occurrence, "closed", "--close-reason", reason, *extra, **options)
+
+
+def complete_pending(state: Path, repository: Path, scan: dict, *, failed: bool = False):
+    scan_dir = Path(scan["scanDir"])
+    write_completed_contract(scan_dir, scan["scanId"], repository)
+    finalize_cli_scan(scan_dir)
+    if failed:
+        return fail_scan(state, scan["scanId"], "Synthetic interruption")
+    return scan_command(state, "complete-scan", scan["scanId"])
+
+
+def finalize_cli_scan(scan_dir: Path) -> None:
+    finalizer = SCRIPT.with_name("finalize_scan_contract.py")
+    subprocess.run([sys.executable, str(finalizer), "--scan-dir", str(scan_dir)], check=True)
+
+
+def create_cli_scan(
+    state_dir: Path,
+    root: Path,
+    repository: Path,
+    *,
+    surface: str = "cli",
+    complete: bool = True,
+    completeness: str = "complete",
+    follow_up: bool = False,
+    extra_anchors: tuple[str, ...] = (),
+    finding: bool = True,
+    identity_anchor: str = "archive-entry-write-without-containment",
+    identity_instance: str | None = None,
+    locations: list[dict[str, Any]] | None = None,
+    mode: str = "standard",
+    parent_scan_id: str | None = None,
+    paths: list[str] | None = None,
+    relative_path: str = "src/extract.py",
+    cost: dict[str, Any] | None = None,
+    target: dict[str, Any] | None = None,
+    target_kind: str | None = None,
+    target_revision: str | None = None,
+) -> dict[str, Any]:
+    scan_dir = root / str(uuid.uuid4())
+    scan_dir.mkdir(mode=0o700, parents=True)
+    recipe = {
+        "config": {"model": "gpt-5.6-sol", "model_reasoning_effort": "high"},
+        "mode": mode,
+        "repository": str(repository.resolve()),
+        "target": target or {"kind": "paths" if paths else "repository", "paths": paths or []},
+    }
+    arguments = [
+        "register-cli-scan",
+        "--scan-dir",
+        str(scan_dir),
+        "--repository",
+        str(repository),
+        "--registration-json-stdin",
+    ]
+    if parent_scan_id is not None:
+        arguments.extend(("--parent-scan-id", parent_scan_id))
+    launched = run_workbench(
+        state_dir,
+        *arguments,
+        input_text=json.dumps({"recipe": recipe, "surface": surface, "packageVersion": "1.2.3"}),
+    )
+    if not complete:
+        return launched
+    if mode == "deep":
+        resume_deep_scan(state_dir, launched["scanId"], "thread-scan-history")
+        mark_deep_coordinator_succeeded(state_dir, launched["scanId"], scan_dir)
+
+    coverage_mode = (
+        "scoped_path" if paths else "deep_repository" if mode == "deep" else "repository"
+    )
+    snapshot_digest = None
+    if target_revision is not None:
+        with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+            snapshot_digest = connection.execute(
+                "SELECT target_snapshot_digest FROM scans WHERE id = ?", (launched["scanId"],)
+            ).fetchone()[0]
+    write_completed_contract(
+        scan_dir,
+        launched["scanId"],
+        repository,
+        identity_anchor=identity_anchor,
+        relative_path=relative_path,
+        include_paths=paths,
+        coverage_mode=coverage_mode,
+        inventory_strategy="scoped_path" if paths else "repository",
+        target_kind=target_kind
+        or ("git_revision" if target_revision is not None else "directory_snapshot"),
+        target_revision=target_revision,
+        snapshot_digest=snapshot_digest,
+    )
+    if not finding or extra_anchors or identity_instance is not None or locations is not None:
+        findings_path = scan_dir / "findings.json"
+        findings = json.loads(findings_path.read_text())
+        if locations is not None:
+            findings["findings"][0]["locations"] = locations
+        if identity_instance is not None:
+            findings["findings"][0]["identity"]["instance"] = identity_instance
+        if not finding:
+            findings["findings"] = []
+        else:
+            for index, anchor in enumerate(extra_anchors, start=1):
+                additional = copy.deepcopy(findings["findings"][0])
+                additional["identity"]["anchor"] = anchor
+                additional["title"] += f" ({index})"
+                findings["findings"].append(additional)
+        findings_path.write_text(json.dumps(findings))
+    if follow_up or completeness != "complete":
+        coverage_path = scan_dir / "coverage.json"
+        coverage = json.loads(coverage_path.read_text())
+        if completeness != "complete":
+            coverage["completeness"] = completeness
+        coverage["surfaces"][0]["disposition"] = "needs_follow_up"
+        coverage["deferred"] = [
+            {"id": "unreviewed-path", "reason": "Review incomplete", "paths": ["src/extract.py"]}
+        ]
+        coverage_path.write_text(json.dumps(coverage))
+    finalize_cli_scan(scan_dir)
+    completion = ["complete-scan", "--scan-id", launched["scanId"]]
+    if cost is not None:
+        completion.extend(("--cost-json", json.dumps(cost)))
+    run_workbench(state_dir, *completion)
+    return launched

@@ -134,6 +134,9 @@ def test_standard_context_begins_delivered_scan_once_without_checkout_identity(
         connection.execute("UPDATE scans SET target_inode = NULL WHERE id = ?", (scan_id,))
     inspected = get_scan(state_dir, scan_id)
     assert inspected["scan"]["progress"]["phase"] == "preflight"
+    finding = get_scan(state_dir, scan_id, "--occurrence-id", str(uuid.uuid4()), check=False)
+    assert finding["returncode"] != 0
+    assert "unavailable for the current checkout owner" in finding["stderr"]
 
     args = (state_dir, scan_id, claim_token, "--thread-id", "owner", "--return-context")
     context = mark_handoff_delivered(*args)
