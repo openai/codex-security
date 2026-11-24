@@ -13,7 +13,14 @@ from types import SimpleNamespace
 import pytest
 from test_deep_coverage_recovery import worker
 from test_workbench_standard_deep_results import write_saved_parent
-from workbench_test_support import saved_binding, saved_draft, select_checkpoint, write_checkpoint
+from workbench_test_support import (
+    review_surface,
+    saved_binding,
+    saved_draft,
+    select_checkpoint,
+    write_checkpoint,
+    write_draft_checkpoint,
+)
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 import finalize_scan_contract as finalizer
@@ -94,7 +101,7 @@ def test_deadline_rollback_does_not_reintroduce_a_later_rejected_worker_finding(
     output = Path(source["artifact_dir"])
     worker_checkpoint = write_checkpoint(output / "checkpoints", draft)
     worker_bytes = worker_checkpoint.read_bytes()
-    previous = write_checkpoint(tmp_path / "checkpoints", saved_draft(scan_id))
+    previous = write_draft_checkpoint(tmp_path, scan_id)
     previous_bytes = previous.read_bytes()
     head = select_checkpoint(tmp_path, previous)
     original_head = head.read_bytes()
@@ -118,13 +125,9 @@ def test_deadline_rollback_does_not_reintroduce_a_later_rejected_worker_finding(
         scan_id,
         complete=True,
         surfaces=[
-            {
-                "id": "candidate-one",
-                "candidateId": "candidate-one",
-                "label": "Reviewed candidate",
-                "disposition": "rejected",
-                "receiptRefs": [],
-            }
+            review_surface(
+                "candidate-one", "Reviewed candidate", "rejected", candidate_id="candidate-one"
+            )
         ],
     )
     (output / "result.json").write_text(json.dumps(rejected))

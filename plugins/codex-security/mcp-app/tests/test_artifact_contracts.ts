@@ -1,5 +1,4 @@
 import { fixturePython } from "./support/python.ts";
-import path from "node:path";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import Ajv2020 from "ajv/dist/2020.js";
@@ -8,7 +7,7 @@ import { readJson } from "./support/json.ts";
 import { finding as fixtureFinding } from "./scan-draft-fixture.ts";
 
 const { artifactSchemaDocuments } = await importSource(
-  path.join(import.meta.dirname, "../src/artifact-contracts.ts"),
+  "src/artifact-contracts.ts",
 );
 const ajv = new Ajv2020({ strict: false, validateFormats: false });
 for (const path of Object.keys(artifactSchemaDocuments)) {
