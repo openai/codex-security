@@ -489,14 +489,16 @@ def primary_finding_location(finding: dict[str, Any]) -> dict[str, Any]:
     )
 
 
+def _line_suffix(location: dict[str, Any]) -> str:
+    start = location["startLine"]
+    end = location.get("endLine", start)
+    return f":{start}" if end == start else f":{start}-{end}"
+
+
 def _locations(finding: dict[str, Any]) -> str:
-    rendered = []
-    for location in finding["locations"]:
-        start = location["startLine"]
-        end = location.get("endLine", start)
-        suffix = f":{start}" if end == start else f":{start}-{end}"
-        rendered.append(f"{_path_text(location['path'])}{suffix}")
-    return ", ".join(rendered)
+    return ", ".join(
+        _path_text(location["path"]) + _line_suffix(location) for location in finding["locations"]
+    )
 
 
 def _finding_sort_key(finding: dict[str, Any]) -> tuple[int, str, str]:
@@ -1082,22 +1084,21 @@ def build_html_projection(manifest: dict[str, Any], findings: dict[str, Any]) ->
     summary = f"{len(items)} {word}"
     if items:
         summary += f" · {_level_mix(items, 'severity', SEVERITY_ORDER)}"
+        summary += ". All findings were open at scan time. Later triage changes are excluded."
+        if scan["status"] != "completed":
+            summary += " The scan stopped before completing its review."
     meta = " · ".join(escape(scan[key]) for key in ("id", "status", "completedAt"))
     rows: list[str] = []
     details: list[str] = []
     for index, finding in enumerate(items, start=1):
         primary = primary_finding_location(finding)
-        start = primary["startLine"]
-        end = primary.get("endLine", start)
-        location = f"{escape(primary['path'])}:{start}"
-        if end != start:
-            location += f"-{end}"
+        location = escape(primary["path"] + _line_suffix(primary))
         severity = escape(finding["severity"]["level"])
         badge = f'<span class="sev {severity}">{severity}</span>'
         title = escape(finding["title"])
         rows.append(
             f'<tr><td>{badge}</td><td><a href="#finding-{index}">{title}</a></td>'
-            f"<td><code>{location}</code></td><td>open</td></tr>"
+            f"<td><code>{location}</code></td></tr>"
         )
         fields = (
             ("Finding ID", finding["findingId"]),
@@ -1111,7 +1112,7 @@ def build_html_projection(manifest: dict[str, Any], findings: dict[str, Any]) ->
         details.append(
             f'<article class="finding" id="finding-{index}"><h2>{title}</h2>'
             f"<dl><dt>Severity</dt><dd>{badge}</dd><dt>Location</dt><dd><code>{location}</code></dd>"
-            f"<dt>Status</dt><dd>open</dd>{description}</dl></article>"
+            f"{description}</dl></article>"
         )
     if not items:
         message = (
@@ -1119,7 +1120,7 @@ def build_html_projection(manifest: dict[str, Any], findings: dict[str, Any]) ->
             if scan["status"] == "completed"
             else "No findings were retained before the scan stopped. No vulnerability conclusion can be drawn."
         )
-        rows.append(f'<tr><td colspan="4">{message}</td></tr>')
+        rows.append(f'<tr><td colspan="3">{message}</td></tr>')
     return f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1131,7 +1132,7 @@ def build_html_projection(manifest: dict[str, Any], findings: dict[str, Any]) ->
 <body>
 <header><h1>Codex Security findings — {target}</h1><p>{meta}</p><p>{summary}</p></header>
 <table>
-<thead><tr><th>Severity</th><th>Finding</th><th>Location</th><th>Status</th></tr></thead>
+<thead><tr><th>Severity</th><th>Finding</th><th>Location</th></tr></thead>
 <tbody>{"".join(rows)}</tbody>
 </table>
 {"".join(details)}

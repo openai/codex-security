@@ -835,7 +835,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
                     self.assertIn("=Unsafe archive extraction", html)
                     self.assertIn("high", html)
                     self.assertIn("src/extract.py:41-44", html)
-                    self.assertIn(">open<", html)
+                    self.assertIn("open at scan time", html)
                 else:
                     sarif = json.loads(result.stdout)
                     self.assertEqual(sarif["version"], "2.1.0")

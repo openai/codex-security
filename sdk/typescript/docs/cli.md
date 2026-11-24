@@ -2801,10 +2801,9 @@ and retains distinct occurrence IDs. It escapes spreadsheet-formula prefixes and
 leading apostrophes; import removes the escape. Use JSON to recover ambiguous
 apostrophes from older CSV exports.
 
-HTML writes a self-contained report a browser can open. Each finding includes
-severity, location, and status. The file uses inline CSS and does not require a
-network connection. Like CSV, HTML marks findings open and omits local triage
-state. The default output path is `./findings.html`.
+HTML writes an offline report to `./findings.html` by default. It shows
+the severity, primary location, summary, and remediation for each finding.
+All findings were open at scan time. The export excludes later triage changes.
 
 ```bash
 codex-security export --scan SCAN_ID --export-format html --output findings.html

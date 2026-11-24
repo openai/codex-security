@@ -7242,8 +7242,9 @@ export async function main(
               );
             }
             const artifactFormat =
-              options.exportFormat ??
-              (options.artifact === "threat-model" ? "md" : "sarif");
+              options.artifact === "threat-model"
+                ? "md"
+                : (options.exportFormat ?? "sarif");
             const [label, expectedFormat] = {
               csv: ["CSV", undefined],
               "servicenow-avit": ["CSV", undefined],
