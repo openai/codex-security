@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import subprocess
 import uuid
 from pathlib import Path
 
@@ -10,6 +9,7 @@ import pytest
 from workbench_test_support import (
     RemediationRequest,
     empty_target_paths,
+    git_in,
     run_workbench,
     start_saved_scan,
     write_completed_contract,
@@ -68,7 +68,7 @@ def test_cancel_finding_remediation_request_restores_previous_state(
     apply_requested = request.request_action(
         str(restored_after_apply["version"]), "apply", apply_token
     )["scan"]
-    subprocess.run(["git", "apply", "--no-index", str(patch_path)], cwd=target, check=True)
+    git_in(target, "apply", "--no-index", str(patch_path))
     applied = request.update(
         apply_token,
         str(apply_requested["findings"][0]["remediationState"]["version"]),
