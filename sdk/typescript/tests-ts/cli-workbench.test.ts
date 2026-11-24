@@ -1642,6 +1642,16 @@ describe("CLI workbench", () => {
             "Error loading rules:\nsynthetic.rules:2: starlark error: error: Parse error: unexpected new line, expected expression (problem is on or around line 2)",
           ],
           [
+            "rules configuration after startup warnings",
+            "exit",
+            "warning: Untrusted project-local configuration is disabled.\nError loading rules:\nsynthetic.rules:2: starlark error: error: Parse error: unexpected new line, expected expression (problem is on or around line 2)",
+          ],
+          [
+            "required API-key login after startup warnings",
+            "exit",
+            "warning: Untrusted project-local configuration is disabled.\nAPI key login is required, but ChatGPT is currently being used. Logging out.",
+          ],
+          [
             "bootstrap configuration",
             "exit",
             "Error: failed to load bootstrap configuration",

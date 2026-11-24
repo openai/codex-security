@@ -420,37 +420,50 @@ export async function matchScanFindingsInternal(
           if (!(error instanceof Error)) throw error;
           if (error.name === "PermissionProfileFallbackError")
             throw new ConfigurationError(error.message, { cause: error });
-          // Native clients expose failed turns and exec failures as ordinary Error messages.
-          const nativeMessage = error.message
-            .replace(/^Codex Exec exited with (?:code \d+|signal \S+): /u, "")
-            .replace(/^Error: /u, "")
-            .replace(/^Error running remote compact task: /u, "");
-          if (
-            nativeMessage.startsWith("Error loading configuration:") ||
-            nativeMessage.startsWith("Error loading rules:") ||
-            nativeMessage.startsWith("failed to load bootstrap configuration")
-          )
-            throw new ConfigurationError(error.message, { cause: error });
-          const providerMessage = nativeMessage.replace(
-            /^(?:(?:HTTP )?4\d\d |unexpected status 4\d\d [^:\n]+: )/u,
-            "",
-          );
-          if (
-            nativeMessage.startsWith("unexpected status 401 Unauthorized:") ||
-            nativeMessage.startsWith("API key login is required,") ||
-            nativeMessage.startsWith("ChatGPT login is required,") ||
-            nativeMessage.startsWith(
-              "Failed to load ChatGPT credentials while enforcing workspace restrictions:",
-            ) ||
-            nativeMessage.startsWith("Login is restricted to workspace(s) ") ||
-            nativeMessage.match(NATIVE_REFRESH_RECOVERY_PATTERN)?.index === 0 ||
-            nativeMessage.match(NATIVE_REFRESH_FAILURE_PATTERN)?.index === 0 ||
-            providerMessage.match(NATIVE_PROVIDER_AUTH_FAILURE_PATTERN)
-              ?.index === 0
-          ) {
-            throw new AuthenticationRequiredError(error.message, {
-              cause: error,
-            });
+          // Exec stderr can include startup warnings before its fatal diagnostic.
+          // Turn errors retain their complete provider response as one message.
+          const execPrefix =
+            /^Codex Exec exited with (?:code \d+|signal \S+): /u.exec(
+              error.message,
+            );
+          const nativeMessages = execPrefix
+            ? error.message.slice(execPrefix[0].length).split("\n")
+            : [error.message];
+          for (const message of nativeMessages) {
+            const nativeMessage = message
+              .replace(/^Error: /u, "")
+              .replace(/^Error running remote compact task: /u, "");
+            if (
+              nativeMessage.startsWith("Error loading configuration:") ||
+              nativeMessage.startsWith("Error loading rules:") ||
+              nativeMessage.startsWith("failed to load bootstrap configuration")
+            )
+              throw new ConfigurationError(error.message, { cause: error });
+            const providerMessage = nativeMessage.replace(
+              /^(?:(?:HTTP )?4\d\d |unexpected status 4\d\d [^:\n]+: )/u,
+              "",
+            );
+            if (
+              nativeMessage.startsWith("unexpected status 401 Unauthorized:") ||
+              nativeMessage.startsWith("API key login is required,") ||
+              nativeMessage.startsWith("ChatGPT login is required,") ||
+              nativeMessage.startsWith(
+                "Failed to load ChatGPT credentials while enforcing workspace restrictions:",
+              ) ||
+              nativeMessage.startsWith(
+                "Login is restricted to workspace(s) ",
+              ) ||
+              nativeMessage.match(NATIVE_REFRESH_RECOVERY_PATTERN)?.index ===
+                0 ||
+              nativeMessage.match(NATIVE_REFRESH_FAILURE_PATTERN)?.index ===
+                0 ||
+              providerMessage.match(NATIVE_PROVIDER_AUTH_FAILURE_PATTERN)
+                ?.index === 0
+            ) {
+              throw new AuthenticationRequiredError(error.message, {
+                cause: error,
+              });
+            }
           }
           throw error;
         });
