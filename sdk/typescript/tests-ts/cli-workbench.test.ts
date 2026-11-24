@@ -1582,6 +1582,31 @@ describe("CLI workbench", () => {
             "Error: unexpected status 401 Unauthorized: synthetic authentication failure",
           ],
           [
+            "required API-key login",
+            "exit",
+            "API key login is required, but ChatGPT is currently being used. Logging out.",
+          ],
+          [
+            "required ChatGPT login",
+            "exit",
+            "ChatGPT login is required, but an API key is currently being used. Logging out.",
+          ],
+          [
+            "workspace credential loading",
+            "exit",
+            "Failed to load ChatGPT credentials while enforcing workspace restrictions: synthetic credential failure. Logging out.",
+          ],
+          [
+            "restricted login workspace",
+            "exit",
+            "Login is restricted to workspace(s) synthetic-workspace-a, but current credentials belong to synthetic-workspace-b. Logging out.",
+          ],
+          [
+            "missing login workspace",
+            "exit",
+            "Login is restricted to workspace(s) synthetic-workspace-a, but current credentials lack a workspace identifier. Logging out.",
+          ],
+          [
             "provider token",
             "turn",
             "HTTP 403 ExpiredTokenException: The security token included in the request has expired.",

@@ -437,6 +437,12 @@ export async function matchScanFindingsInternal(
           );
           if (
             nativeMessage.startsWith("unexpected status 401 Unauthorized:") ||
+            nativeMessage.startsWith("API key login is required,") ||
+            nativeMessage.startsWith("ChatGPT login is required,") ||
+            nativeMessage.startsWith(
+              "Failed to load ChatGPT credentials while enforcing workspace restrictions:",
+            ) ||
+            nativeMessage.startsWith("Login is restricted to workspace(s) ") ||
             nativeMessage.match(NATIVE_REFRESH_RECOVERY_PATTERN)?.index === 0 ||
             nativeMessage.match(NATIVE_REFRESH_FAILURE_PATTERN)?.index === 0 ||
             providerMessage.match(NATIVE_PROVIDER_AUTH_FAILURE_PATTERN)
