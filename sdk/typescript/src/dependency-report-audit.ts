@@ -163,7 +163,7 @@ function originalEvidence(f: Finding, check?: Check) {
   const supports = (keys: string[]) =>
     para(keys.map((k) => factLabels[k] ?? k).join(" · "));
   const sources = f.item.evidence.map((cite) => {
-    const text = f.excerpts.get(citationKey(cite));
+    const text = f.excerpts[citationKey(cite)];
     return `${code(rangeLabel(cite))}${cite.commit ? " · " + code(cite.commit) : ""}${supports(cite.supports)}${text !== undefined ? `<details><summary>Source excerpt</summary>${renderDependencyCode(text, cite.path, cite.startLine)}</details>` : ""}`;
   });
   const receipts = check
@@ -436,7 +436,7 @@ function sampleRecords(finding: StackFinding) {
         const link = refLink(finding, ref);
         if (
           sourceIndex(finding.item, ref) >= 0 &&
-          finding.excerpts.get(citationKey(ref)) === s.text
+          finding.excerpts[citationKey(ref)] === s.text
         )
           return `<p>${link} · ${code(s.commit)}</p>`;
         return `<details><summary>${link} · ${code(s.commit)}</summary>${renderDependencyCode(s.text, s.path, s.startLine)}</details>`;

@@ -198,7 +198,7 @@ function citedCaller(f: Finding, path: PathInspector) {
     )
   )
     return "";
-  const excerpt = f.excerpts.get(citationKey(cite));
+  const excerpt = f.excerpts[citationKey(cite)];
   if (excerpt === undefined) return "";
   return `<section class="inspector"><div class="inspector-head"><div><p class="eyebrow">Repository evidence</p><h3>Cited call site</h3></div></div>
   <div class="frame-body"><div class="code-meta">${esc(line(site.path, site.line))}</div>${renderDependencyCode(excerpt, site.path, cite.startLine, new Set([site.line]))}</div>
@@ -206,7 +206,7 @@ function citedCaller(f: Finding, path: PathInspector) {
 }
 function evidencePreview(f: Finding) {
   for (const c of f.item.evidence) {
-    const excerpt = f.excerpts.get(citationKey(c));
+    const excerpt = f.excerpts[citationKey(c)];
     if (excerpt === undefined) continue;
     return `<section class="inspector"><div class="inspector-head"><h3>Cited evidence</h3></div>
      <div class="frame-body"><div class="code-meta">${esc(line(c.path, c.startLine))}</div>${renderDependencyCode(excerpt, c.path, c.startLine)}</div></section>`;

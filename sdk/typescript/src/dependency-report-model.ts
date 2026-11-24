@@ -45,7 +45,7 @@ type Entry = {
   id: string;
   anchor?: Anchor;
   label: string;
-  excerpts: Map<string, string | undefined>;
+  excerpts: Record<string, string | undefined>;
 };
 export type PreparedCheck = {
   findings: Finding[];
@@ -326,7 +326,7 @@ function identity(
     anchor = { kind: "reference", path: cite.path, line: cite.startLine };
   const label =
     item.location ?? proof?.sink?.function ?? anchor?.path ?? item.reason;
-  const excerpts = new Map(
+  const excerpts = Object.fromEntries(
     item.evidence.map((c) => [citationKey(c), undefined]),
   );
   return { anchor, label, excerpts };
@@ -381,9 +381,9 @@ function loadExcerpts(
   claims: Map<string, Claims[number]>,
 ) {
   const { excerpts } = finding;
-  if (!excerpts.size) return;
+  if (!finding.item.evidence.length) return;
   function save(key: string, text: string) {
-    if (excerpts.has(key)) excerpts.set(key, text);
+    if (Object.hasOwn(excerpts, key)) excerpts[key] = text;
   }
   if (finding.kind === "stack") {
     for (const claim of finding.assessment.claims)
@@ -467,7 +467,7 @@ export function matchTraceFrame(
   if (matches.some((c) => c.commit !== matches[0]?.commit))
     return { gap: "Sink revision is ambiguous across the cited copies." };
   const cite =
-    matches.find((c) => finding.excerpts.get(citationKey(c)) !== undefined) ??
+    matches.find((c) => finding.excerpts[citationKey(c)] !== undefined) ??
     matches[0];
   if (cite) {
     const ref = {

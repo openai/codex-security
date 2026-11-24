@@ -234,7 +234,7 @@ export function sourceFrames(finding: Finding): SourceFrame[] {
     if ("gap" in match) return gap(match.gap);
     const { cite, index } = match;
     const { path, line } = site;
-    const text = finding.excerpts.get(citationKey(cite));
+    const text = finding.excerpts[citationKey(cite)];
     const { startLine, commit } = cite;
     const code =
       text?.split("\n")[line - startLine] !== undefined
