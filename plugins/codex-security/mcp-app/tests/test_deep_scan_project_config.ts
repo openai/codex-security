@@ -10,7 +10,7 @@ import { temporaryDirectory } from "./support/temporary-directories.ts";
 import type { readDeepScanProjectConfig as Reader } from "../src/deep-scan/project-config.js";
 
 const { readDeepScanProjectConfig } = (await importSource(
-  join(import.meta.dirname, "../src/deep-scan/project-config.ts"),
+  "src/deep-scan/project-config.ts",
 )) as { readDeepScanProjectConfig: typeof Reader };
 
 await test("explicit YAML and JSON selection use the CLI project format and minute budget", async () => {
