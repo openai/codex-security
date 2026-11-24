@@ -2724,16 +2724,14 @@ def test_copy_skips_index_paths_under_a_directory_replaced_by_a_file(tmp_path: P
 def test_copy_keeps_a_directory_that_replaced_a_tracked_file(tmp_path: Path) -> None:
     target = tmp_path / "target"
     initialize_git_repository(target)
-    (target / "config").write_text("tracked = True\n")
-    subprocess.run(["git", "add", "config"], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "Add config"], cwd=target, check=True)
-    (target / "config").unlink()
-    (target / "config").mkdir()
-    (target / "config" / "settings.py").write_text("replacement = True\n")
+    tracked = target / "README.md"
+    tracked.unlink()
+    tracked.mkdir()
+    (tracked / "settings.py").write_text("replacement = True\n")
     destination = tmp_path / "copied"
     WORKBENCH_TARGET["copy_git_worktree_files"](target, destination, ())
-    assert (destination / "config" / "settings.py").read_text() == "replacement = True\n"
-    assert not (destination / "config" / ".git").exists()
+    assert (destination / tracked.name / "settings.py").read_text() == "replacement = True\n"
+    assert not (destination / tracked.name / ".git").exists()
 
 
 def test_git_context_rejects_an_unrelated_configured_worktree(tmp_path: Path) -> None:
