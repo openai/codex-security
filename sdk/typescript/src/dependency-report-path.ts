@@ -1,6 +1,5 @@
 import {
   citationKey,
-  inputFor,
   matchTraceFrame,
   type Finding,
   type StepKind,
@@ -269,7 +268,7 @@ function sourcePath(finding: Finding): PathInspector {
   const notes: string[] = [];
   const trail = finding.item.trace ?? [];
   if (finding.kind !== "coverage" && finding.item.proof?.sink) {
-    const endpoint = inputFor(finding.item)?.endpoint;
+    const endpoint = finding.item.inputSource?.endpoint;
     if (!trail.length)
       notes.push(
         endpoint

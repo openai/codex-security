@@ -1,13 +1,12 @@
 import {
   captureLimits,
   counts,
-  inputFor,
   matchTraceFrame,
   prepareDependencyReport,
-  runtimeFor,
-  servicesFor,
-  verdictOrder,
-  type Citation,
+  findingLabels,
+  findingState,
+  quantity,
+  rangeLabel,
   type Finding,
   type Report,
   advisoryFunctions,
@@ -57,16 +56,6 @@ function list(items: string[], label?: string) {
     items.map((item) => "- " + item).join("\n"),
   );
 }
-function range({
-  path,
-  startLine,
-  endLine,
-}: Pick<Citation, "path" | "startLine" | "endLine">) {
-  return code(
-    `${path}:${startLine}${endLine === startLine ? "" : "–" + endLine}`,
-  );
-}
-
 function scopeLabel(scope: StackAssessment["scope"]) {
   const tags = new Set([scope.image_tag, ...(scope.image_tags ?? [])]);
   return join([
@@ -128,7 +117,7 @@ function stackEvidence(f: Extract<Finding, { kind: "stack" }>) {
     join([
       c.fact && prose(c.fact),
       c.limits && prose(c.limits),
-      c.sources.map(range).join(", "),
+      c.sources.map((s) => code(rangeLabel(s))).join(", "),
       code(c.id + "@" + c.revision),
     ]),
   );
@@ -200,7 +189,7 @@ function conditions(f: Finding) {
   );
 }
 function workload(f: Exclude<Finding, { kind: "stack" }>) {
-  const runtime = runtimeFor(f.item);
+  const runtime = f.item.runtimeContext;
   const place = f.item.place;
   const facts: string[] = [];
   if (runtime?.launch)
@@ -243,7 +232,7 @@ function workload(f: Exclude<Finding, { kind: "stack" }>) {
 }
 function source(f: Finding) {
   const refs = f.item.evidence.map((c) =>
-    join([range(c), c.commit && code(c.commit)]),
+    join([code(rangeLabel(c)), c.commit && code(c.commit)]),
   );
   if (f.kind !== "stack") {
     for (const ref of f.item.decidingEvidence ?? []) {
@@ -358,10 +347,7 @@ function callPath(f: Finding, target?: Report["target"]) {
   );
 }
 function title(f: Finding, path?: string) {
-  const status =
-    f.kind === "coverage"
-      ? "Unresolved candidate"
-      : dependencyVerdictLabels[f.item.verdict];
+  const status = findingLabels[findingState(f)];
   const site = f.anchor;
   if (!site) return prose(f.label) + " — " + status;
   const prefix = site.kind === "reference" ? "Reference " : "";
@@ -379,9 +365,7 @@ function contextLabel(f: Finding) {
   }
   const p = f.item.place;
   return join([
-    servicesFor(f.item)
-      .map((s) => s.name)
-      .join(", "),
+    f.item.services?.map((s) => s.name).join(", "),
     p?.workload,
     p?.variant,
     p?.environment,
@@ -390,7 +374,7 @@ function contextLabel(f: Finding) {
   ]);
 }
 function finding(f: Finding, heading: string, target?: Report["target"]) {
-  const input = f.kind !== "stack" && inputFor(f.item);
+  const input = f.kind !== "stack" && f.item.inputSource;
   const exposure = {
     internet: "Internet exposed",
     not_internet: "Not Internet exposed",
@@ -442,12 +426,13 @@ function finding(f: Finding, heading: string, target?: Report["target"]) {
     ? code(f.anchor.path + ":" + f.anchor.line)
     : prose(f.label);
   return {
+    context,
     decision,
     evidence:
       evidence && blocks(heading + "# " + join([identity, context]), evidence),
   };
 }
-function decisionIndex(findings: Finding[]) {
+function decisionIndex(findings: Finding[], scopes: string[]) {
   if (findings.length <= 1) return;
   // Use the short file name unless two different files share it.
   const basename = (path: string) => path.split(/[\\/]/u).at(-1)!;
@@ -455,7 +440,6 @@ function decisionIndex(findings: Finding[]) {
     findings.flatMap((f) => (f.anchor ? [f.anchor.path] : [])),
   );
   const files = Map.groupBy(paths, basename);
-  const scopes = findings.map((f) => prose(contextLabel(f)));
   const common = scopes.every((s) => s === scopes[0]) ? scopes[0] : undefined;
   const rows = findings.map((f, i) => {
     const name = f.anchor && basename(f.anchor.path);
@@ -490,14 +474,14 @@ function sectionBody(section: Section, heading: string) {
     );
   }
   const { findings, dismissed } = section.prepared!;
-  const c = counts(findings);
   const stack = section.stack;
+  const { reviewed, unresolved, outcomes } = counts(findings, stack?.verdict);
   const totals = stack
     ? `**${dependencyVerdictLabels[stack.verdict]}** · ${stack.review ? "Independently reviewed" : "Finalized offline"} · ${stack.coverage.assessed}/${stack.coverage.total} work items assessed · ${stack.coverage.observed} observed`
-    : `${c.reviewed} reviewed ${c.reviewed === 1 ? "use" : "uses"} · ${c.unresolved} unresolved ${c.unresolved === 1 ? "candidate" : "candidates"}`;
-  const outcomes = verdictOrder
-    .filter((v) => c.breakdown[v])
-    .map((v) => dependencyVerdictLabels[v] + ": " + c.breakdown[v]);
+    : join([
+        quantity(reviewed, "reviewed use"),
+        quantity(unresolved, "unresolved candidate"),
+      ]);
   const notes = stack
     ? captureLimits(stack)
         .filter(([, ids]) => ids.length)
@@ -520,8 +504,7 @@ function sectionBody(section: Section, heading: string) {
     ...advisory,
     list(advisoryFunctions(details).map(code), "Vulnerable functions"),
     totals,
-    (!stack || outcomes.length > 1 || c.breakdown[stack.verdict] === 0) &&
-      join(outcomes),
+    join(outcomes),
     notes.length > 0 && "Capture limits · " + join(notes),
     stack?.advisoryLookupError &&
       "Advisory lookup failed · " + prose(stack.advisoryLookupError),
@@ -534,7 +517,10 @@ function sectionBody(section: Section, heading: string) {
       ).map(prose),
       "Scope",
     ),
-    decisionIndex(findings),
+    decisionIndex(
+      findings,
+      results.map((r) => r.context),
+    ),
     ...results.map((result) => result.decision),
     evidence.length > 0 && heading + " Evidence",
     ...evidence,

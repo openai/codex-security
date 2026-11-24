@@ -4,6 +4,7 @@ import { defaultDependencyCallerScope } from "./dependency-caller-scope.js";
 import {
   assertReviewedPremises,
   retainedUse,
+  reference,
   claimDependencies,
   claimFinding,
   dependencyPremiseRefSchema,
@@ -1048,10 +1049,6 @@ type ReviewClaim =
     }
   | { kind: "coverage"; limitations: string[] };
 export type Claim = StoredClaim<ReviewClaim>;
-export function reference(claim: Pick<Claim, "id" | "revision" | "hash">) {
-  return { id: claim.id, revision: claim.revision, hash: claim.hash };
-}
-
 export class DependencyReviewRejection extends CodexSecurityError {}
 
 export function approvedUse(store: DependencyAttemptStore, ref: PremiseRef) {
@@ -1237,8 +1234,9 @@ export function approveDependencyClaims(
     throw new CodexSecurityError(
       "Independent review must decide every claim exactly once.",
     );
-  const reviewed = store.transaction(() =>
-    claims.map((claim) => {
+  const rejected: string[] = [];
+  store.transaction(() => {
+    for (const claim of claims) {
       const current = store.claim<ReviewClaim>(claim.id),
         decision = byId.get(claim.id);
       if (
@@ -1280,19 +1278,13 @@ export function approveDependencyClaims(
         store.get<Decision>("retained-use", claim.id)
       )
         store.set("retained-use", claim.id, null);
-      return { ...reference(current), value: current.value, review: decision };
-    }),
-  );
-  const rejected = reviewed.filter((c) => !c.review.approved);
-  if (rejected.length)
-    throw new DependencyReviewRejection(
-      rejected
-        .map(
-          (c) => "Independent review rejected " + c.id + ": " + c.review.reason,
-        )
-        .join("\n"),
-    );
-  return reviewed;
+      if (!decision.approved)
+        rejected.push(
+          "Independent review rejected " + claim.id + ": " + decision.reason,
+        );
+    }
+  });
+  if (rejected.length) throw new DependencyReviewRejection(rejected.join("\n"));
 }
 
 // Approval requires every prerequisite. Only the edges selected by the reviewer

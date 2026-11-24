@@ -73,7 +73,6 @@ const distModules = [
   "default-severity-rubric",
   "dependency-attempt-store",
   "dependency-source-identity",
-  "dependency-source-work-tools",
   "dependency-source-worklist",
   "dependency-search-audit",
   "severity-rubric",

@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import {
   citationKey,
   matchTraceFrame,
-  inputFor,
   prepareDependencyReport,
   type Finding,
   type Report,
@@ -236,7 +235,7 @@ function content(section: Section, e: Entry) {
       ? f.item.component + (f.item.version ? " " + f.item.version : "")
       : "";
   const context = join([component, e.scope]);
-  const input = inputFor(f.item);
+  const input = f.item.inputSource;
   const questions = f.item.openConditions;
   const deciding = questions?.[0]?.decidingCheck || questions?.[0]?.question;
   return `<header class="finding-head">

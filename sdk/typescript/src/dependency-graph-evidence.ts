@@ -75,16 +75,11 @@ export const dependencyGraphEvidenceDocument = z.object({
 });
 
 type FieldPath = z.infer<typeof path>;
-type ReceiptSelection = {
-  receiptId: string;
-  textBlock: number | null;
-  record: FieldPath;
-};
 type Service = {
   name: string;
   scope: string;
   source: string;
-  receiptSelections: ReceiptSelection[];
+  receiptSelections: DependencyReceiptSelection[];
 };
 
 export interface DependencyEvidenceGraph {
@@ -98,7 +93,7 @@ export interface DependencyEvidenceGraph {
     path: string;
     project?: string;
     services: Service[];
-    receiptSelections: ReceiptSelection[];
+    receiptSelections: DependencyReceiptSelection[];
     source: string;
   }): Record<string, unknown>;
   recordObservations(
@@ -295,7 +290,7 @@ export function createDependencyGraphEvidenceTools(
             ? undefined
             : safeRelativePath(args.project, "Service project", true);
         const services = new Map<string, Service>();
-        const selections: ReceiptSelection[] = [];
+        const selections: DependencyReceiptSelection[] = [];
         const sources = new Set<string>();
         for (const lookup of args.lookups) {
           const rec = record(lookup.receiptId);

@@ -1,13 +1,18 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
 import type { JsonObject, JsonValue } from "./config.js";
+import {
+  dependencySourceNoteQuerySchema,
+  dependencySourceNoteSchema,
+} from "./dependency-stack-evidence.js";
+import { isRecord } from "./record.js";
 
 const label = z.string().trim().min(1);
 const paths = z.array(z.string().min(1));
 const gapSchema = z.strictObject({ id: label, description: label });
 const resolutionSchema = z.strictObject({ id: label, sourceRef: label });
 
-export const sourceWorkMutationSchema = z.discriminatedUnion("operation", [
+const sourceWorkMutationSchema = z.discriminatedUnion("operation", [
   z.strictObject({
     operation: z.literal("append_roster_page"),
     id: label,
@@ -41,7 +46,7 @@ const pageSchema = z.strictObject({
     .optional(),
 });
 
-export const sourceWorkQuerySchema = z.union([
+const sourceWorkQuerySchema = z.union([
   z.strictObject({}),
   z.strictObject({
     rosterId: label,
@@ -60,6 +65,34 @@ export const sourceWorkQuerySchema = z.union([
       .optional(),
   }),
 ]);
+
+type Tool = {
+  name: string;
+  description: string;
+  inputSchema: object;
+  run(input: unknown): unknown;
+};
+
+const graphActions = {
+  query: {
+    name: "query_codex_security_graph",
+    description:
+      "Pass note or sourceWork as the only argument when querying shared research. Use note:{search} to find notes, note:{} to list them, or note:{id} to read pinned excerpts. Use sourceWork:{} for coverage counts, or sourceWork:{rosterId} or {partitionId} with page:{view,limit,cursor} for paths and gaps.",
+    fields: {
+      note: dependencySourceNoteQuerySchema,
+      sourceWork: sourceWorkQuerySchema,
+    },
+  },
+  update: {
+    name: "update_codex_security_graph",
+    description:
+      "Pass exactly one of note or sourceWork. A note shares a question, scope and assertion with exact line ranges from the pinned checkout. Use sourceWork to record search results, resolve gaps, assign files or mark paths examined. For append_roster_page, omit expectedRevision on the first page and supply the current roster revision on later pages. Set declaredComplete to true when no gaps remain across all pages, and false when any gap remains open.",
+    fields: {
+      note: dependencySourceNoteSchema,
+      sourceWork: sourceWorkMutationSchema,
+    },
+  },
+};
 
 function pageOf<T>(
   values: readonly T[],
@@ -399,9 +432,54 @@ export function createDependencySourceWorkTools() {
     return summary;
   }
 
+  const sourceWork = { query, update };
+  function withGraphTools(
+    tools: Tool[],
+    readOnly: boolean,
+    notes: {
+      query(input: unknown): unknown;
+      update(input: unknown): unknown;
+    },
+  ): Tool[] {
+    function graphTool(action: keyof typeof graphActions, base?: Tool): Tool {
+      const { name, description, fields } = graphActions[action];
+      const { properties } = z.toJSONSchema(z.strictObject(fields).partial());
+      const baseSchema = base?.inputSchema as
+        { properties?: object } | undefined;
+      return {
+        name,
+        description: base ? base.description + " " + description : description,
+        inputSchema: {
+          type: "object",
+          properties: { ...baseSchema?.properties, ...properties },
+          additionalProperties: false,
+          ...(!base && { minProperties: 1, maxProperties: 1 }),
+        },
+        run(input) {
+          if (isRecord(input)) {
+            const note = Object.hasOwn(input, "note");
+            const work = Object.hasOwn(input, "sourceWork");
+            if (!note && !work && base) return base.run(input);
+            if (Object.keys(input).length === 1) {
+              if (note) return notes[action](input["note"]);
+              if (work)
+                return { source_work: sourceWork[action](input["sourceWork"]) };
+            }
+          }
+          throw new Error("Supply exactly one of note or sourceWork.");
+        },
+      };
+    }
+
+    const base = tools.find((tool) => tool.name === graphActions.query.name);
+    const result = tools.filter((tool) => tool !== base);
+    result.push(graphTool("query", base));
+    if (!readOnly) result.push(graphTool("update"));
+    return result;
+  }
+
   return {
     coverage: { generation: () => generation, limitations },
-    update,
-    query,
+    withGraphTools,
   };
 }

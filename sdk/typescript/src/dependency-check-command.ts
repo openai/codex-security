@@ -26,12 +26,8 @@ export const reportFileOption = text
   .describe(
     "Save the completed JSON report to a new file. With --format html, save HTML here instead (default: exploitability_report_<timestamp>.html in the current directory).",
   );
-const blocked = z
-  .object({
-    status: z.literal("blocked"),
-    code: z.literal("INVESTIGATION_BLOCKED"),
-    reason: text,
-  })
+const blocked = dependencyScopedBlockedSchema
+  .pick({ status: true, code: true, reason: true })
   .passthrough();
 const advisoryId = { advisoryId: z.string().nullable() };
 const blockedPackage = dependencyPackageCheckOutputSchema
@@ -194,24 +190,25 @@ export function registerDependencyCheck(
             options.reportFile,
             context,
           );
+          const display = (line: string) => context.stderr.write(line + "\n");
           const result = await withDependencyCheckOutput(
             {
               subject: args.subject,
               checkout: repository,
-              display: (line) => context.stderr.write(line + "\n"),
+              display,
+              warn: display,
               signal,
               ...destination,
               progressEvents:
                 options.progressEvents &&
                 resolveConfigPath(cwd, options.progressEvents),
-              warn: (message) =>
-                (context.stderr ?? process.stderr).write(message + "\n"),
             },
             async (emit) => {
               const project = config
                 ? await readProjectConfig(config, cwd)
                 : undefined;
-              const scope = project?.input.exploitability?.scope;
+              const check = project?.input.exploitability;
+              const scope = check?.scope;
               if (sources && sinks && stacks) {
                 const { runLocalStackInvestigation } =
                   await import("./dependency-stack-launcher.js");
@@ -237,10 +234,9 @@ export function registerDependencyCheck(
                   vulnDescription: options.vulnDescription,
                   scope: scope?.instructions,
                   excludePaths: scope?.exclude_paths,
-                  sources: project?.input.exploitability?.sources,
-                  sinks: project?.input.exploitability?.sinks,
-                  evidenceSources:
-                    project?.input.exploitability?.evidence_sources,
+                  sources: check?.sources,
+                  sinks: check?.sinks,
+                  evidenceSources: check?.evidence_sources,
                   onProgress: emit,
                   signal,
                   ...settings,

@@ -5,14 +5,12 @@ import {
 import {
   captureLimits,
   citationKey,
-  inputFor,
-  refMatches,
-  runtimeFor,
-  servicesFor,
+  rangeLabel,
+  containsSource,
+  matchesReceipt,
   tagsFor,
   type Check,
   type Finding,
-  type Citation,
   type DependencyReviewReference,
   type Section,
   type StackReport,
@@ -24,12 +22,6 @@ import { claimKey, walkClaims } from "./dependency-report-reader.js";
 export const code = (value: string) => `<code>${esc(value)}</code>`;
 const n = (count: number, noun: string) =>
   `${count.toLocaleString("en-US")} ${noun}${count === 1 ? "" : "s"}`;
-const rangeLabel = ({
-  path,
-  startLine,
-  endLine,
-}: Pick<Citation, "path" | "startLine" | "endLine">) =>
-  `${path}:${startLine}${endLine === startLine ? "" : `–${endLine}`}`;
 export function safeLink(value: string, label = value) {
   const url = URL.parse(value);
   if (
@@ -114,28 +106,13 @@ function sourceIndex(
   item: Finding["item"],
   ref: Extract<DependencyReviewReference, { kind: "source" }>,
 ) {
-  return item.evidence.findIndex(
-    (c) =>
-      c.path === ref.path &&
-      c.commit === ref.commit &&
-      c.startLine <= ref.startLine &&
-      c.endLine >= ref.endLine,
-  );
-}
-function receiptRefs(item: Finding["item"]) {
-  return [
-    ...new Map(
-      (item.decidingEvidence ?? [])
-        .filter((r) => r.kind === "receipt")
-        .map((r) => [JSON.stringify(r), r]),
-    ).values(),
-  ];
+  return item.evidence.findIndex((c) => containsSource(c, ref));
 }
 function refLink(finding: Finding, ref: DependencyReviewReference) {
   const at =
     ref.kind === "source"
       ? sourceIndex(finding.item, ref)
-      : receiptRefs(finding.item).findIndex((r) => refMatches(ref, r));
+      : finding.receipts.findIndex((r) => matchesReceipt(ref, r));
   const label = ref.kind === "source" ? rangeLabel(ref) : ref.receiptId;
   return at < 0
     ? code(label)
@@ -144,21 +121,6 @@ function refLink(finding: Finding, ref: DependencyReviewReference) {
 function referenceList(finding: Finding, refs: DependencyReviewReference[]) {
   return refs.map((ref) => refLink(finding, ref)).join(" · ");
 }
-function receiptMetadata(
-  check: Check,
-  ref: Extract<DependencyReviewReference, { kind: "receipt" }>,
-) {
-  for (const v of Object.values(check.claimEvidence?.receipts ?? {})) {
-    if (
-      isRecord(v) &&
-      v["receiptId"] === ref.receiptId &&
-      v["originalPayloadSha256"] === ref.originalPayloadSha256 &&
-      JSON.stringify(v["selection"] ?? null) ===
-        JSON.stringify(ref.selection ?? null)
-    )
-      return v;
-  }
-}
 function originalEvidence(f: Finding, check?: Check) {
   const supports = (keys: string[]) =>
     para(keys.map((k) => factLabels[k] ?? k).join(" · "));
@@ -166,9 +128,14 @@ function originalEvidence(f: Finding, check?: Check) {
     const text = f.excerpts[citationKey(cite)];
     return `${code(rangeLabel(cite))}${cite.commit ? " · " + code(cite.commit) : ""}${supports(cite.supports)}${text !== undefined ? `<details><summary>Source excerpt</summary>${renderDependencyCode(text, cite.path, cite.startLine)}</details>` : ""}`;
   });
+  const records = f.receipts.length
+    ? Object.values(check?.claimEvidence?.receipts ?? {})
+    : [];
   const receipts = check
-    ? receiptRefs(f.item).map((r) => {
-        const m = receiptMetadata(check, r);
+    ? f.receipts.map((r) => {
+        const m = asRecord(
+          records.find((v) => isRecord(v) && matchesReceipt(r, v)),
+        );
         const tool = asRecord(m?.["origin"])?.["tool"];
         const fields = facts([
           ["Server", str(m?.["server"])],
@@ -218,9 +185,8 @@ function target(f: Finding) {
     ["Patch or backport", p?.patch],
     ["Tags", tagsFor(f).join(" · ")],
   ]);
-  const services = servicesFor(f.item);
   const rows = list(
-    services.map(
+    (f.item.services ?? []).map(
       (s) =>
         `<strong>${esc(s.name)}</strong> · ${code(s.id)} · ${esc(s.source)} · ${referenceList(f, s.evidence)}`,
     ),
@@ -229,18 +195,16 @@ function target(f: Finding) {
     group("Target and dependency", fields) +
     group(
       "Service associations",
-      rows ||
-        (f.item.services?.length
-          ? para(
-              "The proposed service mapping was not confirmed by this item’s evidence.",
-            )
-          : ""),
+      f.unconfirmedServices
+        ? para(
+            "The proposed service mapping was not confirmed by this item’s evidence.",
+          )
+        : rows,
     )
   );
 }
 function context(f: Finding) {
-  const input = inputFor(f.item);
-  const runtime = runtimeFor(f.item);
+  const { inputSource: input, runtimeContext: runtime } = f.item;
   const source = input
     ? `<p>${exposureLabels[input.exposure]}${input.endpoint ? " · " + safeLink(input.endpoint) : ""}</p><p>${referenceList(f, input.evidence)}</p><p>Internet exposure alone does not establish control of the input at the affected function.</p>`
     : "";

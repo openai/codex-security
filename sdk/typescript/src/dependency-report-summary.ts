@@ -1,14 +1,14 @@
 import {
   counts,
-  verdictOrder,
+  findingLabels,
+  findingState,
+  quantity,
   type Finding,
   type Report,
 } from "./dependency-report-model.js";
 import { dependencyVerdictLabels } from "./dependency-stack-use.js";
 import { formatSecurityPolicyText } from "./security-policy.js";
 
-const quantity = (count: number, label: string) =>
-  `${count} ${label}${count === 1 ? "" : "s"}`;
 function scope(finding: Finding): string {
   if (finding.kind === "stack") {
     const s = finding.assessment.scope;
@@ -61,19 +61,17 @@ export function summarizeDependencyReport(report: Report): string {
       continue;
     }
     const findings = section.prepared!.findings;
-    const { reviewed, unresolved, breakdown } = counts(findings);
+    const { reviewed, unresolved, outcomes } = counts(
+      findings,
+      section.stack?.verdict,
+    );
     const totals = section.stack
       ? [
           dependencyVerdictLabels[section.stack.verdict],
           `${section.stack.coverage.assessed}/${section.stack.coverage.total} stack items assessed`,
         ]
       : [quantity(reviewed, "reviewed use")];
-    for (const verdict of verdictOrder) {
-      const count = breakdown[verdict];
-      if (verdict === section.stack?.verdict && count === findings.length)
-        continue;
-      if (count) totals.push(`${dependencyVerdictLabels[verdict]}: ${count}`);
-    }
+    totals.push(...outcomes);
     if (unresolved) totals.push(quantity(unresolved, "unresolved candidate"));
     lines.push(totals.join(" · "));
     if (section.stack) {
@@ -101,10 +99,7 @@ export function summarizeDependencyReport(report: Report): string {
     const commonScope = new Set(scopes).size === 1 ? scopes[0] : undefined;
     if (commonScope) lines.push("Scope: " + commonScope);
     for (const [index, f] of findings.entries()) {
-      const outcome =
-        f.kind === "coverage"
-          ? "Unresolved candidate"
-          : dependencyVerdictLabels[f.item.verdict];
+      const outcome = findingLabels[findingState(f)];
       const component =
         f.kind !== "coverage" && f.item.component
           ? f.item.component + "@" + (f.item.version ?? "unknown")

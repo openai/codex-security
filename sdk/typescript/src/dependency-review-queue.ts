@@ -17,6 +17,9 @@ export const dependencyPremiseRefSchema = z.strictObject({
   hash: z.string().regex(/^[a-f0-9]{64}$/u),
 });
 export type PremiseRef = z.infer<typeof dependencyPremiseRefSchema>;
+export function reference({ id, revision, hash }: PremiseRef) {
+  return { id, revision, hash };
+}
 export const premiseKey = ({ id, revision, hash }: PremiseRef) =>
   "claim:" + JSON.stringify([id, revision, hash]);
 
@@ -147,7 +150,6 @@ export function createPremiseQueue(options: {
   const running = new Map<string, string>();
   const batches = new Set<Promise<void>>();
   let scheduled: NodeJS.Immediate | undefined;
-  const ref = (c: Claim) => ({ id: c.id, revision: c.revision, hash: c.hash });
   function schedule() {
     if (scheduled) clearImmediate(scheduled);
     scheduled = undefined;
@@ -189,33 +191,29 @@ export function createPremiseQueue(options: {
       await Promise.race(batches);
   }
   function status(c: Claim) {
-    const key = premiseKey(c);
+    const base = { ...reference(c), payload: c.value };
     const decision = currentApproval(store, c);
+    if (decision) return { ...base, state: "approved", decision };
+    const previous = retainedUse(store, c.id);
+    const pending = {
+      ...base,
+      ...(previous && { retainedUse: reference(previous) }),
+    };
+    const reason = failures.get(premiseKey(c));
+    if (reason !== undefined) return { ...pending, state: "rejected", reason };
     const reviewed = store.get<Decision>("dependency-review", c.id);
-    const previous = !decision && retainedUse(store, c.id);
-    const stale =
-      !decision &&
+    if (
       reviewed?.approved &&
       reviewed.hash === c.hash &&
-      reviewed.revision === c.revision;
-    return {
-      ...ref(c),
-      payload: c.value,
-      ...(previous && { retainedUse: ref(previous) }),
-      state: decision
-        ? "approved"
-        : failures.has(key)
-          ? "rejected"
-          : stale
-            ? "stale"
-            : "pending",
-      ...(stale && {
+      reviewed.revision === c.revision
+    )
+      return {
+        ...pending,
+        state: "stale",
         reason:
           "A reviewed premise changed; submit a corrected claim with current references.",
-      }),
-      ...(decision && { decision }),
-      ...(failures.has(key) && !decision && { reason: failures.get(key) }),
-    };
+      };
+    return { ...pending, state: "pending" };
   }
   function enqueue(stored: Claim[]) {
     for (const c of stored) {
@@ -235,6 +233,9 @@ export function createPremiseQueue(options: {
     status,
     async submit(input: unknown) {
       const { claims } = submitPremisesSchema.parse(input);
+      const { revision } = options;
+      if (!revision)
+        throw new CodexSecurityError("A pinned checkout revision is required.");
       const values = await Promise.all(
         claims.map(async (c) => {
           const {
@@ -247,10 +248,6 @@ export function createPremiseQueue(options: {
             statement,
             scope,
           } = c;
-          if (!options.revision)
-            throw new CodexSecurityError(
-              "A pinned checkout revision is required.",
-            );
           if (
             !sources.length &&
             !receiptIds.length &&
@@ -268,12 +265,7 @@ export function createPremiseQueue(options: {
           );
           const verified = await Promise.all(
             sources.map((s) =>
-              readDependencySourceCitation(
-                directory,
-                options.revision!,
-                s,
-                signal,
-              ),
+              readDependencySourceCitation(directory, revision, s, signal),
             ),
           );
           return {

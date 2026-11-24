@@ -11,18 +11,16 @@ import {
   type PreparedDependencyClaim,
 } from "./dependency-stack-claims.js";
 import {
+  dependencySourceNoteSchema,
   inventoryJsonField,
+  prepareDependencySourceNote,
+  readDependencyClaimExcerpts,
+  saveDependencySourceNote,
   type BoundDependencyInventoryReceipt,
   type DependencyInventoryReceiptSelection,
 } from "./dependency-stack-evidence.js";
-import { readDependencyClaimExcerpts } from "./dependency-stack-evidence.js";
 import {
-  dependencySourceNoteSchema,
-  prepareDependencySourceNote,
-  saveDependencySourceNote,
-} from "./dependency-stack-evidence.js";
-import {
-  assertStackAssessmentClaims,
+  collectStackAssessmentClaims,
   finalizeStackReport,
   prepareStackAssessment,
   stackAssessmentInputSchema,
@@ -328,53 +326,46 @@ function selectReceipt(
   };
 }
 
-async function prepareClaims(
-  rows: ClaimInput[],
-  packet: StackPacket,
-  workItems: WorkItem[],
+function claimEvidenceReader(
+  { packet, items }: ReturnType<typeof packetSnapshot>,
   repository: string,
   store: DependencyAttemptStore,
   signal?: AbortSignal,
 ) {
-  const claims: {
-    prepared: PreparedDependencyClaim;
-    expectedRevision?: number;
-  }[] = [];
-  const seen = new Set<string>();
-  const receiptsById = new Map(
-    workItems.map((item) => [captureId(packet, item), item]),
+  const target = packet.manifest.target.sha;
+  const captures = new Map(
+    items.map((item) => [captureId(packet, item), item]),
   );
-  for (const row of rows) {
-    if (seen.has(row.id))
-      throw new CodexSecurityError("Duplicate claim ID in batch: " + row.id);
-    seen.add(row.id);
-    const target = packet.manifest.target.sha;
-    const ranges = row.evidence.map((range) => {
-      if (range.commit && range.commit !== target)
-        throw new CodexSecurityError(
-          "A claim must cite the investigation target SHA.",
-        );
-      return { ...range, commit: target };
-    });
+  return async (
+    row: ClaimInput | PreparedDependencyClaim,
+  ): Promise<PreparedDependencyClaim> => {
+    // A saved claim supplies only selectors. Reread the original bytes and receipts.
+    const ranges = ("excerpts" in row ? row.excerpts : row.evidence).map(
+      (range) => {
+        if (range.commit && range.commit !== target)
+          throw new CodexSecurityError(
+            "A claim must cite the investigation target SHA.",
+          );
+        const { path, startLine, endLine } = range;
+        return { path, startLine, endLine, commit: target };
+      },
+    );
     const excerpts = await readDependencyClaimExcerpts(
       ranges,
       repository,
       signal,
     );
-    const receipts = [
-      ...(row.receiptIds ?? []).map((ref) =>
-        selectReceipt(packet, receiptsById, store, ref),
-      ),
-      ...(row.receiptSelections ?? []).map((selection) =>
-        selectReceipt(
-          packet,
-          receiptsById,
-          store,
-          selection.receiptId,
-          selection,
-        ),
-      ),
-    ];
+    const selectors =
+      "receipts" in row
+        ? row.receipts.map(({ receiptId, selection }) =>
+            selection ? { ...selection, receiptId } : receiptId,
+          )
+        : [...(row.receiptIds ?? []), ...(row.receiptSelections ?? [])];
+    const receipts = selectors.map((selector) =>
+      typeof selector === "string"
+        ? selectReceipt(packet, captures, store, selector)
+        : selectReceipt(packet, captures, store, selector.receiptId, selector),
+    );
     // Keep the original imported artifact alongside every supplemental capture
     // so an exported report can be reviewed without the investigation database.
     for (const receipt of [...receipts]) {
@@ -392,21 +383,9 @@ async function prepareClaims(
         "A claim needs a cited source range, capture receipt or exact supporting claim.",
       );
     }
-    claims.push({
-      prepared: {
-        id: row.id,
-        scope: row.scope,
-        payload: row.payload,
-        dependencies: row.dependencies,
-        excerpts,
-        receipts,
-      },
-      ...(row.expectedRevision !== undefined && {
-        expectedRevision: row.expectedRevision,
-      }),
-    });
-  }
-  return claims;
+    const { id, scope, payload, dependencies } = row;
+    return { id, scope, payload, dependencies, excerpts, receipts };
+  };
 }
 
 function currentAssessments(store: DependencyAttemptStore, claims: Ledger) {
@@ -428,10 +407,11 @@ function investigationVersion(store: DependencyAttemptStore) {
 }
 
 function packetSnapshot(store: DependencyAttemptStore, base?: StackPacket) {
-  return store.read(() => ({
+  const snapshot = store.read(() => ({
     packet: overlayPacket(store, base),
     version: investigationVersion(store),
   }));
+  return { ...snapshot, items: stackPacketWorkItems(snapshot.packet) };
 }
 
 function reportWithEffectiveInputs(
@@ -477,26 +457,27 @@ function openClaims(store: DependencyAttemptStore, { manifest }: StackPacket) {
 
 async function verifyFinal(
   store: DependencyAttemptStore,
-  packet: StackPacket,
+  inputs: ReturnType<typeof packetSnapshot>,
   repository: string,
   claims: Ledger,
   requireSaved: boolean,
   signal?: AbortSignal,
-  version?: string,
 ): Promise<StackInvestigationReport> {
+  const { packet, version, items } = inputs;
   const saved = store.get("report", "final");
   if (requireSaved && !saved)
     throw new CodexSecurityError(
       "The investigator did not finalize the report.",
     );
+  const reportFor = (rows: StackAssessment[]) =>
+    reportWithEffectiveInputs(
+      store,
+      packet,
+      finalizeStackReport(inputs, rows, claims),
+    );
   const decisions = store.values<StackAssessment>("stack-assessment");
-  const snapshot = reportWithEffectiveInputs(
-    store,
-    packet,
-    finalizeStackReport(packet, decisions, claims),
-  );
+  const snapshot = reportFor(decisions);
   const digest = dependencyClaimHash(snapshot);
-  const items = stackPacketWorkItems(packet);
   const byId = new Map(items.map((item) => [item.id, item]));
   for (const assessment of decisions) {
     prepareStackAssessment(
@@ -507,42 +488,14 @@ async function verifyFinal(
       signal,
     );
   }
+  const readEvidence = claimEvidenceReader(inputs, repository, store, signal);
   for (const ref of snapshot.claims) {
     const original = claims.get(ref);
     if (!original)
       throw new CodexSecurityError(
         "A supporting claim changed during finalization.",
       );
-    const [current] = await prepareClaims(
-      [
-        {
-          id: original.id,
-          scope: original.scope,
-          payload: original.payload,
-          dependencies: original.dependencies,
-          evidence: original.excerpts.map(
-            ({ path, commit, startLine, endLine }) => ({
-              path,
-              startLine,
-              endLine,
-              ...(commit && { commit }),
-            }),
-          ),
-          receiptIds: original.receipts
-            .filter((r) => !r.selection)
-            .map((r) => r.receiptId),
-          receiptSelections: original.receipts.flatMap((r) =>
-            r.selection ? [{ ...r.selection, receiptId: r.receiptId }] : [],
-          ),
-        },
-      ],
-      packet,
-      items,
-      repository,
-      store,
-      signal,
-    );
-    const verified = current!.prepared;
+    const verified = await readEvidence(original);
     if (
       claims.preview(verified, original.revision).hash !== ref.hash ||
       dependencyClaimHash(verified.excerpts) !==
@@ -556,19 +509,11 @@ async function verifyFinal(
     }
   }
   return store.transaction(() => {
-    if (version !== undefined && investigationVersion(store) !== version)
+    if (investigationVersion(store) !== version)
       throw new CodexSecurityError(
         "New observations or investigation metadata arrived during finalization. Retry finalize.",
       );
-    const report = reportWithEffectiveInputs(
-      store,
-      packet,
-      finalizeStackReport(
-        packet,
-        store.values<StackAssessment>("stack-assessment"),
-        claims,
-      ),
-    );
+    const report = reportFor(store.values<StackAssessment>("stack-assessment"));
     if (dependencyClaimHash(report) !== digest)
       throw new CodexSecurityError(
         "The investigation changed during finalization. Retry finalize.",
@@ -622,7 +567,8 @@ export async function readFinalStackReport(
       throw new CodexSecurityError(
         "Finalized state does not belong to this input packet.",
       );
-    const { packet, version } = packetSnapshot(store, base);
+    const inputs = packetSnapshot(store, base);
+    const { packet } = inputs;
     if (
       expected &&
       dependencyClaimHash(packet.stacks.queries) !==
@@ -633,12 +579,11 @@ export async function readFinalStackReport(
       );
     return await verifyFinal(
       store,
-      packet,
+      inputs,
       expected?.repository ?? live?.repo ?? location!.repo,
       openClaims(store, packet),
       true,
       expected?.signal,
-      version,
     );
   } finally {
     store.close();
@@ -724,10 +669,10 @@ export async function executeStackRun(
       if (command === "next" && gaps.length)
         return { workItem: null, target: live.target, openQuestions: gaps };
     }
-    const { packet, version } = packetSnapshot(store, base);
+    const inputs = packetSnapshot(store, base);
+    const { packet, version, items } = inputs;
     const { manifest } = packet;
     const claims = openClaims(store, packet);
-    const items = stackPacketWorkItems(packet);
     const assessments = () => currentAssessments(store, claims);
     const current = () => nextItem(items, assessments());
     switch (command) {
@@ -736,7 +681,7 @@ export async function executeStackRun(
         if (!item)
           return {
             workItem: null,
-            coverage: summarizeStackCoverage(packet, assessments()),
+            coverage: summarizeStackCoverage(items, assessments()),
           };
         const sinks = effectiveStackSinks(packet);
         return {
@@ -768,7 +713,7 @@ export async function executeStackRun(
       case "query-claims":
         return claims.query(options.input);
       case "summarize-coverage":
-        return summarizeStackCoverage(packet, assessments());
+        return summarizeStackCoverage(items, assessments());
       case "finalize":
         if (live && (!packet.sinks.sinks.length || !items.length))
           throw new CodexSecurityError(
@@ -776,33 +721,38 @@ export async function executeStackRun(
           );
         return await verifyFinal(
           store,
-          packet,
+          inputs,
           repository,
           claims,
           false,
           signal,
-          version,
         );
       case "record-claims": {
         const op = mutation(store, command, options.input);
         const previous = op.receipt();
         if (previous) return previous.result;
         const input = dependencyClaimQueueSchema.parse(op.body);
-        const rows = await prepareClaims(
-          input.claims,
-          packet,
-          items,
+        const readEvidence = claimEvidenceReader(
+          inputs,
           repository,
           store,
           signal,
         );
+        const rows = new Map<string, PreparedDependencyClaim>();
+        for (const row of input.claims) {
+          if (rows.has(row.id))
+            throw new CodexSecurityError(
+              "Duplicate claim ID in batch: " + row.id,
+            );
+          rows.set(row.id, await readEvidence(row));
+        }
         return op.commit(() => {
           if (investigationVersion(store) !== version)
             throw new CodexSecurityError(
               "The investigation changed while preparing claims. Retry record-claims.",
             );
-          const refs = rows.map(({ prepared, expectedRevision }) => {
-            const { record } = claims.propose(prepared, expectedRevision);
+          const refs = input.claims.map(({ id, expectedRevision }) => {
+            const { record } = claims.propose(rows.get(id)!, expectedRevision);
             return claims.reference(record);
           });
           if (!refs.every((ref) => claims.isUsable(ref)))
@@ -843,7 +793,7 @@ export async function executeStackRun(
             throw new CodexSecurityError(
               "The active work item changed. Run next again.",
             );
-          assertStackAssessmentClaims(assessment, claims);
+          collectStackAssessmentClaims(assessment, claims);
           store.set("stack-assessment", item.id, assessment);
           return { workItemId: item.id, verdict: assessment.verdict };
         });

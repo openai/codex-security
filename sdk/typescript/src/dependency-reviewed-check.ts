@@ -22,6 +22,7 @@ import {
   currentApproval,
   dependencyPremiseRefSchema,
   retainedUse,
+  reference,
   assertReviewedPremises,
 } from "./dependency-review-queue.js";
 import {
@@ -82,7 +83,6 @@ import {
   DependencyReviewRejection,
   type Scope,
   investigationSchema,
-  reference,
   proposedDisposition,
   verifyProposedDisposition,
   type VerifiedDisposition,

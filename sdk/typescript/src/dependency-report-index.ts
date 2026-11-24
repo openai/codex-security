@@ -1,11 +1,10 @@
 import {
   advisoryFunctions,
   sectionAdvisories,
-  servicesFor,
-  inputFor,
+  findingLabels,
+  findingState,
   verdictOrder,
   type Advisory,
-  type DependencyVerdict,
   type Finding,
   type Report,
   type Section,
@@ -13,10 +12,8 @@ import {
 import { inspectPath, type PathInspector } from "./dependency-report-path.js";
 import { escapeHtml as esc } from "./dependency-report-code.js";
 import { code, safeLink, prose } from "./dependency-report-audit.js";
-import { dependencyVerdictLabels } from "./dependency-stack-use.js";
 
-export type State =
-  DependencyVerdict | "unresolved" | "blocked" | "empty" | "pending";
+type State = keyof typeof labels;
 export type Entry = {
   id: string;
   state: State;
@@ -29,9 +26,8 @@ export type Entry = {
 };
 type Group = { section: Section; sites: Entry[][] };
 
-const labels: Record<State, string> = {
-  ...dependencyVerdictLabels,
-  unresolved: "Unresolved candidate",
+const labels = {
+  ...findingLabels,
   blocked: "Blocked",
   pending: "Not started",
   empty: "No findings",
@@ -64,7 +60,7 @@ function scope(f: Finding, includeImage = true) {
   }
   const place = f.item.place;
   return context([
-    ...servicesFor(f.item).map((s) => s.name),
+    ...(f.item.services ?? []).map((s) => s.name),
     place?.workload,
     place?.environment,
     place?.variant,
@@ -83,7 +79,7 @@ function label(f: Finding, path: PathInspector): string {
       "Sampled call"
     );
   }
-  if (f.kind === "coverage") return f.item.location ?? "Unresolved candidate";
+  if (f.kind === "coverage") return f.item.location ?? labels.unresolved;
   return f.item.location || f.item.proof?.sink?.function || f.item.component;
 }
 
@@ -114,7 +110,7 @@ export function sites(section: Section, index: number): Entry[][] {
     const name = label(finding, path);
     return {
       id: finding.id,
-      state: finding.kind === "coverage" ? "unresolved" : finding.item.verdict,
+      state: findingState(finding),
       file: location ? basename(location) : name,
       name,
       scope: scope(finding),
@@ -141,7 +137,7 @@ function searchTerms(entry: Entry, section: Section) {
     entry.scope,
     f?.item.location,
     ...(entry.path?.frames.map((frame) => frame.label) ?? []),
-    f && inputFor(f.item)?.endpoint,
+    f?.item.inputSource?.endpoint,
     f && f.kind !== "coverage" ? f.item.component : undefined,
   ]
     .filter(Boolean)

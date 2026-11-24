@@ -14,7 +14,6 @@ import {
 import {
   sampledStacksSchema,
   stackManifestSchema,
-  stackPacketWorkItems,
   stackSinkMatches,
   type StackPacket,
   type StackWorkItem,
@@ -311,7 +310,7 @@ export type StackInvestigationReport = z.output<
   typeof stackInvestigationReportSchema
 >;
 
-function collectClaims(
+export function collectStackAssessmentClaims(
   assessment: StackAssessment,
   claims: StackClaimReader,
 ): DependencyClaimRecord[] {
@@ -339,13 +338,6 @@ function collectClaims(
     pending.push(...record.dependencies);
   }
   return [...selected.values()].sort((a, b) => a.id.localeCompare(b.id));
-}
-
-export function assertStackAssessmentClaims(
-  assessment: StackAssessment,
-  claims: StackClaimReader,
-): void {
-  collectClaims(assessment, claims);
 }
 
 interface SourceRange {
@@ -784,7 +776,7 @@ export function prepareStackAssessment(
   const row = bindCapturedEvidence(itemInput.parse(input), work);
   if (row.workItemId !== work.id)
     fail("Assessment work item does not match the selected observation.");
-  const records = collectClaims(row, claims);
+  const records = collectStackAssessmentClaims(row, claims);
   if (row.use) {
     if (row.use.verdict !== row.verdict)
       fail("The use and assessment verdicts must agree.");
@@ -818,10 +810,9 @@ export function prepareStackAssessment(
 }
 
 export function summarizeStackCoverage(
-  packet: StackPacket,
+  items: readonly StackWorkItem[],
   assessments: readonly StackAssessment[],
 ) {
-  const items = stackPacketWorkItems(packet);
   const assessed = new Set(assessments.map((a) => a.workItemId));
   const ids = (predicate: (w: StackWorkItem) => boolean) =>
     items.filter(predicate).map((w) => w.id);
@@ -845,11 +836,10 @@ export function summarizeStackCoverage(
 }
 
 export function finalizeStackReport(
-  packet: StackPacket,
+  { packet, items }: { packet: StackPacket; items: readonly StackWorkItem[] },
   assessments: readonly StackAssessment[],
   claims: StackClaimReader,
 ): StackInvestigationReport {
-  const items = stackPacketWorkItems(packet);
   const byId = new Map(assessments.map((a) => [a.workItemId, a]));
   if (byId.size !== items.length || byId.size !== assessments.length)
     fail(
@@ -860,7 +850,7 @@ export function finalizeStackReport(
     const disposition = byId.get(w.id);
     if (!disposition) fail(`Missing disposition for ${w.id}.`);
     const saved = bindCapturedEvidence(disposition, w);
-    const records = collectClaims(saved, claims);
+    const records = collectStackAssessmentClaims(saved, claims);
     assessProof(saved, w, packet, records);
     for (const record of records) selected.set(record.id, record);
     const o = w.observation;
@@ -890,7 +880,7 @@ export function finalizeStackReport(
       },
     };
   });
-  const coverage = summarizeStackCoverage(packet, assessments);
+  const coverage = summarizeStackCoverage(items, assessments);
   const { runId, attemptId, inputDigest, toolRevision, target, cve } =
     packet.manifest;
   return stackInvestigationReportSchema.parse({

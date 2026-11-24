@@ -20,10 +20,7 @@ import {
   type DependencyEvidenceRecord,
 } from "./dependency-evidence-sources.js";
 import type { LinkedDependencyEvidence } from "./dependency-linked-resources.js";
-import {
-  createDependencySourceWorkTools,
-  withInvestigationGraphTools,
-} from "./dependency-source-work-tools.js";
+import { createDependencySourceWorkTools } from "./dependency-source-worklist.js";
 import { createDependencySourceTools } from "./dependency-source-evidence.js";
 import {
   createDependencyGraphEvidenceTools,
@@ -518,12 +515,7 @@ export function createInvestigationSession(options: {
           })),
         );
       }
-      const exposed = withInvestigationGraphTools(
-        tools,
-        sourceWork,
-        readOnly,
-        sourceNotes,
-      );
+      const exposed = sourceWork.withGraphTools(tools, readOnly, sourceNotes);
       return {
         definitions: exposed.map(({ run: _, ...def }) => def),
         async call(name, args) {

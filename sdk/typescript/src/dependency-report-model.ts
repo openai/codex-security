@@ -17,6 +17,7 @@ import {
 } from "./dependency-report-reader.js";
 import type { DependencyTarget } from "./dependency-source-identity.js";
 import { isRecord } from "./record.js";
+import { dependencyVerdictLabels } from "./dependency-stack-use.js";
 
 export type {
   StackReport,
@@ -28,11 +29,6 @@ export type Check = z.infer<typeof reviewedDependencyCheckSchema>;
 export type Advisory = z.infer<typeof dependencyAdvisoryDetailsSchema>;
 export type Blocked = z.infer<typeof dependencyInvestigationBlockedSchema>;
 export type Citation = DependencyUse["evidence"][number];
-export type Service = NonNullable<ReviewedDependencyUse["services"]>[number];
-export type InputSource = NonNullable<ReviewedDependencyUse["inputSource"]>;
-export type RuntimeContext = NonNullable<
-  ReviewedDependencyUse["runtimeContext"]
->;
 type DependencyReportProof = NonNullable<ReviewedDependencyUse["proof"]>;
 export type Site = NonNullable<DependencyReportProof["sink"]>["callSite"];
 export type StepKind = "source" | "handoff" | "sink";
@@ -41,11 +37,15 @@ type Anchor = {
   line: number;
   kind: "call" | "reference";
 };
+type SourceRef = Extract<DependencyReviewReference, { kind: "source" }>;
+type ReceiptRef = Extract<DependencyReviewReference, { kind: "receipt" }>;
 type Entry = {
   id: string;
   anchor?: Anchor;
   label: string;
   excerpts: Record<string, string | undefined>;
+  unconfirmedServices?: boolean;
+  receipts: ReceiptRef[];
 };
 export type PreparedCheck = {
   findings: Finding[];
@@ -89,6 +89,13 @@ export type Report = {
   description?: string;
   sections: Section[];
 };
+export const findingLabels = {
+  ...dependencyVerdictLabels,
+  unresolved: "Unresolved candidate",
+};
+export const findingState = (f: Finding) =>
+  f.kind === "coverage" ? "unresolved" : f.item.verdict;
+
 const findingOrder = [
   "exploitable",
   "potentially_exploitable",
@@ -192,59 +199,58 @@ function readReport(value: unknown): Report {
   };
 }
 
-export function refMatches(
-  ref: DependencyReviewReference,
-  deciding: DependencyReviewReference,
-): boolean {
-  if (ref.kind === "source" && deciding.kind === "source")
-    return (
-      ref.startLine <= ref.endLine &&
-      ref.path === deciding.path &&
-      ref.commit === deciding.commit &&
-      deciding.startLine <= ref.startLine &&
-      ref.endLine <= deciding.endLine
-    );
+export function containsSource(range: Omit<SourceRef, "kind">, ref: SourceRef) {
   return (
-    ref.kind === "receipt" &&
-    deciding.kind === "receipt" &&
-    ref.receiptId === deciding.receiptId &&
-    ref.originalPayloadSha256 === deciding.originalPayloadSha256 &&
-    JSON.stringify(ref.selection ?? null) ===
-      JSON.stringify(deciding.selection ?? null)
+    range.path === ref.path &&
+    range.commit === ref.commit &&
+    range.startLine <= ref.startLine &&
+    ref.endLine <= range.endLine
   );
 }
-export function servicesFor(item: Finding["item"]): Service[] {
-  return (item.services ?? []).filter((service) =>
-    reviewedRefs(item, service.evidence),
-  );
-}
-function reviewedRefs(
-  item: Finding["item"],
-  refs: DependencyReviewReference[],
+
+export function matchesReceipt(
+  ref: ReceiptRef,
+  record: Record<string, unknown>,
 ) {
   return (
-    refs.length > 0 &&
-    refs.every((ref) =>
-      item.decidingEvidence?.some((original) => refMatches(ref, original)),
-    )
+    ref.receiptId === record["receiptId"] &&
+    ref.originalPayloadSha256 === record["originalPayloadSha256"] &&
+    JSON.stringify(ref.selection ?? null) ===
+      JSON.stringify(record["selection"] ?? null)
   );
 }
-export function inputFor(item: Finding["item"]): InputSource | undefined {
-  return item.inputSource && reviewedRefs(item, item.inputSource.evidence)
-    ? item.inputSource
-    : undefined;
+
+function reviewed({ item, receipts }: Finding, ref: DependencyReviewReference) {
+  if (ref.kind === "source")
+    return (
+      ref.startLine <= ref.endLine &&
+      item.decidingEvidence?.some(
+        (r) => r.kind === "source" && containsSource(r, ref),
+      )
+    );
+  return receipts.some((r) => matchesReceipt(ref, r));
 }
-export function runtimeFor(item: Finding["item"]): RuntimeContext | undefined {
-  return item.runtimeContext && reviewedRefs(item, item.runtimeContext.evidence)
-    ? item.runtimeContext
-    : undefined;
+
+// Filter the parsed report, never the original evidence. All views should see
+// the same service, input and runtime details backed by deciding evidence.
+function prepareDetails(finding: Finding) {
+  const { item } = finding;
+  const confirmed = ({ evidence }: { evidence: DependencyReviewReference[] }) =>
+    evidence.length > 0 && evidence.every((ref) => reviewed(finding, ref));
+  if (item.services?.length) {
+    item.services = item.services.filter(confirmed);
+    if (!item.services.length) finding.unconfirmedServices = true;
+  }
+  if (item.tags) item.tags = item.tags.filter(confirmed);
+  if (item.inputSource && !confirmed(item.inputSource)) delete item.inputSource;
+  if (item.runtimeContext && !confirmed(item.runtimeContext))
+    delete item.runtimeContext;
 }
+
 export function tagsFor(finding: Finding) {
   const p = finding.item.place;
   const names = [
-    ...(finding.item.tags ?? [])
-      .filter((tag) => reviewedRefs(finding.item, tag.evidence))
-      .map((tag) => tag.name),
+    ...(finding.item.tags ?? []).map((tag) => tag.name),
     p?.environment && `env:${p.environment}`,
     p?.variant && `variant:${p.variant}`,
     p?.role && `role:${p.role}`,
@@ -277,8 +283,7 @@ function prepareFindings(
   dismissed: Finding[] = [],
 ): PreparedCheck {
   // Unresolved coverage follows unknown uses. Stable sorting keeps ties in input order.
-  const rank = (f: Finding) =>
-    findingOrder.indexOf(f.kind === "coverage" ? "unresolved" : f.item.verdict);
+  const rank = (f: Finding) => findingOrder.indexOf(findingState(f));
   findings.sort((a, b) => rank(a) - rank(b));
   return { findings, dismissed };
 }
@@ -293,25 +298,36 @@ export function captureLimits({ coverage }: StackReport) {
   ] as const;
 }
 
-export function counts(findings: readonly Finding[]) {
-  const breakdown = Object.fromEntries(
-    verdictOrder.map((v) => [v, 0]),
-  ) as Record<DependencyVerdict, number>;
+export const quantity = (count: number, label: string) =>
+  `${count} ${label}${count === 1 ? "" : "s"}`;
+
+export function counts(
+  findings: readonly Finding[],
+  aggregate?: DependencyVerdict,
+) {
+  const breakdown = new Map<DependencyVerdict, number>();
   let reviewed = 0,
     unresolved = 0;
-  for (const finding of findings) {
-    if (finding.kind === "use") reviewed++;
-    if (finding.kind === "coverage") unresolved++;
-    else breakdown[finding.item.verdict]++;
+  for (const f of findings) {
+    if (f.kind === "use") reviewed++;
+    if (f.kind === "coverage") unresolved++;
+    else
+      breakdown.set(f.item.verdict, (breakdown.get(f.item.verdict) ?? 0) + 1);
   }
-  return { reviewed, unresolved, breakdown };
+  const outcomes = verdictOrder.flatMap((verdict) => {
+    const count = breakdown.get(verdict);
+    if (!count || (verdict === aggregate && count === findings.length))
+      return [];
+    return [`${findingLabels[verdict]}: ${count}`];
+  });
+  return { reviewed, unresolved, outcomes };
 }
 
 type Claims = NonNullable<Check["claims"]>;
 function identity(
   item: Finding["item"],
   proof?: DependencyReportProof,
-): Pick<Entry, "label" | "anchor" | "excerpts"> {
+): Omit<Entry, "id"> {
   const site = proof?.sink?.callSite;
   const cite =
     item.evidence.find((c) => c.supports.includes("affected_use")) ??
@@ -329,7 +345,10 @@ function identity(
   const excerpts = Object.fromEntries(
     item.evidence.map((c) => [citationKey(c), undefined]),
   );
-  return { anchor, label, excerpts };
+  const receipts = new Map<string, ReceiptRef>();
+  for (const ref of item.decidingEvidence ?? [])
+    if (ref.kind === "receipt") receipts.set(JSON.stringify(ref), ref);
+  return { anchor, label, excerpts, receipts: [...receipts.values()] };
 }
 function stackFinding(
   assessment: StackAssessment,
@@ -365,6 +384,12 @@ function stackFinding(
     label,
   };
 }
+export const rangeLabel = ({
+  path,
+  startLine,
+  endLine,
+}: Pick<Citation, "path" | "startLine" | "endLine">) =>
+  `${path}:${startLine}${endLine === startLine ? "" : `–${endLine}`}`;
 export const citationKey = ({
   path,
   commit,
@@ -442,8 +467,10 @@ export function prepareDependencyReport(value: unknown): Report {
         ? "If you know who controls the input, add that detail to the matching entry in --sources and rerun cs exploitability check."
         : "To clarify who controls the input, describe the callers in exploitability.scope.instructions and rerun with --config project.yaml. These instructions replace the default caller scope.";
     const claims = new Map(section.check?.claims?.map((c) => [claimKey(c), c]));
-    for (const finding of [...findings, ...dismissed])
+    for (const finding of [...findings, ...dismissed]) {
+      prepareDetails(finding);
       loadExcerpts(section, finding, claims);
+    }
   }
   return report;
 }
@@ -477,7 +504,7 @@ export function matchTraceFrame(
       endLine: site.line,
       commit: cite.commit,
     };
-    if ((kind === "sink" && !item.trace?.length) || reviewedRefs(item, [ref]))
+    if ((kind === "sink" && !item.trace?.length) || reviewed(finding, ref))
       return { index: item.evidence.indexOf(cite), cite };
   }
   return { gap: "No matching reviewed citation for this step." };
