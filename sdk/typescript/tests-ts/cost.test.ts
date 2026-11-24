@@ -27,16 +27,21 @@ import { sessionParentThreadId } from "../src/scan-sessions.js";
 import type { ScanProgress } from "../src/worker-progress.js";
 import { PLUGIN_ROOT as BUNDLED_PLUGIN_ROOT } from "./plugin-root.js";
 import {
-  appendRollout,
-  commandHead,
-  commandTail,
-  commandOutput,
-  persistedCommandOutput,
+  basicUsage,
+  appendRecord,
+  appendRecords,
   customToolOutput,
   nativeMessage,
   responseMessage,
-  progress,
+  legacyMessage,
+  completedMessage,
+  scanProgress,
+  legacyUsageRecord,
   progressMarker,
+  commandHead,
+  commandTail,
+  persistedCommandOutput,
+  commandOutput,
   nativeCommand,
   completedCommand,
   childUuid7Thread,
@@ -107,6 +112,9 @@ test("a partial owned subtotal includes spending absent from local session logs"
       readScanBudgetUsage(
         async () => ({
           ...ownedPythonUsage,
+          cachedInputTokens: complete ? 17 : 0,
+          cacheWriteInputTokens: complete ? 9 : 0,
+          reasoningOutputTokens: complete ? 3 : 0,
           coverage: complete ? "complete" : "partial",
           threadCount: complete ? 2 : 1,
           missingThreadCount: complete ? 0 : 1,
@@ -131,14 +139,19 @@ test("a partial owned subtotal includes spending absent from local session logs"
     expect(observed).toEqual([[ownedSdkUsage.input_tokens, false]]);
     complete = true;
     // The SDK's parent receipt omits the detached worker's usage.
-    const final = await tracker.stop({ input_tokens: 1, output_tokens: 1 });
+    const final = await tracker.stop(basicUsage(1, 1));
     expect(final.measurement).toMatchObject({
       coverage: "complete",
       threadCount: 2,
       missingThreadCount: 0,
       coverageScope: ["thread:primary", "thread:worker"],
     });
-    expect(final.measurement.usage).toEqual(ownedSdkUsage);
+    expect(final.measurement.usage).toEqual({
+      ...ownedSdkUsage,
+      cached_input_tokens: 17,
+      cache_write_input_tokens: 9,
+      reasoning_output_tokens: 3,
+    });
     expect(final.cost?.inputTokens).toBe(ownedSdkUsage.input_tokens);
     expect(observed.at(-1)).toEqual([ownedSdkUsage.input_tokens, true]);
   } finally {
@@ -159,13 +172,19 @@ function bundledCostModule(): Promise<string> {
   return costModuleBundle;
 }
 
+function writeScanWorker(
+  home: string,
+  id: string,
+  usage: Record<string, number>,
+) {
+  return writeSession(home, id, usage, { parent: "scan-thread" });
+}
+
 async function workerSessionFixture() {
   const home = await codexHome();
-  const usage = { input_tokens: 100, output_tokens: 10 };
+  const usage = basicUsage(100, 10);
   const parent = await writeSession(home, "scan-thread", usage);
-  const worker = await writeSession(home, "worker-thread", usage, {
-    parent: "scan-thread",
-  });
+  const worker = await writeScanWorker(home, "worker-thread", usage);
   return { home, usage, parent, worker };
 }
 
@@ -189,7 +208,14 @@ function progressTracker(home: string, expectedFilesTotal: number) {
     expectedFilesTotal,
     onProgress: (update) => updates.push(update),
   });
-  return { updates, tracker };
+  return { tracker, updates };
+}
+
+function commandReceipt(command: string, output: string) {
+  return {
+    type: "item.completed",
+    item: { type: "command_execution", command, aggregated_output: output },
+  };
 }
 
 function activityTracker(home: string) {
@@ -205,7 +231,7 @@ async function appendSessionItem(
   path: string,
   payload: Readonly<Record<string, unknown>>,
 ): Promise<void> {
-  await appendRollout(path, [{ type: "response_item", payload }]);
+  await appendRecord(path, { type: "response_item", payload });
 }
 
 function progressMessage(
@@ -231,11 +257,7 @@ test.each(
   "retains live command state with $projection receipts, $scenario counterpart, changed display=$changedDisplay",
   async ({ projection, scenario, changedDisplay }) => {
     const { home, parent } = await workerSessionFixture();
-    const current: ScanProgress = {
-      phase: "validation",
-      filesCompleted: 1,
-      filesTotal: 8,
-    };
+    const current = scanProgress("validation", 1, 8);
     const older: ScanProgress = { ...current, phase: "attack_path" };
     const later: ScanProgress = {
       ...current,
@@ -259,8 +281,8 @@ test.each(
           ? [raw, native]
           : [native, raw];
     };
-    const append = (rows: unknown[]) => appendRollout(parent, rows);
-    const { updates, tracker } = progressTracker(home, 8);
+    const append = (rows: unknown[]) => appendRecords(parent, rows);
+    const { tracker, updates } = progressTracker(home, 8);
     tracker.start("scan-thread");
     try {
       await tracker.refresh();
@@ -289,10 +311,7 @@ test.each(
         // A later exact completion releases the latest held state, not its stale prefix.
         const text = "Finished reviewing the batch.";
         await append([nativeMessage(text)]);
-        tracker.recordParentItem({
-          type: "item.completed",
-          item: { type: "agent_message", id: "item_1", text },
-        });
+        tracker.recordParentItem(completedMessage("item_1", text));
         await tracker.refresh();
         if (changedDisplay) expected.push(sameCount);
         expect(updates).toEqual(expected);
@@ -329,11 +348,7 @@ test.each(
   "retains live progress omitted from command persistence (display=$changedDisplay, anchor=$anchor, collision=$collision, prefix=$prefixMarker)",
   async ({ changedDisplay, anchor, collision, prefixMarker }) => {
     const { home, parent } = await workerSessionFixture();
-    const current: ScanProgress = {
-      phase: "validation",
-      filesCompleted: 1,
-      filesTotal: 8,
-    };
+    const current = scanProgress("validation", 1, 8);
     const later: ScanProgress = { ...current, phase: "reporting" };
     const command = ["printf", "sk-" + "a".repeat(32)];
     const prefixProgress: ScanProgress = { ...current, phase: "discovery" };
@@ -342,8 +357,8 @@ test.each(
     const fullOutput = `${retainedHead}\n${progressMarker("validation", 1, 8)}\n${commandTail}`;
     const savedOutput =
       retainedHead + persistedCommandOutput.slice(commandHead.length);
-    const append = (rows: unknown[]) => appendRollout(parent, rows);
-    const { updates, tracker } = progressTracker(home, 8);
+    const append = (rows: unknown[]) => appendRecords(parent, rows);
+    const { tracker, updates } = progressTracker(home, 8);
     const deliver = (
       progress: ScanProgress,
       event: Parameters<typeof tracker.recordParentProgress>[1],
@@ -353,18 +368,11 @@ test.each(
       if (JSON.stringify(updates.at(-1)) !== JSON.stringify(progress))
         updates.push(progress);
     };
-
+    const message = (text: string) => nativeMessage(text);
     const completeAnchor = async () => {
       const text = "Synthetic final response.";
-      await append([nativeMessage(text)]);
-      tracker.recordParentItem({
-        type: "item.completed",
-        item: {
-          type: "agent_message",
-          id: "item_1",
-          text,
-        },
-      });
+      await append([message(text)]);
+      tracker.recordParentItem(completedMessage("item_1", text));
     };
     tracker.start("scan-thread");
     try {
@@ -408,15 +416,8 @@ test.each(
       expect(updates).toEqual(expected);
 
       const text = progressMarker("reporting", 1, 8);
-      await append([nativeMessage(text)]);
-      deliver(later, {
-        type: "item.completed",
-        item: {
-          type: "agent_message",
-          id: "item_2",
-          text,
-        },
-      });
+      await append([message(text)]);
+      deliver(later, completedMessage("item_2", text));
       await tracker.refresh();
       expect(updates.at(-1)).toEqual(later);
       await appendSessionItem(parent, progressMessage(2, 8, "reporting"));
@@ -442,14 +443,10 @@ test.each(
   "keeps live progress ahead of an already-read snapshot (display=$changedDisplay, truncated=$truncated, initial=$initialRead)",
   async ({ changedDisplay, truncated, initialRead }) => {
     const { home, parent } = await workerSessionFixture();
-    const current: ScanProgress = {
-      phase: "validation",
-      filesCompleted: 1,
-      filesTotal: 8,
-    };
+    const current = scanProgress("validation", 1, 8);
     const text = progressMarker("validation", 1, 8);
     const command = ["printf", "sk-" + "a".repeat(32)];
-    const { updates, tracker } = progressTracker(home, 8);
+    const { tracker, updates } = progressTracker(home, 8);
     const reached = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     const originalOpen = filesystem.open;
@@ -480,14 +477,14 @@ test.each(
       }
       tracker.beginParentTurn();
       held = true;
-      await appendRollout(parent, [
+      await appendRecords(parent, [
         nativeCommand("older-review", progressMarker("attack_path", 1, 8)),
       ]);
       if (initialRead) tracker.start("scan-thread");
       reading = tracker.refresh();
       await reached.promise;
       // The reader saw old EOF, but current persistence still precedes live delivery.
-      await appendRollout(parent, [
+      await appendRecords(parent, [
         nativeCommand(command, truncated ? persistedCommandOutput : text),
       ]);
       const event = completedCommand(
@@ -529,28 +526,20 @@ test.each(
   "retains accepted inventory across later notifications (truncated=$truncated, changedDisplay=$changedDisplay, rejected=$rejected)",
   async ({ truncated, changedDisplay, rejected }) => {
     const { home, parent } = await workerSessionFixture();
-    const inventory: ScanProgress = {
-      phase: "discovery",
-      filesCompleted: 0,
-      filesTotal: 9,
-    };
-    const reviewed: ScanProgress = {
-      phase: "validation",
-      filesCompleted: 1,
-      filesTotal: 9,
-    };
-    const ignored: ScanProgress = {
-      phase: rejected === "phase" ? "threat_model" : "discovery",
-      filesCompleted: 0,
-      filesTotal: rejected === "changed" ? 10 : 9,
-    };
+    const inventory = scanProgress("discovery", 0, 9);
+    const reviewed = scanProgress("validation", 1, 9);
+    const ignored = scanProgress(
+      rejected === "phase" ? "threat_model" : "discovery",
+      0,
+      rejected === "changed" ? 10 : 9,
+    );
     const inventoryText = progressMarker("discovery", 0, 9);
     const reviewText =
       rejected === "anchor"
         ? "Synthetic completion."
         : progressMarker("validation", 1, 9);
     const ignoredText = progressMarker(ignored.phase, 0, ignored.filesTotal);
-    await appendRollout(parent, [
+    await appendRecords(parent, [
       nativeCommand("older", progressMarker("discovery", 0, 8)),
       nativeCommand(
         changedDisplay ? ["printf", "sk-" + "a".repeat(32)] : "inventory",
@@ -561,7 +550,7 @@ test.each(
         ? []
         : [nativeCommand("ignored", ignoredText)]),
     ]);
-    const { updates, tracker } = progressTracker(home, 8);
+    const { tracker, updates } = progressTracker(home, 8);
     tracker.beginParentTurn();
     tracker.start("scan-thread");
     try {
@@ -613,7 +602,7 @@ test.each(
 test("does not multiply pending inventory work across idle refreshes", async () => {
   const { home, parent, worker } = await workerSessionFixture();
   await appendSessionItem(worker, progressMessage(3));
-  const { updates, tracker } = progressTracker(home, 8);
+  const { tracker, updates } = progressTracker(home, 8);
   tracker.start("scan-thread");
   // Drain the initial worker receipt and use explicit refreshes without a timer.
   await tracker.stop();
@@ -628,14 +617,10 @@ test("does not multiply pending inventory work across idle refreshes", async () 
       return 8;
     },
   };
-  const reviewed: ScanProgress = {
-    phase: "validation",
-    filesCompleted: 3,
-    filesTotal: 8,
-  };
+  const reviewed = scanProgress("validation", 3, 8);
   const inventoryText = progressMarker("discovery", 0, 8);
   const reviewText = progressMarker("validation", 3, 8);
-  await appendRollout(parent, [
+  await appendRecords(parent, [
     nativeCommand("inventory", inventoryText),
     nativeCommand(["review", "sk-" + "a".repeat(32)], persistedCommandOutput),
   ]);
@@ -674,19 +659,13 @@ test.each(["missing", "short", "append", "split-utf8"] as const)(
       timestamp: measuredAt,
       payload: {
         type: "token_count",
-        info: { total_token_usage: { input_tokens: 42, output_tokens: 0 } },
+        info: { total_token_usage: basicUsage(42, 0) },
         rate_limits: { primary: { used_percent: 5 } },
       },
     };
     const early = responseMessage("Early Ω😀 output.");
     const late = responseMessage("Later output.");
-    const laterUsage = {
-      type: "event_msg",
-      payload: {
-        type: "token_count",
-        info: { total_token_usage: { input_tokens: 84, output_tokens: 0 } },
-      },
-    };
+    const laterUsage = legacyUsageRecord(basicUsage(84, 0));
     const full = Buffer.concat([
       await filesystem.readFile(parent),
       Buffer.from(jsonLines([measured, early]) + "\n"),
@@ -704,7 +683,7 @@ test.each(["missing", "short", "append", "split-utf8"] as const)(
         const replay = String(args[0]) === parent ? ++opens : 0;
         if (replay === 2) {
           if (scenario === "append")
-            await appendRollout(parent, [late, laterUsage]);
+            await appendRecords(parent, [late, laterUsage]);
           if (scenario === "split-utf8")
             await appendFile(parent, full.subarray(split));
         }
@@ -782,12 +761,12 @@ test("includes worker usage appended during final event replay", async () => {
     payload: {
       type: "token_count",
       info: {
-        total_token_usage: { input_tokens: inputTokens, output_tokens: 0 },
+        total_token_usage: basicUsage(inputTokens, 0),
       },
       rate_limits: { primary: { used_percent: usedPercent } },
     },
   });
-  await appendRollout(parent, [usage(10, 0, "2026-07-26T12:00:00.000Z")]);
+  await appendRecords(parent, [usage(10, 0, "2026-07-26T12:00:00.000Z")]);
   const initial = usage(0, 0, "2026-07-26T12:01:00.000Z");
   const last = usage(5_000, 50, "2026-07-26T12:02:00.000Z");
   const workerEvents: ScanSessionEvent["event"][] = [];
@@ -829,12 +808,9 @@ test.each(["open", "read", "close"] as const)(
   "retries an association replay after %s fails without losing early events",
   async (boundary) => {
     const home = await codexHome();
-    const parent = await writeSession(home, "scan-thread", {
-      input_tokens: 42,
-      output_tokens: 0,
-    });
+    const parent = await writeSession(home, "scan-thread", basicUsage(42, 0));
     const early = responseMessage("Synthetic early output.");
-    await appendRollout(parent, [early]);
+    await appendRecords(parent, [early]);
     const originalOpen = filesystem.open;
     let opens = 0;
     const opening = spyOn(filesystem, "open").mockImplementation(
@@ -990,6 +966,35 @@ describe("inventory source ordering", () => {
     };
   }
 
+  test.each([true, false])(
+    "reserves truncated copies per full output (identical=%p)",
+    async (identical) => {
+      const f = await fixture();
+      const phase = "discovery";
+      const scope: ScanProgress = { phase, filesCompleted: 0, filesTotal: 9 };
+      const marker = progressMarker(phase, 0, 9) + "\n";
+      const head = marker.padEnd(commandHead.length, "h");
+      const first = head + commandHead + commandTail;
+      const second = identical ? first : head + commandTail + commandTail;
+      const truncated = head + persistedCommandOutput.slice(commandHead.length);
+      try {
+        f.emit("live", scope, first);
+        f.emit("live", scope, second);
+        f.tracker.recordParentItem(completedCommand("saved", "done"));
+        const outputs = [first, truncated, progressMarker(phase, 0, 8), "done"];
+        const rows = outputs.map((text) => nativeCommand("saved", text));
+        await appendFile(f.parent, jsonLines(rows) + "\n");
+        await f.tracker.refresh();
+        // Only an identical second output can use both saved copies to
+        // place its inventory before the smaller one.
+        const totals = f.updates.map((update) => update.filesTotal);
+        expect(totals).toEqual(identical ? [9, 9, 8] : [9, 9]);
+      } finally {
+        await f.close();
+      }
+    },
+  );
+
   test.each(
     [false, true].flatMap((workerFirst) =>
       [false, true].map((firstChanged) => ({ workerFirst, firstChanged })),
@@ -998,21 +1003,17 @@ describe("inventory source ordering", () => {
     "keeps repeated inventories in occurrence order (workers first=$workerFirst, first display changed=$firstChanged)",
     async ({ workerFirst, firstChanged }) => {
       const f = await fixture(workerFirst);
-      const current = {
-        phase: "discovery",
-        filesCompleted: 0,
-        filesTotal: 5,
-      } as const;
+      const current = scanProgress("discovery", 0, 5);
       const middle = { ...current, filesTotal: 10 };
       try {
         f.emit(firstChanged ? "first changed" : "first", current);
         f.emit("middle changed", middle);
         f.emit("latest", current);
-        await appendRollout(f.parent, [
+        await appendRecords(f.parent, [
           nativeCommand("first", progressMarker("discovery", 0, 5)),
         ]);
         await f.tracker.refresh();
-        await appendRollout(f.parent, [
+        await appendRecords(f.parent, [
           nativeCommand("middle", progressMarker("discovery", 0, 10)),
         ]);
         await appendSessionItem(
@@ -1021,12 +1022,12 @@ describe("inventory source ordering", () => {
         );
         await f.tracker.refresh();
         expect(f.updates.at(-1)).toEqual(current);
-        await appendRollout(f.parent, [
+        await appendRecords(f.parent, [
           nativeCommand("latest", progressMarker("discovery", 0, 5)),
           nativeCommand("newer", progressMarker("discovery", 0, 10)),
         ]);
         await f.tracker.stop();
-        expect(f.updates.at(-1)).toEqual(progress("attack_path", 6, 10));
+        expect(f.updates.at(-1)).toEqual(scanProgress("attack_path", 6, 10));
       } finally {
         await f.close();
       }
@@ -1041,16 +1042,12 @@ describe("inventory source ordering", () => {
     "keeps truncated live progress through an anchor arriving during close (workers first=$workerFirst, inventory=$inventory)",
     async ({ workerFirst, inventory }) => {
       const f = await fixture(workerFirst);
-      const old = {
-        phase: "discovery",
-        filesCompleted: inventory ? 0 : 3,
-        filesTotal: 8,
-      } as const;
+      const old = scanProgress("discovery", inventory ? 0 : 3, 8);
       const current = inventory
         ? { ...old, filesTotal: 9 }
         : { ...old, phase: "validation" as const };
       try {
-        await appendRollout(f.parent, [
+        await appendRecords(f.parent, [
           nativeCommand(
             "old",
             progressMarker(old.phase, old.filesCompleted, old.filesTotal),
@@ -1082,7 +1079,7 @@ describe("inventory source ordering", () => {
         await f.tracker.refresh();
         await f.tracker.stop();
         expect(f.updates.at(-1)).toEqual(
-          inventory ? progress("attack_path", 5, 9) : current,
+          inventory ? scanProgress("attack_path", 5, 9) : current,
         );
       } finally {
         await f.close();
@@ -1094,14 +1091,10 @@ describe("inventory source ordering", () => {
     "keeps the newest inventory ahead of a raw copy released during close (workers first: %p)",
     async (workerFirst) => {
       const f = await fixture(workerFirst);
-      const initial = {
-        phase: "discovery",
-        filesCompleted: 0,
-        filesTotal: 9,
-      } as const;
+      const initial = scanProgress("discovery", 0, 9);
       const current = { ...initial, filesTotal: 8 };
       try {
-        await appendRollout(f.parent, [
+        await appendRecords(f.parent, [
           nativeCommand("initial", progressMarker("discovery", 0, 9)),
         ]);
         await appendSessionItem(f.parent, {
@@ -1110,11 +1103,11 @@ describe("inventory source ordering", () => {
           output: progressMarker("discovery", 0, 9),
         });
         f.emit("initial changed", initial);
-        await appendRollout(f.parent, [
+        await appendRecords(f.parent, [
           nativeCommand("final", progressMarker("discovery", 0, 8)),
         ]);
         await f.tracker.refresh();
-        await appendRollout(f.parent, [nativeCommand("anchor", "done")]);
+        await appendRecords(f.parent, [nativeCommand("anchor", "done")]);
         f.emit("final changed", current);
         f.beforeClose(() =>
           f.tracker.recordParentItem(completedCommand("anchor", "done")),
@@ -1122,7 +1115,7 @@ describe("inventory source ordering", () => {
         await f.tracker.refresh();
         await appendSessionItem(f.worker, progressMessage(5, 8, "attack_path"));
         await f.tracker.stop();
-        expect(f.updates.at(-1)).toEqual(progress("attack_path", 5, 8));
+        expect(f.updates.at(-1)).toEqual(scanProgress("attack_path", 5, 8));
       } finally {
         await f.close();
       }
@@ -1133,18 +1126,14 @@ describe("inventory source ordering", () => {
     "retains inventory provenance after a zero-count phase (workers first: %p)",
     async (workerFirst) => {
       const f = await fixture(workerFirst);
-      const initial = {
-        phase: "discovery",
-        filesCompleted: 0,
-        filesTotal: 9,
-      } as const;
+      const initial = scanProgress("discovery", 0, 9);
       try {
-        await appendRollout(f.parent, [
+        await appendRecords(f.parent, [
           nativeCommand("initial", progressMarker("discovery", 0, 9)),
         ]);
         f.emit("initial changed", initial);
         await f.tracker.refresh();
-        await appendRollout(f.parent, [
+        await appendRecords(f.parent, [
           nativeCommand("phase", progressMarker("threat_model", 0, 9)),
         ]);
         await appendSessionItem(f.worker, progressMessage(5, 9, "attack_path"));
@@ -1152,12 +1141,12 @@ describe("inventory source ordering", () => {
           f.emit("phase changed", { ...initial, phase: "threat_model" });
         });
         await f.tracker.refresh();
-        await appendRollout(f.parent, [
+        await appendRecords(f.parent, [
           nativeCommand("smaller", progressMarker("discovery", 0, 8)),
           nativeCommand("restored", progressMarker("discovery", 0, 9)),
         ]);
         await f.tracker.stop();
-        expect(f.updates.at(-1)).toEqual(progress("attack_path", 5, 9));
+        expect(f.updates.at(-1)).toEqual(scanProgress("attack_path", 5, 9));
       } finally {
         await f.close();
       }
@@ -1168,19 +1157,15 @@ describe("inventory source ordering", () => {
     "restores replayed inventory when its delayed live copy is rejected (workers first: %p)",
     async (workerFirst) => {
       const f = await fixture(workerFirst);
-      const initial = {
-        phase: "discovery",
-        filesCompleted: 0,
-        filesTotal: 8,
-      } as const;
+      const initial = scanProgress("discovery", 0, 8);
       const larger = { ...initial, filesTotal: 9 };
       try {
-        await appendRollout(f.parent, [
+        await appendRecords(f.parent, [
           nativeCommand("initial", progressMarker("discovery", 0, 8)),
         ]);
         f.emit("initial changed", initial);
         await f.tracker.refresh();
-        await appendRollout(f.parent, [
+        await appendRecords(f.parent, [
           nativeCommand("larger", progressMarker("discovery", 0, 9)),
           nativeCommand("final", progressMarker("discovery", 0, 8)),
         ]);
@@ -1214,11 +1199,7 @@ describe("inventory source ordering", () => {
     "keeps live inventory while its saved row is %s",
     async (persistence) => {
       const f = await fixture();
-      const initial = {
-        phase: "discovery",
-        filesCompleted: 0,
-        filesTotal: 9,
-      } as const;
+      const initial = scanProgress("discovery", 0, 9);
       const current = { ...initial, filesTotal: 8 };
       const row =
         JSON.stringify(
@@ -1231,9 +1212,10 @@ describe("inventory source ordering", () => {
             call_id: "older-eight",
             output: progressMarker("discovery", 0, 8),
           });
-        await appendRollout(f.parent, [
+        await appendRecord(
+          f.parent,
           nativeCommand("original", progressMarker("discovery", 0, 9)),
-        ]);
+        );
         if (persistence === "partial")
           await appendFile(f.parent, row.slice(0, 30));
         expect(f.emit("changed-display", initial)).toBe(true);
@@ -1267,16 +1249,13 @@ describe("inventory source ordering", () => {
     "bounds an inventory observed during close with a later exact completion (workers first=$workerFirst, changed display=$changedDisplay)",
     async ({ workerFirst, changedDisplay }) => {
       const f = await fixture(workerFirst);
-      const initial = {
-        phase: "discovery",
-        filesCompleted: 0,
-        filesTotal: 9,
-      } as const;
+      const initial = scanProgress("discovery", 0, 9);
       const smaller = { ...initial, filesTotal: 8 };
       try {
-        await appendRollout(f.parent, [
+        await appendRecord(
+          f.parent,
           nativeCommand("original", progressMarker("discovery", 0, 9)),
-        ]);
+        );
         await appendSessionItem(f.worker, progressMessage(5, 9, "attack_path"));
         f.beforeClose(() => {
           expect(
@@ -1284,18 +1263,20 @@ describe("inventory source ordering", () => {
           ).toBe(true);
         });
         await f.tracker.refresh();
-        expect(f.updates.at(-1)).toEqual(progress("attack_path", 5, 9));
+        expect(f.updates.at(-1)).toEqual(scanProgress("attack_path", 5, 9));
         // The read boundary and equal output do not locate the live command.
         // An exact later completion bounds it before the new saved inventory.
-        await appendRollout(f.parent, [
+        await appendRecord(
+          f.parent,
           nativeCommand("anchor", "Inventory batch finished."),
-        ]);
+        );
         f.tracker.recordParentItem(
           completedCommand("anchor", "Inventory batch finished."),
         );
-        await appendRollout(f.parent, [
+        await appendRecord(
+          f.parent,
           nativeCommand("smaller", progressMarker("discovery", 0, 8)),
-        ]);
+        );
         await f.tracker.refresh();
         expect(f.updates.at(-1)).toEqual(smaller);
         await appendSessionItem(f.worker, progressMessage(6, 9, "attack_path"));
@@ -1311,29 +1292,28 @@ describe("inventory source ordering", () => {
     "keeps delayed full command progress after a rejected inventory (duplicate: %p)",
     async (duplicate) => {
       const f = await fixture();
-      const initial = {
-        phase: "discovery",
-        filesCompleted: 0,
-        filesTotal: 9,
-      } as const;
+      const initial = scanProgress("discovery", 0, 9);
       const discovery = { ...initial, filesCompleted: 3 };
       const validation = { ...discovery, phase: "validation" } as const;
       try {
-        await appendRollout(f.parent, [
+        await appendRecord(
+          f.parent,
           nativeCommand("inventory", progressMarker("discovery", 0, 9)),
-        ]);
+        );
         expect(f.emit("inventory", initial)).toBe(true);
         await f.tracker.refresh();
         expect(f.emit("unmatched-discovery", discovery)).toBe(true);
         await appendSessionItem(f.parent, progressMessage(3, 9));
-        await appendRollout(f.parent, [
+        await appendRecord(
+          f.parent,
           nativeCommand("review", persistedCommandOutput),
-        ]);
+        );
         await appendSessionItem(f.parent, progressMessage(0, 9));
         if (duplicate)
-          await appendRollout(f.parent, [
+          await appendRecord(
+            f.parent,
             nativeMessage(progressMarker("discovery", 0, 9)),
-          ]);
+          );
         await f.tracker.refresh();
         expect(
           f.emit(
@@ -1354,21 +1334,18 @@ describe("inventory source ordering", () => {
     "recovers a repeated live total from newer inventories (same completion: %p)",
     async (sameCompletion) => {
       const f = await fixture();
-      const initial = {
-        phase: "discovery",
-        filesCompleted: 0,
-        filesTotal: 9,
-      } as const;
+      const initial = scanProgress("discovery", 0, 9);
       try {
-        await appendRollout(f.parent, [
+        await appendRecord(
+          f.parent,
           nativeCommand("original", progressMarker("discovery", 0, 9)),
-        ]);
+        );
         expect(f.emit("changed-display", initial)).toBe(true);
         await appendSessionItem(f.worker, progressMessage(5, 9, "attack_path"));
         await f.tracker.refresh();
         const smaller = progressMarker("discovery", 0, 8);
         const restored = progressMarker("discovery", 0, 9);
-        await appendRollout(
+        await appendRecords(
           f.parent,
           sameCompletion
             ? [nativeCommand("rescope", smaller + "\n" + restored)]
@@ -1380,7 +1357,7 @@ describe("inventory source ordering", () => {
         await f.tracker.refresh();
         await appendSessionItem(f.worker, progressMessage(6, 9, "attack_path"));
         await f.tracker.stop();
-        expect(f.updates.at(-1)).toEqual(progress("attack_path", 6, 9));
+        expect(f.updates.at(-1)).toEqual(scanProgress("attack_path", 6, 9));
       } finally {
         await f.close();
       }
@@ -1391,14 +1368,10 @@ describe("inventory source ordering", () => {
     "releases an older live inventory after a later completion anchor (workers first: %p)",
     async (workerFirst) => {
       const f = await fixture(workerFirst);
-      const initial = {
-        phase: "discovery",
-        filesCompleted: 0,
-        filesTotal: 9,
-      } as const;
+      const initial = scanProgress("discovery", 0, 9);
       const current = { ...initial, filesTotal: 8 };
       try {
-        await appendRollout(f.parent, [
+        await appendRecords(f.parent, [
           nativeCommand("original", progressMarker("discovery", 0, 9)),
           nativeCommand("smaller", progressMarker("discovery", 0, 8)),
           nativeCommand("anchor", "Inventory enumeration complete."),
@@ -1425,14 +1398,10 @@ describe("inventory source ordering", () => {
     "retains proven scope when a live inventory is observed but not accepted (workers first: %p)",
     async (workerFirst) => {
       const f = await fixture(workerFirst);
-      const initial = {
-        phase: "discovery",
-        filesCompleted: 0,
-        filesTotal: 10,
-      } as const;
+      const initial = scanProgress("discovery", 0, 10);
       const current = { ...initial, filesTotal: 7 };
       try {
-        await appendRollout(f.parent, [
+        await appendRecords(f.parent, [
           nativeCommand("original", progressMarker("discovery", 0, 10)),
           nativeCommand("smaller", progressMarker("discovery", 0, 7)),
         ]);
@@ -1455,7 +1424,7 @@ describe("inventory source ordering", () => {
         );
         await f.tracker.refresh();
         await f.tracker.stop();
-        expect(f.updates.at(-1)).toEqual(progress("attack_path", 5, 7));
+        expect(f.updates.at(-1)).toEqual(scanProgress("attack_path", 5, 7));
       } finally {
         await f.close();
       }
@@ -1466,24 +1435,26 @@ describe("inventory source ordering", () => {
     "takes scope from inventory when a newer zero-count %s arrives during close",
     async (phase) => {
       const f = await fixture(true);
-      const current = { phase, filesCompleted: 0, filesTotal: 8 };
+      const current = scanProgress(phase, 0, 8);
       try {
-        await appendRollout(f.parent, [
+        await appendRecord(
+          f.parent,
           nativeCommand("inventory", progressMarker("discovery", 0, 5)),
-        ]);
+        );
         await appendSessionItem(f.worker, progressMessage(3, 8, "attack_path"));
         f.beforeClose(async () => {
-          await appendRollout(f.parent, [
+          await appendRecord(
+            f.parent,
             nativeCommand("next-phase", progressMarker(phase, 0, 8)),
-          ]);
+          );
           expect(f.emit("next-phase", current)).toBe(true);
         });
         await f.tracker.refresh();
         await f.tracker.stop();
         expect(f.updates.at(-1)).toEqual(
           phase === "discovery"
-            ? progress("attack_path", 3, 8)
-            : progress("discovery", 0, 5),
+            ? scanProgress("attack_path", 3, 8)
+            : scanProgress("discovery", 0, 5),
         );
       } finally {
         await f.close();
@@ -1494,21 +1465,17 @@ describe("inventory source ordering", () => {
 
 test("keeps the parent frontier ahead of duplicate saved inventory", async () => {
   const { home, parent } = await workerSessionFixture();
-  const inventory = {
-    phase: "discovery",
-    filesCompleted: 0,
-    filesTotal: 8,
-  } as const;
+  const inventory = scanProgress("discovery", 0, 8);
   const initial = { ...inventory, filesCompleted: 3 };
   const older = { ...initial, phase: "attack_path" } as const;
   const newer = { ...initial, phase: "validation" } as const;
   await appendSessionItem(parent, progressMessage(0));
-  await appendRollout(parent, [
+  await appendRecords(parent, [
     nativeMessage(progressMarker("discovery", 0, 8)),
     nativeCommand("older-review", progressMarker("attack_path", 3, 8)),
     nativeCommand("newer-review", progressMarker("validation", 3, 8)),
   ]);
-  const { updates, tracker } = progressTracker(home, 8);
+  const { tracker, updates } = progressTracker(home, 8);
   tracker.beginParentTurn();
   const first = completedCommand(
     "unpersisted-review",
@@ -1539,11 +1506,7 @@ test.each(["short literal", "UTF-8 truncation", "earlier literal"])(
   async (scenario) => {
     const { home, parent } = await workerSessionFixture();
     const gap = "\n... command output truncated for persistence ...\n";
-    const progress = {
-      phase: "validation",
-      filesCompleted: 3,
-      filesTotal: 8,
-    } as const;
+    const progress = scanProgress("validation", 3, 8);
     const lead =
       (scenario === "UTF-8 truncation" ? "" : "normal output" + gap) +
       progressMarker("validation", 3, 8) +
@@ -1571,8 +1534,8 @@ test.each(["short literal", "UTF-8 truncation", "earlier literal"])(
         scenario === "UTF-8 truncation" ? 65_532 : 65_536,
       );
     } else expect(Buffer.byteLength(saved)).toBe(149);
-    await appendRollout(parent, [nativeCommand("review", saved)]);
-    const { updates, tracker } = progressTracker(home, 8);
+    await appendRecord(parent, nativeCommand("review", saved));
+    const { tracker, updates } = progressTracker(home, 8);
     tracker.start("scan-thread");
     try {
       await tracker.refresh();
@@ -1592,11 +1555,7 @@ test.each([
   "recovers only complete original lines before a persistence gap (%s)",
   async (scenario, reported) => {
     const { home, parent } = await workerSessionFixture();
-    const progress = {
-      phase: "discovery",
-      filesCompleted: 4,
-      filesTotal: 8,
-    } as const;
+    const progress = scanProgress("discovery", 4, 8);
     const marker = "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress);
     let prefix = commandHead;
     let tail = commandTail;
@@ -1625,31 +1584,28 @@ test.each([
       "m".repeat(20_000) +
       tail;
     expect(Buffer.byteLength(saved)).toBe(64 * 1024);
-    await appendRollout(parent, [nativeCommand("review", saved)]);
-    const { updates, tracker } = progressTracker(home, 8);
+    await appendRecord(parent, nativeCommand("review", saved));
+    const { tracker, updates } = progressTracker(home, 8);
     tracker.start("scan-thread");
     try {
       await tracker.refresh();
       expect(updates).toEqual(reported ? [progress] : []);
       if (reported) {
         const latest = { ...progress, phase: "validation" } as const;
-        await appendRollout(parent, [
+        await appendRecord(
+          parent,
           nativeMessage(
             "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(latest),
           ),
-        ]);
+        );
         await tracker.refresh();
         expect(updates.at(-1)).toEqual(latest);
         // Parsing a prefix must preserve the original full-output signature.
         expect(
-          tracker.recordParentProgress(progress, {
-            type: "item.completed",
-            item: {
-              type: "command_execution",
-              command: "review",
-              aggregated_output: full,
-            },
-          }),
+          tracker.recordParentProgress(
+            progress,
+            commandReceipt("review", full),
+          ),
         ).toBe(false);
       }
     } finally {
@@ -1660,10 +1616,7 @@ test.each([
 
 test("cost-only tracking does not retain unrelated marker-free message history", async () => {
   const root = await codexHome();
-  await writeSession(root, "scan-thread", {
-    input_tokens: 100,
-    output_tokens: 10,
-  });
+  await writeSession(root, "scan-thread", basicUsage(100, 10));
   const history = await writeSession(root, "unrelated-history", {});
   const file = await filesystem.open(history, "a");
   try {
@@ -1734,39 +1687,33 @@ test.each(["é", "漢", "😀"])(
     const tracker = costTracker(home, { onProgress() {} });
     tracker.start("scan-thread");
     await tracker.refresh();
-    const progress = {
-      phase: "discovery",
-      filesCompleted: 8,
-      filesTotal: 8,
-    } as const;
+    const progress = scanProgress("discovery", 8, 8);
     const marker = "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress);
     const fullEdge = character.repeat(40_000);
     // Native keeps complete UTF-8 characters within each 32,743-byte edge.
     const savedEdge = character.repeat(
       Math.floor(32_743 / Buffer.byteLength(character)),
     );
-    const event = {
-      type: "item.completed",
-      item: {
-        type: "command_execution",
-        command: "inspect-source",
-        aggregated_output: `${fullEdge}\n${marker}\n${fullEdge}`,
-      },
-    };
+    const event = commandReceipt(
+      "inspect-source",
+      `${fullEdge}\n${marker}\n${fullEdge}`,
+    );
     expect(tracker.recordParentProgress(progress, event)).toBe(true);
     tracker.acceptParentProgress(progress, event);
-    await appendRollout(parent, [
+    await appendRecord(
+      parent,
       nativeCommand(
         "inspect-source",
         `${savedEdge}\n... command output truncated for persistence ...\n${savedEdge}`,
       ),
-    ]);
-    await appendRollout(parent, [
+    );
+    await appendRecord(
+      parent,
       nativeMessage(
         "CODEX_SECURITY_SCAN_PROGRESS " +
           JSON.stringify({ ...progress, phase: "validation" }),
       ),
-    ]);
+    );
     await tracker.refresh();
     expect(tracker.recordParentProgress(progress, event)).toBe(false);
     await tracker.stop();
@@ -1786,13 +1733,6 @@ function nativeUsageRecord(
       usage: tokenUsage(usage),
       thread_token_usage: tokenUsage(total),
     },
-  };
-}
-
-function legacyUsageRecord(usage: Record<string, number>) {
-  return {
-    type: "event_msg",
-    payload: { type: "token_count", info: { total_token_usage: usage } },
   };
 }
 
@@ -1904,10 +1844,7 @@ describe("scan cost", () => {
 
   test("does not reopen unchanged rollouts and reads appended worker usage", async () => {
     const { home, parent, worker } = await workerSessionFixture();
-    await writeSession(home, "unrelated-thread", {
-      input_tokens: 900,
-      output_tokens: 90,
-    });
+    await writeSession(home, "unrelated-thread", basicUsage(900, 90));
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-6-astra",
@@ -1918,17 +1855,7 @@ describe("scan cost", () => {
     try {
       await tracker.refresh();
       expect(opened).not.toHaveBeenCalled();
-      await appendRollout(worker, [
-        {
-          type: "event_msg",
-          payload: {
-            type: "token_count",
-            info: {
-              total_token_usage: { input_tokens: 200, output_tokens: 20 },
-            },
-          },
-        },
-      ]);
+      await appendRecords(worker, [legacyUsageRecord(basicUsage(200, 20))]);
       const snapshot = await tracker.refresh();
       expect(opened.mock.calls.map(([path]) => path)).toEqual([worker]);
       expect(snapshot.usage).toMatchObject({
@@ -1944,10 +1871,7 @@ describe("scan cost", () => {
 
   test("reports known usage even when model pricing is unavailable", async () => {
     const home = await codexHome();
-    await writeSession(home, "scan-thread", {
-      input_tokens: 100,
-      output_tokens: 10,
-    });
+    await writeSession(home, "scan-thread", basicUsage(100, 10));
     const usages: unknown[] = [];
     const tracker = new ScanCostTracker({
       codexHome: home,
@@ -2230,8 +2154,8 @@ describe("live scan cost tracking", () => {
         },
       },
     });
-    await appendRollout(path, [limit(limitAt, 12)]);
-    await appendRollout(unrelated, [limit(later, 99)]);
+    await appendRecords(path, [limit(limitAt, 12)]);
+    await appendRecords(unrelated, [limit(later, 99)]);
     const observations: ScanUsageObservation[] = [];
     const tracker = costTracker(home, {
       onUsageObservation: (observation) => observations.push(observation),
@@ -2255,7 +2179,7 @@ describe("live scan cost tracking", () => {
         "response",
         ownedSdkUsage,
       );
-      await appendRollout(path, [
+      await appendRecords(path, [
         { ...receipt, timestamp: tokensAt },
         { ...receipt, timestamp: later },
         limit(older, 3),
@@ -2278,7 +2202,7 @@ describe("live scan cost tracking", () => {
       cache_write_input_tokens: 12,
     };
     const path = await writeSession(home, scanThreadId, ownedSdkUsage);
-    await appendRollout(path, [
+    await appendRecords(path, [
       nativeUsageRecord(scanThreadId, "response-1", usage),
       legacyUsageRecord(ownedSdkUsage),
     ]);
@@ -2303,9 +2227,9 @@ describe("live scan cost tracking", () => {
       timestamp: string | undefined,
       input: number,
     ) =>
-      appendRollout(path, [
+      appendRecords(path, [
         {
-          ...legacyUsageRecord({ input_tokens: input, output_tokens: 0 }),
+          ...legacyUsageRecord(basicUsage(input, 0)),
           timestamp,
         },
       ]);
@@ -2333,7 +2257,7 @@ describe("live scan cost tracking", () => {
         total_tokens: 27,
       });
       expect(times).toEqual([first, third]);
-      tracker.recordUsage({ input_tokens: 30, output_tokens: 0 });
+      tracker.recordUsage(basicUsage(30, 0));
       expect((await tracker.refresh()).usage).toMatchObject({
         total_tokens: 37,
       });
@@ -2364,7 +2288,7 @@ describe("live scan cost tracking", () => {
       output_tokens: 13,
     };
     const path = await writeSession(home, scanThreadId, original);
-    await appendRollout(path, [
+    await appendRecords(path, [
       nativeUsageRecord(scanThreadId, "response-1", original),
     ]);
     const budget = new AbortController();
@@ -2387,7 +2311,7 @@ describe("live scan cost tracking", () => {
       compact,
       compactTotal,
     );
-    await appendRollout(path, [
+    await appendRecords(path, [
       compaction,
       { type: "compacted", payload: { message: "Compacted context." } },
       legacyUsageRecord(original),
@@ -2397,7 +2321,7 @@ describe("live scan cost tracking", () => {
 
     const final = { ...ownedSdkUsage, input_tokens: 170, output_tokens: 15 };
     const stale = { ...ownedSdkUsage, input_tokens: 130, output_tokens: 12 };
-    await appendRollout(path, [
+    await appendRecords(path, [
       compaction,
       nativeUsageRecord(
         scanThreadId,
@@ -2422,7 +2346,7 @@ describe("live scan cost tracking", () => {
       output_tokens: 100,
     };
     const parent = await writeSession(home, scanThreadId, inherited);
-    await appendRollout(parent, [
+    await appendRecords(parent, [
       nativeUsageRecord(scanThreadId, "parent-response", inherited),
     ]);
     const child = await writeSession(home, childUuid7Thread, ownedSdkUsage, {
@@ -2457,13 +2381,13 @@ describe("live scan cost tracking", () => {
       compact,
       compactTotal,
     );
-    await appendRollout(child, [compaction, compaction]);
+    await appendRecords(child, [compaction, compaction]);
     expect((await tracker.stop(inherited)).usage).toMatchObject({
       input_tokens: 1_140,
       output_tokens: 113,
     });
 
-    await appendRollout(child, [
+    await appendRecords(child, [
       {
         type: "event_msg",
         payload: {
@@ -2494,7 +2418,7 @@ describe("live scan cost tracking", () => {
         ...ownedSdkUsage,
         input_tokens: 1_000,
       });
-      await appendRollout(path, [
+      await appendRecords(path, [
         nativeUsageRecord(
           scanThreadId,
           "resumed-response",
@@ -2579,17 +2503,12 @@ describe("live scan cost tracking", () => {
       cached_input_tokens: 20,
       output_tokens: 10,
     });
-    await writeSession(
-      home,
-      "worker-thread",
-      {
-        input_tokens: 200,
-        cached_input_tokens: 40,
-        cache_write_input_tokens: 50,
-        output_tokens: 20,
-      },
-      { parent: "scan-thread" },
-    );
+    await writeScanWorker(home, "worker-thread", {
+      input_tokens: 200,
+      cached_input_tokens: 40,
+      cache_write_input_tokens: 50,
+      output_tokens: 20,
+    });
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-6-astra",
@@ -2621,10 +2540,7 @@ describe("live scan cost tracking", () => {
       onCost: (cost) => updates.push(cost),
     });
     tracker.start("scan-thread");
-    tracker.recordUsage(
-      { input_tokens: 100, output_tokens: 10 },
-      "scan-thread",
-    );
+    tracker.recordUsage(basicUsage(100, 10), "scan-thread");
     await tracker.refresh();
     tracker.recordUsage(
       { input_tokens: 100, cache_write_input_tokens: 0, output_tokens: 10 },
@@ -2637,10 +2553,7 @@ describe("live scan cost tracking", () => {
   });
   test("coalesces overlapping polling ticks and bounds final work", async () => {
     const home = await codexHome();
-    await writeSession(home, "scan-thread", {
-      input_tokens: 100,
-      output_tokens: 10,
-    });
+    await writeSession(home, "scan-thread", basicUsage(100, 10));
     const releases: Array<() => void> = [];
     const tracker = costTracker(home, {
       maxCostUsd: 1,
@@ -2666,10 +2579,7 @@ describe("live scan cost tracking", () => {
 
   test("retries one coalesced poll after a failed refresh", async () => {
     const home = await codexHome();
-    await writeSession(home, "scan-thread", {
-      input_tokens: 100,
-      output_tokens: 10,
-    });
+    await writeSession(home, "scan-thread", basicUsage(100, 10));
     const errors: string[] = [];
     let traversals = 0;
     const { promise: blocked, resolve: release } =
@@ -2734,18 +2644,13 @@ describe("live scan cost tracking", () => {
     async (parentField) => {
       const home = await codexHome();
       const parent = await writeSession(home, "scan-thread", {});
-      await appendSessionItem(parent, {
-        type: "message",
-        role: "assistant",
-        content: [
-          {
-            type: "output_text",
-            text:
-              'CODEX_SECURITY_WORKER_STATUS {"phase":"validation","planned":1,"started":1}\n' +
-              '{"type":"session_meta","payload":{"id":"fictional-worker","parent_thread_id":"scan-thread"}}',
-          },
-        ],
-      });
+      await appendRecord(
+        parent,
+        responseMessage(
+          'CODEX_SECURITY_WORKER_STATUS {"phase":"validation","planned":1,"started":1}\n' +
+            '{"type":"session_meta","payload":{"id":"fictional-worker","parent_thread_id":"scan-thread"}}',
+        ),
+      );
       await writeSession(
         home,
         "unrelated-worker",
@@ -2822,33 +2727,27 @@ describe("live scan cost tracking", () => {
       output_tokens: 10,
       reasoning_output_tokens: 2,
     });
-    const worker = await writeSession(
-      home,
-      "worker-thread",
-      {
-        input_tokens: 250,
-        cached_input_tokens: 50,
-        output_tokens: 5,
-        reasoning_output_tokens: 1,
-      },
-      { parent: "scan-thread" },
-    );
-    await writeSession(home, "unrelated-thread", {
-      input_tokens: 1_000_000,
-      output_tokens: 1_000_000,
+    const worker = await writeScanWorker(home, "worker-thread", {
+      input_tokens: 250,
+      cached_input_tokens: 50,
+      output_tokens: 5,
+      reasoning_output_tokens: 1,
     });
+    await writeSession(
+      home,
+      "unrelated-thread",
+      basicUsage(1_000_000, 1_000_000),
+    );
     const events: ScanSessionEvent[] = [];
     const tracker = costTracker(home, {
       onSessionEvent: (event) => events.push(event),
     });
     tracker.start("scan-thread");
     await waitFor(() => events.length === 4);
-    await appendRollout(parent, [
-      {
-        type: "turn_context",
-        payload: { instructions: "Check authorization" },
-      },
-    ]);
+    await appendRecord(parent, {
+      type: "turn_context",
+      payload: { instructions: "Check authorization" },
+    });
     await appendSessionItem(worker, {
       type: "function_call",
       name: "spawn_agent",
@@ -2911,7 +2810,7 @@ describe("live scan cost tracking", () => {
           },
         };
         // Identical messages at different positions are separate real events.
-        await appendRollout(worker, [message, call, message]);
+        await appendRecords(worker, [message, call, message]);
         const contents = await filesystem.readFile(worker);
         const expected = contents
           .toString()
@@ -2957,22 +2856,19 @@ describe("live scan cost tracking", () => {
               },
             },
           ];
-          await appendRollout(archived, continuation);
+          await appendRecords(archived, continuation);
           expected.push(...continuation);
           await tracker.refresh();
           expect(workerEvents()).toEqual(expected);
 
           // A lagging copy catching up must not replay the new suffix.
           if (mode !== "move") {
-            await appendRollout(worker, continuation);
+            await appendRecords(worker, continuation);
             await tracker.refresh();
             expect(workerEvents()).toEqual(expected);
           }
-          const latest = [
-            message,
-            legacyUsageRecord({ input_tokens: 400, output_tokens: 40 }),
-          ];
-          await appendRollout(mode === "move" ? archived : worker, latest);
+          const latest = [message, legacyUsageRecord(basicUsage(400, 40))];
+          await appendRecords(mode === "move" ? archived : worker, latest);
           expected.push(...latest);
           const snapshot = await tracker.refresh();
           expect(workerEvents()).toEqual(expected);
@@ -2992,7 +2888,7 @@ describe("live scan cost tracking", () => {
 
   test("forwards a new rollout generation for an existing thread", async () => {
     const home = await codexHome();
-    const usage = { input_tokens: 100, output_tokens: 10 };
+    const usage = basicUsage(100, 10);
     await writeSession(home, "scan-thread", usage);
     const worker = await writeSession(home, "worker-thread", usage, {
       parent: "scan-thread",
@@ -3067,11 +2963,10 @@ describe("live scan cost tracking", () => {
 
   test("does not replay stale worker activity or progress from archived copies", async () => {
     const { home, worker } = await workerSessionFixture();
-    const otherWorker = await writeSession(
+    const otherWorker = await writeScanWorker(
       home,
       "second-worker",
-      { input_tokens: 100, output_tokens: 10 },
-      { parent: "scan-thread" },
+      basicUsage(100, 10),
     );
     await appendSessionItem(worker, {
       type: "function_call",
@@ -3192,7 +3087,7 @@ describe("live scan cost tracking", () => {
         { type: "response_item", payload: progressMessage(0) },
         { type: "response_item", payload: progressMessage(2) },
       ];
-      await appendRollout(worker, continuation);
+      await appendRecords(worker, continuation);
       await tracker.refresh();
       await tracker.refresh();
       expect(workerEvents()).toEqual([...expected, ...continuation]);
@@ -3210,7 +3105,7 @@ describe("live scan cost tracking", () => {
     async (missing) => {
       const home = await codexHome();
       const scanDirectory = join(home, "scan");
-      const usage = { input_tokens: 10, output_tokens: 1 };
+      const usage = basicUsage(10, 1);
       const writeMain = () =>
         writeSession(home, "scan-thread", usage, {
           cwd: scanDirectory,
@@ -3252,9 +3147,7 @@ describe("live scan cost tracking", () => {
 
       expect(workers).toEqual([]);
       if (missing === "parent") {
-        await writeSession(home, "parent-worker", usage, {
-          parent: "scan-thread",
-        });
+        await writeScanWorker(home, "parent-worker", usage);
       } else {
         await writeMain();
       }
@@ -3392,11 +3285,9 @@ describe("live scan cost tracking", () => {
           await expect(tracker.refresh()).rejects.toMatchObject({ code });
         }
         const appendWorkerUsage = () =>
-          appendRollout(worker, [legacyUsageRecord(usage(1_000_000))]);
+          appendRecord(worker, legacyUsageRecord(usage(1_000_000)));
         if (capped) await appendWorkerUsage();
-        const middle = await writeSession(home, "middle", usage(20), {
-          parent: "scan-thread",
-        });
+        const middle = await writeScanWorker(home, "middle", usage(20));
         await expect(tracker.refresh()).rejects.toMatchObject({ code });
         expect(observed.filter((id) => id === "middle")).toHaveLength(
           capped ? 0 : 1,
@@ -3470,61 +3361,41 @@ describe("live scan cost tracking", () => {
         "worker",
         "output",
       );
-      await writeSession(
-        home,
-        "scan-thread",
-        { input_tokens: 1_000, output_tokens: 10 },
-        { cwd: scanDirectory, timestamp: "2026-07-26T12:00:00.900Z" },
-      );
-      await writeSession(
-        home,
-        "deep-worker",
-        { input_tokens: 250, output_tokens: 2 },
-        {
-          cwd:
-            process.platform === "win32"
-              ? workerDirectory.toUpperCase()
-              : workerDirectory,
-          timestamp: "2026-07-26T12:00:00.900Z",
-        },
-      );
-      await writeSession(
-        home,
-        "deep-reducer",
-        { input_tokens: 125, output_tokens: 1 },
-        {
-          cwd:
-            (process.platform === "win32"
-              ? artifacts.toUpperCase()
-              : artifacts) + sep,
-          timestamp: "2026-07-26T12:02:00Z",
-        },
-      );
-      await writeSession(
-        home,
-        "finding-comparison",
-        { input_tokens: 40, output_tokens: 4 },
-        {
-          cwd: join(artifacts, "deep_discovery"),
-          timestamp: "2026-07-26T12:03:00Z",
-        },
-      );
-      await writeSession(
-        home,
-        "deep-worker-child",
-        { input_tokens: 50, output_tokens: 1 },
-        { parent: "deep-worker", parentField },
-      );
+      await writeSession(home, "scan-thread", basicUsage(1_000, 10), {
+        cwd: scanDirectory,
+        timestamp: "2026-07-26T12:00:00.900Z",
+      });
+      await writeSession(home, "deep-worker", basicUsage(250, 2), {
+        cwd:
+          process.platform === "win32"
+            ? workerDirectory.toUpperCase()
+            : workerDirectory,
+        timestamp: "2026-07-26T12:00:00.900Z",
+      });
+      await writeSession(home, "deep-reducer", basicUsage(125, 1), {
+        cwd:
+          (process.platform === "win32" ? artifacts.toUpperCase() : artifacts) +
+          sep,
+        timestamp: "2026-07-26T12:02:00Z",
+      });
+      await writeSession(home, "finding-comparison", basicUsage(40, 4), {
+        cwd: join(artifacts, "deep_discovery"),
+        timestamp: "2026-07-26T12:03:00Z",
+      });
+      await writeSession(home, "deep-worker-child", basicUsage(50, 1), {
+        parent: "deep-worker",
+        parentField,
+      });
       await writeSession(
         home,
         "unrelated-thread",
-        { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        basicUsage(1_000_000, 1_000_000),
         { cwd: `${scanDirectory}-other` },
       );
       await writeSession(
         home,
         "previous-scan",
-        { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        basicUsage(1_000_000, 1_000_000),
         {
           cwd: join(
             scanDirectory,
@@ -3538,7 +3409,7 @@ describe("live scan cost tracking", () => {
       await writeSession(
         home,
         "unknown-start",
-        { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        basicUsage(1_000_000, 1_000_000),
         {
           cwd: join(
             scanDirectory,
@@ -3553,7 +3424,7 @@ describe("live scan cost tracking", () => {
       await writeSession(
         home,
         "nested-scan",
-        { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        basicUsage(1_000_000, 1_000_000),
         {
           cwd: join(scanDirectory, "nested", "artifacts"),
           timestamp: "2026-07-26T12:03:00Z",
@@ -3661,43 +3532,31 @@ describe("live scan cost tracking", () => {
     async (_name, workingDirectory, timestamp, parentThreadId, parentField) => {
       const home = await codexHome();
       const scanDirectory = join(home, "scans", "current");
-      await writeSession(
-        home,
-        "scan-thread",
-        { input_tokens: 1_000, output_tokens: 10 },
-        { cwd: scanDirectory, timestamp: "2026-07-26T12:00:00.900Z" },
-      );
-      await writeSession(
-        home,
-        "deep-worker",
-        { input_tokens: 250, output_tokens: 2 },
-        {
-          cwd: join(
-            scanDirectory,
-            "artifacts",
-            "deep_discovery",
-            "workers",
-            "worker",
-            "output",
-          ),
-          timestamp: "2026-07-26T12:00:00.950Z",
-        },
-      );
-      await writeSession(
-        home,
-        "bystander",
-        { input_tokens: 1_000_000, output_tokens: 1_000_000 },
-        {
-          parent: parentThreadId,
-          cwd: workingDirectory(scanDirectory),
-          timestamp,
-          parentField,
-        },
-      );
+      await writeSession(home, "scan-thread", basicUsage(1_000, 10), {
+        cwd: scanDirectory,
+        timestamp: "2026-07-26T12:00:00.900Z",
+      });
+      await writeSession(home, "deep-worker", basicUsage(250, 2), {
+        cwd: join(
+          scanDirectory,
+          "artifacts",
+          "deep_discovery",
+          "workers",
+          "worker",
+          "output",
+        ),
+        timestamp: "2026-07-26T12:00:00.950Z",
+      });
+      await writeSession(home, "bystander", basicUsage(1_000_000, 1_000_000), {
+        parent: parentThreadId,
+        cwd: workingDirectory(scanDirectory),
+        timestamp,
+        parentField,
+      });
       await writeSession(
         home,
         "bystander-child",
-        { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        basicUsage(1_000_000, 1_000_000),
         { parent: "bystander" },
       );
       const events: ScanSessionEvent[] = [];
@@ -3735,27 +3594,20 @@ describe("live scan cost tracking", () => {
     async (timestamp) => {
       const home = await codexHome();
       const scanDirectory = join(home, "scan");
-      await writeSession(
-        home,
-        "scan-thread",
-        { input_tokens: 1_000, output_tokens: 10 },
-        { cwd: scanDirectory, timestamp },
-      );
+      await writeSession(home, "scan-thread", basicUsage(1_000, 10), {
+        cwd: scanDirectory,
+        timestamp,
+      });
       await writeSession(
         home,
         "independent-worker",
-        { input_tokens: 1_000_000, output_tokens: 1_000_000 },
+        basicUsage(1_000_000, 1_000_000),
         {
           cwd: join(scanDirectory, "artifacts"),
           timestamp: "2026-07-26T12:01:00Z",
         },
       );
-      await writeSession(
-        home,
-        "child-worker",
-        { input_tokens: 250, output_tokens: 2 },
-        { parent: "scan-thread" },
-      );
+      await writeScanWorker(home, "child-worker", basicUsage(250, 2));
       const tracker = costTracker(home, {
         scanDirectory,
       });
@@ -3806,13 +3658,7 @@ describe("live scan cost tracking", () => {
             type: "event_msg",
             payload: { type: "task_started", started_at: 1_785_067_200 },
           },
-          {
-            type: "event_msg",
-            payload: {
-              type: "agent_message",
-              message: "Inherited parent commentary.",
-            },
-          },
+          legacyMessage("Inherited parent commentary."),
           {
             type: "response_item",
             payload: {
@@ -3823,13 +3669,7 @@ describe("live scan cost tracking", () => {
             },
           },
           { type: "response_item", payload: progressMessage(7) },
-          {
-            type: "event_msg",
-            payload: {
-              type: "token_count",
-              info: { total_token_usage: inherited },
-            },
-          },
+          legacyUsageRecord(inherited),
           {
             type: "event_msg",
             payload: { type: "task_started", started_at: 1_785_067_320 },
@@ -3861,21 +3701,13 @@ describe("live scan cost tracking", () => {
                 'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
             },
           },
-          {
-            type: "event_msg",
-            payload: {
-              type: "token_count",
-              info: {
-                total_token_usage: {
-                  input_tokens: 1_300,
-                  cached_input_tokens: 650,
-                  cache_write_input_tokens: 150,
-                  output_tokens: 130,
-                  reasoning_output_tokens: 30,
-                },
-              },
-            },
-          },
+          legacyUsageRecord({
+            input_tokens: 1_300,
+            cached_input_tokens: 650,
+            cache_write_input_tokens: 150,
+            output_tokens: 130,
+            reasoning_output_tokens: 30,
+          }),
         ]) + "\n",
       );
 
@@ -3933,9 +3765,7 @@ describe("live scan cost tracking", () => {
           worker: 1,
         }),
       ]);
-      expect(progress).toEqual([
-        { phase: "discovery", filesCompleted: 3, filesTotal: 8 },
-      ]);
+      expect(progress).toEqual([scanProgress("discovery", 3, 8)]);
       const workerEvents = events.filter(
         ({ threadId }) => threadId === "worker-thread",
       );
@@ -3961,7 +3791,7 @@ describe("live scan cost tracking", () => {
     const rolloutPath = await writeSession(
       home,
       childUuid7Thread,
-      { input_tokens: 1_100, output_tokens: 110 },
+      basicUsage(1_100, 110),
       { parent: scanThreadId },
     );
     const rollout = ownershipRollout(replayedTurnIds);
@@ -4088,12 +3918,10 @@ describe("live scan cost tracking", () => {
       summary: [{ type: "summary_text", text: "Following the login query." }],
       encrypted_content: "do-not-display",
     });
-    await appendSessionItem(path, {
-      id: "message-1",
-      type: "message",
-      role: "assistant",
-      content: [{ type: "output_text", text: "The query uses request input." }],
-    });
+    await appendRecord(
+      path,
+      responseMessage("The query uses request input.", "message-1"),
+    );
 
     const { activities, tracker } = activityTracker(home);
     tracker.start("scan-thread");
@@ -4153,17 +3981,9 @@ describe("live scan cost tracking", () => {
               'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
           },
         }),
-        JSON.stringify({
-          type: "response_item",
-          payload: {
-            id: "message-1",
-            type: "message",
-            role: "assistant",
-            content: [
-              { type: "output_text", text: "Reviewed the login query." },
-            ],
-          },
-        }),
+        JSON.stringify(
+          responseMessage("Reviewed the login query.", "message-1"),
+        ),
         "",
       ].join("\n"),
     );
@@ -4191,7 +4011,7 @@ describe("live scan cost tracking", () => {
         worker: 1,
       }),
     ]);
-    expect(updates).toEqual([progress("discovery", 3, 8)]);
+    expect(updates).toEqual([scanProgress("discovery", 3, 8)]);
   });
 
   test("expands streamed worker reasoning without duplicating summaries or exposing encrypted content", async () => {
@@ -4399,20 +4219,20 @@ describe("live scan cost tracking", () => {
     await appendSessionItem(descendant, progressMessage(5));
     await appendSessionItem(unrelated, progressMessage(7));
 
-    const { updates, tracker } = progressTracker(home, 8);
+    const { tracker, updates } = progressTracker(home, 8);
     tracker.start("scan-thread");
     await tracker.stop();
 
     expect(updates).toEqual([
       { phase: "discovery", filesCompleted: expect.any(Number), filesTotal: 8 },
-      progress("discovery", 8, 8),
+      scanProgress("discovery", 8, 8),
     ]);
     expect([3, 5]).toContain(updates[0]!.filesCompleted);
   });
 
   test("forwards parent custom-tool progress without adding global counts to worker totals", async () => {
     const { home, parent, worker } = await workerSessionFixture();
-    const { updates, tracker } = progressTracker(home, 942);
+    const { tracker, updates } = progressTracker(home, 942);
     tracker.start("scan-thread");
     await tracker.refresh();
     const marker =
@@ -4432,21 +4252,17 @@ describe("live scan cost tracking", () => {
     await appendSessionItem(parent, progressMessage(49, 942, "validation"));
     await tracker.stop();
     expect(updates).toEqual([
-      progress("discovery", 49, 942),
-      progress("validation", 49, 942),
+      scanProgress("discovery", 49, 942),
+      scanProgress("validation", 49, 942),
     ]);
   });
 
   test("keeps a global parent phase through equal worker progress and delayed provenance", async () => {
     const { home, parent, worker } = await workerSessionFixture();
-    const { updates, tracker } = progressTracker(home, 8);
+    const { tracker, updates } = progressTracker(home, 8);
     tracker.start("scan-thread");
     await tracker.refresh();
-    const progress = {
-      phase: "discovery",
-      filesCompleted: 8,
-      filesTotal: 8,
-    } as const;
+    const progress = scanProgress("discovery", 8, 8);
     const text = "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress);
     const event = {
       type: "item.completed",
@@ -4457,7 +4273,7 @@ describe("live scan cost tracking", () => {
     updates.push(progress);
     await appendSessionItem(worker, progressMessage(8, 8, "validation"));
     await tracker.refresh();
-    await appendRollout(parent, [nativeMessage(text)]);
+    await appendRecord(parent, nativeMessage(text));
     await tracker.stop();
     expect(updates.map((update) => update.phase)).toEqual(["discovery"]);
   });
@@ -4466,7 +4282,7 @@ describe("live scan cost tracking", () => {
     "orders independent tool receipts by completion, not call start (%p)",
     async (overlap) => {
       const { home, parent } = await workerSessionFixture();
-      const { updates, tracker } = progressTracker(home, 8);
+      const { tracker, updates } = progressTracker(home, 8);
       tracker.start("scan-thread");
       await tracker.refresh();
       const marker = (phase: string) => progressMarker(phase, 8, 8);
@@ -4492,21 +4308,14 @@ describe("live scan cost tracking", () => {
           "outer-call",
         ),
       );
-      await appendRollout(parent, records);
+      await appendRecords(parent, records);
       await tracker.refresh();
-      const event = {
-        type: "item.completed",
-        item: {
-          type: "command_execution",
-          command: "inspect-source",
-          aggregated_output: commandOutput(marker("discovery")),
-        },
-      };
+      const event = commandReceipt(
+        "inspect-source",
+        commandOutput(marker("discovery")),
+      );
       expect(
-        tracker.recordParentProgress(
-          { phase: "discovery", filesCompleted: 8, filesTotal: 8 },
-          event,
-        ),
+        tracker.recordParentProgress(scanProgress("discovery", 8, 8), event),
       ).toBe(false);
       await tracker.stop();
       expect(updates.map((update) => update.phase)).toEqual(
@@ -4519,27 +4328,16 @@ describe("live scan cost tracking", () => {
     "keeps recovered response progress ahead of an older live command (multipart: %p)",
     async (multipart) => {
       const { home, parent } = await workerSessionFixture();
-      const { updates, tracker } = progressTracker(home, 9);
-      const progress = {
-        phase: "attack_path",
-        filesCompleted: 3,
-        filesTotal: 9,
-      } as const;
+      const { tracker, updates } = progressTracker(home, 9);
+      const progress = scanProgress("attack_path", 3, 9);
       const text = "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress);
       const parts = multipart ? ["Report: ", text] : [text];
       // Paginated mode persists the concatenated message before the original
       // parts. Only the original response exposes the multipart marker here.
-      await appendRollout(parent, [
+      await appendRecords(parent, [
         nativeCommand("older-review", persistedCommandOutput),
         nativeMessage(parts.join("")),
-        {
-          type: "response_item",
-          payload: {
-            type: "message",
-            role: "assistant",
-            content: parts.map((text) => ({ type: "output_text", text })),
-          },
-        },
+        responseMessage(parts),
       ]);
       tracker.start("scan-thread");
       try {
@@ -4547,16 +4345,15 @@ describe("live scan cost tracking", () => {
         expect(updates).toEqual([progress]);
         const older = { ...progress, phase: "validation" } as const;
         expect(
-          tracker.recordParentProgress(older, {
-            type: "item.completed",
-            item: {
-              type: "command_execution",
-              command: "older-review",
-              aggregated_output: commandOutput(
+          tracker.recordParentProgress(
+            older,
+            commandReceipt(
+              "older-review",
+              commandOutput(
                 "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(older),
               ),
-            },
-          }),
+            ),
+          ),
         ).toBe(false);
         tracker.recordParentItem({
           type: "item.completed",
@@ -4575,45 +4372,24 @@ describe("live scan cost tracking", () => {
 
   test("admits a newer recovered response that repeats an earlier live phase", async () => {
     const { home, parent } = await workerSessionFixture();
-    const { updates, tracker } = progressTracker(home, 9);
-    const first = {
-      phase: "discovery",
-      filesCompleted: 3,
-      filesTotal: 9,
-    } as const;
+    const { tracker, updates } = progressTracker(home, 9);
+    const first = scanProgress("discovery", 3, 9);
     const second = { ...first, phase: "validation" } as const;
     const marker = (progress: ScanProgress) =>
       "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress);
     // Every native completion and its original multipart response is durable
     // before SDK delivery. Reusing a tuple is not reusing a message occurrence.
-    await appendRollout(parent, [
+    await appendRecords(parent, [
       ...[first, second].map((progress, index) =>
         nativeCommand(`review-${index}`, marker(progress)),
       ),
       nativeMessage("Report: " + marker(first)),
-      {
-        type: "response_item",
-        payload: {
-          type: "message",
-          role: "assistant",
-          content: ["Report: ", marker(first)].map((text) => ({
-            type: "output_text",
-            text,
-          })),
-        },
-      },
+      responseMessage(["Report: ", marker(first)]),
     ]);
     tracker.start("scan-thread");
     try {
       for (const [index, progress] of [first, second].entries()) {
-        const event = {
-          type: "item.completed",
-          item: {
-            type: "command_execution",
-            command: `review-${index}`,
-            aggregated_output: marker(progress),
-          },
-        };
+        const event = commandReceipt(`review-${index}`, marker(progress));
         expect(tracker.recordParentProgress(progress, event)).toBe(true);
         tracker.acceptParentProgress(progress, event);
       }
@@ -4642,22 +4418,15 @@ describe("live scan cost tracking", () => {
     "keeps parent phase when repeated receipts meet tied worker coverage (%p, %s, %s)",
     async (repeat, parentPhase, workerPhase) => {
       const { home, parent, worker } = await workerSessionFixture();
-      const { updates, tracker } = progressTracker(home, 9);
-      const inventory = {
-        phase: "discovery",
-        filesCompleted: 0,
-        filesTotal: 10,
-      } as const;
-      const parentProgress = {
-        phase: parentPhase,
-        filesCompleted: 9,
-        filesTotal: 9,
-      };
+      const { tracker, updates } = progressTracker(home, 9);
+      const inventory = scanProgress("discovery", 0, 10);
+      const parentProgress = scanProgress(parentPhase, 9, 9);
       const marker = (progress: ScanProgress) =>
         "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress);
-      await appendRollout(parent, [
+      await appendRecord(
+        parent,
         nativeCommand("inventory", persistedCommandOutput),
-      ]);
+      );
       tracker.start("scan-thread");
       try {
         await appendSessionItem(parent, {
@@ -4668,11 +4437,7 @@ describe("live scan cost tracking", () => {
         await tracker.refresh();
         await appendSessionItem(worker, {
           type: "custom_tool_call_output",
-          output: marker({
-            phase: workerPhase,
-            filesCompleted: 9,
-            filesTotal: 10,
-          }),
+          output: marker(scanProgress(workerPhase, 9, 10)),
         });
         await tracker.refresh();
         if (repeat) {
@@ -4685,17 +4450,13 @@ describe("live scan cost tracking", () => {
         }
         // A repeated receipt updates ownership/order without duplicate callbacks.
         expect(updates).toEqual([parentProgress]);
-        tracker.recordParentProgress(inventory, {
-          type: "item.completed",
-          item: {
-            type: "command_execution",
-            command: "inventory",
-            aggregated_output: commandOutput(marker(inventory)),
-          },
-        });
+        tracker.recordParentProgress(
+          inventory,
+          commandReceipt("inventory", commandOutput(marker(inventory))),
+        );
         await tracker.refresh();
         await tracker.refresh();
-        expect(updates.at(-1)).toEqual(progress(parentPhase, 9, 10));
+        expect(updates.at(-1)).toEqual(scanProgress(parentPhase, 9, 10));
         expect(updates).toHaveLength(2);
       } finally {
         await tracker.stop();
@@ -4712,10 +4473,10 @@ describe("live scan cost tracking", () => {
     "recovers multipart progress from the original response (%s, worker: %p)",
     async (mode, workerMessage) => {
       const { home, parent, worker } = await workerSessionFixture();
-      const { updates, tracker } = progressTracker(home, 8);
+      const { tracker, updates } = progressTracker(home, 8);
       const expected: ScanProgress[] = [
-        { phase: "discovery", filesCompleted: 1, filesTotal: 8 },
-        { phase: "validation", filesCompleted: 2, filesTotal: 8 },
+        scanProgress("discovery", 1, 8),
+        scanProgress("validation", 2, 8),
       ];
       const parts = expected.map(
         (update) => "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(update),
@@ -4724,22 +4485,10 @@ describe("live scan cost tracking", () => {
       // response parts. Legacy and paginated rollouts keep different projections.
       const finalized = parts.join("");
       const projection =
-        mode === "legacy"
-          ? {
-              type: "event_msg",
-              payload: { type: "agent_message", message: finalized },
-            }
-          : nativeMessage(finalized);
-      await appendRollout(workerMessage ? worker : parent, [
+        mode === "legacy" ? legacyMessage(finalized) : nativeMessage(finalized);
+      await appendRecords(workerMessage ? worker : parent, [
         projection,
-        {
-          type: "response_item",
-          payload: {
-            type: "message",
-            role: "assistant",
-            content: parts.map((text) => ({ type: "output_text", text })),
-          },
-        },
+        responseMessage(parts),
       ]);
       tracker.start("scan-thread");
       await tracker.refresh();
@@ -4752,13 +4501,13 @@ describe("live scan cost tracking", () => {
     "preserves distinct notifications sharing a call ID (worker: %p)",
     async (workerOutput) => {
       const { home, parent, worker } = await workerSessionFixture();
-      const { updates, tracker } = progressTracker(home, 8);
+      const { tracker, updates } = progressTracker(home, 8);
       tracker.start("scan-thread");
       await tracker.refresh();
       const values: ScanProgress[] = [
-        { phase: "discovery", filesCompleted: 1, filesTotal: 8 },
-        { phase: "discovery", filesCompleted: 4, filesTotal: 8 },
-        { phase: "validation", filesCompleted: 8, filesTotal: 8 },
+        scanProgress("discovery", 1, 8),
+        scanProgress("discovery", 4, 8),
+        scanProgress("validation", 8, 8),
       ];
       if (!workerOutput)
         values.push({ ...values[2]!, phase: "discovery" }, values[2]!);
@@ -4786,12 +4535,8 @@ describe("live scan cost tracking", () => {
     "keeps distinct saved progress receipts after live output (%s, %s, %s)",
     async (type, shape, status) => {
       const { home, parent } = await workerSessionFixture();
-      const { updates, tracker } = progressTracker(home, 8);
-      const discovery: ScanProgress = {
-        phase: "discovery",
-        filesCompleted: 8,
-        filesTotal: 8,
-      };
+      const { tracker, updates } = progressTracker(home, 8);
+      const discovery = scanProgress("discovery", 8, 8);
       const marker = (phase: ScanProgress["phase"]) =>
         "CODEX_SECURITY_SCAN_PROGRESS " +
         JSON.stringify({ ...discovery, phase });
@@ -4951,12 +4696,9 @@ describe("live scan cost tracking", () => {
             projection === "native"
               ? nativeMessage(text)
               : projection === "event"
-                ? {
-                    type: "event_msg",
-                    payload: { type: "agent_message", message: text },
-                  }
+                ? legacyMessage(text)
                 : responseMessage(text);
-          await appendRollout(parent, [record]);
+          await appendRecord(parent, record);
           if (staged) {
             await tracker.refresh();
             // The response must advance immediately; its later native copy
@@ -4987,22 +4729,16 @@ describe("live scan cost tracking", () => {
             updates.push(update);
         },
       });
-      const progress = (phase: "discovery" | "validation") => ({
-        phase,
-        filesCompleted: 8,
-        filesTotal: 8,
-      });
+      const progress = (phase: "discovery" | "validation") =>
+        scanProgress(phase, 8, 8);
       const marker = (phase: "discovery" | "validation") =>
         "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress(phase));
       const projections = (phase: "discovery" | "validation") => [
         nativeMessage(marker(phase)),
-        {
-          type: "event_msg",
-          payload: { type: "agent_message", message: marker(phase) },
-        },
+        legacyMessage(marker(phase)),
         responseMessage(marker(phase)),
       ];
-      const append = async (rows: unknown[]) => appendRollout(parent, rows);
+      const append = async (rows: unknown[]) => appendRecords(parent, rows);
       if (history) await append(projections("discovery").slice(1));
       tracker.start("scan-thread");
       await tracker.refresh();
@@ -5037,21 +4773,16 @@ describe("live scan cost tracking", () => {
 
   test("deduplicates legacy parent message projections by occurrence", async () => {
     const { home, parent } = await workerSessionFixture();
-    const { updates, tracker } = progressTracker(home, 8);
+    const { tracker, updates } = progressTracker(home, 8);
     tracker.start("scan-thread");
     await tracker.refresh();
     const text = ["discovery", "validation"]
       .map((phase) => progressMarker(phase, 8, 8))
       .join("\n");
     for (let occurrence = 0; occurrence < 2; occurrence++) {
-      await appendRollout(parent, [
-        {
-          type: "event_msg",
-          payload: { type: "agent_message", message: text },
-        },
-      ]);
+      await appendRecord(parent, legacyMessage(text));
       await tracker.refresh();
-      await appendRollout(parent, [responseMessage(text)]);
+      await appendRecord(parent, responseMessage(text));
       await tracker.refresh();
     }
     await tracker.stop();
@@ -5076,7 +4807,7 @@ describe("live scan cost tracking", () => {
     "keeps the global parent phase at equal worker coverage (%s, worker first: %p, parent: %s, worker: %s)",
     async (source, workerFirst, parentPhase, workerPhase) => {
       const { home, usage, parent, worker } = await workerSessionFixture();
-      const { updates, tracker } = progressTracker(home, 9);
+      const { tracker, updates } = progressTracker(home, 9);
       const originalReaddir = filesystem.readdir;
       const listing = spyOn(filesystem, "readdir").mockImplementation((async (
         ...args: Parameters<typeof originalReaddir>
@@ -5106,11 +4837,7 @@ describe("live scan cost tracking", () => {
             await appendSessionItem(worker, progressMessage(8, 8, workerPhase));
             await tracker.refresh();
           }
-          const progress = {
-            phase: parentPhase,
-            filesCompleted: 8,
-            filesTotal: 9,
-          };
+          const progress = scanProgress(parentPhase, 8, 9);
           const event = {
             type: "item.completed",
             item: {
@@ -5126,7 +4853,7 @@ describe("live scan cost tracking", () => {
             await tracker.refresh();
           }
         }
-        expect(updates.at(-1)).toEqual(progress(parentPhase, 8, 9));
+        expect(updates.at(-1)).toEqual(scanProgress(parentPhase, 8, 9));
         expect(updates.map((update) => update.phase)).toEqual(
           workerFirst ? [workerPhase, parentPhase] : [parentPhase],
         );
@@ -5134,23 +4861,20 @@ describe("live scan cost tracking", () => {
         // A later global parent update remains authoritative at the same count.
         await appendSessionItem(parent, progressMessage(8, 9, "reporting"));
         await tracker.refresh();
-        expect(updates.at(-1)).toEqual(progress("reporting", 8, 9));
+        expect(updates.at(-1)).toEqual(scanProgress("reporting", 8, 9));
 
         // Keep each worker's coverage even when its phase did not reach the UI.
-        const additional = await writeSession(
+        const additional = await writeScanWorker(
           home,
           "additional-worker",
           usage,
-          {
-            parent: "scan-thread",
-          },
         );
         await appendSessionItem(additional, progressMessage(1, 1, "discovery"));
         await tracker.refresh();
-        expect(updates.at(-1)).toEqual(progress("discovery", 9, 9));
+        expect(updates.at(-1)).toEqual(scanProgress("discovery", 9, 9));
         await appendSessionItem(parent, progressMessage(9, 9, "validation"));
         await tracker.stop();
-        expect(updates.at(-1)).toEqual(progress("validation", 9, 9));
+        expect(updates.at(-1)).toEqual(scanProgress("validation", 9, 9));
       } finally {
         await tracker.stop();
         listing.mockRestore();
@@ -5167,7 +4891,7 @@ describe("live scan cost tracking", () => {
     "keeps the global parent phase when inventory admits equal worker coverage (%p, parent: %s, worker: %s)",
     async (workerCount, parentPhase, workerPhase) => {
       const { home, parent, worker } = await workerSessionFixture();
-      const { updates, tracker } = progressTracker(home, 9);
+      const { tracker, updates } = progressTracker(home, 9);
       try {
         await appendSessionItem(parent, progressMessage(8, 9, parentPhase));
         tracker.start("scan-thread");
@@ -5177,14 +4901,16 @@ describe("live scan cost tracking", () => {
           progressMessage(workerCount, 10, workerPhase),
         );
         await tracker.refresh();
-        expect(updates.at(-1)).toEqual(progress(parentPhase, 8, 9));
+        expect(updates.at(-1)).toEqual(scanProgress(parentPhase, 8, 9));
         tracker.setExpectedFilesTotal(10);
         await tracker.refresh();
-        expect(updates.at(-1)).toEqual({
-          phase: workerCount === 8 ? parentPhase : workerPhase,
-          filesCompleted: workerCount,
-          filesTotal: 10,
-        });
+        expect(updates.at(-1)).toEqual(
+          scanProgress(
+            workerCount === 8 ? parentPhase : workerPhase,
+            workerCount,
+            10,
+          ),
+        );
       } finally {
         await tracker.stop();
       }
@@ -5204,22 +4930,11 @@ describe("live scan cost tracking", () => {
     "uses only an eligible parent phase after inventory correction (live first: %p, parent total: %p, worker after: %p, parent: %s, worker: %s)",
     async (liveFirst, parentTotal, workerAfter, parentPhase, workerPhase) => {
       const { home, parent, worker } = await workerSessionFixture();
-      const { updates, tracker } = progressTracker(home, 8);
-      const inventory = {
-        phase: "discovery",
-        filesCompleted: 0,
-        filesTotal: 7,
-      } as const;
+      const { tracker, updates } = progressTracker(home, 8);
+      const inventory = scanProgress("discovery", 0, 7);
       const text = `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify(inventory)}`;
       const deliverInventory = () => {
-        const event = {
-          type: "item.completed",
-          item: {
-            type: "command_execution",
-            command: "inventory",
-            aggregated_output: commandOutput(text),
-          },
-        };
+        const event = commandReceipt("inventory", commandOutput(text));
         const current = tracker.recordParentProgress(inventory, event);
         if (liveFirst && current) {
           tracker.acceptParentProgress(inventory, event);
@@ -5231,16 +4946,18 @@ describe("live scan cost tracking", () => {
         tracker.start("scan-thread");
         await tracker.refresh();
         tracker.beginParentTurn();
-        await appendRollout(parent, [
+        await appendRecord(
+          parent,
           nativeCommand("inventory", persistedCommandOutput),
-        ]);
+        );
         if (liveFirst) {
           deliverInventory();
           await tracker.refresh();
         }
-        await appendRollout(parent, [
+        await appendRecord(
+          parent,
           nativeMessage(progressMarker(parentPhase, 3, parentTotal)),
-        ]);
+        );
         await tracker.refresh();
         if (!workerAfter) {
           await appendSessionItem(
@@ -5257,11 +4974,9 @@ describe("live scan cost tracking", () => {
         }
         await appendSessionItem(worker, progressMessage(3, 3, workerPhase));
         await tracker.stop();
-        expect(updates.at(-1)).toEqual({
-          phase: parentTotal === 7 ? parentPhase : workerPhase,
-          filesCompleted: 3,
-          filesTotal: 7,
-        });
+        expect(updates.at(-1)).toEqual(
+          scanProgress(parentTotal === 7 ? parentPhase : workerPhase, 3, 7),
+        );
       } finally {
         await tracker.stop();
       }
@@ -5275,18 +4990,17 @@ describe("live scan cost tracking", () => {
     "keeps greater newly admitted worker coverage ahead of retained phases (%s, %s, %s)",
     async (parentPhase, pendingPhase, acceptedPhase) => {
       const { home, parent, worker, usage } = await workerSessionFixture();
-      const accepted = await writeSession(home, "accepted-worker", usage, {
-        parent: "scan-thread",
-      });
-      const { updates, tracker } = progressTracker(home, 8);
+      const accepted = await writeScanWorker(home, "accepted-worker", usage);
+      const { tracker, updates } = progressTracker(home, 8);
 
       tracker.start("scan-thread");
       try {
         await tracker.refresh();
         tracker.beginParentTurn();
-        await appendRollout(parent, [
+        await appendRecord(
+          parent,
           nativeCommand("inventory", persistedCommandOutput),
-        ]);
+        );
         await appendSessionItem(parent, {
           type: "custom_tool_call_output",
           output: progressMarker(parentPhase, 4, 8),
@@ -5302,22 +5016,16 @@ describe("live scan cost tracking", () => {
           output: progressMarker(acceptedPhase, 3, 3),
         });
         await tracker.refresh();
-        expect(updates).toEqual([progress(parentPhase, 4, 8)]);
+        expect(updates).toEqual([scanProgress(parentPhase, 4, 8)]);
         tracker.recordParentProgress(
-          { phase: "discovery", filesCompleted: 0, filesTotal: 9 },
-          {
-            type: "item.completed",
-            item: {
-              type: "command_execution",
-              command: "inventory",
-              aggregated_output: commandOutput(
-                progressMarker("discovery", 0, 9),
-              ),
-            },
-          },
+          scanProgress("discovery", 0, 9),
+          commandReceipt(
+            "inventory",
+            commandOutput(progressMarker("discovery", 0, 9)),
+          ),
         );
         await tracker.stop();
-        expect(updates.at(-1)).toEqual(progress(pendingPhase, 6, 9));
+        expect(updates.at(-1)).toEqual(scanProgress(pendingPhase, 6, 9));
       } finally {
         await tracker.stop();
       }
@@ -5326,7 +5034,7 @@ describe("live scan cost tracking", () => {
 
   test("does not replace a global parent phase with equal worker progress", async () => {
     const { home, parent, worker } = await workerSessionFixture();
-    const { updates, tracker } = progressTracker(home, 8);
+    const { tracker, updates } = progressTracker(home, 8);
     tracker.start("scan-thread");
     await tracker.refresh();
     await appendSessionItem(parent, progressMessage(8, 8, "validation"));
@@ -5335,7 +5043,7 @@ describe("live scan cost tracking", () => {
     await tracker.refresh();
     await appendSessionItem(parent, progressMessage(8, 8, "validation"));
     await tracker.stop();
-    expect(updates).toEqual([progress("validation", 8, 8)]);
+    expect(updates).toEqual([scanProgress("validation", 8, 8)]);
   });
 
   test.each([false, true])(
@@ -5354,11 +5062,7 @@ describe("live scan cost tracking", () => {
       });
       tracker.start("scan-thread");
       await tracker.refresh();
-      const first = {
-        phase: "discovery",
-        filesCompleted: 0,
-        filesTotal: 8,
-      } as const;
+      const first = scanProgress("discovery", 0, 8);
       const latest = { ...first, filesTotal: 9 };
       const marker = (value: ScanProgress) =>
         "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(value);
@@ -5381,13 +5085,14 @@ describe("live scan cost tracking", () => {
       if (nativeCompletion) {
         // Even the full persisted completion can omit the marker. Its retained
         // command and output identify it without waiting for the missing text.
-        await appendRollout(parent, [
+        await appendRecord(
+          parent,
           nativeCommand(
             ["scan-progress", "1"],
             persistedCommandOutput,
             "native-latest",
           ),
-        ]);
+        );
       }
       await tracker.refresh();
       expect(updates.at(-1)).toEqual(latest);
@@ -5436,15 +5141,12 @@ describe("live scan cost tracking", () => {
       });
       const copies = {
         native: message,
-        event: {
-          type: "event_msg",
-          payload: { type: "agent_message", message: text },
-        },
+        event: legacyMessage(text),
         response: responseMessage(text),
       };
       tracker.start("scan-thread");
       try {
-        await appendRollout(
+        await appendRecords(
           parent,
           projections.map((kind) => copies[kind as keyof typeof copies]),
         );
@@ -5453,21 +5155,10 @@ describe("live scan cost tracking", () => {
           type: "item.completed",
           item: { type: "agent_message", text },
         });
-        const inventory = {
-          phase: "discovery",
-          filesCompleted: 0,
-          filesTotal: 9,
-        } as const;
+        const inventory = scanProgress("discovery", 0, 9);
         const marker =
           "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(inventory);
-        const event = {
-          type: "item.completed",
-          item: {
-            type: "command_execution",
-            command: "inventory",
-            aggregated_output: commandOutput(marker),
-          },
-        };
+        const event = commandReceipt("inventory", commandOutput(marker));
         expect(tracker.recordParentProgress(inventory, event)).toBe(true);
         tracker.acceptParentProgress(inventory, event);
         report(inventory);
@@ -5477,7 +5168,7 @@ describe("live scan cost tracking", () => {
         });
         // Publish the older receipt and its ordering evidence in the same batch.
         // Until the persisted command is visible, the tool receipt can be newer.
-        await appendRollout(parent, [
+        await appendRecords(parent, [
           customToolOutput(progressMarker("discovery", 0, 8)),
           native({
             type: "CommandExecution",
@@ -5499,11 +5190,11 @@ describe("live scan cost tracking", () => {
 
   test("ignores old live phase copies without blocking new tool-only progress in legacy logs", async () => {
     const { home, parent } = await workerSessionFixture();
-    const { updates, tracker } = progressTracker(home, 8);
+    const { tracker, updates } = progressTracker(home, 8);
     tracker.start("scan-thread");
     await tracker.refresh();
     for (const phase of ["discovery", "validation"] as const) {
-      const progress = { phase, filesCompleted: 8, filesTotal: 8 };
+      const progress = scanProgress(phase, 8, 8);
       const event = {
         type: "item.completed",
         item: {
@@ -5530,27 +5221,17 @@ describe("live scan cost tracking", () => {
 
   test("orders repeated commands by completion and allows a later tool-only repeated phase", async () => {
     const { home, parent } = await workerSessionFixture();
-    const { updates, tracker } = progressTracker(home, 8);
+    const { tracker, updates } = progressTracker(home, 8);
     tracker.start("scan-thread");
     await tracker.refresh();
-    const discovery = {
-      phase: "discovery",
-      filesCompleted: 8,
-      filesTotal: 8,
-    } as const;
+    const discovery = scanProgress("discovery", 8, 8);
     const validation = { ...discovery, phase: "validation" } as const;
     const marker = (progress: ScanProgress) =>
       "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress);
     const command = `'/tool with spaces' 'a b' 'it'"'"'s' 'C:\\work'`;
     const argv = ["/tool with spaces", "a b", "it's", "C:\\work"];
-    const live = (progress: ScanProgress) => ({
-      type: "item.completed",
-      item: {
-        type: "command_execution",
-        command,
-        aggregated_output: marker(progress),
-      },
-    });
+    const live = (progress: ScanProgress) =>
+      commandReceipt(command, marker(progress));
     for (const progress of [discovery, validation]) {
       const event = live(progress);
       if (tracker.recordParentProgress(progress, event)) {
@@ -5565,22 +5246,20 @@ describe("live scan cost tracking", () => {
       validation,
       discovery,
     ].entries()) {
-      await appendRollout(parent, [
-        {
-          type: "event_msg",
-          payload: {
-            type: "item_completed",
-            started_at_ms: [20, 10, 30][index],
-            completed_at_ms: 40 + index,
-            item: {
-              type: "CommandExecution",
-              id: `native-${index}`,
-              command: argv,
-              aggregated_output: marker(progress),
-            },
+      await appendRecord(parent, {
+        type: "event_msg",
+        payload: {
+          type: "item_completed",
+          started_at_ms: [20, 10, 30][index],
+          completed_at_ms: 40 + index,
+          item: {
+            type: "CommandExecution",
+            id: `native-${index}`,
+            command: argv,
+            aggregated_output: marker(progress),
           },
         },
-      ]);
+      });
     }
     await tracker.refresh();
     expect(updates.at(-1)).toEqual(discovery);
@@ -5605,25 +5284,14 @@ describe("live scan cost tracking", () => {
 
   test("does not derive ordering from a mismatched or unfamiliar command projection", async () => {
     const { home, parent } = await workerSessionFixture();
-    const { updates, tracker } = progressTracker(home, 8);
+    const { tracker, updates } = progressTracker(home, 8);
     tracker.start("scan-thread");
     await tracker.refresh();
-    const progress = {
-      phase: "discovery",
-      filesCompleted: 1,
-      filesTotal: 8,
-    } as const;
+    const progress = scanProgress("discovery", 1, 8);
     const text = "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress);
-    tracker.recordParentProgress(progress, {
-      type: "item.completed",
-      item: {
-        type: "command_execution",
-        command: "'unfinished",
-        aggregated_output: text,
-      },
-    });
+    tracker.recordParentProgress(progress, commandReceipt("'unfinished", text));
     await appendSessionItem(parent, progressMessage(2));
-    await appendRollout(parent, [nativeCommand("different", text)]);
+    await appendRecord(parent, nativeCommand("different", text));
     await tracker.stop();
     expect(updates).toEqual([{ ...progress, filesCompleted: 2 }]);
   });
@@ -5659,19 +5327,21 @@ describe("live scan cost tracking", () => {
       await appendSessionItem(parent, progressMessage(8, filesTotal + 1));
       await tracker.stop();
       expect(updates).toEqual([
-        progress("discovery", 0, filesTotal),
-        progress("discovery", 7, filesTotal),
+        scanProgress("discovery", 0, filesTotal),
+        scanProgress("discovery", 7, filesTotal),
       ]);
     },
   );
 
   test("aggregates worker progress without regressing or changing assigned shards", async () => {
     const { home, usage, parent, worker } = await workerSessionFixture();
-    const otherWorker = await writeSession(home, "other-worker-thread", usage, {
-      parent: "scan-thread",
-    });
+    const otherWorker = await writeScanWorker(
+      home,
+      "other-worker-thread",
+      usage,
+    );
     const unrelated = await writeSession(home, "unrelated-thread", usage);
-    const { updates, tracker } = progressTracker(home, 1_258);
+    const { tracker, updates } = progressTracker(home, 1_258);
     tracker.start("scan-thread");
     await tracker.refresh();
 
@@ -5710,26 +5380,22 @@ describe("live scan cost tracking", () => {
     await tracker.stop();
 
     expect(updates).toEqual([
-      progress("discovery", 3, 1_258),
-      progress("discovery", 5, 1_258),
-      progress("discovery", 1_200, 1_258),
-      progress("discovery", 1_251, 1_258),
-      progress("validation", 1_251, 1_258),
+      scanProgress("discovery", 3, 1_258),
+      scanProgress("discovery", 5, 1_258),
+      scanProgress("discovery", 1_200, 1_258),
+      scanProgress("discovery", 1_251, 1_258),
+      scanProgress("validation", 1_251, 1_258),
     ]);
   });
 
   test("adds reviewed files from independent delegated-worker shards", async () => {
     const home = await codexHome();
-    const usage = { input_tokens: 100, output_tokens: 10 };
+    const usage = basicUsage(100, 10);
     await writeSession(home, "scan-thread", usage);
-    const first = await writeSession(home, "worker-a", usage, {
-      parent: "scan-thread",
-    });
-    const second = await writeSession(home, "worker-b", usage, {
-      parent: "scan-thread",
-    });
+    const first = await writeScanWorker(home, "worker-a", usage);
+    const second = await writeScanWorker(home, "worker-b", usage);
     const unrelated = await writeSession(home, "unrelated-worker", usage);
-    const { updates, tracker } = progressTracker(home, 4_198);
+    const { tracker, updates } = progressTracker(home, 4_198);
     tracker.start("scan-thread");
     await tracker.refresh();
 
@@ -5745,10 +5411,10 @@ describe("live scan cost tracking", () => {
     await tracker.stop();
 
     expect(updates).toEqual([
-      progress("discovery", 250, 4_198),
-      progress("discovery", 350, 4_198),
-      progress("discovery", 940, 4_198),
-      progress("discovery", 1_679, 4_198),
+      scanProgress("discovery", 250, 4_198),
+      scanProgress("discovery", 350, 4_198),
+      scanProgress("discovery", 940, 4_198),
+      scanProgress("discovery", 1_679, 4_198),
     ]);
   });
 
@@ -5815,14 +5481,14 @@ describe("live scan cost tracking", () => {
       await appendSessionItem(worker, payload);
     }
 
-    const { updates, tracker } = progressTracker(home, 8);
+    const { tracker, updates } = progressTracker(home, 8);
     tracker.start("scan-thread");
     await tracker.stop();
 
     expect(updates).toEqual([
-      progress("discovery", 3, 8),
-      progress("discovery", 4, 8),
-      progress("discovery", 5, 8),
+      scanProgress("discovery", 3, 8),
+      scanProgress("discovery", 4, 8),
+      scanProgress("discovery", 5, 8),
     ]);
   });
 
@@ -5840,7 +5506,7 @@ describe("live scan cost tracking", () => {
 
     try {
       await expect(reportedProgress).resolves.toEqual(
-        progress("discovery", 3, 8),
+        scanProgress("discovery", 3, 8),
       );
     } finally {
       await tracker.stop();
@@ -5849,7 +5515,7 @@ describe("live scan cost tracking", () => {
 
   test("reports newly completed worker batches once per progress update", async () => {
     const { home, worker } = await workerSessionFixture();
-    const { updates, tracker } = progressTracker(home, 8);
+    const { tracker, updates } = progressTracker(home, 8);
     tracker.start("scan-thread");
     await tracker.refresh();
 
@@ -5862,17 +5528,14 @@ describe("live scan cost tracking", () => {
     await tracker.stop();
 
     expect(updates).toEqual([
-      progress("discovery", 3, 8),
-      progress("discovery", 5, 8),
+      scanProgress("discovery", 3, 8),
+      scanProgress("discovery", 5, 8),
     ]);
   });
 
   test("uses each session's final cumulative usage without double counting", async () => {
     const home = await codexHome();
-    const path = await writeSession(home, "scan-thread", {
-      input_tokens: 100,
-      output_tokens: 10,
-    });
+    const path = await writeSession(home, "scan-thread", basicUsage(100, 10));
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-terra",
@@ -5880,15 +5543,7 @@ describe("live scan cost tracking", () => {
     tracker.start("scan-thread");
     expect((await tracker.refresh()).cost?.estimatedUsd).toBe(0.00032);
 
-    const latest = JSON.stringify({
-      type: "event_msg",
-      payload: {
-        type: "token_count",
-        info: {
-          total_token_usage: { input_tokens: 250, output_tokens: 20 },
-        },
-      },
-    });
+    const latest = JSON.stringify(legacyUsageRecord(basicUsage(250, 20)));
     await appendFile(path, `${latest}\n${latest}\n`);
 
     expect((await tracker.stop()).cost).toMatchObject({
@@ -5903,10 +5558,7 @@ describe("live scan cost tracking", () => {
 
   test("retains a partial event across incremental reads", async () => {
     const home = await codexHome();
-    const path = await writeSession(home, "scan-thread", {
-      input_tokens: 100,
-      output_tokens: 10,
-    });
+    const path = await writeSession(home, "scan-thread", basicUsage(100, 10));
     const events: ScanSessionEvent[] = [];
     const tracker = new ScanCostTracker({
       codexHome: home,
@@ -5922,7 +5574,7 @@ describe("live scan cost tracking", () => {
         type: "token_count",
         details: "😀",
         info: {
-          total_token_usage: { input_tokens: 250, output_tokens: 20 },
+          total_token_usage: basicUsage(250, 20),
         },
       },
     });
@@ -5947,10 +5599,7 @@ describe("live scan cost tracking", () => {
 
   test("reads session events larger than 16 MiB", async () => {
     const home = await codexHome();
-    const path = await writeSession(home, "scan-thread", {
-      input_tokens: 100,
-      output_tokens: 10,
-    });
+    const path = await writeSession(home, "scan-thread", basicUsage(100, 10));
     const tracker = new ScanCostTracker({
       codexHome: home,
       model: "gpt-5.6-terra",
@@ -5962,7 +5611,7 @@ describe("live scan cost tracking", () => {
       payload: {
         type: "token_count",
         info: {
-          total_token_usage: { input_tokens: 250, output_tokens: 20 },
+          total_token_usage: basicUsage(250, 20),
         },
         details: "x".repeat(16 * 1_024 * 1_024 + 1),
       },
@@ -5998,24 +5647,13 @@ describe("live scan cost tracking", () => {
     async (parentTokens) => {
       const home = await codexHome();
       if (parentTokens !== undefined) {
-        await writeSession(home, "scan-thread", {
-          input_tokens: parentTokens,
-          output_tokens: 0,
-        });
+        await writeSession(home, "scan-thread", basicUsage(parentTokens, 0));
       }
-      await writeSession(
-        home,
-        "worker-thread",
-        { input_tokens: 100, output_tokens: 0 },
-        { parent: "scan-thread" },
-      );
+      await writeScanWorker(home, "worker-thread", basicUsage(100, 0));
       const tracker = costTracker(home);
       tracker.start("scan-thread");
 
-      const snapshot = await tracker.stop({
-        input_tokens: 1_000,
-        output_tokens: 0,
-      });
+      const snapshot = await tracker.stop(basicUsage(1_000, 0));
 
       expect(snapshot.cost?.inputTokens).toBe(
         Math.max(parentTokens ?? 0, 1_000) + 100,
@@ -6028,7 +5666,7 @@ describe("live scan cost tracking", () => {
       codexHome: await codexHome(),
       model: "gpt-5.6-luna",
     });
-    const usage = { input_tokens: 1_000, output_tokens: 20 };
+    const usage = basicUsage(1_000, 20);
     tracker.start("scan-thread");
 
     expect(await tracker.stop(usage)).toMatchObject({
@@ -6052,7 +5690,7 @@ describe("live scan cost tracking", () => {
 
   test("reports budget subtotals until missing worker usage becomes measured", async () => {
     const home = await codexHome();
-    const parentUsage = { input_tokens: 1_000_000, output_tokens: 100_000 };
+    const parentUsage = basicUsage(1_000_000, 100_000);
     await writeSession(home, "scan-thread", parentUsage);
     const costs: Array<[number, boolean]> = [];
     const usages: unknown[] = [];
@@ -6065,14 +5703,7 @@ describe("live scan cost tracking", () => {
     tracker.start("scan-thread");
     expect((await tracker.refresh()).cost?.estimatedUsd).toBe(6);
 
-    const worker = await writeSession(
-      home,
-      "worker-thread",
-      {},
-      {
-        parent: "scan-thread",
-      },
-    );
+    const worker = await writeScanWorker(home, "worker-thread", {});
     expect(await tracker.refresh()).toMatchObject({ usage: null, cost: null });
     expect(costs.at(-1)).toEqual([6, false]);
     expect(usages).toHaveLength(1);
@@ -6084,9 +5715,7 @@ describe("live scan cost tracking", () => {
       coverageScope: ["thread:scan-thread", "thread:worker-thread"],
     });
 
-    await appendRollout(worker, [
-      legacyUsageRecord({ input_tokens: 0, output_tokens: 0 }),
-    ]);
+    await appendRecords(worker, [legacyUsageRecord(basicUsage(0, 0))]);
     expect((await tracker.refresh()).usage).toMatchObject({
       ...parentUsage,
       total_tokens: 1_100_000,
@@ -6100,8 +5729,8 @@ describe("live scan cost tracking", () => {
     });
     expect(usages).toHaveLength(1);
 
-    await appendRollout(worker, [
-      legacyUsageRecord({ input_tokens: 500_000, output_tokens: 50_000 }),
+    await appendRecords(worker, [
+      legacyUsageRecord(basicUsage(500_000, 50_000)),
     ]);
     expect((await tracker.stop(parentUsage)).usage).toMatchObject({
       input_tokens: 1_500_000,
@@ -6122,17 +5751,14 @@ describe("live scan cost tracking", () => {
     async (native) => {
       const home = await codexHome();
       const scanDirectory = join(home, "scans", "compressed");
-      const parentUsage = { input_tokens: 100, output_tokens: 10 };
+      const parentUsage = basicUsage(100, 10);
       await writeSession(home, "scan-thread", parentUsage, {
         timestamp: "2026-07-26T12:00:00Z",
       });
       const worker = await writeSession(
         home,
         "compressed-worker",
-        {
-          input_tokens: 900,
-          output_tokens: 90,
-        },
+        basicUsage(900, 90),
         {
           cwd: join(
             scanDirectory,
@@ -6145,7 +5771,7 @@ describe("live scan cost tracking", () => {
           timestamp: "2026-07-26T12:01:00Z",
         },
       );
-      await appendRollout(worker, [
+      await appendRecords(worker, [
         {
           type: "event_msg",
           timestamp: "2026-07-26T12:03:00Z",
@@ -6239,10 +5865,11 @@ describe("live scan cost tracking", () => {
         });
         tracker.start("scan-thread");
         await tracker.stop();
-        const plain = await writeSession(home, "scan-thread", {
-          input_tokens: 1_000,
-          output_tokens: 0,
-        });
+        const plain = await writeSession(
+          home,
+          "scan-thread",
+          basicUsage(1_000, 0),
+        );
         const contents = await filesystem.readFile(plain);
         const path = `${plain}${compressed ? ".zst" : ""}`;
         const encoded = compressed ? zlib.zstdCompressSync(contents) : contents;
@@ -6273,7 +5900,7 @@ describe("live scan cost tracking", () => {
           },
         );
         try {
-          const stopped = tracker.stop({ input_tokens: 500, output_tokens: 0 });
+          const stopped = tracker.stop(basicUsage(500, 0));
           if (missing) {
             expect(await stopped).toMatchObject({
               usage: { input_tokens: 500 },
@@ -6306,16 +5933,8 @@ describe("live scan cost tracking", () => {
     async (previouslyMeasured) => {
       const home = await codexHome();
       if (previouslyMeasured) {
-        await writeSession(home, "scan-thread", {
-          input_tokens: 100,
-          output_tokens: 10,
-        });
-        await writeSession(
-          home,
-          "worker-thread",
-          { input_tokens: 200, output_tokens: 20 },
-          { parent: "scan-thread" },
-        );
+        await writeSession(home, "scan-thread", basicUsage(100, 10));
+        await writeScanWorker(home, "worker-thread", basicUsage(200, 20));
       }
       const measurements: Readonly<ScanUsageMeasurement>[] = [];
       const tracker = costTracker(home, {
@@ -6379,7 +5998,7 @@ describe("live scan cost tracking", () => {
         cache_write_input_tokens: 0,
         output_tokens: 10,
       });
-      const workerUsage = { input_tokens: 200, output_tokens: 20 };
+      const workerUsage = basicUsage(200, 20);
       await writeFile(
         join(directory, "worker-attempt.json"),
         JSON.stringify({
@@ -6392,12 +6011,10 @@ describe("live scan cost tracking", () => {
           usage: { ...workerUsage, ...receiptWrites },
         }),
       );
-      await writeSession(
-        home,
-        "worker-thread",
-        { ...workerUsage, ...nativeWrites },
-        { parent: "scan-thread" },
-      );
+      await writeScanWorker(home, "worker-thread", {
+        ...workerUsage,
+        ...nativeWrites,
+      });
       const tracker = costTracker(home, {
         workerReceipts: { directory, scanId },
       });
@@ -6426,7 +6043,7 @@ describe("live scan cost tracking", () => {
     const scanId = "receipts";
     const receipts = join(home, "worker-usage", scanId);
     await filesystem.mkdir(receipts, { recursive: true });
-    const parentUsage = { input_tokens: 100, output_tokens: 10 };
+    const parentUsage = basicUsage(100, 10);
     await writeSession(home, "scan-thread", parentUsage);
     for (const [attemptId, input] of [
       ["first", 100],
@@ -6441,7 +6058,7 @@ describe("live scan cost tracking", () => {
           scanId,
           attemptId,
           threadId: "resumed-worker",
-          usage: { input_tokens: input, output_tokens: 10 },
+          usage: basicUsage(input, 10),
         }),
       );
     }
@@ -6485,10 +6102,7 @@ describe("live scan cost tracking", () => {
         coverageScope: partial.measurement.coverageScope,
       }),
     );
-    await writeSession(home, "resumed-worker", {
-      input_tokens: 150,
-      output_tokens: 10,
-    });
+    await writeSession(home, "resumed-worker", basicUsage(150, 10));
     expect((await tracker.stop(parentUsage)).measurement).toMatchObject({
       coverage: "complete",
       threadCount: 2,
@@ -6532,11 +6146,8 @@ describe("live scan cost tracking", () => {
             usage,
           }),
         );
-      await save("earlier", "worker", { input_tokens: 500, output_tokens: 5 });
-      await save("latest", "worker", {
-        input_tokens: 1_000,
-        output_tokens: 10,
-      });
+      await save("earlier", "worker", basicUsage(500, 5));
+      await save("latest", "worker", basicUsage(1_000, 10));
       await save("unknown", null, null);
       const measurements: Readonly<ScanUsageMeasurement>[] = [];
       const tracker = costTracker(home, {
@@ -6545,9 +6156,7 @@ describe("live scan cost tracking", () => {
         onMeasurement: (measurement) => measurements.push(measurement),
       });
       tracker.start("scan-thread");
-      const before = (
-        await tracker.stop({ input_tokens: 100, output_tokens: 1 })
-      ).measurement;
+      const before = (await tracker.stop(basicUsage(100, 1))).measurement;
       expect(before).toMatchObject({
         coverage: "partial",
         threadCount: 2,
@@ -6600,22 +6209,10 @@ describe("live scan cost tracking", () => {
           await filesystem.rename(`${directory}-unavailable`, directory);
           moved = false;
         }
-        await save("latest", "worker", {
-          input_tokens: 1_200,
-          output_tokens: 12,
-        });
-        await save("unknown", "other-worker", {
-          input_tokens: 0,
-          output_tokens: 0,
-        });
-        await writeSession(home, "worker", {
-          input_tokens: 1_200,
-          output_tokens: 12,
-        });
-        await writeSession(home, "other-worker", {
-          input_tokens: 0,
-          output_tokens: 0,
-        });
+        await save("latest", "worker", basicUsage(1_200, 12));
+        await save("unknown", "other-worker", basicUsage(0, 0));
+        await writeSession(home, "worker", basicUsage(1_200, 12));
+        await writeSession(home, "other-worker", basicUsage(0, 0));
         const recovered = (await tracker.stop()).measurement;
         expect(recovered).toMatchObject({
           coverage: "complete",
@@ -6666,17 +6263,14 @@ describe("live scan cost tracking", () => {
         "usage",
       );
       await filesystem.mkdir(artifacts, { recursive: true });
-      const usage = { input_tokens: 100, output_tokens: 10 };
+      const usage = basicUsage(100, 10);
       await writeSession(home, "scan-thread", usage);
-      const foreign = await writeSession(home, "foreign-thread", {
-        input_tokens: 999_999,
-        output_tokens: 999_999,
-      });
-      await appendSessionItem(foreign, {
-        type: "message",
-        role: "assistant",
-        content: [{ type: "output_text", text: "Unrelated session output." }],
-      });
+      const foreign = await writeSession(
+        home,
+        "foreign-thread",
+        basicUsage(999_999, 999_999),
+      );
+      await appendRecord(foreign, responseMessage("Unrelated session output."));
       for (const [attemptId, threadId, receiptUsage] of [
         [
           "forged-cost",
@@ -6737,7 +6331,7 @@ describe("live scan cost tracking", () => {
     const unrelated = join(home, "worker-usage", "other-scan");
     await filesystem.mkdir(directory, { recursive: true });
     await filesystem.mkdir(unrelated, { recursive: true });
-    const usage = { input_tokens: 100, output_tokens: 10 };
+    const usage = basicUsage(100, 10);
     await writeSession(home, "scan-thread", usage);
     const receipt = {
       schemaVersion: 1,
@@ -6746,7 +6340,7 @@ describe("live scan cost tracking", () => {
       scanId: "other-scan",
       attemptId: "other-attempt",
       threadId: "unrelated-worker",
-      usage: { input_tokens: 1_000_000, output_tokens: 0 },
+      usage: basicUsage(1_000_000, 0),
     };
     await writeFile(
       join(unrelated, "other-attempt.json"),
@@ -6775,7 +6369,7 @@ describe("live scan cost tracking", () => {
   test("keeps independent Deep worker usage unknown until a receipt supplies it", async () => {
     const home = await codexHome();
     const scanDirectory = join(home, "scans", "current");
-    const parentUsage = { input_tokens: 100, output_tokens: 10 };
+    const parentUsage = basicUsage(100, 10);
     await writeSession(home, "scan-thread", parentUsage, {
       cwd: scanDirectory,
       timestamp: "2026-07-26T12:00:00Z",
@@ -6800,7 +6394,7 @@ describe("live scan cost tracking", () => {
     tracker.start("scan-thread");
     expect(await tracker.refresh()).toMatchObject({ usage: null, cost: null });
 
-    tracker.recordUsage({ input_tokens: 50, output_tokens: 5 }, "deep-worker");
+    tracker.recordUsage(basicUsage(50, 5), "deep-worker");
     expect((await tracker.stop(parentUsage)).usage).toMatchObject({
       input_tokens: 150,
       output_tokens: 15,
@@ -6814,17 +6408,14 @@ describe("live scan cost tracking", () => {
       const home = await codexHome();
       const tracker = costTracker(home);
       tracker.start("scan-thread");
-      const usage = { input_tokens: 500, output_tokens: 0 };
+      const usage = basicUsage(500, 0);
       tracker.recordUsage(
         source === "unknown" ? null : usage,
         "validation-thread",
       );
       if (source === "receipt-and-log")
         await writeSession(home, "validation-thread", usage);
-      const snapshot = await tracker.stop({
-        input_tokens: 1_000,
-        output_tokens: 0,
-      });
+      const snapshot = await tracker.stop(basicUsage(1_000, 0));
       if (source === "unknown")
         expect(snapshot).toMatchObject({ usage: null, cost: null });
       else expect(snapshot.cost?.inputTokens).toBe(1_500);
@@ -6837,10 +6428,7 @@ describe("live scan cost tracking", () => {
 
   test("includes a separate validation root and its missing child in coverage scope", async () => {
     const home = await codexHome();
-    await writeSession(home, "validation-thread", {
-      input_tokens: 500,
-      output_tokens: 0,
-    });
+    await writeSession(home, "validation-thread", basicUsage(500, 0));
     await writeSession(
       home,
       "validation-child",
@@ -6851,14 +6439,8 @@ describe("live scan cost tracking", () => {
     );
     const tracker = costTracker(home);
     tracker.start("scan-thread");
-    tracker.recordUsage(
-      { input_tokens: 500, output_tokens: 0 },
-      "validation-thread",
-    );
-    const snapshot = await tracker.stop({
-      input_tokens: 1_000,
-      output_tokens: 0,
-    });
+    tracker.recordUsage(basicUsage(500, 0), "validation-thread");
+    const snapshot = await tracker.stop(basicUsage(1_000, 0));
     expect(snapshot.measurement).toMatchObject({
       coverage: "partial",
       missingThreadCount: 1,

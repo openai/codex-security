@@ -5,7 +5,7 @@ from __future__ import annotations
 import copy
 import os
 from collections.abc import Callable, Sequence
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from finalize_scan_contract import (
@@ -14,8 +14,8 @@ from finalize_scan_contract import (
     _require_portable_relative_path,
     _require_str,
     _validate_schema_node,
+    finding_within_scope,
     open_scan_local_file_descriptor,
-    path_within_scope,
 )
 from workbench.saved_coverage import _project_worker_coverage_row, _saved_coverage_id
 
@@ -58,16 +58,13 @@ def retain_recorded_receipt_ownership(
     sources: list[tuple[str, dict[str, Any], str | None]],
     digest: Callable[[Any], str],
     include_paths: Sequence[str],
-    finding_scope: Sequence[tuple[str, bool]] | None = None,
+    finding_scope: Sequence[tuple[str, bool]],
 ) -> None:
     # Checkpoints are written by the host tool; direct result files can be authored
     # without it. Compare the entire payload within the same worker attempt.
     def payload_digest(draft: dict[str, Any]) -> str:
         return digest({key: value for key, value in draft.items() if key != "handoffClaimToken"})
 
-    scope = (
-        finding_scope if finding_scope is not None else [(path, False) for path in include_paths]
-    )
     recorded: dict[Path, set[str]] = {}
     for relative, draft, worker_id in sources:
         directory = Path(relative).parent
@@ -79,19 +76,7 @@ def retain_recorded_receipt_ownership(
                 scoped = [
                     finding
                     for finding in draft["findings"]
-                    if isinstance(finding, dict)
-                    and isinstance(finding.get("locations"), list)
-                    and any(
-                        isinstance(location, dict)
-                        and isinstance(location.get("path"), str)
-                        and any(
-                            PurePosixPath(location["path"]) == PurePosixPath(path)
-                            if is_file
-                            else path_within_scope(location["path"], path)
-                            for path, is_file in scope
-                        )
-                        for location in finding["locations"]
-                    )
+                    if isinstance(finding, dict) and finding_within_scope(finding, finding_scope)
                 ]
                 payloads.add(payload_digest({**draft, "findings": scoped}))
     for relative, draft, worker_id in sources:

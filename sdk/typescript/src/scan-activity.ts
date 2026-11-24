@@ -195,6 +195,21 @@ function unwrapCommand(command: string) {
   };
 }
 
+/** @internal */
+export function sessionReasoningUpdate(
+  payload: Readonly<Record<string, unknown>>,
+) {
+  const type = payload["type"];
+  const raw =
+    type === "agent_reasoning_raw_content" ||
+    type === "agent_reasoning_raw_content_delta";
+  if (!raw && type !== "agent_reasoning" && type !== "agent_reasoning_delta")
+    return null;
+  const delta = type.endsWith("_delta");
+  const text = payload[delta ? "delta" : "text"];
+  return typeof text === "string" ? { raw, delta, text } : null;
+}
+
 export function scanActivityFromSessionEvent(
   event: Readonly<Record<string, unknown>>,
   repository: string,
@@ -205,28 +220,14 @@ export function scanActivityFromSessionEvent(
   const payload = event["payload"];
   if (event["type"] === "event_msg") {
     const type = payload["type"];
-    const kind =
-      type === "agent_reasoning" ||
-      type === "agent_reasoning_delta" ||
-      type === "agent_reasoning_raw_content" ||
-      type === "agent_reasoning_raw_content_delta"
-        ? "reasoning"
-        : type === "agent_message"
-          ? "message"
-          : null;
-    const delta =
-      type === "agent_reasoning_delta" ||
-      type === "agent_reasoning_raw_content_delta";
-    const text = delta
-      ? payload["delta"]
-      : kind === "reasoning"
-        ? payload["text"]
-        : payload["message"];
-    if (kind === null || typeof text !== "string") return null;
+    const reasoning = sessionReasoningUpdate(payload);
+    const text =
+      type === "agent_message" ? payload["message"] : reasoning?.text;
+    if (typeof text !== "string") return null;
     return proseActivity(
       `${type}:${typeof event["timestamp"] === "string" ? event["timestamp"] : ""}:${text}`,
-      kind,
-      delta ? "running" : "completed",
+      reasoning === null ? "message" : "reasoning",
+      reasoning?.delta ? "running" : "completed",
       text,
     );
   }
@@ -281,7 +282,8 @@ export function scanActivityFromSessionEvent(
   };
 }
 
-function sessionProse(
+/** @internal */
+export function sessionProse(
   id: string,
   kind: "reasoning" | "message",
   value: unknown,
@@ -312,7 +314,8 @@ export function sessionContentText(
     .join(separator);
 }
 
-function proseActivity(
+/** @internal */
+export function proseActivity(
   id: string,
   kind: "reasoning" | "message",
   status: ScanActivityStatus,

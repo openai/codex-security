@@ -5,12 +5,11 @@ import { CodexSecurityError } from "../src/index.js";
 import {
   FakeSignals,
   SYNTHETIC_CREDENTIALS,
-  capture,
   dependencies,
   fakePreflight,
   fakeResult,
 } from "./cli-fixtures.js";
-import { captureCli, createCliTest } from "./support/cli-run.js";
+import { createCliTest, captureCli } from "./support/cli-run.js";
 
 const commands = [
   ["scan", ["scan", "."]],
@@ -264,12 +263,10 @@ test.each(commands.slice(1))(
         ["--token-limit", "4"],
         ["--token-offset=4", "--token-limit=4"],
       ]) {
-        const reference = capture();
+        const reference = captureCli(main, "stdout");
         expect(
-          await main(
+          await reference.run(
             [...command, ...formatArgs, ...tokens],
-            reference.stream,
-            capture().stream,
             failingScan(message),
           ),
         ).toBe(2);
@@ -332,12 +329,10 @@ test.each(["rerun", "resume"])(
 test.each(commands.slice(1))(
   "preserves success filtering and full error envelopes for %s",
   async (_name, command) => {
-    const success = capture();
+    const success = captureCli(main, "stdout");
     expect(
-      await main(
+      await success.run(
         [...command, "--json", "--filter-output", "manifest,findings"],
-        success.stream,
-        capture().stream,
         scanDependencies(),
       ),
     ).toBe(0);
@@ -346,10 +341,10 @@ test.each(commands.slice(1))(
       manifest: original["manifest"],
       findings: original["findings"],
     });
-    const failure = capture();
+    const failure = captureCli(main, "stdout");
     const message = "Synthetic full envelope failure.";
     expect(
-      await main(
+      await failure.run(
         [
           ...command,
           "--json",
@@ -357,8 +352,6 @@ test.each(commands.slice(1))(
           "--filter-output",
           "manifest,findings",
         ],
-        failure.stream,
-        capture().stream,
         failingScan(message),
       ),
     ).toBe(2);

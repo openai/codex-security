@@ -1,3 +1,8 @@
+import {
+  completedMessage,
+  legacyUsageRecord,
+  responseMessage,
+} from "./support/usage-rollout.js";
 import { requestMetadata } from "./support/request-metadata.js";
 import { mkdir, readFile, realpath, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -22,7 +27,7 @@ import type { JsonObject } from "../src/config.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient } from "./support/api-client.js";
-import { preparedRuntime } from "./support/api-events.js";
+import { completedTurn, preparedRuntime } from "./support/api-events.js";
 
 describe("CodexSecurity headless patching", () => {
   const { cleanup, temporaryDirectory } = createApiTestFixtures();
@@ -53,26 +58,16 @@ describe("CodexSecurity headless patching", () => {
         aggregated_output: "",
       },
     };
-    yield {
-      type: "item.completed",
-      item: {
-        id: "result",
-        type: "agent_message",
-        text:
-          typeof response === "string" ? response : JSON.stringify(response),
-      },
-    };
+    yield completedMessage(
+      "result",
+      typeof response === "string" ? response : JSON.stringify(response),
+    );
     if (complete) {
-      yield {
-        type: "turn.completed",
-        usage: {
-          input_tokens: 10,
-          cached_input_tokens: 2,
-          cache_write_input_tokens: 0,
-          output_tokens: 3,
-          reasoning_output_tokens: 0,
-        },
-      };
+      yield completedTurn({
+        input_tokens: 10,
+        output_tokens: 3,
+        cached_input_tokens: 2,
+      });
     }
   }
 
@@ -233,28 +228,16 @@ describe("CodexSecurity headless patching", () => {
               timestamp: "2026-08-31T00:00:00.000Z",
             },
           }),
-          JSON.stringify({
-            type: "response_item",
-            payload: {
-              id: "session-message",
-              type: "message",
-              role: "assistant",
-              content: [{ type: "output_text", text: "Applying the patch." }],
-            },
-          }),
-          JSON.stringify({
-            type: "event_msg",
-            payload: {
-              type: "token_count",
-              info: {
-                total_token_usage: {
-                  input_tokens: 10,
-                  cached_input_tokens: 2,
-                  output_tokens: 3,
-                },
-              },
-            },
-          }),
+          JSON.stringify(
+            responseMessage("Applying the patch.", "session-message"),
+          ),
+          JSON.stringify(
+            legacyUsageRecord({
+              input_tokens: 10,
+              cached_input_tokens: 2,
+              output_tokens: 3,
+            }),
+          ),
           "",
         ].join("\n"),
       );

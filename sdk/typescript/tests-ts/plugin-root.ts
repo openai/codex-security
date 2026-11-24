@@ -1,3 +1,4 @@
+import { hash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, cp, mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -44,10 +45,27 @@ export const copyCompletedScanFixture = (destination: string) =>
     recursive: true,
   });
 
-export async function copyCompletedScan(root: string): Promise<string> {
+export async function copyCompletedScan(
+  root: string,
+  mode: "standard" | "deep" = "standard",
+): Promise<string> {
   const scanDir = join(root, "scan");
   await copyCompletedScanFixture(scanDir);
   await chmod(scanDir, 0o700);
   await writeFile(join(scanDir, "report.md"), "# Scan report\n");
+  if (mode === "deep") {
+    const coveragePath = join(scanDir, "coverage.json");
+    const coverage = JSON.parse(await readFile(coveragePath, "utf8"));
+    coverage.mode = "deep_repository";
+    const coverageBytes = JSON.stringify(coverage);
+    await writeFile(coveragePath, coverageBytes);
+    const manifestPath = join(scanDir, "scan-manifest.json");
+    const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+    const artifact = manifest.scan.artifacts.find(
+      (entry: { path: string }) => entry.path === "coverage.json",
+    );
+    artifact.sha256 = hash("sha256", coverageBytes);
+    await writeFile(manifestPath, JSON.stringify(manifest));
+  }
   return scanDir;
 }
