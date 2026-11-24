@@ -47,6 +47,12 @@ const testPosix = process.platform === "win32" ? test.skip : test;
 
 afterEach(cleanup);
 
+function saveInterruptedAttempt(paths: Parameters<typeof options>[0]) {
+  return runMultiscan(
+    options(paths, client(rejecting("Interrupted scan")), { maxAttempts: 1 }),
+  );
+}
+
 test("keeps literal CSV scopes at the checked out repository", async () => {
   const name = "keeps literal CSV scopes at the checked out repository";
   if (runTestInSubprocess(import.meta.path, name)) return;
@@ -304,9 +310,7 @@ describe("multiscan", () => {
       "stubborn",
     );
     await appendFile(paths.input, `next,${source.path},${source.revision}\n`);
-    await runMultiscan(
-      options(paths, client(rejecting("Interrupted scan")), { maxAttempts: 1 }),
-    );
+    await saveInterruptedAttempt(paths);
     const checkout = join(
       paths.output,
       "recovery-checkouts",
@@ -415,9 +419,7 @@ describe("multiscan", () => {
 
   test("reuses recovered completion saved before checkout removal", async () => {
     const { paths } = await repositoryFixture("cleanup-interruption", "done");
-    await runMultiscan(
-      options(paths, client(rejecting("Interrupted scan")), { maxAttempts: 1 }),
-    );
+    await saveInterruptedAttempt(paths);
     const checkout = join(
       paths.output,
       "recovery-checkouts",
@@ -961,12 +963,7 @@ describe("multiscan", () => {
     async (recover) => {
       const { paths } = await repositoryFixture("replacement");
       const ledger = join(paths.output, "results.jsonl");
-      if (recover)
-        await runMultiscan(
-          options(paths, client(rejecting("Interrupted scan")), {
-            maxAttempts: 1,
-          }),
-        );
+      if (recover) await saveInterruptedAttempt(paths);
       const before = recover ? await readFile(ledger, "utf8") : undefined;
       const lock = join(paths.output, ".lock");
       const owner = join(lock, "owner.json");
@@ -1075,11 +1072,7 @@ describe("multiscan", () => {
     "does not reserve another attempt when the lock is lost %s recovery",
     async (when) => {
       const { paths } = await repositoryFixture("abandoned");
-      await runMultiscan(
-        options(paths, client(rejecting("Interrupted scan")), {
-          maxAttempts: 1,
-        }),
-      );
+      await saveInterruptedAttempt(paths);
       const artifacts = join(paths.output, "artifacts", "abandoned");
       await mkdir(join(artifacts, "attempt-1"), {
         recursive: true,

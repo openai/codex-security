@@ -449,27 +449,23 @@ async function runCampaign(
     if (artifactsPresent) {
       if (receipt.status === "completed") {
         try {
-          if (receipt.cleanupPending === "checkout") {
+          let checkout: string | undefined;
+          if (receipt.cleanupPending === "checkout")
+            checkout = join(output, "checkouts", task.id);
+          if (receipt.cleanupPending === "recovery-checkout")
+            checkout = await recoveryCheckoutPath(
+              output,
+              task.id,
+              receipt.attempt,
+              "cleanup",
+            );
+          if (checkout)
             await removeCheckout(
-              join(output, "checkouts", task.id),
+              checkout,
               artifactOutput,
               lock,
               options.signal,
             );
-          } else if (receipt.cleanupPending === "recovery-checkout") {
-            const recoveryRoot = join(output, "recovery-checkouts");
-            await lstat(recoveryRoot);
-            await ensureOutputDirectory(recoveryRoot);
-            const taskRoot = join(recoveryRoot, task.id);
-            await lstat(taskRoot);
-            await ensureOutputDirectory(taskRoot);
-            await removeCheckout(
-              join(taskRoot, `attempt-${receipt.attempt}`),
-              artifactOutput,
-              lock,
-              options.signal,
-            );
-          }
         } catch {}
       }
       if (receipt.status !== "failed" && receipt.warnings?.length) {
@@ -555,8 +551,8 @@ async function runCampaign(
         if (options.recoverScan === undefined) attempt = nextAttempt();
         else if (retry === 0) attempt = recoveryAttempt;
         let scanDir = join(artifactRoot, `attempt-${attempt}`);
-        let checkout: string | undefined;
-        let protectedRoot = join(output, "checkouts", task.id);
+        let checkout = join(output, "checkouts", task.id);
+        let reserved = false;
         let attemptedResume = false;
         let failure: string | undefined;
         let cleanupFailure: string | undefined;
@@ -607,13 +603,8 @@ async function runCampaign(
                 task.id,
                 `attempt-${attempt}`,
               );
-              const retained = await lstat(retainedCheckout).catch(
-                (error: NodeJS.ErrnoException) => {
-                  if (error.code !== "ENOENT") throw error;
-                  return undefined;
-                },
-              );
-              if (retained !== undefined) protectedRoot = retainedCheckout;
+              if (await lstat(retainedCheckout).catch(undefinedIfMissingFile))
+                checkout = retainedCheckout;
               attemptedResume = true;
               notifyProgress(options, {
                 repository: task.id,
@@ -655,33 +646,28 @@ async function runCampaign(
               knowledgeBaseFailure = true;
               throw knowledge.failure.error;
             }
-            checkout = await lock.mutate(async () => {
-              if (options.recoverScan !== undefined) {
-                const checkoutRoot = await ensureOutputDirectory(
-                  join(output, "recovery-checkouts"),
+            await lock.mutate(async () => {
+              const recovering = options.recoverScan !== undefined;
+              const destination = recovering
+                ? await recoveryCheckoutPath(output, task.id, attempt)
+                : checkout;
+              // Reserve both paths for recovery. Never replace an interrupted attempt.
+              if (recovering) await mkdir(scanDir, { mode: 0o700 });
+              try {
+                await mkdir(destination, { mode: 0o700 });
+              } catch (error) {
+                if (
+                  recovering ||
+                  (error as NodeJS.ErrnoException).code !== "EEXIST"
+                )
+                  throw error;
+                checkoutOccupied = true;
+                throw new Error(
+                  `Bulk checkout is already occupied: ${destination}. Retry with --recover to use a fresh checkout, or inspect and move the retained checkout before an ordinary retry.`,
                 );
-                const taskRoot = await ensureOutputDirectory(
-                  join(checkoutRoot, task.id),
-                );
-                checkout = join(taskRoot, `attempt-${attempt}`);
-                // Reserve both paths before starting work. An interrupted attempt is never replaced.
-                await mkdir(scanDir, { mode: 0o700 });
-                await mkdir(checkout, { mode: 0o700 });
-              } else {
-                const destination = join(output, "checkouts", task.id);
-                try {
-                  await mkdir(destination, { mode: 0o700 });
-                  checkout = destination;
-                } catch (error) {
-                  if ((error as NodeJS.ErrnoException).code !== "EEXIST")
-                    throw error;
-                  checkoutOccupied = true;
-                  throw new Error(
-                    `Bulk checkout is already occupied: ${destination}. Retry with --recover to use a fresh checkout, or inspect and move the retained checkout before an ordinary retry.`,
-                  );
-                }
               }
-              protectedRoot = checkout;
+              checkout = destination;
+              reserved = true;
               // Claim the fresh checkout before Git or the scanner can fail.
               const marker = await checkoutMarker(checkout, scanDir);
               await mkdir(join(checkout, ".git"), { mode: 0o700 });
@@ -689,7 +675,6 @@ async function runCampaign(
                 flag: "wx",
                 mode: 0o600,
               });
-              return checkout;
             });
             await checkoutRevision(
               task,
@@ -777,7 +762,7 @@ async function runCampaign(
             ? `Bulk attempt directory is not empty: ${scanDir}. Existing artifacts were preserved. Run the same bulk-scan command with --recover to recover interrupted scans or retry failed scans in new attempt directories.`
             : errorMessage(error);
         } finally {
-          if (options.recoverScan === undefined && checkout !== undefined) {
+          if (options.recoverScan === undefined && reserved) {
             cleanupFailure = await removeCheckout(checkout, scanDir, lock);
           }
         }
@@ -790,13 +775,13 @@ async function runCampaign(
         if (threatModelPath === undefined)
           threatModelPath = await readThreatModelPath(scanDir, {
             pythonPath: options.config.pythonPath,
-            protectedRoot,
+            protectedRoot: checkout,
             signal: options.signal?.aborted ? undefined : options.signal,
           });
-        const recoveryCheckout =
-          options.recoverScan !== undefined && failure === undefined
-            ? checkout
-            : undefined;
+        const cleanupRecovery =
+          reserved &&
+          options.recoverScan !== undefined &&
+          failure === undefined;
         const receipt: MultiscanReceipt = {
           ...task,
           status,
@@ -809,7 +794,7 @@ async function runCampaign(
           ...(savedUsage === undefined ? {} : { usage: savedUsage }),
           outcome: options.signal?.aborted ? "canceled" : status,
           ...(reportedError === undefined ? {} : { error: reportedError }),
-          ...(recoveryCheckout !== undefined
+          ...(cleanupRecovery
             ? { cleanupPending: "recovery-checkout" }
             : failure === undefined && cleanupFailure !== undefined
               ? { cleanupPending: "checkout" }
@@ -821,12 +806,18 @@ async function runCampaign(
         };
         const receiptLine = `${JSON.stringify(receipt)}\n`;
         receiptTail = receiptTail.then(() =>
-          lock.mutate(() => appendReceipt(ledger, receiptLine, requireOwner)),
+          lock.mutate(async () => {
+            await using file = await open(ledger, "a", 0o600);
+            // The owner may have changed while opening the ledger.
+            await requireOwner();
+            await file.writeFile(receiptLine, "utf8");
+            await file.sync();
+          }),
         );
         await receiptTail;
         options.signal?.throwIfAborted();
-        if (recoveryCheckout !== undefined) {
-          reportedError = await removeCheckout(recoveryCheckout, scanDir, lock);
+        if (cleanupRecovery) {
+          reportedError = await removeCheckout(checkout, scanDir, lock);
         }
         notifyProgress(options, {
           repository: task.id,
@@ -878,6 +869,21 @@ function notifyProgress(
   event: Parameters<NonNullable<MultiscanOptions["onProgress"]>>[0],
 ): void {
   notify(() => options.onProgress?.(event));
+}
+
+async function recoveryCheckoutPath(
+  output: string,
+  id: string,
+  attempt: number,
+  action: "reserve" | "cleanup" = "reserve",
+) {
+  let parent = output;
+  for (const part of ["recovery-checkouts", id]) {
+    const path = join(parent, part);
+    if (action === "cleanup") await lstat(path);
+    parent = await ensureOutputDirectory(path);
+  }
+  return join(parent, `attempt-${attempt}`);
 }
 
 // A completed attempt can be revisited after its checkout path was reused.
@@ -983,26 +989,10 @@ async function ensureOutputDirectory(
   return canonical;
 }
 
-async function appendReceipt(
-  path: string,
-  receipt: string,
-  requireOwner: () => Promise<void>,
-): Promise<void> {
-  // Check again if the lock directory was replaced while opening the ledger.
-  const file = await open(path, "a", 0o600);
-  try {
-    await requireOwner();
-    await file.writeFile(receipt, "utf8");
-    await file.sync();
-  } finally {
-    await file.close();
-  }
-}
-
 interface SupervisorLock {
   release(): Promise<void>;
   requireOwner(): Promise<void>;
-  mutate<T>(operation: () => Promise<T>): Promise<T>;
+  mutate(operation: () => Promise<void>): Promise<void>;
 }
 
 // Keep one inode across supervisor changes. SQLite releases the transaction on
@@ -1096,7 +1086,7 @@ async function acquireLock(output: string): Promise<SupervisorLock> {
       );
   };
   let active = 0;
-  async function mutate<T>(operation: () => Promise<T>): Promise<T> {
+  async function mutate(operation: () => Promise<void>): Promise<void> {
     // Concurrent workers share the transaction. A losing contender can
     // briefly hold it while rechecking a lease; let the current owner retry.
     while (active === 0) {
@@ -1112,21 +1102,21 @@ async function acquireLock(output: string): Promise<SupervisorLock> {
     active++;
     try {
       await requireOwner();
-      return await operation();
+      await operation();
     } finally {
       if (--active === 0) guard.exec("ROLLBACK");
     }
   }
-  let heartbeat = Promise.resolve();
+  let heartbeat: Promise<void> | undefined;
   const timer = setInterval(() => {
-    heartbeat = heartbeat
-      .then(() =>
-        mutate(() => {
-          const now = new Date();
-          return utimes(ownerPath, now, now);
-        }),
-      )
-      .catch(() => {});
+    heartbeat ??= mutate(() => {
+      const now = new Date();
+      return utimes(ownerPath, now, now);
+    })
+      .catch(() => {})
+      .finally(() => {
+        heartbeat = undefined;
+      });
   }, LOCK_HEARTBEAT_MS);
   timer.unref();
 
