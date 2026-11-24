@@ -2,18 +2,13 @@ import assert from "node:assert/strict";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { test } from "node:test";
-import { importSource } from "./import-module.ts";
+import { bundledMcpDefine, importSource } from "./import-module.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
-const helperUrl = new URL(
-  "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
-  import.meta.url,
-);
 const { normalizeCandidateBatch, normalizeCandidatesCommand } =
-  await importSource(
-    join(import.meta.dirname, "../src/helpers/normalize-candidates.ts"),
-    { define: { "import.meta.url": JSON.stringify(helperUrl.href) } },
-  );
+  await importSource("src/helpers/normalize-candidates.ts", {
+    define: bundledMcpDefine("helpers"),
+  });
 
 const cases = [
   {
