@@ -1159,6 +1159,7 @@ test.each([
   ["profile", "openai"],
   ["root", "openrouter"],
   ["profile", "openrouter"],
+  ["root", "xai"],
 ] as const)(
   "Deep workers, rerun and resume inherit the %s %s endpoint",
   async (selection, provider) => {
@@ -1167,7 +1168,10 @@ test.each([
     const scan = join(root, "scan");
     await mkdir(repository);
     await mkdir(scan, { mode: 0o700 });
-    const endpoint = "https://endpoint.example.test/v1";
+    const endpoint =
+      provider === "xai"
+        ? "https://api.x.ai/v1"
+        : "https://endpoint.example.test/v1";
     const routing: JsonObject =
       provider === "openai"
         ? {
@@ -1178,7 +1182,13 @@ test.each([
             model_provider: provider,
             model_providers: {
               [provider]: {
-                ...OPENROUTER_CODEX_PROVIDER,
+                ...(provider === "xai"
+                  ? {
+                      name: "xAI",
+                      wire_api: "responses",
+                      env_key: "XAI_API_KEY",
+                    }
+                  : OPENROUTER_CODEX_PROVIDER),
                 base_url: endpoint,
                 query_params: { version: "preview" },
               },
@@ -1188,6 +1198,8 @@ test.each([
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
       OPENAI_API_KEY: "synthetic-openai-key",
       OPENROUTER_API_KEY: "synthetic-openrouter-key",
+      XAI_API_KEY: "synthetic-xai-key",
+      NO_PROXY: "example.invalid",
     };
     let recipe: JsonObject;
     const client = new TestClient(
@@ -1229,10 +1241,38 @@ test.each([
                     profile,
                   )
                 : {};
+            const expected = structuredClone(routing);
+            if (provider === "xai") {
+              const settings = await workerRuntimeSettings(options.env!);
+              expect(settings.nativeProfile).toBe(options.nativeProfile);
+              expect(options.env!["NO_PROXY"]).toBe(
+                "example.invalid,127.0.0.1",
+              );
+              expect(settings.environment?.["NO_PROXY"]).toBe(
+                options.env!["NO_PROXY"],
+              );
+              expect(settings.environment?.["XAI_API_KEY"]).toBe(
+                environment.XAI_API_KEY,
+              );
+              const selected = await effectiveProvider(
+                options.env!,
+                repository,
+                profileConfigOverrides(settings.config),
+                settings.nativeProfile,
+              );
+              expect(selected.base_url).toMatch(
+                /^http:\/\/127\.0\.0\.1:\d+\//u,
+              );
+              const providers = expected["model_providers"] as Record<
+                string,
+                JsonObject
+              >;
+              providers[provider]!["base_url"] = selected.base_url;
+            }
             expect({ ...options.config, ...providerConfig }).toMatchObject(
-              routing,
+              expected,
             );
-            expect({ ...runtime, ...providerConfig }).toMatchObject(routing);
+            expect({ ...runtime, ...providerConfig }).toMatchObject(expected);
             throw new Error("synthetic endpoint inherited");
           })(),
       },

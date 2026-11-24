@@ -52,6 +52,8 @@ import {
   createProfileCodex,
   createProviderProfile,
   preflightReadOnlyProfileCodex,
+  profileProxyExclusions,
+  type ProviderProfile,
   providerPreflightCommand,
 } from "./provider-profile.js";
 import {
@@ -202,7 +204,7 @@ export interface ReadOnlyCodexOptions {
   cyberAccessProgram?: CyberAccessProgram;
   config?: CodexSecurityConfig;
   /** @internal Private native profile owned by the calling scan. */
-  nativeProfile?: { name: string; path: string };
+  nativeProfile?: Omit<ProviderProfile, "cleanup">;
   /** @internal */
   codex?: ReadOnlyCodex;
   environment?: NodeJS.ProcessEnv;
@@ -780,6 +782,10 @@ async function startReadOnlyCodexThread(
         ...runtimeOptions.nativeProviderEnvironment,
         ...environment,
       };
+    }
+    if (profile?.loopback) {
+      const env = codexOptions.env ?? environment;
+      codexOptions.env = { ...env, ...profileProxyExclusions(profile, env) };
     }
     const codex =
       profile === undefined

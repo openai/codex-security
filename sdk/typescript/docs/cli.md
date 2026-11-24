@@ -501,9 +501,10 @@ See [Opper's Codex setup guide](https://docs.opper.ai/integrations/coding-agents
 ### xAI Responses API
 
 Codex 0.172.0 sends collaboration and Codex Security MCP tools as `namespace`
-declarations, which xAI rejects. When a private provider profile uses
+declarations, which xAI rejects. When the selected private provider uses
 `https://api.x.ai/v1` over Responses, the SDK starts a local HTTP adapter for
-the lifetime of the profile. It translates tool declarations to functions,
+the lifetime of the profile. Codex and its discovery workers connect directly
+to the adapter on `127.0.0.1`. It translates tool declarations to functions,
 restores tool calls, and replays plaintext subagent messages as assistant text
 with the sender and recipient. It rejects encrypted subagent messages. To try
 it, use the scan command below with that base URL and set `CODEX_API_KEY` to your

@@ -19,6 +19,7 @@ import {
   createProfileCodex,
   createProviderProfile,
   providerPreflightCommand,
+  profileProxyExclusions,
   restoreProviderProfile,
 } from "../src/provider-profile.js";
 import { CodexLoginHandle } from "../src/auth.js";
@@ -888,6 +889,20 @@ test("private profiles adapt direct xAI without rerouting gateways or other prov
       base_url: "https://api.openai.com/v1",
       wire_api: "responses",
     });
+    expect(profileProxyExclusions(profile, { NO_PROXY: "*" })["NO_PROXY"]).toBe(
+      "*,127.0.0.1",
+    );
+    if (process.platform !== "win32") {
+      expect(
+        profileProxyExclusions(profile, {
+          NO_PROXY: "a.test",
+          no_proxy: "b.test",
+        }),
+      ).toEqual({
+        NO_PROXY: "a.test,127.0.0.1",
+        no_proxy: "b.test,127.0.0.1",
+      });
+    }
     const proxyUrl = String(xai["base_url"]);
     await profile.cleanup();
     await expect(
@@ -898,6 +913,25 @@ test("private profiles adapt direct xAI without rerouting gateways or other prov
       }),
     ).rejects.toThrow();
     expect(await readFile(profile.path, "utf8").catch(() => null)).toBe(null);
+  } finally {
+    await profile.cleanup();
+  }
+});
+
+test("an inactive xAI definition keeps its native URL and proxy settings", async () => {
+  const providers = {
+    gateway: { base_url: "https://gateway.example.test/v1" },
+    xai: { base_url: "https://api.x.ai/v1" },
+  };
+  const profile = await createProviderProfile(await temporaryDirectory(), {
+    model_provider: "gateway",
+    model_providers: providers,
+  });
+  try {
+    expect(parse(await readFile(profile.path, "utf8"))).toEqual({
+      model_providers: providers,
+    });
+    expect(profileProxyExclusions(profile, {})).toEqual({});
   } finally {
     await profile.cleanup();
   }

@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Codex, CodexOptions } from "@openai/codex-sdk";
 import { parse } from "smol-toml";
-import { configuredCodexHome } from "./auth.js";
+import { configuredCodexHome, environmentEntry } from "./auth.js";
 import { CodexSecurityError } from "./errors.js";
 import {
   resolveCodexProfile,
@@ -33,7 +33,29 @@ import {
 export interface ProviderProfile {
   name: string;
   path: string;
+  loopback?: boolean;
   cleanup(): Promise<void>;
+}
+
+/** Keep the local adapter connection local, preserving existing proxy exclusions. */
+export function profileProxyExclusions(
+  profile: Pick<ProviderProfile, "loopback"> | undefined,
+  environment: ProcessEnvironment,
+): Record<string, string> {
+  if (!profile?.loopback) return {};
+  const upper = environmentEntry(environment, "NO_PROXY");
+  const lower = environmentEntry(environment, "no_proxy");
+  const exclude = (value?: string) => {
+    if (!value) return "127.0.0.1";
+    if (value.split(",").includes("127.0.0.1")) return value;
+    return `${value},127.0.0.1`;
+  };
+  return {
+    NO_PROXY: exclude(upper ?? lower),
+    ...(process.platform === "win32"
+      ? {}
+      : { no_proxy: exclude(lower ?? upper) }),
+  };
 }
 
 /** Keep provider metadata, analytics consent, and attribution on no-turn commands. */
@@ -118,24 +140,26 @@ export async function createProviderProfile(
     return { name, path, cleanup: () => rm(path, { force: true }) };
   }
 
-  const providers = resolveCodexProfile(config)["model_providers"];
+  const resolved = resolveCodexProfile(config);
+  const providers = resolved["model_providers"];
   const definitions: JsonObject = isRecord(providers) ? { ...providers } : {};
-  // xAI rejects native namespaces. Leave gateways and other providers alone.
+  const selected = resolved["model_provider"];
+  const definition =
+    typeof selected === "string" ? definitions[selected] : undefined;
   const upstream = "https://api.x.ai/v1";
   let adapter:
     Awaited<ReturnType<typeof startResponsesCompatProxy>> | undefined;
   try {
-    for (const [id, definition] of Object.entries(definitions)) {
-      if (
-        !isRecord(definition) ||
-        (definition["wire_api"] ?? "responses") !== "responses" ||
-        definition["supports_websockets"] === true ||
-        (definition["base_url"] !== upstream &&
-          definition["base_url"] !== upstream + "/")
-      )
-        continue;
-      adapter ??= await startResponsesCompatProxy(upstream);
-      definitions[id] = { ...definition, base_url: adapter.baseUrl };
+    if (
+      typeof selected === "string" &&
+      isRecord(definition) &&
+      (definition["wire_api"] ?? "responses") === "responses" &&
+      definition["supports_websockets"] !== true &&
+      (definition["base_url"] === upstream ||
+        definition["base_url"] === upstream + "/")
+    ) {
+      adapter = await startResponsesCompatProxy(upstream);
+      definitions[selected] = { ...definition, base_url: adapter.baseUrl };
     }
     await writeCodexConfig(path, { model_providers: definitions });
   } catch (error) {
@@ -145,6 +169,7 @@ export async function createProviderProfile(
   return {
     name,
     path,
+    loopback: adapter !== undefined,
     cleanup: async () => {
       try {
         await adapter?.close();
