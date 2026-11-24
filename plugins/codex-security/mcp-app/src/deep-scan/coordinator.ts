@@ -194,24 +194,27 @@ export class DeepScanCoordinator {
     return this.terminalResult.promise.then(cloneState);
   }
 
-  // Only the initiating MCP request may stop the scan with a refusal.
-  async waitForParent(
+  // An MCP caller can supply an exact refusal as its cancellation reason.
+  // Apply it synchronously so queued publication cannot race past the abort.
+  async waitForInitialRequest(
     signal: AbortSignal | undefined,
   ): Promise<DeepScanRunState> {
+    if (!signal) return this.wait(signal);
+    const onAbort = () => {
+      if (
+        this.terminal ||
+        !CYBERSECURITY_POLICY_REFUSAL_MESSAGES.has(signal.reason)
+      )
+        return;
+      this.abortController.abort(new DeepScanNonRetryableError(signal.reason));
+      this.publicationAbortController.abort(signal.reason);
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
     try {
       return await this.wait(signal);
-    } catch (error) {
-      if (
-        !this.terminal &&
-        signal?.aborted &&
-        CYBERSECURITY_POLICY_REFUSAL_MESSAGES.has(signal.reason)
-      ) {
-        this.abortController.abort(
-          new DeepScanNonRetryableError(signal.reason),
-        );
-        this.publicationAbortController.abort(signal.reason);
-      }
-      throw error;
+    } finally {
+      signal.removeEventListener("abort", onAbort);
     }
   }
 

@@ -32,8 +32,8 @@ export async function testDeepScanLifecycle(context: TestContext) {
   for (const check of [
     lateCancellationWaitsForPersistence,
     failedParentCancellationStopsActiveWorker,
-    refusalStopsOnlyTheInitiatingWaiter,
-    parentRefusalDuringPublicationPreservesCommittedSuccess,
+    onlyTheInitiatingRequestCanFailDiscovery,
+    refusalStopsPublicationButPreservesCommittedSuccess,
     canceledPublicationWaitsForHeartbeat,
     delayedIterationDoesNotReplaceStoppedState,
     replacementWaitsForTerminalResult,
@@ -49,7 +49,7 @@ export async function testDeepScanLifecycle(context: TestContext) {
     await context.test(check.name, check);
   }
 
-  async function refusalStopsOnlyTheInitiatingWaiter() {
+  async function onlyTheInitiatingRequestCanFailDiscovery() {
     const refusal = "This content was flagged for possible cybersecurity risk.";
     for (const [parent, reason, failed] of [
       [true, refusal, true],
@@ -72,7 +72,7 @@ export async function testDeepScanLifecycle(context: TestContext) {
         await eventually(() => executor.discoveryCalls === 2);
         const caller = new AbortController();
         const waiter = parent
-          ? coordinator.waitForParent(caller.signal)
+          ? coordinator.waitForInitialRequest(caller.signal)
           : coordinator.wait(caller.signal);
         caller.abort(reason);
         await assert.rejects(waiter, { name: "AbortError", cause: reason });
@@ -87,7 +87,7 @@ export async function testDeepScanLifecycle(context: TestContext) {
     }
   }
 
-  async function parentRefusalDuringPublicationPreservesCommittedSuccess() {
+  async function refusalStopsPublicationButPreservesCommittedSuccess() {
     const refusal = "Request blocked by cyberPolicy.";
     for (const during of ["publication", "committed", "lost-response"]) {
       const { fixture, store } = await coordinatorFixture(config);
@@ -101,19 +101,16 @@ export async function testDeepScanLifecycle(context: TestContext) {
       };
       const coordinator = startCoordinator(fixture, store, new FakeExecutor(), {
         threadId: "fixture-owner",
-        onComplete: async () => {
-          if (during === "publication") await gate.pause();
-        },
+        onComplete: () =>
+          during === "publication" ? gate.pause() : Promise.resolve(),
       });
-      try {
-        await gate.entered;
-        await assert.rejects(
-          coordinator.waitForParent(AbortSignal.abort(refusal)),
-          { name: "AbortError", cause: refusal },
-        );
-      } finally {
-        gate.release();
-      }
+      const caller = new AbortController();
+      const waiter = coordinator.waitForInitialRequest(caller.signal);
+      await gate.entered;
+      // Queue publication's continuation, then cancel before it can start finish.
+      gate.release();
+      caller.abort(refusal);
+      await assert.rejects(waiter, { name: "AbortError", cause: refusal });
       const stopped = await coordinator.settled();
       const failed = during === "publication";
       assert.equal(stopped.status, failed ? "failed" : "succeeded");

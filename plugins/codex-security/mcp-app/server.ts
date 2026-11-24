@@ -1151,7 +1151,7 @@ export function createCodexSecurityServer(): McpServer {
           const signal = abortSignalFromExtra(extra);
           const terminal = await (!joined &&
           coordinator instanceof DeepScanCoordinator
-            ? coordinator.waitForParent(signal)
+            ? coordinator.waitForInitialRequest(signal)
             : coordinator.wait(signal));
           result = preparation.completion.result
             ? await preparation.completion.result

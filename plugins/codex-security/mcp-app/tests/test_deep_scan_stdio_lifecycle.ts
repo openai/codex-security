@@ -1245,7 +1245,7 @@ service_tier = "ultrafast"
       await restartedServer.stop();
     }
     await testDetachedTargetReplay(serverBundlePath, environment, targetPath);
-    await testParentTurnRefusalFailsScan(
+    await testExplicitRefusalFailsScan(
       serverBundlePath,
       environment,
       targetPath,
@@ -1333,7 +1333,7 @@ async function testDetachedTargetReplay(
   }
 }
 
-async function testParentTurnRefusalFailsScan(
+async function testExplicitRefusalFailsScan(
   serverBundlePath: string,
   environment: NodeJS.ProcessEnv,
   targetPath: string,
@@ -1356,33 +1356,25 @@ async function testParentTurnRefusalFailsScan(
       requestId: 2,
       reason: refusal,
     });
-    await waitFor(async () => {
-      const state = await getDeepScan({ environment, scanId, threadId });
-      return state.status === "failed";
-    }, "the refused parent turn to fail the scan");
-    assert.equal(server.response(2)?.result?.structuredContent, undefined);
-    const failedState = await getDeepScan({ environment, scanId, threadId });
-    assert.equal(failedState.status, "failed");
-    assert.equal(failedState.error, refusal);
-    assert.equal(
-      failedState.workers.every(
-        (worker: PersistedDeepScanWorker) =>
-          !["queued", "running"].includes(worker.status),
-      ),
-      true,
-    );
-
-    const failedLateJoin = await server.callTool(
+    const joined = await server.callTool(
       3,
       toolCall("start_codex_security_deep_scan", { scanId }, threadId),
     );
-    const failedLateJoinText =
-      failedLateJoin.result?.content
-        ?.map((item: { text: string }) => item.text)
-        .join(" ") ?? "";
-    assert.equal(failedLateJoin.result?.isError, true);
-    assert.equal(failedLateJoin.result?.structuredContent, undefined);
-    assert.ok(failedLateJoinText.includes(refusal));
+    assert.equal(joined.result?.isError, true);
+    assert.ok(
+      joined.result.content.some((item: { text: string }) =>
+        item.text.includes(refusal),
+      ),
+    );
+    const state = await getDeepScan({ environment, scanId, threadId });
+    assert.equal(state.status, "failed");
+    assert.equal(state.error, refusal);
+    assert.ok(
+      state.workers.every(
+        (worker: PersistedDeepScanWorker) =>
+          !["queued", "running"].includes(worker.status),
+      ),
+    );
   } finally {
     await server.stop();
   }
