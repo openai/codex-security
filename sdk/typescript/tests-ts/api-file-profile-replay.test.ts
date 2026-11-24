@@ -2,7 +2,6 @@ import { afterEach, expect, onTestFinished, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { once } from "node:events";
 import {
-  appendFile,
   cp,
   mkdir,
   readFile,
@@ -35,7 +34,6 @@ import { preparedRuntime } from "./support/api-events.js";
 import { rejecting } from "./support/errors.js";
 import { useTestPython } from "./support/python.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
-import { writeSession } from "./support/usage-rollout.js";
 
 const pythonExecutable = useTestPython();
 
@@ -275,6 +273,10 @@ test.serial.each([
         scanId,
       ]);
       expect(recipe).toEqual(submitted!);
+      expect(submitted!["modelDefaults"]).toEqual({
+        model: "gpt-6.1-sol",
+        reasoningEffort: "high",
+      });
       expect(JSON.stringify(recipe)).not.toContain("synthetic-private-value");
       await writeFile(profilePath, stringify(fileProfile("reloaded")));
       let replay: JsonObject | undefined;
@@ -610,46 +612,41 @@ test("private replay preserves explicit clears over projected defaults and empty
   }
 });
 
-test.each([true, false])(
-  "resuming a file profile keeps inherited model settings (budgeted: %p)",
-  async (budgeted) => {
+test.each([
+  ["resume", undefined, "", "gpt-5.6-sol", "xhigh"],
+  ["resume", undefined, 'model = "gpt-6-sol"', "gpt-6-sol", "xhigh"],
+  [
+    "resume",
+    { model: "gpt-6-sol", reasoningEffort: "high" },
+    'model_reasoning_effort = "low"',
+    "gpt-6-sol",
+    "low",
+  ],
+  ["rerun", undefined, "", "gpt-6.1-sol", "high"],
+] as const)(
+  "%s a file profile with saved defaults %p and current settings %p",
+  async (operation, modelDefaults, profile, model, effort) => {
     const home = await temporaryDirectory();
     const repository = await temporaryDirectory();
     const scanDir = await temporaryDirectory();
     const environment = { CODEX_HOME: home, CODEX_SECURITY_STATE_DIR: home };
-    await writeFile(
-      join(home, "review.config.toml"),
-      budgeted ? "" : 'model_reasoning_effort = "low"',
-    );
-    const threadId = "thread-1";
-    const path = await writeSession(
-      codexSecurityCredentialHome(environment),
-      threadId,
-      {},
-      { cwd: scanDir },
-    );
-    await appendFile(
-      path,
-      JSON.stringify({
-        type: "turn_context",
-        payload: { model: "gpt-5.6-sol", effort: "xhigh" },
-      }) + "\n",
-    );
+    await writeFile(join(home, "review.config.toml"), profile);
     const recipe = {
       repository,
       target: { kind: "repository", paths: [] },
       mode: "deep",
       config: { profile: "review" },
-      ...(budgeted ? { maxCostUsd: 3 } : {}),
+      maxCostUsd: 3,
+      ...(modelDefaults && { modelDefaults }),
     };
     let replay: JsonObject | undefined;
     const status = await main(
-      ["scans", "resume", "saved", "--json"],
+      ["scans", operation, "saved", "--json"],
       capture().stream,
       capture().stream,
       dependencies({
         environment,
-        onWorkbench: () => ({ scanId: "saved", scanDir, threadId, recipe }),
+        onWorkbench: () => ({ scanId: "saved", scanDir, recipe }),
         onConfig: (config) => {
           replay = config.codexOverrides;
         },
@@ -659,8 +656,8 @@ test.each([true, false])(
     expect(
       await mergedCodexConfig({ codexOverrides: replay }, home),
     ).toMatchObject({
-      model: "gpt-5.6-sol",
-      model_reasoning_effort: budgeted ? "xhigh" : "low",
+      model,
+      model_reasoning_effort: effort,
     });
   },
 );

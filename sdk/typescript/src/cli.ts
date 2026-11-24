@@ -391,7 +391,6 @@ import {
 import {
   findScanSession,
   readSavedScanLogs,
-  scanSessionModelSettings,
   type ScanLogSource,
 } from "./scan-logs.js";
 import { sendFeedback } from "./feedback.js";
@@ -8987,7 +8986,7 @@ async function runScanImport(
 }
 
 async function prepareScanArgumentsFromRecipe(
-  { recipe, userContext, threadId, scanDir }: JsonObject,
+  { recipe, userContext }: JsonObject,
   operation: "resume" | "rerun",
   directory: string,
   environment: CliDependencies["environment"],
@@ -9168,16 +9167,17 @@ async function prepareScanArgumentsFromRecipe(
       "This scan used additional instructions. The --scan-prompt-file must not be empty.",
     );
   }
-  let replayConfig = await restoreProviderProfile(
-    config,
-    recipe["providerProfile"],
-    environment,
-  );
-  // File profiles reload on resume. Keep inherited launch defaults from
-  // the owning session so an upgrade cannot reprice cumulative usage.
+  const replayConfig = {
+    ...(await restoreProviderProfile(
+      config,
+      recipe["providerProfile"],
+      environment,
+    )),
+  };
+  // File profiles reload on resume. Keep the original default rates for
+  // cumulative usage without restoring settings since removed from the file.
   if (
     operation === "resume" &&
-    typeof threadId === "string" &&
     typeof replayConfig["profile"] === "string" &&
     !selectedScanProfile(replayConfig)
   ) {
@@ -9185,21 +9185,22 @@ async function prepareScanArgumentsFromRecipe(
       replayConfig,
       scanCodexHome(environment),
     );
-    const missing = ["model", "model_reasoning_effort"].filter(
-      (key) => !(key in replayConfig) && !(key in profile),
-    );
-    if (missing.length) {
-      const session = await findScanSession(
-        codexSecurityCredentialHome(environment),
-        threadId,
+    // All file-profile recipes before modelDefaults used these scanner defaults.
+    const defaults = z
+      .object({ model: z.string(), reasoningEffort: z.string() })
+      .parse(
+        recipe["modelDefaults"] ?? {
+          model: "gpt-5.6-sol",
+          reasoningEffort: "xhigh",
+        },
       );
-      if (session && session.workingDirectory === scanDir) {
-        const original = await scanSessionModelSettings(session.path);
-        replayConfig = { ...replayConfig };
-        for (const key of missing)
-          if (original[key] !== undefined) replayConfig[key] = original[key];
-      }
-    }
+    if (!("model" in profile) && !("model" in replayConfig))
+      replayConfig["model"] = defaults.model;
+    if (
+      !("model_reasoning_effort" in profile) &&
+      !("model_reasoning_effort" in replayConfig)
+    )
+      replayConfig["model_reasoning_effort"] = defaults.reasoningEffort;
   }
   return {
     repository,

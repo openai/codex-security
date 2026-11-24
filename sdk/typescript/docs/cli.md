@@ -1431,6 +1431,8 @@ set `codex.profile: review`. The profile file uses top-level Codex TOML keys.
 Its settings override scanner defaults. Explicit scan settings take precedence.
 Relative file paths, including `model_instructions_file`, resolve from the
 profile directory. Saved launches retain the profile name and reload its settings.
+For an omitted model or effort, `scans resume` retains the scanner defaults from
+the original launch. `scans rerun` uses the installed scanner's defaults.
 Include custom provider definitions in the file so the scan
 can use them from its isolated Codex home. An absent file contributes no
 settings. Existing inline `profiles` tables still work.
