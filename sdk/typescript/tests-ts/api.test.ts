@@ -4374,71 +4374,38 @@ if __name__ == "__main__":
     await client.close();
   });
 
+  const refusal = "This content was flagged for possible cybersecurity risk.";
+  const nativeFailure = "Synthetic native turn failure";
   test.each([
-    ["This content was flagged for possible cybersecurity risk.", false, 1],
+    ["turn.failed", refusal, null, 1],
     [
+      "error",
       "This request was blocked due to a misalignment policy violation.",
-      true,
+      null,
       1,
     ],
-    [
-      "Command failed: This content was flagged for possible cybersecurity risk.",
-      true,
-      2,
-    ],
+    ["error", `Command failed: ${refusal}`, null, 2],
+    ["turn.failed", nativeFailure, "before", 1],
+    ["turn.failed", nativeFailure, "after", 1],
+    ["error", refusal, "before", 1],
+    ["error", refusal, "after", 1],
   ] as const)(
-    "skips the Standard follow-up only for a native refusal: %s",
-    async (message, errorFirst, turns) => {
-      const { repository, codexHome, scanDir } = await scanDirectories();
-      async function* events(): AsyncGenerator<ThreadEvent> {
-        yield { type: "thread.started", thread_id: "thread-1" };
-        yield { type: "turn.started" };
-        if (errorFirst) yield { type: "error", message };
-        yield { type: "turn.failed", error: { message } };
-      }
-      const runStreamed = mock(async () => ({ events: events() }));
-      let failure: readonly string[] | undefined;
-      await using client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        createCodex: codexFactory(runStreamed),
-        runWorkbench: async (_options, args, input) => {
-          if (args[0] === "fail-scan") failure = args;
-          return mockWorkbench(args, input);
-        },
-      });
-      await expect(
-        client.run(repository, { postScanPrompt: "Summarize the scan." }),
-      ).rejects.toThrow(message);
-      expect(runStreamed).toHaveBeenCalledTimes(turns);
-      expect(failure).toContain(`--message=${message}`);
-    },
-  );
-
-  test.each([
-    ["turn.failed", true],
-    ["turn.failed", false],
-    ["error", true],
-    ["error", false],
-  ] as const)(
-    "records a native failure only when %s preceded cancellation (failure first: %p)",
-    async (type, failureFirst) => {
+    "records the scan outcome and Standard follow-up for %s (%s, cancel %p)",
+    async (type, message, cancel, turns) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const controller = new AbortController();
-      const message =
-        type === "error"
-          ? "This request has been flagged for possible cybersecurity risk."
-          : "Synthetic native turn failure";
       async function* events(): AsyncGenerator<ThreadEvent> {
-        if (!failureFirst) controller.abort();
+        yield { type: "thread.started", thread_id: "thread-1" };
+        if (cancel === "before") controller.abort();
         try {
-          yield type === "error"
-            ? { type, message }
-            : { type, error: { message } };
+          if (type === "error") yield { type, message };
+          yield* failedEvents(message);
         } finally {
-          // The reader closes a failed stream after observing its terminal event.
-          if (failureFirst) controller.abort();
+          // The reader closes the stream when it observes a failure.
+          if (cancel === "after") controller.abort();
         }
       }
+      const runStreamed = mock(async () => ({ events: events() }));
       const telemetry: Readonly<OperationTelemetryEvent>[] = [];
       let stopped: readonly string[] | undefined;
       await using client = TestClient.withDependencies({
@@ -4448,7 +4415,7 @@ if __name__ == "__main__":
             ...options,
             directory: join(root, "journal"),
           }),
-        createCodex: codexFactory(async () => ({ events: events() })),
+        createCodex: codexFactory(runStreamed),
         runWorkbench: async (_options, args, input) => {
           if (args[0] === "fail-scan" || args[0] === "cancel-scan")
             stopped = args;
@@ -4458,20 +4425,23 @@ if __name__ == "__main__":
       await expect(
         client.run(repository, {
           signal: controller.signal,
+          postScanPrompt: "Summarize the scan.",
           onTelemetry: (event) => telemetry.push(event),
         }),
-      ).rejects.toThrow();
+      ).rejects.toThrow(cancel === null ? message : undefined);
+      expect(runStreamed).toHaveBeenCalledTimes(turns);
+      const canceled = cancel === "before";
       expect(
         telemetry.filter((event) => event.type === "attempt_finished"),
       ).toEqual([
         expect.objectContaining({
-          outcome: failureFirst ? "failed" : "canceled",
-          failureCategory: failureFirst ? "execution" : "canceled",
+          outcome: canceled ? "canceled" : "failed",
+          failureCategory: canceled ? "canceled" : "execution",
         }),
       ]);
-      expect(controller.signal.aborted).toBe(true);
-      expect(stopped?.[0]).toBe(failureFirst ? "fail-scan" : "cancel-scan");
-      if (failureFirst) expect(stopped).toContain(`--message=${message}`);
+      expect(controller.signal.aborted).toBe(cancel !== null);
+      expect(stopped?.[0]).toBe(canceled ? "cancel-scan" : "fail-scan");
+      if (!canceled) expect(stopped).toContain(`--message=${message}`);
     },
   );
 
