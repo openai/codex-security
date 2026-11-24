@@ -441,6 +441,13 @@ reported window. An allowance can arrive before any token measurement. See
 [telemetry and measurement](telemetry.md) for operation receipts, collection
 controls, replay, and reporting definitions.
 
+On a local Windows drive, `onActivity` can report a repository-relative path
+when the tool spells the checkout directory with different casing. The SDK
+compares the directories' filesystem identities on the scan host and preserves
+the spelling of the relative filename. A different checkout, an inaccessible
+directory, or a case difference in a UNC share or directory yields no path for
+that operand.
+
 Follow scans with `onWorkerEvent` and `onReconnect`. `onWorkerEvent` reports
 persisted worker sessions discovered by the SDK's existing session tracker,
 independently of model-emitted status markers:

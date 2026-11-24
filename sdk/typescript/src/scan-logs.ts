@@ -1,8 +1,10 @@
 import { basename, dirname, isAbsolute, join, relative, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { observedEventKey, readActivityPaths } from "./observed-activities.js";
 import { firstNativeSessionLine, sessionLines } from "./session-lines.js";
 import { parseJson } from "./value.js";
 import { isRecord } from "./record.js";
+import { isSessionToolCall } from "./scan-activity.js";
 import { sessionFiles } from "./cost.js";
 import { CodexSecurityError } from "./errors.js";
 import type { JsonObject } from "./config.js";
@@ -232,6 +234,11 @@ export async function readScanLogs(options: ScanLogOptions) {
     }
     sessions.push(session);
   }
+  const { observedPaths, live } = await readActivityPaths(
+    homes,
+    options.scanId,
+    { includeLive: true },
+  );
   const events: Record<string, unknown>[] = [];
   // Recorded completion can precede the scan turn's final response. Keep that
   // turn's remaining events, then stop before a post-completion turn starts.
@@ -251,7 +258,20 @@ export async function readScanLogs(options: ScanLogOptions) {
         replaying = false;
       }
       if (taskStarted && startsAfterCompletion(event["timestamp"])) break;
-      events.push({ threadId: session.threadId, event });
+      const eventKey =
+        observedPaths.size > 0 &&
+        event["type"] === "response_item" &&
+        isRecord(payload) &&
+        isSessionToolCall(payload["type"])
+          ? observedEventKey(session.threadId, event)
+          : undefined;
+      const paths =
+        eventKey === undefined ? undefined : observedPaths.get(eventKey);
+      events.push({
+        threadId: session.threadId,
+        event,
+        ...(paths && { paths }),
+      });
     }
   }
 
@@ -262,6 +282,9 @@ export async function readScanLogs(options: ScanLogOptions) {
       threadId,
       parentThreadId,
       path,
+      ...(live.has(threadId) && {
+        observedActivities: [...live.get(threadId)!.values()],
+      }),
     })),
     events,
   };

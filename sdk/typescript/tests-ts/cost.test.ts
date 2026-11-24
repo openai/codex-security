@@ -1,3 +1,4 @@
+import { ActivityObservations } from "../src/observed-activities.js";
 import { execFile } from "node:child_process";
 import { appendFileSync, writeFileSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -167,6 +168,22 @@ async function workerSessionFixture() {
   return { home, usage, parent, worker };
 }
 
+function driveObservations(
+  home: string,
+  verify?: ActivityObservations["verifyDirectory"],
+) {
+  const repository = "C:/Work/Repo";
+  return {
+    repository,
+    activityObservations: new ActivityObservations(
+      home,
+      "scan-example",
+      repository,
+      verify,
+    ),
+  };
+}
+
 function costTracker(
   home: string,
   options: Omit<
@@ -190,13 +207,23 @@ function activityTracker(home: string) {
   return { activities, tracker };
 }
 
+function readFileCall(id: string, args: string | { path: string }) {
+  return {
+    type: "function_call",
+    name: "read_file",
+    call_id: id,
+    arguments: args,
+  };
+}
+
 async function appendSessionItem(
   path: string,
   payload: Readonly<Record<string, unknown>>,
+  timestamp?: string,
 ): Promise<void> {
   await appendFile(
     path,
-    `${JSON.stringify({ type: "response_item", payload })}\n`,
+    `${JSON.stringify({ timestamp, type: "response_item", payload })}\n`,
   );
 }
 
@@ -4321,6 +4348,190 @@ describe("live scan cost tracking", () => {
     const ownedEvents = [rollout[0]!, ...rollout.slice(-3)];
     expect(forwardedEvents.map(({ event }) => event)).toEqual(ownedEvents);
     expect(saved.events.map(({ event }) => event)).toEqual(ownedEvents);
+  });
+
+  test("keeps parent and worker usage at their first read boundary when capturing drive aliases", async () => {
+    const { home, parent, worker } = await workerSessionFixture();
+    const pending = new Set([parent, worker]);
+    const totals: number[] = [];
+    const tracker = costTracker(home, {
+      ...driveObservations(home, () => false),
+      onUsage: (usage) => totals.push(usage.input_tokens),
+    });
+    const original = filesystem.open;
+    const opening = spyOn(filesystem, "open").mockImplementation(
+      async (...args: Parameters<typeof original>) => {
+        const handle = await original(...args);
+        const file = String(args[0]);
+        if (pending.delete(file)) {
+          const close = handle.close.bind(handle);
+          handle.close = async () => {
+            await appendFile(
+              file,
+              JSON.stringify({
+                type: "event_msg",
+                payload: {
+                  type: "token_count",
+                  info: {
+                    total_token_usage: { input_tokens: 300, output_tokens: 10 },
+                  },
+                },
+              }) + "\n",
+            );
+            return close();
+          };
+        }
+        return handle;
+      },
+    );
+    try {
+      tracker.beginParentTurn();
+      tracker.start("scan-thread");
+      await tracker.stop();
+      expect(totals).toEqual([200, 600]);
+    } finally {
+      opening.mockRestore();
+    }
+  });
+
+  test("observes a worker call when its rollout moves after the first read", async () => {
+    const { home, worker } = await workerSessionFixture();
+    const tracker = costTracker(
+      home,
+      driveObservations(home, () => true),
+    );
+    tracker.beginParentTurn();
+    await appendSessionItem(
+      worker,
+      readFileCall("owned", { path: "c:/WORK/Repo/Src/owned.ts" }),
+      new Date().toISOString(),
+    );
+    const archive = join(home, "archived_sessions");
+    await filesystem.mkdir(archive);
+    const original = filesystem.open;
+    const opening = spyOn(filesystem, "open").mockImplementation(
+      async (...args: Parameters<typeof original>) => {
+        const handle = await original(...args);
+        if (String(args[0]) === worker) {
+          const close = handle.close.bind(handle);
+          handle.close = async () => {
+            await close();
+            await filesystem.rename(worker, join(archive, basename(worker)));
+          };
+        }
+        return handle;
+      },
+    );
+    try {
+      tracker.start("scan-thread");
+      await tracker.stop();
+    } finally {
+      opening.mockRestore();
+    }
+    const logs = await readScanLogs({
+      codexHome: home,
+      scanId: "scan-example",
+      threadId: "scan-thread",
+    });
+    expect(logs.events.flatMap((row) => row["paths"] ?? [])).toEqual([
+      "Src/owned.ts",
+    ]);
+  });
+
+  test("saves only current owned drive aliases and replays the originating call", async () => {
+    const { home, parent, worker, usage } = await workerSessionFixture();
+    const unrelated = await writeSession(home, "other-thread", usage);
+    const archive = join(home, "archived_sessions");
+    await filesystem.mkdir(archive);
+    const archivedWorker = await writeSession(home, "archived-worker", usage, {
+      parent: "scan-thread",
+    });
+    const archived = join(archive, basename(archivedWorker));
+    await filesystem.rename(archivedWorker, archived);
+    const checked: string[] = [];
+    const tracker = costTracker(
+      home,
+      driveObservations(home, (_repository, candidate) => {
+        checked.push(candidate);
+        return candidate === "c:/WORK/Repo";
+      }),
+    );
+    // Resume replays existing rows before the new local turn is launched.
+    await appendSessionItem(
+      worker,
+      readFileCall(
+        "previous-turn",
+        JSON.stringify({ path: "c:/WORK/Repo/Src/previous.ts" }),
+      ),
+      new Date().toISOString(),
+    );
+    tracker.start("scan-thread");
+    await tracker.refresh();
+    expect(checked).toBeEmpty();
+    tracker.beginParentTurn();
+    const timestamp = new Date().toISOString();
+    for (const [file, id, prefix, time] of [
+      [parent, "parent", "c:/WORK/Repo", timestamp],
+      [worker, "owned", "c:/WORK/Repo", timestamp],
+      [worker, "sibling", "c:/Work/repo", timestamp],
+      [worker, "stale", "c:/WORK/Repo", "2020-01-01T00:00:00Z"],
+      [worker, "undated", "c:/WORK/Repo", undefined],
+      [archived, "archived", "c:/WORK/Repo", timestamp],
+      [unrelated, "unrelated", "c:/WORK/Repo", timestamp],
+    ] as const) {
+      const path = `${prefix}/Src/${id}.ts`;
+      await appendSessionItem(
+        file,
+        readFileCall(id, JSON.stringify({ path })),
+        time,
+      );
+      await appendSessionItem(file, {
+        type: "function_call_output",
+        call_id: id,
+      });
+    }
+    await tracker.stop();
+    expect(checked.sort()).toEqual(["c:/WORK/Repo", "c:/Work/repo"]);
+
+    const logs = await readScanLogs({
+      codexHome: home,
+      scanId: "scan-example",
+      threadId: "scan-thread",
+    });
+    expect(
+      logs.events
+        .flatMap((row) => (Array.isArray(row["paths"]) ? row["paths"] : []))
+        .sort(),
+    ).toEqual(["Src/owned.ts"]);
+    // Same call ID, different native row. A receipt must not bleed into it.
+    await appendSessionItem(
+      worker,
+      readFileCall(
+        "owned",
+        JSON.stringify({ path: "c:/WORK/Repo/unobserved.ts" }),
+      ),
+    );
+    const replayed: ScanActivity[] = [];
+    const replay = costTracker(home, {
+      ...driveObservations(home),
+      onActivity: (activity) => replayed.push(activity),
+    });
+    replay.start("scan-thread");
+    await replay.stop();
+    expect(
+      replayed
+        .filter((activity) => activity.id === "worker-thread:owned")
+        .map((activity) => [activity.status, activity.paths]),
+    ).toEqual([
+      ["running", ["Src/owned.ts"]],
+      ["completed", ["Src/owned.ts"]],
+      ["running", []],
+    ]);
+    expect(
+      replayed
+        .filter((activity) => activity.id !== "worker-thread:owned")
+        .flatMap((activity) => activity.paths),
+    ).toEqual([]);
   });
 
   test("forwards actions from this scan's delegated workers only", async () => {

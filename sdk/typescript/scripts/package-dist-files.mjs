@@ -189,6 +189,7 @@ const distModules = [
   "models",
   "multiscan",
   "mock-scan",
+  "observed-activities",
   "operation-telemetry",
   "owner-evidence",
   "patch-publication",

@@ -17,6 +17,7 @@ import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import { isRecord } from "./record.js";
 import { errorMessage } from "./errors.js";
+import type { ActivityObservations } from "./observed-activities.js";
 import { sessionLines } from "./session-lines.js";
 import {
   estimateScanCost,
@@ -26,6 +27,7 @@ import {
   type ScanTokenUsage,
 } from "./cost-model.js";
 import {
+  isSessionToolCall,
   scanActivityFromSessionEvent,
   sessionContentText,
   type ScanActivity,
@@ -168,6 +170,11 @@ function createSessionReasoning(id: string, text = "") {
 }
 
 type SessionObservation<T> = { position: number; value: T };
+
+type SessionActivity = SessionObservation<ScanActivity> & {
+  // A call and its completion share the decision made for the originating row.
+  source?: { event: Record<string, unknown>; paths?: string[] };
+};
 
 interface SessionProgress {
   update: ScanProgress;
@@ -337,6 +344,7 @@ interface ScanCostTrackerOptions {
   pricingContext?: ScanPricingContext;
   model: string;
   repository?: string;
+  activityObservations?: ActivityObservations;
   scanDirectory?: string;
   /** Host-bound store outside model-writable scan artifacts, for Deep scans only. */
   workerReceipts?: { directory: string; scanId: string };
@@ -380,8 +388,9 @@ export interface ScanCostSnapshot {
 const COST_POLL_INTERVAL_MS = 100;
 const SESSION_READ_SIZE = 64 * 1_024;
 
-function createSessionUsage(observeUsage: boolean) {
+function createSessionUsage(observeUsage: boolean, aliasRepository?: string) {
   return {
+    aliasRepository,
     offset: 0,
     decoder: new StringDecoder("utf8"),
     pendingLine: [] as string[],
@@ -401,8 +410,8 @@ function createSessionUsage(observeUsage: boolean) {
     responseUsage: null as ScanTokenUsage | null,
     responseIds: new Set<string>(),
     eventPosition: 0,
-    calls: new Map<string, ScanActivity>(),
-    activities: [] as SessionObservation<ScanActivity>[],
+    calls: new Map<string, SessionActivity>(),
+    activities: [] as SessionActivity[],
     progress: [] as SessionProgress[],
     position: 0,
     completions: [] as SessionCompletion[],
@@ -542,6 +551,7 @@ export class ScanCostTracker {
 
   /** Called before launching a turn, after loading any resumed history. */
   public beginParentTurn(resumed = false): void {
+    this.#options.activityObservations?.beginParentTurn();
     this.#parentTurnFilesTotal = this.#expectedFilesTotal;
     this.#parentTurnStartKnown = this.#parentSession !== null || !resumed;
     for (const live of this.#liveParentItems) {
@@ -2349,6 +2359,7 @@ export class ScanCostTracker {
       this.#options.onMeasurement === undefined &&
       this.#options.onUsageObservation === undefined &&
       this.#options.onActivity === undefined &&
+      this.#options.activityObservations?.verifyDirectory === undefined &&
       this.#options.onProgress === undefined &&
       this.#options.onSessionEvent === undefined &&
       this.#options.onWorkerEvent === undefined
@@ -2408,6 +2419,7 @@ export class ScanCostTracker {
     if (this.#threadId === null) return;
     if (
       this.#options.onActivity ||
+      this.#options.activityObservations?.verifyDirectory ||
       this.#options.onProgress ||
       this.#options.onWorkerEvent ||
       this.#options.onSessionEvent ||
@@ -2467,12 +2479,15 @@ export class ScanCostTracker {
       this.#options.onActivity === undefined
         ? undefined
         : this.#options.repository;
+    const observations = this.#options.activityObservations;
+    const aliasRepository = observations?.repository;
     const collectionErrors: unknown[] = [];
     const progressThread =
       this.#options.onProgress === undefined ? undefined : this.#threadId;
     const observeHealthySessions =
       this.#options.maxCostUsd === undefined &&
       (this.#options.onActivity !== undefined ||
+        this.#options.activityObservations?.verifyDirectory !== undefined ||
         this.#options.onProgress !== undefined ||
         this.#options.onSessionEvent !== undefined ||
         this.#options.onWorkerEvent !== undefined);
@@ -2486,7 +2501,7 @@ export class ScanCostTracker {
         )) {
           let session = this.#sessions.get(path);
           if (session === undefined) {
-            session = createSessionUsage(observeUsage);
+            session = createSessionUsage(observeUsage, aliasRepository);
             this.#sessions.set(path, session);
           }
           try {
@@ -2605,7 +2620,10 @@ export class ScanCostTracker {
       if (observe && path.endsWith(".zst") && !tracked.compressedRead) {
         // The metadata pass associates this archive with the scan. A full read
         // starts at the beginning, including when retrying a partial decode.
-        const archive: SessionUsage = createSessionUsage(observeUsage);
+        const archive: SessionUsage = createSessionUsage(
+          observeUsage,
+          aliasRepository,
+        );
         if (this.#options.onSessionEvent !== undefined) archive.events = [];
         try {
           await readSessionUsage(path, archive, repository, progressThread);
@@ -2636,7 +2654,10 @@ export class ScanCostTracker {
             undefined,
             session.offset,
           );
-          if (replay.offset === session.offset) {
+          if (
+            replay.offset === session.offset &&
+            replay.threadId === threadId
+          ) {
             session.events = replay.events;
             if (this.#timer === null)
               await readSessionUsage(
@@ -2706,12 +2727,23 @@ export class ScanCostTracker {
       if (session.events !== undefined)
         reported.events = Math.max(reported.events, session.eventPosition);
       if (worker !== undefined) {
-        for (const { position, value: activity } of session.activities.splice(
-          0,
-        )) {
+        for (const {
+          position,
+          value: activity,
+          source,
+        } of session.activities.splice(0)) {
           if (position <= reported.activities) continue;
+          if (source && observations) {
+            source.paths ??= await observations.workerPaths(
+              threadId,
+              path,
+              activity,
+              source.event,
+            );
+          }
           this.#options.onActivity?.({
             ...activity,
+            paths: source?.paths ?? activity.paths,
             id: `${threadId}:${activity.id}`,
             worker,
           });
@@ -3535,7 +3567,12 @@ function readSessionEvent(
         duplicate: false,
       });
     }
-    if (repository === undefined) return;
+    const activityRepository =
+      repository ??
+      (isSessionToolCall(payload["type"])
+        ? session.aliasRepository
+        : undefined);
+    if (activityRepository === undefined) return;
     if (
       payload["type"] === "reasoning" &&
       typeof payload["id"] === "string" &&
@@ -3553,7 +3590,7 @@ function readSessionEvent(
               summary: [summary],
             },
           },
-          repository,
+          activityRepository,
         );
         if (
           activity === null ||
@@ -3569,7 +3606,19 @@ function readSessionEvent(
       }
       return;
     }
-    const activity = scanActivityFromSessionEvent(event, repository);
+    // Delay host filesystem access until the tracker has established session ownership.
+    let ambiguous = false;
+    const activity = scanActivityFromSessionEvent(
+      event,
+      activityRepository,
+      session.aliasRepository
+        ? () => {
+            ambiguous = true;
+            return false;
+          }
+        : undefined,
+    );
+    if (repository === undefined && !ambiguous) return;
     if (activity !== null) {
       if (activity.kind === "reasoning") {
         const reasoning = (session.reasoning ??= createSessionReasoning(
@@ -3596,10 +3645,15 @@ function readSessionEvent(
       if (activity.kind === "message") {
         session.prose.add(`${activity.kind}:${activity.description}`);
       }
-      if (activity.status === "running") {
-        session.calls.set(activity.id, activity);
+      const observation: SessionActivity = sessionObservation(
+        session,
+        activity,
+      );
+      if (ambiguous) observation.source = { event };
+      if (repository !== undefined && activity.status === "running") {
+        session.calls.set(activity.id, observation);
       }
-      session.activities.push(sessionObservation(session, activity));
+      session.activities.push(observation);
       return;
     }
     if (
@@ -3609,13 +3663,15 @@ function readSessionEvent(
     ) {
       const call = session.calls.get(payload["call_id"]);
       if (call !== undefined) {
-        session.activities.push(
-          sessionObservation(session, {
-            ...call,
+        session.activities.push({
+          position: session.eventPosition,
+          value: {
+            ...call.value,
             status: payload["status"] === "failed" ? "failed" : "completed",
-          }),
-        );
-        session.calls.delete(call.id);
+          },
+          source: call.source,
+        });
+        session.calls.delete(call.value.id);
       }
     }
     return;

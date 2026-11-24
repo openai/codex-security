@@ -1,6 +1,19 @@
+import {
+  observedEventKey,
+  saveLiveActivityPaths,
+  saveObservedActivity,
+} from "../src/observed-activities.js";
 import { writeJsonLines } from "./support/json.js";
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  readFile,
+  readdir,
+  rename,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
 import { unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { zstdCompressSync } from "node:zlib";
@@ -72,6 +85,164 @@ function taskStarted(turnId: string, timestamp?: string) {
 }
 
 describe("saved scan logs", () => {
+  test("replays primary SDK observations in capture order across repeated item IDs", async () => {
+    const home = await temporaryHome();
+    const scan = { codexHome: home, scanId: "scan-1", threadId: "parent" };
+    await writeSession(home, "parent", [
+      commandEvent("type a", "native-call", "2026-08-11T12:00:00Z"),
+    ]);
+    await writeSession(home, "worker", [], "parent");
+    const activity = {
+      id: "item_0",
+      kind: "tool" as const,
+      status: "running" as const,
+      paths: ["A.ts"],
+    };
+    const save = (
+      scanId: string,
+      threadId: string,
+      occurrence: string,
+      paths: string[],
+    ) =>
+      saveLiveActivityPaths(home, scanId, threadId, occurrence, {
+        ...activity,
+        paths,
+      });
+    await Promise.all([
+      save("scan-1", "parent", "first-run:4", activity.paths),
+      save("scan-1", "parent", "first-run:4", activity.paths),
+      save("scan-2", "parent", "first-run:4", ["different-scan"]),
+      save("scan-1", "worker", "first-run:4", ["worker.ts"]),
+    ]);
+    await save("scan-1", "parent", "first-run:4", ["retry.ts"]);
+    await save("scan-1", "parent", "first-run:15", ["B.ts"]);
+    await save("scan-1", "parent", "another-run:1", ["C.ts"]);
+    const logs = await readScanLogs(scan);
+    expect(
+      logs.sessions.find((session) => session.threadId === "parent")
+        ?.observedActivities,
+    ).toEqual([
+      activity,
+      { ...activity, paths: ["B.ts"] },
+      { ...activity, paths: ["C.ts"] },
+    ]);
+    expect(
+      logs.sessions.find((session) => session.threadId === "worker")
+        ?.observedActivities,
+    ).toEqual([{ ...activity, paths: ["worker.ts"] }]);
+    expect(logs.events.every((row) => !("paths" in row))).toBe(true);
+    expect(
+      (await readScanLogs({ ...scan, scanId: "scan-2" })).sessions.find(
+        (session) => session.threadId === "parent",
+      )?.observedActivities,
+    ).toEqual([{ ...activity, paths: ["different-scan"] }]);
+  });
+
+  test("keeps a deeply nested native event readable when a path receipt exists", async () => {
+    const home = await temporaryHome();
+    const scanId = "scan-1";
+    const call = commandEvent("type file", "call-1", "2026-08-11T12:00:00Z");
+    await writeSession(home, "parent", [call]);
+    await saveObservedActivity(home, scanId, {
+      eventKey: observedEventKey("parent", call)!,
+      paths: ["file"],
+    });
+    const nested =
+      '\n{"type":"response_item","payload":{"type":"function_call","arguments":' +
+      "[".repeat(20_000) +
+      "0" +
+      "]".repeat(20_000) +
+      "}}\n";
+    await appendFile(
+      join(home, "sessions/2026/08/11/rollout-parent.jsonl"),
+      nested,
+    );
+    const result = await readScanLogs({
+      codexHome: home,
+      scanId,
+      threadId: "parent",
+    });
+    expect(result.events).toHaveLength(3);
+    expect(result.events[1]?.["paths"]).toEqual(["file"]);
+    expect(result.events[2]?.["paths"]).toBeUndefined();
+  });
+
+  test("ignores a linked activity-path store and preserves the raw log", async () => {
+    const home = await temporaryHome();
+    const redirected = await temporaryHome();
+    const directory = join(home, "activity-paths");
+    await symlink(
+      redirected,
+      directory,
+      process.platform === "win32" ? "junction" : "dir",
+    );
+    const call = commandEvent("type file", "call-1", "2026-08-11T12:00:00Z");
+    await writeSession(home, "parent", [call]);
+    await saveObservedActivity(home, "scan-1", {
+      eventKey: observedEventKey("parent", call)!,
+      paths: ["file"],
+    });
+    expect(await readdir(redirected)).toEqual([]);
+    const logs = await readScanLogs({
+      codexHome: home,
+      scanId: "scan-1",
+      threadId: "parent",
+    });
+    expect(logs.events.at(-1)).toEqual({ threadId: "parent", event: call });
+  });
+
+  test("replays source-observed paths for the exact scan, thread, and native event", async () => {
+    const home = await temporaryHome();
+    const scanId = "scan-1";
+    const call = commandEvent(
+      'type "c:/WORK/repo/Src/A.ts"',
+      "call-1",
+      "2026-08-11T12:00:00Z",
+    );
+    const repeated = { ...call, timestamp: "2026-08-11T12:00:01Z" };
+    const changed = commandEvent(
+      'type "c:/WORK/repo/Src/B.ts"',
+      "call-1",
+      call.timestamp,
+    );
+    await writeSession(home, "parent", [call, repeated, changed]);
+    await writeSession(home, "worker", [call], "parent");
+    const record = {
+      eventKey: observedEventKey("parent", call)!,
+      paths: ["Src/A.ts"],
+    };
+    await Promise.all([
+      saveObservedActivity(home, scanId, record),
+      saveObservedActivity(home, scanId, record),
+    ]);
+    await saveObservedActivity(home, scanId, {
+      ...record,
+      paths: ["other.ts"],
+    });
+    const logs = await readScanLogs({
+      codexHome: home,
+      scanId,
+      threadId: "parent",
+    });
+    const calls = logs.events.filter(
+      ({ event }) => (event as { type: string }).type === "response_item",
+    );
+    expect(calls).toContainEqual({
+      threadId: "parent",
+      event: call,
+      paths: ["Src/A.ts"],
+    });
+    expect(calls).toContainEqual({ threadId: "parent", event: repeated });
+    expect(calls).toContainEqual({ threadId: "parent", event: changed });
+    expect(calls).toContainEqual({ threadId: "worker", event: call });
+    const other = await readScanLogs({
+      codexHome: home,
+      scanId: "scan-2",
+      threadId: "parent",
+    });
+    expect(other.events.every((row) => !("paths" in row))).toBe(true);
+  });
+
   test.each([
     ["prefix first", [0], [0, 1, 1, 2], 1, false, false],
     ["complete first", [0, 1, 1, 2], [0], 0, false, false],
