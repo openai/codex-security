@@ -219,9 +219,9 @@ test("Cloud stops before expanding a shared subtree beyond its JSON depth limit"
     excluded: [],
   };
 
-  await expect(
-    prepareNormalizedExternalPublication(input, options, f.deps),
-  ).rejects.toThrow("Cloud JSON depth limit of 20");
+  await expect(prepareCloudFindings(f, input)).rejects.toThrow(
+    "Cloud JSON depth limit of 20",
+  );
   expect(reads).toBe(0);
   expect(f.posts).toHaveLength(0);
   expect(snapshotNormalizedFindings(input).findings).toHaveLength(1);
@@ -296,17 +296,15 @@ test("Wiz's gzip JSON report retains finding identity, evidence and repository l
     },
   });
   f.state.repositoryUrl = otherRepository;
-  await expect(
-    prepareExternalPublication(f.file, options, f.deps),
-  ).rejects.toThrow("does not match the selected Cloud repository");
-  await expect(
-    prepareNormalizedExternalPublication(parsed, options, f.deps),
-  ).rejects.toThrow("does not match the selected Cloud repository");
+  await expect(prepareCloudFile(f)).rejects.toThrow(
+    "does not match the selected Cloud repository",
+  );
+  await expect(prepareCloudFindings(f, parsed)).rejects.toThrow(
+    "does not match the selected Cloud repository",
+  );
   expect(f.posts).toHaveLength(0);
   f.state.repositoryUrl = exampleRepository;
-  const result = await (
-    await prepareExternalPublication(f.file, options, f.deps)
-  ).publish();
+  const result = await (await prepareCloudFile(f)).publish();
   expect(result.counts.created).toBe(2);
   expect(result.verified).toBe(2);
 
@@ -352,15 +350,11 @@ test("ArmorCode rejects generic rows from a different Cloud repository before pu
     provider: "armorcode" as const,
     sourceRepositoryUrl,
   };
+  await expect(prepareCloudFile(f, selection)).rejects.toThrow(
+    "does not match the selected Cloud repository",
+  );
   await expect(
-    prepareExternalPublication(f.file, selection, f.deps),
-  ).rejects.toThrow("does not match the selected Cloud repository");
-  await expect(
-    prepareNormalizedExternalPublication(
-      normalizeArmorCodeFindings(report),
-      selection,
-      f.deps,
-    ),
+    prepareCloudFindings(f, normalizeArmorCodeFindings(report), selection),
   ).rejects.toThrow("does not match the selected Cloud repository");
   expect(f.posts).toHaveLength(0);
 });
@@ -395,11 +389,7 @@ test("Dependabot publishes on the existing GitHub provider and rejects foreign r
     provider: "github" as const,
     sourceKey: "github.com/example/project/dependabot",
   };
-  const first = await prepareExternalPublication(
-    correct.file,
-    selection,
-    correct.deps,
-  );
+  const first = await prepareCloudFile(correct, selection);
   expect(first.preview.requests[0]!.source.provider).toBe("github");
   expect(correct.posts).toHaveLength(0);
   first.preview.requests[0]!.items[0]!.evidence.url =
@@ -409,77 +399,56 @@ test("Dependabot publishes on the existing GitHub provider and rejects foreign r
   expect(JSON.parse(correct.posts[0]!).items[0].evidence.url).toBe(
     input.html_url,
   );
-  const retry = await prepareExternalPublication(
-    correct.file,
-    selection,
-    correct.deps,
-  );
+  const retry = await prepareCloudFile(correct, selection);
   expect(retry.preview.resumed).toBe(true);
   expect((await retry.publish()).counts.created).toBe(1);
   expect(correct.posts[1]).toBe(correct.posts[0]);
-  const replay = await prepareExternalPublication(
-    correct.file,
-    selection,
-    correct.deps,
-  );
+  const replay = await prepareCloudFile(correct, selection);
   expect((await replay.publish()).counts.unchanged).toBe(1);
   const foreign = await fixture([input], "https://github.com/example/other");
-  await expect(
-    prepareExternalPublication(foreign.file, selection, foreign.deps),
-  ).rejects.toThrow(/does not match/i);
+  await expect(prepareCloudFile(foreign, selection)).rejects.toThrow(
+    /does not match/i,
+  );
   const native = await readGitHubFindings(correct.file);
   await expect(
-    prepareNormalizedExternalPublication(native, selection, foreign.deps),
+    prepareCloudFindings(foreign, native, selection),
   ).rejects.toThrow(/does not match/i);
   const projected = structuredClone(native);
   delete projected.findings[0]!.evidence.source_data;
   await expect(
-    prepareNormalizedExternalPublication(projected, selection, foreign.deps),
+    prepareCloudFindings(foreign, projected, selection),
   ).rejects.toThrow(/does not match/i);
   expect(
-    (
-      await prepareNormalizedExternalPublication(
-        projected,
-        selection,
-        correct.deps,
-      )
-    ).preview.requests,
+    (await prepareCloudFindings(correct, projected, selection)).preview
+      .requests,
   ).toHaveLength(1);
   projected.findings[0]!.evidence.url = input.url;
   projected.findings[0]!.evidence.source_data = {
     security_vulnerability: input.security_vulnerability,
   };
   projected.findings[0]!.source_finding_id = "alert-1";
-  const compatible = await prepareNormalizedExternalPublication(
-    projected,
-    selection,
-    correct.deps,
-  );
+  const compatible = await prepareCloudFindings(correct, projected, selection);
   expect((await compatible.publish()).counts.created).toBe(1);
   expect(
     (
       await (
-        await prepareNormalizedExternalPublication(
-          projected,
-          selection,
-          correct.deps,
-        )
+        await prepareCloudFindings(correct, projected, selection)
       ).publish()
     ).counts.unchanged,
   ).toBe(1);
   await expect(
-    prepareNormalizedExternalPublication(projected, selection, foreign.deps),
+    prepareCloudFindings(foreign, projected, selection),
   ).rejects.toThrow(/does not match/i);
   const conflicting = structuredClone(native);
   conflicting.findings[0]!.evidence.url = githubDependabotAlert(2).html_url;
   await expect(
-    prepareNormalizedExternalPublication(conflicting, selection, correct.deps),
+    prepareCloudFindings(correct, conflicting, selection),
   ).rejects.toThrow(/alert URL/i);
   const relabeled = structuredClone(native);
   relabeled.findings[0]!.source_finding_id =
     "github.com/example/other/dependabot/2";
   await expect(
-    prepareNormalizedExternalPublication(relabeled, selection, foreign.deps),
+    prepareCloudFindings(foreign, relabeled, selection),
   ).rejects.toThrow(/source finding ID/i);
   expect(foreign.posts).toHaveLength(0);
 });
@@ -798,6 +767,23 @@ async function fixture(
       return failure.result.savedSubmission!;
     },
   };
+}
+
+type PublicationFixture = Awaited<ReturnType<typeof fixture>>;
+
+function prepareCloudFile(
+  f: PublicationFixture,
+  selected: ExternalPublicationOptions = options,
+) {
+  return prepareExternalPublication(f.file, selected, f.deps);
+}
+
+function prepareCloudFindings(
+  f: PublicationFixture,
+  input: ExternalFindings,
+  selected: NormalizedExternalPublicationOptions = options,
+) {
+  return prepareNormalizedExternalPublication(input, selected, f.deps);
 }
 
 test.each([0, 1])(
@@ -1126,7 +1112,7 @@ test.each([true, false])(
     const header = "Codex-Security-Repository-Import-Severities";
     const severities = "critical,high,medium,low,informational";
     if (advertised) f.state.catalogHeaders[header] = severities;
-    const prepare = () => prepareExternalPublication(f.file, options, f.deps);
+    const prepare = () => prepareCloudFile(f);
     const first = await prepare();
     const selected = advertised ? ["reported"] : ["unreported", "reported"];
     expect(first.preview.findings.map((f) => f.source_finding_id)).toEqual(
@@ -1405,17 +1391,15 @@ async function hostedFixture(
   const settings = { ...options, provider, sourceKey };
   return {
     ...cloud,
-    prepareFile: () =>
-      prepareExternalPublication(cloud.file, settings, cloud.deps),
+    prepareFile: () => prepareCloudFile(cloud, settings),
     prepareNormalized: <Input extends ExternalFindings>(
       input: Input,
       selectedProvider: FindingImportRequest["source"]["provider"] = provider,
     ) =>
-      prepareNormalizedExternalPublication(
-        input,
-        { ...settings, provider: selectedProvider },
-        cloud.deps,
-      ),
+      prepareCloudFindings(cloud, input, {
+        ...settings,
+        provider: selectedProvider,
+      }),
   };
 }
 
@@ -1664,11 +1648,7 @@ test("a pending projected Snyk issue keeps its generated ID bound to the origina
       ...report,
       snykRestContext: { ...report.snykRestContext, apiOrigin },
     };
-    return prepareNormalizedExternalPublication(
-      projected,
-      { ...options, provider: "snyk" },
-      f.deps,
-    );
+    return prepareCloudFindings(f, projected, { ...options, provider: "snyk" });
   };
   const selected = await prepare(capture.apiOrigin);
   expect(selected.preview.findings).toEqual(
@@ -1780,12 +1760,10 @@ test("a Semgrep file retry preserves the approved private repository's case", as
   await expect(
     prepareExternalPublication(f.file, settings, strict),
   ).rejects.toThrow(/repository/iu);
-  await expect(
-    prepareExternalPublication(f.file, settings, f.deps),
-  ).rejects.toThrow(/repository/iu);
+  await expect(prepareCloudFile(f, settings)).rejects.toThrow(/repository/iu);
   expect(f.posts).toHaveLength(1);
   await writeFile(f.file, JSON.stringify(report));
-  const retry = await prepareExternalPublication(f.file, settings, f.deps);
+  const retry = await prepareCloudFile(f, settings);
   expect(retry.preview.resumed).toBe(true);
   await retry.publish();
   expect(f.posts[1]).toBe(f.posts[0]);
@@ -1942,11 +1920,11 @@ test("Semgrep publication compares the operator's source URL with Cloud reposito
   );
   const f = await hostedFixture("semgrep", report, url);
   const prepare = (sourceRepositoryUrl: string) =>
-    prepareExternalPublication(
-      f.file,
-      { ...options, provider: "semgrep", sourceRepositoryUrl },
-      f.deps,
-    );
+    prepareCloudFile(f, {
+      ...options,
+      provider: "semgrep",
+      sourceRepositoryUrl,
+    });
   const different = "https://scm.example.test:443/Team/Project";
   await expect(prepare(different)).rejects.toThrow(/does not match/i);
   expect(f.posts).toHaveLength(0);
@@ -2021,19 +1999,11 @@ test("an undefined optional Snyk context permits generic SDK evidence", async ()
   }
   const f = await fixture();
   const report = new Report();
-  const prepared = await prepareNormalizedExternalPublication(
-    report,
-    options,
-    f.deps,
-  );
+  const prepared = await prepareCloudFindings(f, report);
   expect((await prepared.publish()).counts.created).toBe(1);
   report.snykRestContext = {};
   await expect(
-    prepareNormalizedExternalPublication(
-      report,
-      { ...options, provider: "snyk" },
-      f.deps,
-    ),
+    prepareCloudFindings(f, report, { ...options, provider: "snyk" }),
   ).rejects.toThrow("Expected a versioned Snyk REST report context");
 });
 
@@ -2078,7 +2048,7 @@ test.each(["sast", "sca"])(
     const f = await fixture(report, url);
     const binding = { ...options, provider: "semgrep" as const };
     const local = normalizeSemgrepFindings(report, {}, "local");
-    const prepare = () => prepareExternalPublication(f.file, binding, f.deps);
+    const prepare = () => prepareCloudFile(f, binding);
     const prepared = await prepare();
     expect(prepared.preview.findings).toEqual(local.findings);
     await f.loseResponse(prepared);
@@ -2097,15 +2067,11 @@ test.each(["sast", "sca"])(
     expect(privatePreview.privateImport?.format).toBe("security.findings.v1");
     expect(privatePreview.findings[0]!.evidence.severity).toBe("unknown");
     const elsewhere = await fixture(report, "https://github.com/other/project");
+    await expect(prepareCloudFile(elsewhere, binding)).rejects.toThrow(
+      /repository/iu,
+    );
     await expect(
-      prepareExternalPublication(elsewhere.file, binding, elsewhere.deps),
-    ).rejects.toThrow(/repository/iu);
-    await expect(
-      prepareNormalizedExternalPublication(
-        { ...local, report: undefined },
-        binding,
-        elsewhere.deps,
-      ),
+      prepareCloudFindings(elsewhere, { ...local, report: undefined }, binding),
     ).rejects.toThrow(/repository/iu);
     expect(elsewhere.posts).toHaveLength(0);
     const missingSource = structuredClone(local);
@@ -2113,26 +2079,26 @@ test.each(["sast", "sca"])(
       "sourceRepositoryUrl"
     ];
     await expect(
-      prepareNormalizedExternalPublication(missingSource, binding, f.deps),
+      prepareCloudFindings(f, missingSource, binding),
     ).rejects.toThrow(/Guardian --source-repository-url/u);
     const wrongRef = structuredClone(local);
     wrongRef.findings[0]!.evidence.branch = "refs/heads/other";
-    await expect(
-      prepareNormalizedExternalPublication(wrongRef, binding, f.deps),
-    ).rejects.toThrow(/selected ref/u);
+    await expect(prepareCloudFindings(f, wrongRef, binding)).rejects.toThrow(
+      /selected ref/u,
+    );
     const changed = {
       ...local,
       findings: [{ ...local.findings[0]!, source_finding_id: "another-id" }],
     };
-    await expect(
-      prepareNormalizedExternalPublication(changed, binding, f.deps),
-    ).rejects.toThrow(/original Guardian finding/);
+    await expect(prepareCloudFindings(f, changed, binding)).rejects.toThrow(
+      /original Guardian finding/,
+    );
   },
 );
 
 test("a saved selection with Guardian evidence cannot resume under another provider", async () => {
   const f = await fixture([normalized()]);
-  const prepare = () => prepareExternalPublication(f.file, options, f.deps);
+  const prepare = () => prepareCloudFile(f);
   const path = await f.loseResponse(await prepare());
   const saved = JSON.parse(await readFile(path, "utf8"));
   const { evidence } = saved.requests[0].items[0];
@@ -2293,7 +2259,8 @@ test("marked Semgrep rows require their provider while unmarked Wiz records can 
     provider: "wiz" | "semgrep" = "wiz",
     format?: string,
   ) =>
-    prepareNormalizedExternalPublication(
+    prepareCloudFindings(
+      f,
       {
         read: 1,
         excluded: [],
@@ -2316,7 +2283,6 @@ test("marked Semgrep rows require their provider while unmarked Wiz records can 
         ],
       },
       { ...options, provider },
-      f.deps,
     );
   await expect(
     prepare("1.2e1", null, "wiz", semgrepPlatformFormat),
@@ -2758,11 +2724,7 @@ test.each([true, false])(
         };
     result.findings[0]!.evidence.details!.repository!.url = escaped;
     const prepare = () =>
-      prepareNormalizedExternalPublication(
-        input,
-        { ...options, provider: "snyk" },
-        f.deps,
-      );
+      prepareCloudFindings(f, input, { ...options, provider: "snyk" });
     f.state.repositoryUrl = "https://github.com/example/different";
     await expect(prepare()).rejects.toThrow(
       /does not match the selected Cloud repository/,
@@ -3086,16 +3048,16 @@ test("normalized Sonar publication checks retained bindings on preview and retry
   };
   const selection = { read: 2, findings: [finding, named], excluded: [] };
   const prepare = (findings = selection.findings) =>
-    prepareNormalizedFixture(
+    prepareCloudFindings(
       f,
       { ...selection, findings, report: { ...context, branch: "main" } },
       selected,
     );
+  await expect(prepareCloudFindings(f, selection, selected)).rejects.toThrow(
+    "without a ref",
+  );
   await expect(
-    prepareNormalizedFixture(f, selection, selected),
-  ).rejects.toThrow("without a ref");
-  await expect(
-    prepareNormalizedFixture(
+    prepareCloudFindings(
       f,
       {
         ...rows,
@@ -3111,7 +3073,7 @@ test("normalized Sonar publication checks retained bindings on preview and retry
     ),
   ).rejects.toThrow("retained Sonar branch");
   await expect(
-    prepareNormalizedFixture(
+    prepareCloudFindings(
       f,
       { ...rows, report: { ...context, repositoryUrl: foreign } },
       selected,
@@ -3122,7 +3084,7 @@ test("normalized Sonar publication checks retained bindings on preview and retry
     "resume the saved request",
   );
   await expect(
-    prepareNormalizedFixture(
+    prepareCloudFindings(
       f,
       { ...selection, report: { ...context, branch: "other" } },
       selected,
@@ -3292,7 +3254,7 @@ test("Wiz network-scan findings are excluded without requiring a detection metho
     detectionMethod: "EXTERNAL_NETWORK_SCAN",
   };
   const f = await fixture([supported, network]);
-  const prepared = await prepareExternalPublication(f.file, options, f.deps);
+  const prepared = await prepareCloudFile(f);
   expect(
     prepared.preview.findings.map((finding) => finding.source_finding_id),
   ).toEqual([supported.id]);
@@ -3440,7 +3402,7 @@ test("Cloud validation preserves allowed evidence boundaries and raw vendor stri
 
 test("request and pagination metadata retain Cloud byte limits and distinct identities", async () => {
   const f = await fixture();
-  const prepared = await prepareExternalPublication(f.file, options, f.deps);
+  const prepared = await prepareCloudFile(f);
   const request = prepared.preview.requests[0]!;
   expect(() =>
     validateImportRequest({
@@ -3527,7 +3489,7 @@ async function inspectorPublicationFixture(name = inspectorRepositoryUrl) {
   const f = await fixture({ findings: [input] });
   const map = new Map([[project.id, inspectorRepositoryUrl]]);
   const prepare = (settings: ExternalPublicationOptions = inspectorOptions) =>
-    prepareExternalPublication(f.file, settings, f.deps);
+    prepareCloudFile(f, settings);
   async function loseResponse(prepared: PreparedExternalPublication) {
     await f.loseResponse(prepared);
     return f.posts.at(-1)!;
@@ -3552,7 +3514,7 @@ test("Checkmarx publishes a native SAST finding only to its declared Cloud repos
     provider: "checkmarx" as const,
     sourceRepositoryUrl: f.state.repositoryUrl,
   };
-  const prepare = () => prepareExternalPublication(f.file, selected, f.deps);
+  const prepare = () => prepareCloudFile(f, selected);
   const first = await prepare();
   expect(first.preview.requests[0]).toMatchObject({
     source: { provider: "checkmarx", source_key: selected.sourceKey },
@@ -3561,17 +3523,17 @@ test("Checkmarx publishes a native SAST finding only to its declared Cloud repos
   const sibling = sdkRow("sdk-id");
   sibling.evidence.source_scan_id = "scan-b";
   await expect(
-    prepareNormalizedExternalPublication(
+    prepareCloudFindings(
+      f,
       sdkSelection([...first.preview.findings, sibling]),
       selected,
-      f.deps,
     ),
   ).rejects.toThrow(/same product, project and scan/i);
   const replayWithReport = (change: Record<string, unknown>) =>
-    prepareNormalizedExternalPublication(
+    prepareCloudFindings(
+      f,
       { ...first.preview, report: { ...first.preview.report, ...change } },
       selected,
-      f.deps,
     );
   await expect(
     replayWithReport({
@@ -3636,7 +3598,7 @@ test("Continuum Cloud publication checks repository and provider and replays an 
     sourceKey: "continuum/example/project",
     sourceRepositoryUrl: continuumRepository,
   };
-  const prepare = () => prepareExternalPublication(f.file, selected, f.deps);
+  const prepare = () => prepareCloudFile(f, selected);
   const first = await prepare();
   expect(first.preview.requests[0]).toMatchObject({
     source: { provider: "continuum", source_key: selected.sourceKey },
@@ -3648,17 +3610,13 @@ test("Continuum Cloud publication checks repository and provider and replays an 
     ],
   });
   await expect(
-    prepareNormalizedExternalPublication(
-      first.preview,
-      { ...selected, provider: "wiz" },
-      f.deps,
-    ),
+    prepareCloudFindings(f, first.preview, { ...selected, provider: "wiz" }),
   ).rejects.toThrow(/continuum provider/i);
   const relabeled = structuredClone(first.preview);
   relabeled.findings[0]!.source_finding_id = "another-id";
-  await expect(
-    prepareNormalizedExternalPublication(relabeled, selected, f.deps),
-  ).rejects.toThrow(/source finding ID|occurrence|ARN/i);
+  await expect(prepareCloudFindings(f, relabeled, selected)).rejects.toThrow(
+    /source finding ID|occurrence|ARN/i,
+  );
 
   f.state.repositoryUrl = "https://github.com/example/other";
   await expect(prepare()).rejects.toThrow(/does not match/i);
@@ -3743,10 +3701,10 @@ test("Continuum Cloud publication preserves issue identity and linked source ran
     sourceKey: "continuum/example/project",
   };
   const other = await fixture(report, "https://github.com/example/other");
-  await expect(
-    prepareExternalPublication(other.file, selected, other.deps),
-  ).rejects.toThrow("does not match the selected Cloud repository");
-  const prepared = await prepareExternalPublication(f.file, selected, f.deps);
+  await expect(prepareCloudFile(other, selected)).rejects.toThrow(
+    "does not match the selected Cloud repository",
+  );
+  const prepared = await prepareCloudFile(f, selected);
   expect(prepared.preview.requests[0]?.items).toMatchObject([
     {
       source_finding_id: issue.issueArn,
@@ -4061,10 +4019,10 @@ test("Inspector publication checks its source and reuses the finding ARN", async
   const other = "https://github.com/example/other";
   opaque.evidence.details = { kind: "sast", repository: { url: other } };
   await expect(
-    prepareNormalizedExternalPublication(
+    prepareCloudFindings(
+      f,
       { ...prepared.preview, findings: [row, opaque] },
       inspectorOptions,
-      f.deps,
     ),
   ).rejects.toThrow(/typed-only.*does not match/i);
 
@@ -4072,9 +4030,9 @@ test("Inspector publication checks its source and reuses the finding ARN", async
   await expect(prepare()).rejects.toThrow(/does not match/i);
   for (const source_data of [row.evidence.source_data, { finding: input }]) {
     row.evidence.source_data = source_data;
-    await expect(
-      prepareNormalizedExternalPublication(prepared.preview, options, f.deps),
-    ).rejects.toThrow("requires the inspector provider");
+    await expect(prepareCloudFindings(f, prepared.preview)).rejects.toThrow(
+      "requires the inspector provider",
+    );
   }
   expect(f.posts).toHaveLength(2);
 });
@@ -4105,7 +4063,7 @@ test.each(["Inspector", "Trivy"] as const)(
     );
     expect((await prepared.import()).counts.created).toBe(1);
 
-    const prepare = () => prepareExternalPublication(f.file, options, f.deps);
+    const prepare = () => prepareCloudFile(f);
     const first = await prepare();
     f.state.loseResponse = true;
     const error = await first.publish().catch((error: unknown) => error);
@@ -4119,10 +4077,9 @@ test.each(["Inspector", "Trivy"] as const)(
 
     record.vendorSeverity = "MEDIUM";
     await writeFile(f.file, JSON.stringify([record]));
-    const updated = await prepareNormalizedExternalPublication(
+    const updated = await prepareCloudFindings(
+      f,
       await readVendorFindings(f.file),
-      options,
-      f.deps,
     );
     expect((await updated.publish()).counts.updated).toBe(1);
     expect(f.reports.get(record.id)?.evidence.source_data).toEqual(record);
@@ -4146,11 +4103,10 @@ test.each(["example/project", inspectorRepositoryUrl])(
     const prepared = await preparing;
     const firstBody = await loseResponse(prepared);
     const resume = (inspectorProjectMap?: ReadonlyMap<string, string>) =>
-      prepareNormalizedExternalPublication(
-        prepared.preview,
-        { ...inspectorOptions, inspectorProjectMap },
-        f.deps,
-      );
+      prepareCloudFindings(f, prepared.preview, {
+        ...inspectorOptions,
+        inspectorProjectMap,
+      });
 
     await expect(resume()).rejects.toThrow(/project|repository/i);
     await expect(resume(new Map([[project.id, otherUrl]]))).rejects.toThrow(
@@ -4226,10 +4182,10 @@ test.each(["inspector", "sonar"] as const)(
       },
     };
     const prepare = () =>
-      prepareNormalizedExternalPublication(
+      prepareCloudFindings(
+        f,
         { read: 1, findings: [finding], excluded: [] },
         { ...options, provider },
-        f.deps,
       );
     f.state.loseResponse = true;
     await expect((await prepare()).publish()).rejects.toThrow(
@@ -4253,7 +4209,7 @@ test("publishes a filtered numeric Veracode CWE that the previous reader rejecte
     provider: "veracode" as const,
     sourceRepositoryUrl: exampleRepository,
   };
-  const prepared = await prepareExternalPublication(f.file, settings, f.deps);
+  const prepared = await prepareCloudFile(f, settings);
   expect((await prepared.publish()).verified).toBe(2);
 });
 
@@ -4271,11 +4227,7 @@ test.each(["wiz", "inspector"] as const)(
     const input = normalizeBlackDuckFindings([blackDuckBomRow()], source);
     input.findings[0]!.evidence.source_data = { sourceRepositoryUrl: source };
     const prepare = () =>
-      prepareNormalizedExternalPublication(
-        input,
-        { ...options, provider },
-        f.deps,
-      );
+      prepareCloudFindings(f, input, { ...options, provider });
 
     f.state.loseResponse = true;
     await expect((await prepare()).publish()).rejects.toThrow(
@@ -4333,7 +4285,7 @@ test.each(["row", "report", "Snyk SARIF"] as const)(
         );
     input.findings[0]!.source_finding_id = projectedId;
     const prepare = (selection: ExternalFindings = input) =>
-      prepareNormalizedExternalPublication(selection, selected, f.deps);
+      prepareCloudFindings(f, selection, selected);
     f.state.repositoryUrl = otherRepository;
     if (report)
       expect(
@@ -4362,12 +4314,7 @@ test("Checkmarx projections under Wiz bind retained row URLs and native reposito
   const prepare = (
     findings: ExternalFindings["findings"],
     metadata?: typeof report,
-  ) =>
-    prepareNormalizedExternalPublication(
-      sdkSelection(findings, metadata),
-      options,
-      f.deps,
-    );
+  ) => prepareCloudFindings(f, sdkSelection(findings, metadata));
   const branch = { vulnerableAsset: wizBranchAsset };
   const mismatch = `belongs to "${sourceRepositoryUrl}"`;
   const projected = sdkRow(projectedId, branch);
@@ -4396,8 +4343,7 @@ test("Black Duck Cloud replay preserves package occurrence and rejects a differe
     sourceKey: "scanner/project-a/release-a",
     sourceRepositoryUrl: "https://github.com/example/project",
   };
-  const prepare = () =>
-    prepareExternalPublication(correct.file, selected, correct.deps);
+  const prepare = () => prepareCloudFile(correct, selected);
   const first = await prepare();
   expect(correct.posts).toHaveLength(0);
   expect(first.preview.requests[0]!.source.provider).toBe("blackduck");
@@ -4423,9 +4369,9 @@ test("Black Duck Cloud replay preserves package occurrence and rejects a differe
   ]);
   expect((await (await prepare()).publish()).counts.unchanged).toBe(1);
   const foreign = await fixture(report, "https://github.com/example/other");
-  await expect(
-    prepareExternalPublication(foreign.file, selected, foreign.deps),
-  ).rejects.toThrow(/does not match/i);
+  await expect(prepareCloudFile(foreign, selected)).rejects.toThrow(
+    /does not match/i,
+  );
   expect(foreign.posts).toHaveLength(0);
   const native = normalizeBlackDuckFindings(
     report,
@@ -4439,15 +4385,11 @@ test("Black Duck Cloud replay preserves package occurrence and rejects a differe
     ).findings,
   );
   mixed.read = mixed.findings.length;
+  await expect(prepareCloudFindings(correct, mixed, selected)).rejects.toThrow(
+    /same project version/,
+  );
   await expect(
-    prepareNormalizedExternalPublication(mixed, selected, correct.deps),
-  ).rejects.toThrow(/same project version/);
-  await expect(
-    prepareNormalizedExternalPublication(
-      native,
-      { ...selected, provider: "wiz" },
-      foreign.deps,
-    ),
+    prepareCloudFindings(foreign, native, { ...selected, provider: "wiz" }),
   ).rejects.toThrow(/requires the blackduck provider/);
   const stripped = structuredClone(native);
   const data = stripped.findings[0]!.evidence.source_data!;
@@ -4460,10 +4402,10 @@ test("Black Duck Cloud replay preserves package occurrence and rejects a differe
     { sourceRepositoryUrl: selected.sourceRepositoryUrl },
   ]) {
     stripped.findings[0]!.evidence.source_data = sourceData;
-    await expect(
-      prepareNormalizedExternalPublication(stripped, wiz, foreign.deps),
-    ).rejects.toThrow(/does not match the selected Cloud repository/);
-    await prepareNormalizedExternalPublication(stripped, wiz, matching.deps);
+    await expect(prepareCloudFindings(foreign, stripped, wiz)).rejects.toThrow(
+      /does not match the selected Cloud repository/,
+    );
+    await prepareCloudFindings(matching, stripped, wiz);
   }
   for (const url of [
     "ssh://git@git.example.test/team/project.git",
@@ -4471,15 +4413,15 @@ test("Black Duck Cloud replay preserves package occurrence and rejects a differe
   ]) {
     stripped.findings[0]!.evidence.source_data = { sourceRepositoryUrl: url };
     await expect(
-      prepareNormalizedExternalPublication(stripped, wiz, foreign.deps),
+      prepareCloudFindings(foreign, stripped, wiz),
     ).rejects.toThrow();
   }
   expect(foreign.posts).toHaveLength(0);
   stripped.findings[0]!.evidence.source_data = { upstream: data };
-  await prepareNormalizedExternalPublication(stripped, wiz, foreign.deps);
+  await prepareCloudFindings(foreign, stripped, wiz);
   delete stripped.findings[0]!.evidence.source_data;
   await expect(
-    prepareNormalizedExternalPublication(stripped, selected, foreign.deps),
+    prepareCloudFindings(foreign, stripped, selected),
   ).rejects.toThrow(/retained Black Duck/);
   const normalized = structuredClone(native);
   normalized.findings[0]!.source_finding_id = "sdk-id";
@@ -4487,11 +4429,7 @@ test("Black Duck Cloud replay preserves package occurrence and rejects a differe
     sourceRepositoryUrl: selected.sourceRepositoryUrl,
     projectVersionUrl: "https://scanner.example.test/dashboard/version",
   };
-  await prepareNormalizedExternalPublication(
-    normalized,
-    selected,
-    correct.deps,
-  );
+  await prepareCloudFindings(correct, normalized, selected);
 
   const summary = normalized.findings[0]!;
   delete summary.evidence.source_data;
@@ -4500,7 +4438,7 @@ test("Black Duck Cloud replay preserves package occurrence and rejects a differe
     repository: { url: selected.sourceRepositoryUrl },
   };
   const prepareSummary = () =>
-    prepareNormalizedExternalPublication(normalized, selected, correct.deps);
+    prepareCloudFindings(correct, normalized, selected);
   const prepared = await prepareSummary();
   const expected = JSON.stringify(prepared.preview.requests[0]);
   correct.state.loseResponse = true;
@@ -4525,15 +4463,14 @@ test("Veracode Cloud replays an application policy issue and rejects a foreign d
     sourceRepositoryUrl: "https://github.com/example/project",
     sourceKey: "veracode/example/static",
   };
-  const prepare = () =>
-    prepareExternalPublication(correct.file, selected, correct.deps);
+  const prepare = () => prepareCloudFile(correct, selected);
   const first = await prepare();
   expect(first.preview.requests[0]!.source.provider).toBe("veracode");
   await expect(
-    prepareNormalizedExternalPublication(
+    prepareCloudFindings(
+      correct,
       normalizeVeracodeFindings(page, selected.sourceRepositoryUrl),
       { ...selected, provider: "wiz" },
-      correct.deps,
     ),
   ).rejects.toThrow(/requires the veracode provider/i);
   for (const row of [
@@ -4544,7 +4481,7 @@ test("Veracode Cloud replays an application policy issue and rejects a foreign d
     input.findings[0]!.source_finding_id = "sdk-id";
     input.findings[0]!.evidence.source_data!["row"] = row;
     await expect(
-      prepareNormalizedExternalPublication(input, selected, correct.deps),
+      prepareCloudFindings(correct, input, selected),
     ).rejects.toThrow(/context|STATIC/);
   }
   const partial = normalizeVeracodeFindings(page, selected.sourceRepositoryUrl);
@@ -4556,16 +4493,12 @@ test("Veracode Cloud replays an application policy issue and rejects a foreign d
   for (const id of [finding.source_finding_id, "sdk-id"]) {
     finding.source_finding_id = id;
     await expect(
-      prepareNormalizedExternalPublication(
-        partial,
-        { ...selected, provider: "wiz" },
-        foreign.deps,
-      ),
+      prepareCloudFindings(foreign, partial, { ...selected, provider: "wiz" }),
     ).rejects.toThrow(/requires the veracode provider/i);
   }
   finding.evidence.details!.repository!.url = selected.sourceRepositoryUrl;
   await expect(
-    prepareNormalizedExternalPublication(partial, selected, correct.deps),
+    prepareCloudFindings(correct, partial, selected),
   ).rejects.toThrow(/retained application/i);
   finding.evidence.source_data = {
     sourceRepositoryUrl: selected.sourceRepositoryUrl,
@@ -4575,11 +4508,10 @@ test("Veracode Cloud replays an application policy issue and rejects a foreign d
   };
   expect(
     (
-      await prepareNormalizedExternalPublication(
-        partial,
-        { ...selected, provider: "wiz" },
-        correct.deps,
-      )
+      await prepareCloudFindings(correct, partial, {
+        ...selected,
+        provider: "wiz",
+      })
     ).preview.findings,
   ).toHaveLength(1);
   const mixed = normalizeVeracodeFindings(page, selected.sourceRepositoryUrl);
@@ -4590,9 +4522,9 @@ test("Veracode Cloud replays an application policy issue and rejects a foreign d
     "https://github.com/example/other";
   mixed.findings.push(sdkFinding);
   mixed.read++;
-  await expect(
-    prepareNormalizedExternalPublication(mixed, selected, correct.deps),
-  ).rejects.toThrow(/does not match/);
+  await expect(prepareCloudFindings(correct, mixed, selected)).rejects.toThrow(
+    /does not match/,
+  );
   expect(correct.posts).toHaveLength(0);
   first.preview.requests[0]!.items[0]!.evidence.source_data![
     "sourceRepositoryUrl"
@@ -4605,9 +4537,9 @@ test("Veracode Cloud replays an application policy issue and rejects a foreign d
   expect(correct.posts[1]).toBe(correct.posts[0]);
   expect((await (await prepare()).publish()).counts.unchanged).toBe(1);
   const other = await fixture([page], "https://github.com/example/other");
-  await expect(
-    prepareExternalPublication(other.file, selected, other.deps),
-  ).rejects.toThrow(/does not match/i);
+  await expect(prepareCloudFile(other, selected)).rejects.toThrow(
+    /does not match/i,
+  );
   expect(other.posts).toHaveLength(0);
 });
 
@@ -4650,10 +4582,10 @@ test("CLI creates, reimports unchanged, and updates the same canonical finding",
   const canonical = f.reports.get("vendor-1")!.canonical_finding_id;
   expect(JSON.parse(first.stdout.text()).counts.created).toBe(1);
   expect(first.stderr.text()).not.toContain("Selected findings and evidence:");
-  const again = await prepareExternalPublication(f.file, options, f.deps);
+  const again = await prepareCloudFile(f);
   expect((await again.publish()).counts.unchanged).toBe(1);
   await writeFile(f.file, JSON.stringify([normalized("vendor-1", "critical")]));
-  const updated = await prepareExternalPublication(f.file, options, f.deps);
+  const updated = await prepareCloudFile(f);
   expect(updated.preview.requests[0]!.items[0]!.expected_version).toBe(1);
   expect((await updated.publish()).counts.updated).toBe(1);
   expect(f.reports.get("vendor-1")).toMatchObject({
@@ -4674,7 +4606,7 @@ test("normalized input accepts server-materialized optional evidence defaults", 
     },
   ]);
   f.state.materializeDefaults = true;
-  const prepared = await prepareExternalPublication(f.file, options, f.deps);
+  const prepared = await prepareCloudFile(f);
   expect((await prepared.publish()).counts.created).toBe(1);
   expect(f.reports.get("vendor-1")?.evidence).toMatchObject({
     advisory_ids: [],
@@ -4829,7 +4761,7 @@ function observeLockContention() {
 }
 
 async function pauseAtPublication(
-  f: Awaited<ReturnType<typeof fixture>>,
+  f: PublicationFixture,
   stage: "receipt" | "readback" = "readback",
 ) {
   const arrived = Promise.withResolvers<void>();
@@ -4864,15 +4796,13 @@ async function pauseAtPublication(
 test("overlapping retries cannot delete a newer pending submission or roll back newer evidence", async () => {
   const f = await fixture();
   f.state.brokenReadback = true;
-  await expect(
-    (await prepareExternalPublication(f.file, options, f.deps)).publish(),
-  ).rejects.toThrow("resume the saved request");
+  await expect((await prepareCloudFile(f)).publish()).rejects.toThrow(
+    "resume the saved request",
+  );
   f.state.brokenReadback = false;
   const { completion: first, release } = await pauseAtPublication(f);
   const observer = observeLockContention();
-  const second = (
-    await prepareExternalPublication(f.file, options, f.deps)
-  ).publish();
+  const second = (await prepareCloudFile(f)).publish();
   try {
     await Promise.race([
       observer.contended,
@@ -4889,14 +4819,14 @@ test("overlapping retries cannot delete a newer pending submission or roll back 
     observer.restore();
     await Promise.allSettled([first, second]);
   }
-  const newer = await prepareExternalPublication(f.file, options, f.deps);
+  const newer = await prepareCloudFile(f);
   f.state.loseResponse = true;
   await expect(newer.publish()).rejects.toThrow("resume the saved request");
   const acceptedBody = f.posts.at(-1);
   await writeFile(f.file, JSON.stringify([normalized("vendor-1", "critical")]));
-  await (await prepareExternalPublication(f.file, options, f.deps)).publish();
+  await (await prepareCloudFile(f)).publish();
   await writeFile(f.file, JSON.stringify([normalized()]));
-  const retry = await prepareExternalPublication(f.file, options, f.deps);
+  const retry = await prepareCloudFile(f);
   expect(retry.preview.resumed).toBe(true);
   expect(retry.preview.requests[0]!.request_id).toBe(
     newer.preview.requests[0]!.request_id,
@@ -4916,7 +4846,7 @@ test("reset retirement tolerates a checkpoint written while waiting for the acti
   f.state.environmentId = "replacement-environment";
   f.state.brokenReadback = true;
   const observer = observeLockContention();
-  const reset = prepareExternalPublication(f.file, options, f.deps);
+  const reset = prepareCloudFile(f);
   const resetResult = reset.then(
     () => "unexpected-success",
     (error: Error) => error.message,
@@ -4939,7 +4869,7 @@ test("reset retirement tolerates a checkpoint written while waiting for the acti
   }
   f.state.brokenReadback = false;
   f.reports.clear();
-  const fresh = await prepareExternalPublication(f.file, options, f.deps);
+  const fresh = await prepareCloudFile(f);
   expect(fresh.preview.resumed).toBe(false);
   expect((await fresh.publish()).counts.created).toBe(1);
 });
@@ -4987,7 +4917,7 @@ test.each(["receipt", "readback"] as const)(
       expect(await readFile(join(directory, name), "utf8")).toBe(before);
       expect(listeners.size).toBe(0);
       expect(f.posts).toHaveLength(1);
-      const retry = await prepareExternalPublication(f.file, options, f.deps);
+      const retry = await prepareCloudFile(f);
       expect(retry.preview.resumed).toBe(true);
       expect(retry.preview.requests[0]!.request_id).toBe(
         JSON.parse(f.posts[0]!).request_id,
@@ -5036,9 +4966,9 @@ test("canceling before acquiring a new publication lock reports no saved work", 
 test("lock cancellation does not report a saved receipt for another request", async () => {
   const f = await fixture();
   f.state.brokenReadback = true;
-  await expect(
-    (await prepareExternalPublication(f.file, options, f.deps)).publish(),
-  ).rejects.toThrow("resume the saved request");
+  await expect((await prepareCloudFile(f)).publish()).rejects.toThrow(
+    "resume the saved request",
+  );
   const directory = join(f.root, "state", "external-finding-publications");
   const name = (await readdir(directory)).find((name) =>
     name.endsWith(".pending.json"),
@@ -5101,9 +5031,9 @@ test.skipIf(process.platform !== "win32")(
     const before = await descriptor(shared);
     expect(before).toContain(";;;WD)");
     f.state.brokenReadback = true;
-    await expect(
-      (await prepareExternalPublication(f.file, options, f.deps)).publish(),
-    ).rejects.toThrow("resume the saved request");
+    await expect((await prepareCloudFile(f)).publish()).rejects.toThrow(
+      "resume the saved request",
+    );
     const directory = join(
       f.environment.CODEX_SECURITY_STATE_DIR,
       "external-finding-publications",
@@ -5119,13 +5049,9 @@ test.skipIf(process.platform !== "win32")(
     expect(await descriptor(join(directory, name))).not.toContain(";;;WD)");
     expect(await descriptor(shared)).toBe(before);
     f.state.brokenReadback = false;
-    expect(
-      (
-        await (
-          await prepareExternalPublication(f.file, options, f.deps)
-        ).publish()
-      ).counts.created,
-    ).toBe(1);
+    expect((await (await prepareCloudFile(f)).publish()).counts.created).toBe(
+      1,
+    );
     expect(f.posts).toHaveLength(1);
   },
   60_000,
@@ -5134,10 +5060,10 @@ test.skipIf(process.platform !== "win32")(
 test("readback failure retries acknowledged receipts without another POST", async () => {
   const f = await fixture();
   f.state.brokenReadback = true;
-  const prepared = await prepareExternalPublication(f.file, options, f.deps);
+  const prepared = await prepareCloudFile(f);
   await expect(prepared.publish()).rejects.toThrow("resume the saved request");
   f.state.brokenReadback = false;
-  const retry = await prepareExternalPublication(f.file, options, f.deps);
+  const retry = await prepareCloudFile(f);
   expect(retry.preview.resumed).toBe(true);
   expect((await retry.publish()).counts.created).toBe(1);
   expect(f.posts).toHaveLength(1);
@@ -5146,22 +5072,14 @@ test("readback failure retries acknowledged receipts without another POST", asyn
 test("an older pending receipt can resume after newer evidence without rolling it back", async () => {
   const f = await fixture();
   f.state.loseResponse = true;
-  await expect(
-    (await prepareExternalPublication(f.file, options, f.deps)).publish(),
-  ).rejects.toThrow("resume the saved request");
+  await expect((await prepareCloudFile(f)).publish()).rejects.toThrow(
+    "resume the saved request",
+  );
   const original = f.posts[0];
   await writeFile(f.file, JSON.stringify([normalized("vendor-1", "critical")]));
-  expect(
-    (
-      await (
-        await prepareExternalPublication(f.file, options, f.deps)
-      ).publish()
-    ).counts.updated,
-  ).toBe(1);
+  expect((await (await prepareCloudFile(f)).publish()).counts.updated).toBe(1);
   await writeFile(f.file, JSON.stringify([normalized()]));
-  const replay = await (
-    await prepareExternalPublication(f.file, options, f.deps)
-  ).publish();
+  const replay = await (await prepareCloudFile(f)).publish();
   expect(f.posts.at(-1)).toBe(original);
   expect(replay.receipts[0]!.results[0]!.version).toBe(1);
   expect(f.reports.get("vendor-1")).toMatchObject({
@@ -5175,23 +5093,23 @@ test.each(["environment-example", "replacement-environment", null])(
   async (environmentId) => {
     const f = await fixture();
     f.state.throttle = true;
-    await expect(
-      (await prepareExternalPublication(f.file, options, f.deps)).publish(),
-    ).rejects.toThrow("Retry-After: 1");
+    await expect((await prepareCloudFile(f)).publish()).rejects.toThrow(
+      "Retry-After: 1",
+    );
     f.state.marker = "generation-2";
     f.state.environmentId = environmentId;
-    await expect(
-      prepareExternalPublication(f.file, options, f.deps),
-    ).rejects.toThrow("retired without uploading");
+    await expect(prepareCloudFile(f)).rejects.toThrow(
+      "retired without uploading",
+    );
     expect(f.posts).toHaveLength(1);
     if (environmentId === null) {
-      await expect(
-        prepareExternalPublication(f.file, options, f.deps),
-      ).rejects.toThrow("Configure an authorized Cloud environment");
+      await expect(prepareCloudFile(f)).rejects.toThrow(
+        "Configure an authorized Cloud environment",
+      );
       f.state.environmentId = "replacement-environment";
     }
     f.state.throttle = false;
-    const fresh = await prepareExternalPublication(f.file, options, f.deps);
+    const fresh = await prepareCloudFile(f);
     expect(fresh.preview.resumed).toBe(false);
     expect(fresh.preview.requests[0]!.repository).toMatchObject({
       reset_marker: "generation-2",
@@ -5242,10 +5160,10 @@ test.each([0, 1])(
       },
     }));
     const prepare = () =>
-      prepareNormalizedExternalPublication(
+      prepareCloudFindings(
+        f,
         { read: findings.length, findings, excluded: [] },
         { ...options, sourceKey: 'tenant/"境界"' },
-        f.deps,
       );
     const template = (await prepare()).preview.requests[0]!;
     const targetBytes = 5 * 1024 * 1024 + extraByte;
@@ -5274,7 +5192,7 @@ test.each([100, 101])(
       normalized(`vendor-${index}`),
     );
     const f = await fixture(records);
-    const prepared = await prepareExternalPublication(f.file, options, f.deps);
+    const prepared = await prepareCloudFile(f);
     const { requests } = prepared.preview;
     expect(requests.map((request) => request.items.length)).toEqual(
       count === 100 ? [100] : [100, 1],
@@ -5309,9 +5227,9 @@ test("publication keeps final item errors visible", async () => {
 test("local receipts contain no credential and pending bodies match transmitted bytes", async () => {
   const f = await fixture();
   f.state.throttle = true;
-  await expect(
-    (await prepareExternalPublication(f.file, options, f.deps)).publish(),
-  ).rejects.toThrow("Slow down");
+  await expect((await prepareCloudFile(f)).publish()).rejects.toThrow(
+    "Slow down",
+  );
   const directory = join(f.root, "state", "external-finding-publications");
   const name = (await readdir(directory)).find((name) =>
     name.endsWith(".pending.json"),
@@ -5382,9 +5300,9 @@ test("a failed checkpoint leaves the original pending request recoverable", asyn
     },
   );
   try {
-    await expect(
-      (await prepareExternalPublication(f.file, options, f.deps)).publish(),
-    ).rejects.toThrow("Checkpoint interrupted");
+    await expect((await prepareCloudFile(f)).publish()).rejects.toThrow(
+      "Checkpoint interrupted",
+    );
   } finally {
     checkpoint.mockRestore();
   }
@@ -5396,13 +5314,7 @@ test("a failed checkpoint leaves the original pending request recoverable", asyn
   expect(saved.receipts).toBeUndefined();
   expect(JSON.stringify(saved.requests[0])).toBe(f.posts[0]!);
   await writeFile(join(directory, `${name}.orphan.tmp`), "{");
-  expect(
-    (
-      await (
-        await prepareExternalPublication(f.file, options, f.deps)
-      ).publish()
-    ).counts.created,
-  ).toBe(1);
+  expect((await (await prepareCloudFile(f)).publish()).counts.created).toBe(1);
   expect(f.posts).toHaveLength(2);
   expect(f.posts[1]).toBe(f.posts[0]);
   expect(f.receipts.size).toBe(1);
@@ -5421,9 +5333,9 @@ test.each(["pending", "result"])(
       },
     );
     try {
-      await expect(
-        (await prepareExternalPublication(f.file, options, f.deps)).publish(),
-      ).rejects.toThrow("File installation interrupted");
+      await expect((await prepareCloudFile(f)).publish()).rejects.toThrow(
+        "File installation interrupted",
+      );
     } finally {
       installation.mockRestore();
     }
@@ -5434,13 +5346,9 @@ test.each(["pending", "result"])(
       stage === "result",
     );
     expect(f.posts).toHaveLength(stage === "result" ? 1 : 0);
-    expect(
-      (
-        await (
-          await prepareExternalPublication(f.file, options, f.deps)
-        ).publish()
-      ).counts.created,
-    ).toBe(1);
+    expect((await (await prepareCloudFile(f)).publish()).counts.created).toBe(
+      1,
+    );
     expect(f.posts).toHaveLength(1);
   },
 );
@@ -5450,9 +5358,9 @@ test.each(["request", "counts", "length", "schema"])(
   async (invalid) => {
     const f = await fixture();
     f.state.brokenReadback = true;
-    await expect(
-      (await prepareExternalPublication(f.file, options, f.deps)).publish(),
-    ).rejects.toThrow("resume the saved request");
+    await expect((await prepareCloudFile(f)).publish()).rejects.toThrow(
+      "resume the saved request",
+    );
     const directory = join(f.root, "state", "external-finding-publications");
     const name = (await readdir(directory)).find((name) =>
       name.endsWith(".pending.json"),
@@ -5466,9 +5374,7 @@ test.each(["request", "counts", "length", "schema"])(
     if (invalid === "schema") saved.receipts[0].source.provider = "unsupported";
     await writeFile(pending, JSON.stringify(saved));
     f.state.brokenReadback = false;
-    await expect(
-      (await prepareExternalPublication(f.file, options, f.deps)).publish(),
-    ).rejects.toThrow();
+    await expect((await prepareCloudFile(f)).publish()).rejects.toThrow();
     expect(f.posts).toHaveLength(1);
     expect(
       (await readdir(directory)).filter((name) => name.endsWith(".tmp")),
@@ -5480,7 +5386,7 @@ test("a held retry reports the acknowledged batch after another resumer retires 
   const f = await fixture(
     Array.from({ length: 101 }, (_, index) => normalized(`item-${index}`)),
   );
-  const prepare = () => prepareExternalPublication(f.file, options, f.deps);
+  const prepare = () => prepareCloudFile(f);
   f.state.postBudget = 1;
   const original = await prepare();
   await expect(original.publish()).rejects.toThrow("Slow down");
@@ -5517,7 +5423,7 @@ test.each(["matching", "replaced", "missing"])(
     const f = await fixture(
       Array.from({ length: 101 }, (_, index) => normalized(`item-${index}`)),
     );
-    const prepare = () => prepareExternalPublication(f.file, options, f.deps);
+    const prepare = () => prepareCloudFile(f);
     f.state.postBudget = 1;
     await expect((await prepare()).publish()).rejects.toThrow("Slow down");
     const held = await prepare();
@@ -5565,12 +5471,12 @@ test.each([1, 101])(
     );
     f.state.postBudget = 1;
     f.state.brokenReadback = true;
-    await expect(
-      (await prepareExternalPublication(f.file, options, f.deps)).publish(),
-    ).rejects.toThrow("resume the saved request");
+    await expect((await prepareCloudFile(f)).publish()).rejects.toThrow(
+      "resume the saved request",
+    );
     f.state.brokenReadback = false;
-    const first = await prepareExternalPublication(f.file, options, f.deps);
-    const second = await prepareExternalPublication(f.file, options, f.deps);
+    const first = await prepareCloudFile(f);
+    const second = await prepareCloudFile(f);
     f.state.postBudget = Infinity;
     const completed = await first.publish();
     expect(completed.counts.created).toBe(count);
@@ -5578,7 +5484,7 @@ test.each([1, 101])(
     f.state.postBudget = 0;
     expect(await second.publish()).toEqual(completed);
     expect(f.posts).toHaveLength(completedPosts);
-    const fresh = await prepareExternalPublication(f.file, options, f.deps);
+    const fresh = await prepareCloudFile(f);
     expect(fresh.preview.resumed).toBe(false);
     expect(fresh.preview.requests[0]!.request_id).not.toBe(
       first.preview.requests[0]!.request_id,
@@ -5598,7 +5504,7 @@ test.each([
   "failed %s staging cleans temporary data and remains retryable (%s)",
   async (stage, fault) => {
     const f = await fixture();
-    const prepared = await prepareExternalPublication(f.file, options, f.deps);
+    const prepared = await prepareCloudFile(f);
     const originalOpen = fs.open;
     const originalRename = fs.rename;
     let temporaryOpens = 0;
@@ -5652,7 +5558,7 @@ test.each([
       stage === "result",
     );
     expect(f.posts).toHaveLength(stage === "initial" ? 0 : 1);
-    const retry = await prepareExternalPublication(f.file, options, f.deps);
+    const retry = await prepareCloudFile(f);
     expect(retry.preview.resumed).toBe(stage === "result");
     expect((await retry.publish()).counts.created).toBe(1);
     expect(f.posts).toHaveLength(1);
@@ -5874,12 +5780,12 @@ test.each(["replacement-environment", null])(
   async (environmentId) => {
     const f = await fixture();
     f.state.loseResponse = true;
-    await expect(
-      (await prepareExternalPublication(f.file, options, f.deps)).publish(),
-    ).rejects.toThrow("resume the saved request");
+    await expect((await prepareCloudFile(f)).publish()).rejects.toThrow(
+      "resume the saved request",
+    );
     const original = f.posts[0]!;
     f.state.environmentId = environmentId;
-    const retry = await prepareExternalPublication(f.file, options, f.deps);
+    const retry = await prepareCloudFile(f);
     expect(retry.preview.resumed).toBe(true);
     expect(retry.preview.requests[0]!.repository.environment_id).toBe(
       "environment-example",
@@ -5891,7 +5797,7 @@ test.each(["replacement-environment", null])(
 
 test("mixed environments preserve input order and are shown before confirmation", async () => {
   const f = await fixture([normalized("existing-a"), normalized("existing-c")]);
-  await (await prepareExternalPublication(f.file, options, f.deps)).publish();
+  await (await prepareCloudFile(f)).publish();
   const originalIds = ["existing-a", "existing-c"].map(
     (id) => f.reports.get(id)!.canonical_finding_id,
   );
@@ -5904,7 +5810,7 @@ test("mixed environments preserve input order and are shown before confirmation"
       normalized("existing-c", "critical"),
     ]),
   );
-  const prepared = await prepareExternalPublication(f.file, options, f.deps);
+  const prepared = await prepareCloudFile(f);
   expect(
     prepared.preview.requests.map(
       (request) => request.repository.environment_id,
@@ -5977,19 +5883,19 @@ test("mixed environments preserve input order and are shown before confirmation"
 
 test("existing source updates do not need a newly discovered default environment", async () => {
   const f = await fixture();
-  await (await prepareExternalPublication(f.file, options, f.deps)).publish();
+  await (await prepareCloudFile(f)).publish();
   f.state.environmentId = null;
   await writeFile(f.file, JSON.stringify([normalized("vendor-1", "critical")]));
-  const prepared = await prepareExternalPublication(f.file, options, f.deps);
+  const prepared = await prepareCloudFile(f);
   expect(prepared.preview.requests[0]!.repository.environment_id).toBe(
     "environment-example",
   );
   expect((await prepared.publish()).counts.updated).toBe(1);
   const posts = f.posts.length;
   await writeFile(f.file, JSON.stringify([normalized("new-vendor")]));
-  await expect(
-    prepareExternalPublication(f.file, options, f.deps),
-  ).rejects.toThrow("Configure an authorized Cloud environment");
+  await expect(prepareCloudFile(f)).rejects.toThrow(
+    "Configure an authorized Cloud environment",
+  );
   expect(f.posts).toHaveLength(posts);
 });
 
@@ -6015,7 +5921,7 @@ test.each([
     "Cloud readback did not match the saved finding identity",
   );
   expect(f.posts).toHaveLength(1);
-  const retry = await prepareExternalPublication(f.file, options, f.deps);
+  const retry = await prepareCloudFile(f);
   expect((await retry.publish()).counts.created).toBe(1);
   expect(f.posts).toHaveLength(1);
 });
@@ -6029,7 +5935,7 @@ test("malformed bracketed URLs exclude only their own finding before upload", as
       evidence: { ...invalid.evidence, url: "https://[127.0.0.1]/finding" },
     },
   ]);
-  const prepared = await prepareExternalPublication(f.file, options, f.deps);
+  const prepared = await prepareCloudFile(f);
   expect(
     prepared.preview.findings.map((finding) => finding.source_finding_id),
   ).toEqual(["valid-url"]);
@@ -6088,7 +5994,7 @@ test.each([false, true])(
       if (cancel) {
         await expect(completion).rejects.toThrow("Synthetic cancellation");
         expect(f.posts).toHaveLength(0);
-        const retry = await prepareExternalPublication(f.file, options, f.deps);
+        const retry = await prepareCloudFile(f);
         expect(retry.preview.resumed).toBe(true);
         expect(retry.preview.requests[0]!.request_id).toBe(
           prepared.preview.requests[0]!.request_id,
@@ -6128,7 +6034,7 @@ test("numeric evidence size excludes an oversized item and preserves a valid mix
     256 * 1024,
   );
   const f = await fixture([oversized, accepted]);
-  const prepared = await prepareExternalPublication(f.file, options, f.deps);
+  const prepared = await prepareCloudFile(f);
   expect(
     prepared.preview.findings.map((finding) => finding.source_finding_id),
   ).toEqual(["accepted-numbers"]);
@@ -6154,9 +6060,7 @@ test.each([0xff, 0xfe])(
         Buffer.from('","evidence":{"title":"Example","severity":"high"}}'),
       ]),
     );
-    await expect(
-      prepareExternalPublication(f.file, options, f.deps),
-    ).rejects.toThrow("UTF-8");
+    await expect(prepareCloudFile(f)).rejects.toThrow("UTF-8");
     expect(f.posts).toHaveLength(0);
     await writeFile(
       f.file,
@@ -6276,7 +6180,7 @@ test("readback retry preserves acknowledged findings and scanner diagnostics", a
     provider: "opengrep" as const,
     sourceRepositoryUrl: f.destination().url,
   };
-  const prepared = await prepareExternalPublication(f.file, settings, f.deps);
+  const prepared = await prepareCloudFile(f, settings);
   try {
     await prepared.publish();
     throw new Error("Expected readback interruption");
@@ -6293,11 +6197,11 @@ test("readback retry preserves acknowledged findings and scanner diagnostics", a
   const changed = structuredClone(input);
   changed.errors[0]!.message = "A different scanner diagnostic";
   await writeFile(f.file, JSON.stringify(changed));
-  const different = await prepareExternalPublication(f.file, settings, f.deps);
+  const different = await prepareCloudFile(f, settings);
   expect(different.preview.resumed).toBe(false);
   expect(different.preview.report?.["errors"]).toEqual(changed.errors);
   await writeFile(f.file, JSON.stringify(input));
-  const original = await prepareExternalPublication(f.file, settings, f.deps);
+  const original = await prepareCloudFile(f, settings);
   expect(original.preview.resumed).toBe(true);
   f.state.brokenReadback = false;
   const retried = await original.publish();
@@ -6361,14 +6265,13 @@ test("each discovery page requests the repository and refreshes its private impo
 test("repository URLs and IDs share the same resumable destination", async () => {
   const f = await fixture();
   f.state.loseResponse = true;
-  const first = await prepareExternalPublication(
-    f.file,
-    { ...options, repository: `${f.destination().url}.git` },
-    f.deps,
-  );
+  const first = await prepareCloudFile(f, {
+    ...options,
+    repository: `${f.destination().url}.git`,
+  });
   expect(first.preview.destination.id).toBe(options.repository);
   await expect(first.publish()).rejects.toThrow("resume the saved request");
-  const retry = await prepareExternalPublication(f.file, options, f.deps);
+  const retry = await prepareCloudFile(f);
   expect(retry.preview.resumed).toBe(true);
   expect((await retry.publish()).status).toBe("complete");
   expect(f.posts[1]).toBe(f.posts[0]);
@@ -6655,10 +6558,10 @@ test("normalized SDK publication preserves caller evidence and exclusion account
     ],
   };
   const original = structuredClone(input);
-  const prepared = await prepareNormalizedExternalPublication(
+  const prepared = await prepareCloudFindings(
+    f,
     input as Parameters<typeof prepareNormalizedExternalPublication>[0],
     Object.create(options) as typeof options,
-    f.deps,
   );
   expect(input).toEqual(original);
   expect(prepared.preview.read).toBe(2);
@@ -6690,26 +6593,18 @@ test("GitHub publication previews, imports, re-imports, updates and resumes sele
   ).toBe(0);
   expect(f.posts).toHaveLength(0);
   expect(JSON.parse(cli.stdout.text()).source.provider).toBe("github");
-  const first = await (
-    await prepareExternalPublication(f.file, githubOptions, f.deps)
-  ).publish();
+  const first = await (await prepareCloudFile(f, githubOptions)).publish();
   expect(first.counts.created).toBe(1);
   expect(first.verified).toBe(1);
-  const repeated = await (
-    await prepareExternalPublication(f.file, githubOptions, f.deps)
-  ).publish();
+  const repeated = await (await prepareCloudFile(f, githubOptions)).publish();
   expect(repeated.counts.unchanged).toBe(1);
   imported.alert.most_recent_instance.state = "fixed";
   await writeFile(f.file, JSON.stringify([imported]));
   f.state.loseResponse = true;
   await expect(
-    (await prepareExternalPublication(f.file, githubOptions, f.deps)).publish(),
+    (await prepareCloudFile(f, githubOptions)).publish(),
   ).rejects.toBeInstanceOf(ExternalPublicationError);
-  const prepared = await prepareExternalPublication(
-    f.file,
-    githubOptions,
-    f.deps,
-  );
+  const prepared = await prepareCloudFile(f, githubOptions);
   expect(prepared.preview.resumed).toBe(true);
   const resumed = await prepared.publish();
   expect(resumed.counts.updated).toBe(1);
@@ -6721,7 +6616,7 @@ test("GitHub publication previews, imports, re-imports, updates and resumes sele
   });
   await writeFile(f.file, JSON.stringify([importedAlert("refs/heads/review")]));
   const differentRef = await (
-    await prepareExternalPublication(f.file, githubOptions, f.deps)
+    await prepareCloudFile(f, githubOptions)
   ).publish();
   expect(differentRef.counts.created).toBe(1);
   expect(f.reports.size).toBe(2);
@@ -6740,11 +6635,7 @@ test.each([
     const evidence = input.findings[0]!.evidence;
     const f = await fixture(undefined, otherRepository);
     const prepare = () =>
-      prepareNormalizedExternalPublication(
-        input,
-        { ...options, provider: "github" },
-        f.deps,
-      );
+      prepareCloudFindings(f, input, { ...options, provider: "github" });
     evidence.details!.repository!.url = otherRepository;
     await expect(prepare()).rejects.toThrow(
       "does not match the original GitHub finding",
@@ -6769,11 +6660,7 @@ test("GitHub imports reject a different Cloud destination before uploading", asy
   const imported = importedAlert("refs/heads/main", "git.example.test");
   const f = await fixture([imported]);
   await expect(
-    prepareExternalPublication(
-      f.file,
-      { ...options, provider: "github" },
-      f.deps,
-    ),
+    prepareCloudFile(f, { ...options, provider: "github" }),
   ).rejects.toThrow("does not match the selected Cloud repository");
   expect(f.posts).toHaveLength(0);
 });
@@ -6787,27 +6674,17 @@ test("global GHSA publication retains unassessed applicability through repeat im
     sourceKey: "github.com/example/project/security-advisories",
   };
   expect(
-    (
-      await (
-        await prepareExternalPublication(f.file, selected, f.deps)
-      ).publish()
-    ).counts.created,
+    (await (await prepareCloudFile(f, selected)).publish()).counts.created,
   ).toBe(1);
   expect(
-    (
-      await (
-        await prepareExternalPublication(f.file, selected, f.deps)
-      ).publish()
-    ).counts.unchanged,
+    (await (await prepareCloudFile(f, selected)).publish()).counts.unchanged,
   ).toBe(1);
   const withdrawn = {
     ...imported,
     advisory: { ...imported.advisory, withdrawn_at: "2026-01-03T00:00:00Z" },
   };
   await writeFile(f.file, JSON.stringify([withdrawn]));
-  const result = await (
-    await prepareExternalPublication(f.file, selected, f.deps)
-  ).publish();
+  const result = await (await prepareCloudFile(f, selected)).publish();
   expect(result.counts.updated).toBe(1);
   expect(result.verified).toBe(1);
   const report = [...f.reports.values()][0]!;
@@ -6856,15 +6733,11 @@ test("normalized publication omits only new null fields to match canonical Cloud
       advisory: { source: "global" as const },
     },
   };
-  const prepared = await prepareNormalizedExternalPublication(
-    {
-      read: 1,
-      findings: [{ source_finding_id: "synthetic-global-advisory", evidence }],
-      excluded: [],
-    },
-    options,
-    f.deps,
-  );
+  const prepared = await prepareCloudFindings(f, {
+    read: 1,
+    findings: [{ source_finding_id: "synthetic-global-advisory", evidence }],
+    excluded: [],
+  });
   const sent = prepared.preview.findings[0]!.evidence;
   expect(sent.packages![0]).not.toHaveProperty("vulnerable_version_range");
   expect(sent.packages![0]!.installed_version).toBeNull();
@@ -6892,7 +6765,7 @@ test("normalized publication omits only new null fields to match canonical Cloud
       },
     ]),
   );
-  const wiz = await prepareExternalPublication(f.file, options, f.deps);
+  const wiz = await prepareCloudFile(f);
   expect(wiz.preview.findings[0]!.evidence.details).not.toHaveProperty(
     "advisory",
   );
@@ -6928,11 +6801,7 @@ test("normalized SDK publication detaches raw evidence aliases before validating
     excluded: [],
   };
   const original = JSON.stringify(input);
-  const prepared = await prepareNormalizedExternalPublication(
-    input,
-    options,
-    f.deps,
-  );
+  const prepared = await prepareCloudFindings(f, input);
   expect(JSON.stringify(input)).toBe(original);
   expect(prepared.preview.report).toEqual({
     package: { name: "example-package" },
@@ -6944,7 +6813,7 @@ test("normalized SDK publication detaches raw evidence aliases before validating
     earlier_package: { name: "example-package" },
   });
   await writeFile(f.file, JSON.stringify(input.findings));
-  const fromFile = await prepareExternalPublication(f.file, options, f.deps);
+  const fromFile = await prepareCloudFile(f);
   expect(prepared.preview.findings).toEqual(fromFile.preview.findings);
 });
 
@@ -6960,9 +6829,9 @@ test.each(["code-scanning", "advisory"])(
     );
     const f = await fixture([family === "code-scanning" ? alert : advisory]);
     const selected = { ...options, provider: "github" as const };
-    await expect(
-      prepareExternalPublication(f.file, selected, f.deps),
-    ).rejects.toThrow("does not match the selected Cloud repository");
+    await expect(prepareCloudFile(f, selected)).rejects.toThrow(
+      "does not match the selected Cloud repository",
+    );
     expect(f.posts).toHaveLength(0);
     const matching = {
       ...f.deps,
@@ -7003,16 +6872,6 @@ function scoredFindings(score: unknown, report?: Record<string, unknown>) {
   };
 }
 
-type PublicationFixture = Awaited<ReturnType<typeof fixture>>;
-
-function prepareNormalizedFixture(
-  f: PublicationFixture,
-  input: ExternalFindings,
-  selected: NormalizedExternalPublicationOptions = options,
-) {
-  return prepareNormalizedExternalPublication(input, selected, f.deps);
-}
-
 test.each(["deep shared data", "cycle", "row BigInt"])(
   "a compact export remains publishable with an unusable native %s",
   async (kind) => {
@@ -7034,7 +6893,7 @@ test.each(["deep shared data", "cycle", "row BigInt"])(
       else for (let n = 0; n < 24; n++) content = [content, content];
       input.findings[0]!.evidence.source_data.score = new Compact(content);
     }
-    const preview = await prepareNormalizedFixture(f, input);
+    const preview = await prepareCloudFindings(f, input);
     expect(preview.preview.resumed).toBe(false);
     await preview.publish();
     expect(JSON.parse(f.posts[0]!).items[0].evidence.source_data.score).toBe(4);
@@ -7046,7 +6905,7 @@ test("a boxed false flag remains independent of an approved empty object", async
   const prepare = (score: unknown, flag: unknown) => {
     const input = scoredFindings(score);
     Object.assign(input.findings[0]!.evidence.source_data, { flag });
-    return prepareNormalizedExternalPublication(input, options, f.deps);
+    return prepareCloudFindings(f, input);
   };
   f.state.throttle = true;
   const original = await prepare(1, {});
@@ -7089,9 +6948,9 @@ test("normalized SDK publication rejects nonfinite raw evidence without JSON coe
     ],
     excluded: [],
   };
-  await expect(
-    prepareNormalizedExternalPublication(input, options, f.deps),
-  ).rejects.toThrow("finite JSON numbers");
+  await expect(prepareCloudFindings(f, input)).rejects.toThrow(
+    "finite JSON numbers",
+  );
   expect(input.findings[0]!.evidence.source_data.score).toBe(Infinity);
   expect(f.posts).toHaveLength(0);
 });
@@ -7109,22 +6968,15 @@ test("normalized SDK publication rejects unserializable report metadata before u
     ],
     excluded: [],
   };
+  await expect(prepareCloudFindings(f, input)).rejects.toThrow(/bigint/i);
   await expect(
-    prepareNormalizedExternalPublication(input, options, f.deps),
-  ).rejects.toThrow(/bigint/i);
-  await expect(
-    prepareNormalizedExternalPublication(
-      { ...input, report: { elapsed: new Number(Infinity) } },
-      options,
-      f.deps,
-    ),
+    prepareCloudFindings(f, {
+      ...input,
+      report: { elapsed: new Number(Infinity) },
+    }),
   ).rejects.toThrow("finite JSON numbers");
   await expect(
-    prepareNormalizedExternalPublication(
-      { ...input, report: { toJSON: () => Infinity } },
-      options,
-      f.deps,
-    ),
+    prepareCloudFindings(f, { ...input, report: { toJSON: () => Infinity } }),
   ).rejects.toThrow("finite JSON numbers");
   expect(f.posts).toHaveLength(0);
 });
@@ -7149,29 +7001,21 @@ test("publication JSON retains native Error messages and scanner diagnostics", a
   ];
   const f = await fixture();
   await expect(
-    prepareNormalizedExternalPublication(
-      { read: 0, findings: [], excluded: [], report },
-      options,
-      f.deps,
-    ),
+    prepareCloudFindings(f, { read: 0, findings: [], excluded: [], report }),
   ).rejects.toThrow(`Scanner diagnostics: ${JSON.stringify(jsonErrors)}`);
   expect(f.posts).toHaveLength(0);
 
-  const prepared = await prepareNormalizedExternalPublication(
-    {
-      read: 1,
-      findings: [
-        {
-          source_finding_id: "synthetic-report",
-          evidence: { title: "Example finding", severity: "high" },
-        },
-      ],
-      excluded: [],
-      report,
-    },
-    options,
-    f.deps,
-  );
+  const prepared = await prepareCloudFindings(f, {
+    read: 1,
+    findings: [
+      {
+        source_finding_id: "synthetic-report",
+        evidence: { title: "Example finding", severity: "high" },
+      },
+    ],
+    excluded: [],
+    report,
+  });
   nested.cause.message = "Caller changed the diagnostic.";
   const completed = await prepared.publish();
   expect(completed.verified).toBe(1);
@@ -7225,7 +7069,8 @@ test("invalid source namespaces fail before authentication or Cloud requests", a
 
 test("normalized SDK publication accepts Cloud providers without their file reader", async () => {
   const f = await fixture();
-  const prepared = await prepareNormalizedExternalPublication(
+  const prepared = await prepareCloudFindings(
+    f,
     {
       read: 1,
       findings: [
@@ -7237,7 +7082,6 @@ test("normalized SDK publication accepts Cloud providers without their file read
       excluded: [],
     },
     { ...options, provider: "endor" },
-    f.deps,
   );
   expect(prepared.preview.source.provider).toBe("endor");
   expect((await prepared.publish()).verified).toBe(1);
@@ -7259,10 +7103,10 @@ test.each([
       }),
     };
     const f = await fixture();
-    const prepared = await prepareNormalizedExternalPublication(
+    const prepared = await prepareCloudFindings(
+      f,
       { read: 1, findings: [finding], excluded: [] },
       { ...options, provider: "snyk" },
-      f.deps,
     );
     expect((await prepared.publish()).verified).toBe(1);
     expect([...f.reports.values()][0]!.evidence.source_data).toEqual(
@@ -7279,21 +7123,15 @@ test("Snyk SARIF publish, replay and changed evidence preserve Cloud identity", 
     provider: "snyk" as const,
     sourceKey: "organization/project/main",
   };
-  const first = await (
-    await prepareExternalPublication(f.file, settings, f.deps)
-  ).publish();
+  const first = await (await prepareCloudFile(f, settings)).publish();
   expect(first.counts.created).toBe(1);
   expect(first.verified).toBe(1);
   const original = structuredClone([...f.reports.values()][0]!);
-  const second = await (
-    await prepareExternalPublication(f.file, settings, f.deps)
-  ).publish();
+  const second = await (await prepareCloudFile(f, settings)).publish();
   expect(second.counts.unchanged).toBe(1);
   input.runs[0]!.results[0]!.message.text = "Updated source evidence";
   await writeFile(f.file, JSON.stringify(input));
-  const third = await (
-    await prepareExternalPublication(f.file, settings, f.deps)
-  ).publish();
+  const third = await (await prepareCloudFile(f, settings)).publish();
   expect(third.counts.updated).toBe(1);
   const updated = [...f.reports.values()][0]!;
   expect(updated.id).toBe(original.id);
@@ -7341,7 +7179,7 @@ for (const [provider, report, normalize, dryRunTitle] of [
     const input = { ...source, runs: [...source.runs, run] };
     const f = await fixture(input);
     const selected = { ...options, provider };
-    const prepare = () => prepareExternalPublication(f.file, selected, f.deps);
+    const prepare = () => prepareCloudFile(f, selected);
     expect((await prepare()).preview.findings).toHaveLength(1);
 
     run.versionControlProvenance[0]!.repositoryUri = otherRepository;
@@ -7353,11 +7191,7 @@ for (const [provider, report, normalize, dryRunTitle] of [
 
     // An SDK selection carries only its result-bearing run. Existing approved
     // requests must send those exact bytes, even if the native file has other runs.
-    const sdk = await prepareNormalizedExternalPublication(
-      normalize(input),
-      selected,
-      f.deps,
-    );
+    const sdk = await prepareCloudFindings(f, normalize(input), selected);
     await f.loseResponse(sdk);
     const retry = await prepare();
     expect(retry.preview.resumed).toBe(true);
@@ -7392,15 +7226,11 @@ for (const [provider, report, normalize, dryRunTitle] of [
       };
       const f = await fixture(input);
       const selected = { ...options, provider };
+      await expect(prepareCloudFile(f, selected)).rejects.toThrow(
+        "does not match the selected Cloud repository",
+      );
       await expect(
-        prepareExternalPublication(f.file, selected, f.deps),
-      ).rejects.toThrow("does not match the selected Cloud repository");
-      await expect(
-        prepareNormalizedExternalPublication(
-          normalize(input),
-          selected,
-          f.deps,
-        ),
+        prepareCloudFindings(f, normalize(input), selected),
       ).rejects.toThrow("does not match the selected Cloud repository");
       expect(f.posts).toHaveLength(0);
       expect(f.reports.size).toBe(0);
@@ -7418,11 +7248,7 @@ test("Snyk checks empty projects alongside findings in a CLI JSON export", async
   };
   const f = await fixture([project, other]);
   await expect(
-    prepareExternalPublication(
-      f.file,
-      { ...options, provider: "snyk" },
-      f.deps,
-    ),
+    prepareCloudFile(f, { ...options, provider: "snyk" }),
   ).rejects.toThrow("does not match the selected Cloud repository");
   expect(f.posts).toHaveLength(0);
 });
@@ -7432,21 +7258,17 @@ test("native Snyk remote tests bind file and normalized imports to the reported 
   input.path = "https://github.com/other/project#release/v1";
   const f = await fixture(input);
   const selected = { ...options, provider: "snyk" as const };
+  await expect(prepareCloudFile(f, selected)).rejects.toThrow(
+    "does not match the selected Cloud repository",
+  );
   await expect(
-    prepareExternalPublication(f.file, selected, f.deps),
-  ).rejects.toThrow("does not match the selected Cloud repository");
-  await expect(
-    prepareNormalizedExternalPublication(
-      normalizeSnykJson(input),
-      selected,
-      f.deps,
-    ),
+    prepareCloudFindings(f, normalizeSnykJson(input), selected),
   ).rejects.toThrow("does not match the selected Cloud repository");
   expect(f.posts).toHaveLength(0);
 
   input.path = "https://github.com/example/project.git#release/v1";
   await writeFile(f.file, JSON.stringify(input));
-  const prepared = await prepareExternalPublication(f.file, selected, f.deps);
+  const prepared = await prepareCloudFile(f, selected);
   expect((await prepared.publish()).verified).toBe(1);
   expect([...f.reports.values()][0]!.evidence.source_data).toMatchObject({
     project: { path: input.path },
@@ -7464,9 +7286,7 @@ test("Snyk source repository binding is rechecked for a fresh import after compl
   const original = structuredClone(input);
   const f = await fixture(input);
   const selected = { ...options, provider: "snyk" as const };
-  const first = await (
-    await prepareExternalPublication(f.file, selected, f.deps)
-  ).publish();
+  const first = await (await prepareCloudFile(f, selected)).publish();
   expect(first.verified).toBe(1);
   expect([...f.reports.values()][0]!.evidence.source_data).toMatchObject({
     run: {
@@ -7539,9 +7359,9 @@ async function trivyCloud(
   const f = await fixture(report, destination);
   return {
     ...f,
-    fileImport: () => prepareExternalPublication(f.file, trivyOptions, f.deps),
+    fileImport: () => prepareCloudFile(f, trivyOptions),
     selected: (rows: ExternalFindings, settings = trivyOptions) =>
-      prepareNormalizedExternalPublication(rows, settings, f.deps),
+      prepareCloudFindings(f, rows, settings),
   };
 }
 
@@ -7722,11 +7542,7 @@ test("Wiz SAST can carry upstream Trivy evidence while binding its own repositor
     { environment: local.environment },
   );
   expect((await prepared.import()).counts.created).toBe(1);
-  const publication = await prepareExternalPublication(
-    cloud.file,
-    options,
-    cloud.deps,
-  );
+  const publication = await prepareCloudFile(cloud);
   expect((await publication.publish()).counts.created).toBe(1);
 });
 
@@ -7746,7 +7562,7 @@ async function expectTrivyReplay(
         { ...settings, repository: local.repository },
         { environment: local.environment },
       ),
-    () => prepareNormalizedExternalPublication(rows, settings, cloud.deps),
+    () => prepareCloudFindings(cloud, rows, settings),
   ]) {
     if (error) await expect(prepare()).rejects.toThrow(error);
     else expect((await prepare()).preview.findings).toHaveLength(1);
@@ -7829,7 +7645,7 @@ test("Trivy preparation rejects retained Inspector findings", async () => {
   const input = normalizeInspectorFindings(inspectorReport(), gitHubProject);
   const cloud = await fixture();
   await expect(
-    prepareNormalizedExternalPublication(input, trivyOptions, cloud.deps),
+    prepareCloudFindings(cloud, input, trivyOptions),
   ).rejects.toThrow(
     "Retained Inspector evidence requires the inspector provider.",
   );
@@ -7974,7 +7790,7 @@ test.each([
   async (settings, message) => {
     const f = await fixture(trivyReport());
     await expect(
-      prepareExternalPublication(f.file, { ...options, ...settings }, f.deps),
+      prepareCloudFile(f, { ...options, ...settings }),
     ).rejects.toThrow(message);
     expect(f.posts).toHaveLength(0);
   },
@@ -8032,9 +7848,7 @@ test.each([
       provider: "snyk" as const,
       sourceKey: "example/project/main/plugin-sca",
     };
-    const first = await (
-      await prepareExternalPublication(f.file, selected, f.deps)
-    ).publish();
+    const first = await (await prepareCloudFile(f, selected)).publish();
     expect(first.counts.created).toBe(1);
     expect(first.verified).toBe(1);
     expect(JSON.parse(f.posts[0]!).repository.repo_connector_id).toBe(
@@ -8044,7 +7858,7 @@ test.each([
       original,
     );
     const second = await (
-      await prepareNormalizedExternalPublication(normalized, selected, f.deps)
+      await prepareCloudFindings(f, normalized, selected)
     ).publish();
     expect(second.counts.unchanged).toBe(1);
   },
@@ -8209,12 +8023,12 @@ test.each([
     );
     const f = await fixture(input, destination);
     const selected = { ...options, provider: "snyk" as const };
-    await expect(
-      prepareExternalPublication(f.file, selected, f.deps),
-    ).rejects.toThrow("does not match the selected Cloud repository");
-    await expect(
-      prepareNormalizedExternalPublication(normalized, selected, f.deps),
-    ).rejects.toThrow("does not match the selected Cloud repository");
+    await expect(prepareCloudFile(f, selected)).rejects.toThrow(
+      "does not match the selected Cloud repository",
+    );
+    await expect(prepareCloudFindings(f, normalized, selected)).rejects.toThrow(
+      "does not match the selected Cloud repository",
+    );
     expect(f.posts).toHaveLength(0);
     expect(normalized.findings[0]!.evidence.source_data).toMatchObject(
       original,
@@ -8230,7 +8044,7 @@ test("native Snyk JSON publishes selected dependency occurrences and replays the
     provider: "snyk" as const,
     sourceKey: "example/project/main/root/native-sca",
   };
-  const prepared = await prepareExternalPublication(f.file, selected, f.deps);
+  const prepared = await prepareCloudFile(f, selected);
   expect(prepared.preview.excluded).toEqual([]);
   const first = await prepared.publish();
   expect(first.counts.created).toBe(1);
@@ -8240,9 +8054,7 @@ test("native Snyk JSON publishes selected dependency occurrences and replays the
     packages: [{ name: "@example/package", manifest_path: null }],
     source_data: { vulnerability: input.vulnerabilities[0] },
   });
-  const second = await (
-    await prepareExternalPublication(f.file, selected, f.deps)
-  ).publish();
+  const second = await (await prepareCloudFile(f, selected)).publish();
   expect(second.counts.unchanged).toBe(1);
 });
 
@@ -8254,7 +8066,7 @@ test("Semgrep publication preserves identity across JSON and SARIF with explicit
     sourceKey: "organization/project/main",
     sourceRepositoryUrl: "https://github.com/example/project",
   };
-  const prepared = await prepareExternalPublication(f.file, settings, f.deps);
+  const prepared = await prepareCloudFile(f, settings);
   expect(prepared.preview.source).toEqual({
     provider: "semgrep",
     source_key: settings.sourceKey,
@@ -8266,16 +8078,10 @@ test("Semgrep publication preserves identity across JSON and SARIF with explicit
   expect(original.source.provider).toBe("semgrep");
   expect(original.evidence.details?.kind).toBe("sast");
   expect(
-    (
-      await (
-        await prepareExternalPublication(f.file, settings, f.deps)
-      ).publish()
-    ).counts.unchanged,
+    (await (await prepareCloudFile(f, settings)).publish()).counts.unchanged,
   ).toBe(1);
   await writeFile(f.file, JSON.stringify(semgrepSarif()));
-  const changed = await (
-    await prepareExternalPublication(f.file, settings, f.deps)
-  ).publish();
+  const changed = await (await prepareCloudFile(f, settings)).publish();
   expect(changed.counts.updated).toBe(1);
   const updated = [...f.reports.values()][0]!;
   expect(updated.id).toBe(original.id);
@@ -8295,7 +8101,7 @@ test("OpenGrep publication retains grouped evidence through Cloud readback and r
     sourceKey: "organization/project/main/opengrep",
     sourceRepositoryUrl: "https://github.com/example/project",
   };
-  const prepared = await prepareExternalPublication(f.file, settings, f.deps);
+  const prepared = await prepareCloudFile(f, settings);
   expect(prepared.preview.source).toEqual({
     provider: "semgrep",
     source_key: settings.sourceKey,
@@ -8324,18 +8130,14 @@ test("OpenGrep publication retains grouped evidence through Cloud readback and r
   );
   expect(original.evidence).not.toHaveProperty("confidence");
   expect(JSON.parse(f.posts[0]!).source.provider).toBe("semgrep");
-  const repeated = await (
-    await prepareExternalPublication(f.file, settings, f.deps)
-  ).publish();
+  const repeated = await (await prepareCloudFile(f, settings)).publish();
   expect(repeated.counts.unchanged).toBe(1);
   expect(repeated.report).toEqual(report);
 
   input.results[0]!.extra.message = "Updated OpenGrep evidence";
   input.results[0]!.extra.fingerprint = "new-scanner-fingerprint_9";
   await writeFile(f.file, JSON.stringify(input));
-  const changed = await (
-    await prepareExternalPublication(f.file, settings, f.deps)
-  ).publish();
+  const changed = await (await prepareCloudFile(f, settings)).publish();
   expect(changed.counts.updated).toBe(1);
   expect(changed.verified).toBe(1);
   expect(changed.report).toEqual(report);
@@ -8380,11 +8182,7 @@ test("repository severity exclusions identify every original OpenGrep trace", as
   f.state.catalogHeaders["Codex-Security-Repository-Import-Severities"] =
     "high";
   const prepare = (input: ExternalFindings) =>
-    prepareNormalizedExternalPublication(
-      input,
-      { ...settings, provider: "semgrep" },
-      f.deps,
-    );
+    prepareCloudFindings(f, input, { ...settings, provider: "semgrep" });
   const originalIds = [
     ids.get(first!.path)!,
     ids.get(other.path)!,
@@ -8392,7 +8190,7 @@ test("repository severity exclusions identify every original OpenGrep trace", as
     ids.get(first!.path)!,
   ];
   for (const [load, expectedIds] of [
-    [() => prepareExternalPublication(f.file, settings, f.deps), originalIds],
+    [() => prepareCloudFile(f, settings), originalIds],
     [() => prepare({ ...parsed }), originalIds],
     [() => prepare(structuredClone(parsed)), [null, null, null, null]],
     [
@@ -8420,15 +8218,11 @@ test("empty OpenGrep Cloud imports retain scanner diagnostics without uploading"
   input.results = [];
   const f = await fixture(input);
   await expect(
-    prepareExternalPublication(
-      f.file,
-      {
-        ...options,
-        provider: "opengrep",
-        sourceRepositoryUrl: "https://github.com/example/project",
-      },
-      f.deps,
-    ),
+    prepareCloudFile(f, {
+      ...options,
+      provider: "opengrep",
+      sourceRepositoryUrl: "https://github.com/example/project",
+    }),
   ).rejects.toThrow(input.errors[0]!.message);
   expect(f.posts).toHaveLength(0);
 });
@@ -8474,18 +8268,14 @@ test("Semgrep native percent paths retain CE records through JSON-to-SARIF publi
     sourceKey: "organization/project/main",
     sourceRepositoryUrl: "https://github.com/example/project",
   };
-  const first = await (
-    await prepareExternalPublication(f.file, settings, f.deps)
-  ).publish();
+  const first = await (await prepareCloudFile(f, settings)).publish();
   expect(first.counts.created).toBe(paths.length);
   expect(first.verified).toBe(paths.length);
   const originalIds = [...f.reports.values()]
     .map((report) => [report.id, report.canonical_finding_id])
     .sort();
   await writeFile(f.file, JSON.stringify(sarif));
-  const changed = await (
-    await prepareExternalPublication(f.file, settings, f.deps)
-  ).publish();
+  const changed = await (await prepareCloudFile(f, settings)).publish();
   expect(changed.counts.created).toBe(0);
   expect(changed.counts.updated).toBe(paths.length);
   expect(changed.verified).toBe(paths.length);
@@ -8500,11 +8290,7 @@ test("Semgrep native percent paths retain CE records through JSON-to-SARIF publi
       .sort(),
   ).toEqual(paths.toSorted());
   expect(
-    (
-      await (
-        await prepareExternalPublication(f.file, settings, f.deps)
-      ).publish()
-    ).counts.unchanged,
+    (await (await prepareCloudFile(f, settings)).publish()).counts.unchanged,
   ).toBe(paths.length);
 });
 
@@ -8521,9 +8307,7 @@ test("Semgrep publication retains unsupported SARIF bases without repository loc
     sourceKey: "organization/project/main",
     sourceRepositoryUrl: "https://github.com/example/project",
   };
-  const first = await (
-    await prepareExternalPublication(f.file, settings, f.deps)
-  ).publish();
+  const first = await (await prepareCloudFile(f, settings)).publish();
   expect(first.counts.created).toBe(1);
   expect(first.verified).toBe(1);
   const original = structuredClone([...f.reports.values()][0]!);
@@ -8536,9 +8320,7 @@ test("Semgrep publication retains unsupported SARIF bases without repository loc
 
   run.originalUriBaseIds.ROOT.uri = "subproject/";
   await writeFile(f.file, JSON.stringify(input));
-  const changed = await (
-    await prepareExternalPublication(f.file, settings, f.deps)
-  ).publish();
+  const changed = await (await prepareCloudFile(f, settings)).publish();
   expect(changed.counts.updated).toBe(1);
   const updated = [...f.reports.values()][0]!;
   expect(updated.id).toBe(original.id);
@@ -8548,33 +8330,21 @@ test("Semgrep publication retains unsupported SARIF bases without repository loc
     runContext: { originalUriBaseIds: run.originalUriBaseIds },
   });
   expect(
-    (
-      await (
-        await prepareExternalPublication(f.file, settings, f.deps)
-      ).publish()
-    ).counts.unchanged,
+    (await (await prepareCloudFile(f, settings)).publish()).counts.unchanged,
   ).toBe(1);
 });
 
 test("Semgrep refuses missing source identity and a conflicting Cloud destination without uploads", async () => {
   const f = await fixture(semgrepJson());
   await expect(
-    prepareExternalPublication(
-      f.file,
-      { ...options, provider: "semgrep" },
-      f.deps,
-    ),
+    prepareCloudFile(f, { ...options, provider: "semgrep" }),
   ).rejects.toThrow("sourceRepositoryUrl");
   await expect(
-    prepareExternalPublication(
-      f.file,
-      {
-        ...options,
-        provider: "semgrep",
-        sourceRepositoryUrl: "https://github.com/other/project",
-      },
-      f.deps,
-    ),
+    prepareCloudFile(f, {
+      ...options,
+      provider: "semgrep",
+      sourceRepositoryUrl: "https://github.com/other/project",
+    }),
   ).rejects.toThrow(/repository/i);
   expect(f.posts).toHaveLength(0);
 });
@@ -8601,23 +8371,15 @@ test("Endor JSON and SARIF reuse UUID identity through Cloud publication", async
     provider: "endor" as const,
     sourceKey: "namespace/project/main",
   };
-  const first = await (
-    await prepareExternalPublication(f.file, settings, f.deps)
-  ).publish();
+  const first = await (await prepareCloudFile(f, settings)).publish();
   expect(first.counts.created).toBe(1);
   const original = structuredClone([...f.reports.values()][0]!);
   expect(
-    (
-      await (
-        await prepareExternalPublication(f.file, settings, f.deps)
-      ).publish()
-    ).counts.unchanged,
+    (await (await prepareCloudFile(f, settings)).publish()).counts.unchanged,
   ).toBe(1);
   const sarif = endorSarif();
   await writeFile(f.file, JSON.stringify(sarif));
-  const changed = await (
-    await prepareExternalPublication(f.file, settings, f.deps)
-  ).publish();
+  const changed = await (await prepareCloudFile(f, settings)).publish();
   expect(changed.counts.updated).toBe(1);
   expect(changed.verified).toBe(1);
   const updated = [...f.reports.values()][0]!;
@@ -8679,7 +8441,7 @@ test("Endor source repository binding preserves immutable requests across a repo
   const f = await fixture(input);
   const selected = { ...options, provider: "endor" as const };
   f.state.loseResponse = true;
-  const first = await prepareExternalPublication(f.file, selected, f.deps);
+  const first = await prepareCloudFile(f, selected);
   await expect(first.publish()).rejects.toThrow("resume the saved request");
   const changedDestination = {
     ...f.deps,
@@ -8775,11 +8537,7 @@ test("publication rejects malformed options without writing findings", async () 
 test("a held primitive retry cannot republish after a newer boxed approval", async () => {
   const f = await fixture();
   const prepare = (elapsed: unknown) =>
-    prepareNormalizedExternalPublication(
-      scoredFindings(12, { elapsed }),
-      options,
-      f.deps,
-    );
+    prepareCloudFindings(f, scoredFindings(12, { elapsed }));
   const original = await prepare(2.5);
   f.state.loseResponse = true;
   await expect(original.publish()).rejects.toThrow(/resume the saved request/);
@@ -9397,7 +9155,7 @@ function localFinding(id?: string, severity?: string) {
 
 /** Use one disposable checkout and SQLite database for import, review and receipt lookup. */
 async function storedPublicationFixture(
-  cloud: Awaited<ReturnType<typeof fixture>>,
+  cloud: PublicationFixture,
   fetch = cloud.deps.fetch,
 ) {
   const local = await localFindingsFixture({

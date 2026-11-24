@@ -27,6 +27,15 @@ import { sessionParentThreadId } from "../src/scan-sessions.js";
 import type { ScanProgress } from "../src/worker-progress.js";
 import { PLUGIN_ROOT as BUNDLED_PLUGIN_ROOT } from "./plugin-root.js";
 import {
+  appendRollout,
+  commandHead,
+  commandTail,
+  commandOutput,
+  persistedCommandOutput,
+  customToolOutput,
+  nativeMessage,
+  responseMessage,
+  progress,
   progressMarker,
   nativeCommand,
   completedCommand,
@@ -44,13 +53,6 @@ import {
 } from "./support/usage-rollout.js";
 
 import { createApiTestFixtures } from "./support/temporary-directories.js";
-
-// Exact ASCII fixture for the pinned native 64 KiB persistence representation.
-const commandHead = "h".repeat(32_743);
-const commandTail = "t".repeat(32_743);
-const persistedCommandOutput = `${commandHead}\n... command output truncated for persistence ...\n${commandTail}`;
-const commandOutput = (middle: string) =>
-  `${commandHead}\n${middle}\n${commandTail}`;
 
 const { temporaryDirectory: codexHome, cleanup } = createApiTestFixtures(
   "codex-security-cost-",
@@ -181,6 +183,15 @@ function costTracker(
   });
 }
 
+function progressTracker(home: string, expectedFilesTotal: number) {
+  const updates: ScanProgress[] = [];
+  const tracker = costTracker(home, {
+    expectedFilesTotal,
+    onProgress: (update) => updates.push(update),
+  });
+  return { updates, tracker };
+}
+
 function activityTracker(home: string) {
   const activities: ScanActivity[] = [];
   const tracker = costTracker(home, {
@@ -194,10 +205,7 @@ async function appendSessionItem(
   path: string,
   payload: Readonly<Record<string, unknown>>,
 ): Promise<void> {
-  await appendFile(
-    path,
-    `${JSON.stringify({ type: "response_item", payload })}\n`,
-  );
+  await appendRollout(path, [{ type: "response_item", payload }]);
 }
 
 function progressMessage(
@@ -205,20 +213,8 @@ function progressMessage(
   filesTotal = 8,
   phase: ScanProgress["phase"] = "discovery",
 ): Record<string, unknown> {
-  return {
-    type: "message",
-    role: "assistant",
-    content: [
-      {
-        type: "output_text",
-        text: `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({
-          phase,
-          filesCompleted,
-          filesTotal,
-        })}`,
-      },
-    ],
-  };
+  return responseMessage(progressMarker(phase, filesCompleted, filesTotal))
+    .payload;
 }
 
 test.each(
@@ -256,27 +252,15 @@ test.each(
       );
     const records = (progress: ScanProgress, id: string, args = command) => {
       const native = nativeCommand(args, output(progress), id);
-      const raw = {
-        type: "response_item",
-        payload: {
-          type: "custom_tool_call_output",
-          call_id: id,
-          output: output(progress),
-        },
-      };
+      const raw = customToolOutput(output(progress), id);
       return projection === "native"
         ? [native]
         : projection === "raw-before"
           ? [raw, native]
           : [native, raw];
     };
-    const append = (rows: unknown[]) =>
-      appendFile(parent, jsonLines(rows) + "\n");
-    const updates: ScanProgress[] = [];
-    const tracker = costTracker(home, {
-      expectedFilesTotal: 8,
-      onProgress: (update) => updates.push(update),
-    });
+    const append = (rows: unknown[]) => appendRollout(parent, rows);
+    const { updates, tracker } = progressTracker(home, 8);
     tracker.start("scan-thread");
     try {
       await tracker.refresh();
@@ -304,18 +288,7 @@ test.each(
       if (scenario === "released") {
         // A later exact completion releases the latest held state, not its stale prefix.
         const text = "Finished reviewing the batch.";
-        await append([
-          {
-            type: "event_msg",
-            payload: {
-              type: "item_completed",
-              item: {
-                type: "AgentMessage",
-                content: [{ type: "Text", text }],
-              },
-            },
-          },
-        ]);
+        await append([nativeMessage(text)]);
         tracker.recordParentItem({
           type: "item.completed",
           item: { type: "agent_message", id: "item_1", text },
@@ -369,13 +342,8 @@ test.each(
     const fullOutput = `${retainedHead}\n${progressMarker("validation", 1, 8)}\n${commandTail}`;
     const savedOutput =
       retainedHead + persistedCommandOutput.slice(commandHead.length);
-    const append = (rows: unknown[]) =>
-      appendFile(parent, jsonLines(rows) + "\n");
-    const updates: ScanProgress[] = [];
-    const tracker = costTracker(home, {
-      expectedFilesTotal: 8,
-      onProgress: (update) => updates.push(update),
-    });
+    const append = (rows: unknown[]) => appendRollout(parent, rows);
+    const { updates, tracker } = progressTracker(home, 8);
     const deliver = (
       progress: ScanProgress,
       event: Parameters<typeof tracker.recordParentProgress>[1],
@@ -385,19 +353,10 @@ test.each(
       if (JSON.stringify(updates.at(-1)) !== JSON.stringify(progress))
         updates.push(progress);
     };
-    const message = (text: string) => ({
-      type: "event_msg",
-      payload: {
-        type: "item_completed",
-        item: {
-          type: "AgentMessage",
-          content: [{ type: "Text", text }],
-        },
-      },
-    });
+
     const completeAnchor = async () => {
       const text = "Synthetic final response.";
-      await append([message(text)]);
+      await append([nativeMessage(text)]);
       tracker.recordParentItem({
         type: "item.completed",
         item: {
@@ -449,7 +408,7 @@ test.each(
       expect(updates).toEqual(expected);
 
       const text = progressMarker("reporting", 1, 8);
-      await append([message(text)]);
+      await append([nativeMessage(text)]);
       deliver(later, {
         type: "item.completed",
         item: {
@@ -490,11 +449,7 @@ test.each(
     };
     const text = progressMarker("validation", 1, 8);
     const command = ["printf", "sk-" + "a".repeat(32)];
-    const updates: ScanProgress[] = [];
-    const tracker = costTracker(home, {
-      expectedFilesTotal: 8,
-      onProgress: (update) => updates.push(update),
-    });
+    const { updates, tracker } = progressTracker(home, 8);
     const reached = Promise.withResolvers<void>();
     const release = Promise.withResolvers<void>();
     const originalOpen = filesystem.open;
@@ -525,22 +480,16 @@ test.each(
       }
       tracker.beginParentTurn();
       held = true;
-      await appendFile(
-        parent,
-        jsonLines([
-          nativeCommand("older-review", progressMarker("attack_path", 1, 8)),
-        ]) + "\n",
-      );
+      await appendRollout(parent, [
+        nativeCommand("older-review", progressMarker("attack_path", 1, 8)),
+      ]);
       if (initialRead) tracker.start("scan-thread");
       reading = tracker.refresh();
       await reached.promise;
       // The reader saw old EOF, but current persistence still precedes live delivery.
-      await appendFile(
-        parent,
-        jsonLines([
-          nativeCommand(command, truncated ? persistedCommandOutput : text),
-        ]) + "\n",
-      );
+      await appendRollout(parent, [
+        nativeCommand(command, truncated ? persistedCommandOutput : text),
+      ]);
       const event = completedCommand(
         changedDisplay ? "printf [REDACTED_SECRET]" : command.join(" "),
         truncated ? commandOutput(text) : text,
@@ -601,25 +550,18 @@ test.each(
         ? "Synthetic completion."
         : progressMarker("validation", 1, 9);
     const ignoredText = progressMarker(ignored.phase, 0, ignored.filesTotal);
-    await appendFile(
-      parent,
-      jsonLines([
-        nativeCommand("older", progressMarker("discovery", 0, 8)),
-        nativeCommand(
-          changedDisplay ? ["printf", "sk-" + "a".repeat(32)] : "inventory",
-          truncated ? persistedCommandOutput : inventoryText,
-        ),
-        nativeCommand("review", reviewText),
-        ...(["none", "anchor"].includes(rejected)
-          ? []
-          : [nativeCommand("ignored", ignoredText)]),
-      ]) + "\n",
-    );
-    const updates: ScanProgress[] = [];
-    const tracker = costTracker(home, {
-      expectedFilesTotal: 8,
-      onProgress: (update) => updates.push(update),
-    });
+    await appendRollout(parent, [
+      nativeCommand("older", progressMarker("discovery", 0, 8)),
+      nativeCommand(
+        changedDisplay ? ["printf", "sk-" + "a".repeat(32)] : "inventory",
+        truncated ? persistedCommandOutput : inventoryText,
+      ),
+      nativeCommand("review", reviewText),
+      ...(["none", "anchor"].includes(rejected)
+        ? []
+        : [nativeCommand("ignored", ignoredText)]),
+    ]);
+    const { updates, tracker } = progressTracker(home, 8);
     tracker.beginParentTurn();
     tracker.start("scan-thread");
     try {
@@ -671,11 +613,7 @@ test.each(
 test("does not multiply pending inventory work across idle refreshes", async () => {
   const { home, parent, worker } = await workerSessionFixture();
   await appendSessionItem(worker, progressMessage(3));
-  const updates: ScanProgress[] = [];
-  const tracker = costTracker(home, {
-    expectedFilesTotal: 8,
-    onProgress: (update) => updates.push(update),
-  });
+  const { updates, tracker } = progressTracker(home, 8);
   tracker.start("scan-thread");
   // Drain the initial worker receipt and use explicit refreshes without a timer.
   await tracker.stop();
@@ -697,13 +635,10 @@ test("does not multiply pending inventory work across idle refreshes", async () 
   };
   const inventoryText = progressMarker("discovery", 0, 8);
   const reviewText = progressMarker("validation", 3, 8);
-  await appendFile(
-    parent,
-    jsonLines([
-      nativeCommand("inventory", inventoryText),
-      nativeCommand(["review", "sk-" + "a".repeat(32)], persistedCommandOutput),
-    ]) + "\n",
-  );
+  await appendRollout(parent, [
+    nativeCommand("inventory", inventoryText),
+    nativeCommand(["review", "sk-" + "a".repeat(32)], persistedCommandOutput),
+  ]);
   tracker.recordParentProgress(
     inventory,
     completedCommand("inventory", inventoryText),
@@ -743,22 +678,8 @@ test.each(["missing", "short", "append", "split-utf8"] as const)(
         rate_limits: { primary: { used_percent: 5 } },
       },
     };
-    const early = {
-      type: "response_item",
-      payload: {
-        type: "message",
-        role: "assistant",
-        content: [{ type: "output_text", text: "Early Ω😀 output." }],
-      },
-    };
-    const late = {
-      type: "response_item",
-      payload: {
-        type: "message",
-        role: "assistant",
-        content: [{ type: "output_text", text: "Later output." }],
-      },
-    };
+    const early = responseMessage("Early Ω😀 output.");
+    const late = responseMessage("Later output.");
     const laterUsage = {
       type: "event_msg",
       payload: {
@@ -783,7 +704,7 @@ test.each(["missing", "short", "append", "split-utf8"] as const)(
         const replay = String(args[0]) === parent ? ++opens : 0;
         if (replay === 2) {
           if (scenario === "append")
-            await appendFile(parent, jsonLines([late, laterUsage]) + "\n");
+            await appendRollout(parent, [late, laterUsage]);
           if (scenario === "split-utf8")
             await appendFile(parent, full.subarray(split));
         }
@@ -866,10 +787,7 @@ test("includes worker usage appended during final event replay", async () => {
       rate_limits: { primary: { used_percent: usedPercent } },
     },
   });
-  await appendFile(
-    parent,
-    jsonLines([usage(10, 0, "2026-07-26T12:00:00.000Z")]) + "\n",
-  );
+  await appendRollout(parent, [usage(10, 0, "2026-07-26T12:00:00.000Z")]);
   const initial = usage(0, 0, "2026-07-26T12:01:00.000Z");
   const last = usage(5_000, 50, "2026-07-26T12:02:00.000Z");
   const workerEvents: ScanSessionEvent["event"][] = [];
@@ -915,15 +833,8 @@ test.each(["open", "read", "close"] as const)(
       input_tokens: 42,
       output_tokens: 0,
     });
-    const early = {
-      type: "response_item",
-      payload: {
-        type: "message",
-        role: "assistant",
-        content: [{ type: "output_text", text: "Synthetic early output." }],
-      },
-    };
-    await appendFile(parent, jsonLines([early]) + "\n");
+    const early = responseMessage("Synthetic early output.");
+    await appendRollout(parent, [early]);
     const originalOpen = filesystem.open;
     let opens = 0;
     const opening = spyOn(filesystem, "open").mockImplementation(
@@ -1097,38 +1008,25 @@ describe("inventory source ordering", () => {
         f.emit(firstChanged ? "first changed" : "first", current);
         f.emit("middle changed", middle);
         f.emit("latest", current);
-        await appendFile(
-          f.parent,
-          jsonLines([
-            nativeCommand("first", progressMarker("discovery", 0, 5)),
-          ]) + "\n",
-        );
+        await appendRollout(f.parent, [
+          nativeCommand("first", progressMarker("discovery", 0, 5)),
+        ]);
         await f.tracker.refresh();
-        await appendFile(
-          f.parent,
-          jsonLines([
-            nativeCommand("middle", progressMarker("discovery", 0, 10)),
-          ]) + "\n",
-        );
+        await appendRollout(f.parent, [
+          nativeCommand("middle", progressMarker("discovery", 0, 10)),
+        ]);
         await appendSessionItem(
           f.worker,
           progressMessage(6, 10, "attack_path"),
         );
         await f.tracker.refresh();
         expect(f.updates.at(-1)).toEqual(current);
-        await appendFile(
-          f.parent,
-          jsonLines([
-            nativeCommand("latest", progressMarker("discovery", 0, 5)),
-            nativeCommand("newer", progressMarker("discovery", 0, 10)),
-          ]) + "\n",
-        );
+        await appendRollout(f.parent, [
+          nativeCommand("latest", progressMarker("discovery", 0, 5)),
+          nativeCommand("newer", progressMarker("discovery", 0, 10)),
+        ]);
         await f.tracker.stop();
-        expect(f.updates.at(-1)).toEqual({
-          phase: "attack_path",
-          filesCompleted: 6,
-          filesTotal: 10,
-        });
+        expect(f.updates.at(-1)).toEqual(progress("attack_path", 6, 10));
       } finally {
         await f.close();
       }
@@ -1152,17 +1050,14 @@ describe("inventory source ordering", () => {
         ? { ...old, filesTotal: 9 }
         : { ...old, phase: "validation" as const };
       try {
-        await appendFile(
-          f.parent,
-          jsonLines([
-            nativeCommand(
-              "old",
-              progressMarker(old.phase, old.filesCompleted, old.filesTotal),
-            ),
-            nativeCommand("original", persistedCommandOutput),
-            nativeCommand("anchor", "Finished the batch."),
-          ]) + "\n",
-        );
+        await appendRollout(f.parent, [
+          nativeCommand(
+            "old",
+            progressMarker(old.phase, old.filesCompleted, old.filesTotal),
+          ),
+          nativeCommand("original", persistedCommandOutput),
+          nativeCommand("anchor", "Finished the batch."),
+        ]);
         if (inventory)
           await appendSessionItem(
             f.worker,
@@ -1187,9 +1082,7 @@ describe("inventory source ordering", () => {
         await f.tracker.refresh();
         await f.tracker.stop();
         expect(f.updates.at(-1)).toEqual(
-          inventory
-            ? { phase: "attack_path", filesCompleted: 5, filesTotal: 9 }
-            : current,
+          inventory ? progress("attack_path", 5, 9) : current,
         );
       } finally {
         await f.close();
@@ -1208,29 +1101,20 @@ describe("inventory source ordering", () => {
       } as const;
       const current = { ...initial, filesTotal: 8 };
       try {
-        await appendFile(
-          f.parent,
-          jsonLines([
-            nativeCommand("initial", progressMarker("discovery", 0, 9)),
-          ]) + "\n",
-        );
+        await appendRollout(f.parent, [
+          nativeCommand("initial", progressMarker("discovery", 0, 9)),
+        ]);
         await appendSessionItem(f.parent, {
           type: "custom_tool_call_output",
           call_id: "initial-copy",
           output: progressMarker("discovery", 0, 9),
         });
         f.emit("initial changed", initial);
-        await appendFile(
-          f.parent,
-          jsonLines([
-            nativeCommand("final", progressMarker("discovery", 0, 8)),
-          ]) + "\n",
-        );
+        await appendRollout(f.parent, [
+          nativeCommand("final", progressMarker("discovery", 0, 8)),
+        ]);
         await f.tracker.refresh();
-        await appendFile(
-          f.parent,
-          jsonLines([nativeCommand("anchor", "done")]) + "\n",
-        );
+        await appendRollout(f.parent, [nativeCommand("anchor", "done")]);
         f.emit("final changed", current);
         f.beforeClose(() =>
           f.tracker.recordParentItem(completedCommand("anchor", "done")),
@@ -1238,11 +1122,7 @@ describe("inventory source ordering", () => {
         await f.tracker.refresh();
         await appendSessionItem(f.worker, progressMessage(5, 8, "attack_path"));
         await f.tracker.stop();
-        expect(f.updates.at(-1)).toEqual({
-          phase: "attack_path",
-          filesCompleted: 5,
-          filesTotal: 8,
-        });
+        expect(f.updates.at(-1)).toEqual(progress("attack_path", 5, 8));
       } finally {
         await f.close();
       }
@@ -1259,38 +1139,25 @@ describe("inventory source ordering", () => {
         filesTotal: 9,
       } as const;
       try {
-        await appendFile(
-          f.parent,
-          jsonLines([
-            nativeCommand("initial", progressMarker("discovery", 0, 9)),
-          ]) + "\n",
-        );
+        await appendRollout(f.parent, [
+          nativeCommand("initial", progressMarker("discovery", 0, 9)),
+        ]);
         f.emit("initial changed", initial);
         await f.tracker.refresh();
-        await appendFile(
-          f.parent,
-          jsonLines([
-            nativeCommand("phase", progressMarker("threat_model", 0, 9)),
-          ]) + "\n",
-        );
+        await appendRollout(f.parent, [
+          nativeCommand("phase", progressMarker("threat_model", 0, 9)),
+        ]);
         await appendSessionItem(f.worker, progressMessage(5, 9, "attack_path"));
         f.beforeClose(() => {
           f.emit("phase changed", { ...initial, phase: "threat_model" });
         });
         await f.tracker.refresh();
-        await appendFile(
-          f.parent,
-          jsonLines([
-            nativeCommand("smaller", progressMarker("discovery", 0, 8)),
-            nativeCommand("restored", progressMarker("discovery", 0, 9)),
-          ]) + "\n",
-        );
+        await appendRollout(f.parent, [
+          nativeCommand("smaller", progressMarker("discovery", 0, 8)),
+          nativeCommand("restored", progressMarker("discovery", 0, 9)),
+        ]);
         await f.tracker.stop();
-        expect(f.updates.at(-1)).toEqual({
-          phase: "attack_path",
-          filesCompleted: 5,
-          filesTotal: 9,
-        });
+        expect(f.updates.at(-1)).toEqual(progress("attack_path", 5, 9));
       } finally {
         await f.close();
       }
@@ -1308,21 +1175,15 @@ describe("inventory source ordering", () => {
       } as const;
       const larger = { ...initial, filesTotal: 9 };
       try {
-        await appendFile(
-          f.parent,
-          jsonLines([
-            nativeCommand("initial", progressMarker("discovery", 0, 8)),
-          ]) + "\n",
-        );
+        await appendRollout(f.parent, [
+          nativeCommand("initial", progressMarker("discovery", 0, 8)),
+        ]);
         f.emit("initial changed", initial);
         await f.tracker.refresh();
-        await appendFile(
-          f.parent,
-          jsonLines([
-            nativeCommand("larger", progressMarker("discovery", 0, 9)),
-            nativeCommand("final", progressMarker("discovery", 0, 8)),
-          ]) + "\n",
-        );
+        await appendRollout(f.parent, [
+          nativeCommand("larger", progressMarker("discovery", 0, 9)),
+          nativeCommand("final", progressMarker("discovery", 0, 8)),
+        ]);
         await appendSessionItem(f.worker, progressMessage(5, 9, "attack_path"));
         await f.tracker.refresh();
         f.emit("larger changed", larger);
@@ -1370,12 +1231,9 @@ describe("inventory source ordering", () => {
             call_id: "older-eight",
             output: progressMarker("discovery", 0, 8),
           });
-        await appendFile(
-          f.parent,
-          JSON.stringify(
-            nativeCommand("original", progressMarker("discovery", 0, 9)),
-          ) + "\n",
-        );
+        await appendRollout(f.parent, [
+          nativeCommand("original", progressMarker("discovery", 0, 9)),
+        ]);
         if (persistence === "partial")
           await appendFile(f.parent, row.slice(0, 30));
         expect(f.emit("changed-display", initial)).toBe(true);
@@ -1416,12 +1274,9 @@ describe("inventory source ordering", () => {
       } as const;
       const smaller = { ...initial, filesTotal: 8 };
       try {
-        await appendFile(
-          f.parent,
-          JSON.stringify(
-            nativeCommand("original", progressMarker("discovery", 0, 9)),
-          ) + "\n",
-        );
+        await appendRollout(f.parent, [
+          nativeCommand("original", progressMarker("discovery", 0, 9)),
+        ]);
         await appendSessionItem(f.worker, progressMessage(5, 9, "attack_path"));
         f.beforeClose(() => {
           expect(
@@ -1429,27 +1284,18 @@ describe("inventory source ordering", () => {
           ).toBe(true);
         });
         await f.tracker.refresh();
-        expect(f.updates.at(-1)).toEqual({
-          phase: "attack_path",
-          filesCompleted: 5,
-          filesTotal: 9,
-        });
+        expect(f.updates.at(-1)).toEqual(progress("attack_path", 5, 9));
         // The read boundary and equal output do not locate the live command.
         // An exact later completion bounds it before the new saved inventory.
-        await appendFile(
-          f.parent,
-          JSON.stringify(nativeCommand("anchor", "Inventory batch finished.")) +
-            "\n",
-        );
+        await appendRollout(f.parent, [
+          nativeCommand("anchor", "Inventory batch finished."),
+        ]);
         f.tracker.recordParentItem(
           completedCommand("anchor", "Inventory batch finished."),
         );
-        await appendFile(
-          f.parent,
-          JSON.stringify(
-            nativeCommand("smaller", progressMarker("discovery", 0, 8)),
-          ) + "\n",
-        );
+        await appendRollout(f.parent, [
+          nativeCommand("smaller", progressMarker("discovery", 0, 8)),
+        ]);
         await f.tracker.refresh();
         expect(f.updates.at(-1)).toEqual(smaller);
         await appendSessionItem(f.worker, progressMessage(6, 9, "attack_path"));
@@ -1473,38 +1319,21 @@ describe("inventory source ordering", () => {
       const discovery = { ...initial, filesCompleted: 3 };
       const validation = { ...discovery, phase: "validation" } as const;
       try {
-        await appendFile(
-          f.parent,
-          JSON.stringify(
-            nativeCommand("inventory", progressMarker("discovery", 0, 9)),
-          ) + "\n",
-        );
+        await appendRollout(f.parent, [
+          nativeCommand("inventory", progressMarker("discovery", 0, 9)),
+        ]);
         expect(f.emit("inventory", initial)).toBe(true);
         await f.tracker.refresh();
         expect(f.emit("unmatched-discovery", discovery)).toBe(true);
         await appendSessionItem(f.parent, progressMessage(3, 9));
-        await appendFile(
-          f.parent,
-          JSON.stringify(nativeCommand("review", persistedCommandOutput)) +
-            "\n",
-        );
+        await appendRollout(f.parent, [
+          nativeCommand("review", persistedCommandOutput),
+        ]);
         await appendSessionItem(f.parent, progressMessage(0, 9));
         if (duplicate)
-          await appendFile(
-            f.parent,
-            JSON.stringify({
-              type: "event_msg",
-              payload: {
-                type: "item_completed",
-                item: {
-                  type: "AgentMessage",
-                  content: [
-                    { type: "Text", text: progressMarker("discovery", 0, 9) },
-                  ],
-                },
-              },
-            }) + "\n",
-          );
+          await appendRollout(f.parent, [
+            nativeMessage(progressMarker("discovery", 0, 9)),
+          ]);
         await f.tracker.refresh();
         expect(
           f.emit(
@@ -1531,36 +1360,27 @@ describe("inventory source ordering", () => {
         filesTotal: 9,
       } as const;
       try {
-        await appendFile(
-          f.parent,
-          JSON.stringify(
-            nativeCommand("original", progressMarker("discovery", 0, 9)),
-          ) + "\n",
-        );
+        await appendRollout(f.parent, [
+          nativeCommand("original", progressMarker("discovery", 0, 9)),
+        ]);
         expect(f.emit("changed-display", initial)).toBe(true);
         await appendSessionItem(f.worker, progressMessage(5, 9, "attack_path"));
         await f.tracker.refresh();
         const smaller = progressMarker("discovery", 0, 8);
         const restored = progressMarker("discovery", 0, 9);
-        await appendFile(
+        await appendRollout(
           f.parent,
-          jsonLines(
-            sameCompletion
-              ? [nativeCommand("rescope", smaller + "\n" + restored)]
-              : [
-                  nativeCommand("smaller", smaller),
-                  nativeCommand("restored", restored),
-                ],
-          ) + "\n",
+          sameCompletion
+            ? [nativeCommand("rescope", smaller + "\n" + restored)]
+            : [
+                nativeCommand("smaller", smaller),
+                nativeCommand("restored", restored),
+              ],
         );
         await f.tracker.refresh();
         await appendSessionItem(f.worker, progressMessage(6, 9, "attack_path"));
         await f.tracker.stop();
-        expect(f.updates.at(-1)).toEqual({
-          phase: "attack_path",
-          filesCompleted: 6,
-          filesTotal: 9,
-        });
+        expect(f.updates.at(-1)).toEqual(progress("attack_path", 6, 9));
       } finally {
         await f.close();
       }
@@ -1578,14 +1398,11 @@ describe("inventory source ordering", () => {
       } as const;
       const current = { ...initial, filesTotal: 8 };
       try {
-        await appendFile(
-          f.parent,
-          jsonLines([
-            nativeCommand("original", progressMarker("discovery", 0, 9)),
-            nativeCommand("smaller", progressMarker("discovery", 0, 8)),
-            nativeCommand("anchor", "Inventory enumeration complete."),
-          ]) + "\n",
-        );
+        await appendRollout(f.parent, [
+          nativeCommand("original", progressMarker("discovery", 0, 9)),
+          nativeCommand("smaller", progressMarker("discovery", 0, 8)),
+          nativeCommand("anchor", "Inventory enumeration complete."),
+        ]);
         await appendSessionItem(f.worker, progressMessage(5, 9, "attack_path"));
         f.beforeClose(() => {
           expect(f.emit("changed-display", initial)).toBe(true);
@@ -1615,13 +1432,10 @@ describe("inventory source ordering", () => {
       } as const;
       const current = { ...initial, filesTotal: 7 };
       try {
-        await appendFile(
-          f.parent,
-          jsonLines([
-            nativeCommand("original", progressMarker("discovery", 0, 10)),
-            nativeCommand("smaller", progressMarker("discovery", 0, 7)),
-          ]) + "\n",
-        );
+        await appendRollout(f.parent, [
+          nativeCommand("original", progressMarker("discovery", 0, 10)),
+          nativeCommand("smaller", progressMarker("discovery", 0, 7)),
+        ]);
         await appendSessionItem(f.parent, {
           type: "custom_tool_call_output",
           call_id: "current-seven",
@@ -1641,11 +1455,7 @@ describe("inventory source ordering", () => {
         );
         await f.tracker.refresh();
         await f.tracker.stop();
-        expect(f.updates.at(-1)).toEqual({
-          phase: "attack_path",
-          filesCompleted: 5,
-          filesTotal: 7,
-        });
+        expect(f.updates.at(-1)).toEqual(progress("attack_path", 5, 7));
       } finally {
         await f.close();
       }
@@ -1658,28 +1468,22 @@ describe("inventory source ordering", () => {
       const f = await fixture(true);
       const current = { phase, filesCompleted: 0, filesTotal: 8 };
       try {
-        await appendFile(
-          f.parent,
-          JSON.stringify(
-            nativeCommand("inventory", progressMarker("discovery", 0, 5)),
-          ) + "\n",
-        );
+        await appendRollout(f.parent, [
+          nativeCommand("inventory", progressMarker("discovery", 0, 5)),
+        ]);
         await appendSessionItem(f.worker, progressMessage(3, 8, "attack_path"));
         f.beforeClose(async () => {
-          await appendFile(
-            f.parent,
-            JSON.stringify(
-              nativeCommand("next-phase", progressMarker(phase, 0, 8)),
-            ) + "\n",
-          );
+          await appendRollout(f.parent, [
+            nativeCommand("next-phase", progressMarker(phase, 0, 8)),
+          ]);
           expect(f.emit("next-phase", current)).toBe(true);
         });
         await f.tracker.refresh();
         await f.tracker.stop();
         expect(f.updates.at(-1)).toEqual(
           phase === "discovery"
-            ? { phase: "attack_path", filesCompleted: 3, filesTotal: 8 }
-            : { phase: "discovery", filesCompleted: 0, filesTotal: 5 },
+            ? progress("attack_path", 3, 8)
+            : progress("discovery", 0, 5),
         );
       } finally {
         await f.close();
@@ -1699,30 +1503,12 @@ test("keeps the parent frontier ahead of duplicate saved inventory", async () =>
   const older = { ...initial, phase: "attack_path" } as const;
   const newer = { ...initial, phase: "validation" } as const;
   await appendSessionItem(parent, progressMessage(0));
-  await appendFile(
-    parent,
-    jsonLines([
-      {
-        type: "event_msg",
-        payload: {
-          type: "item_completed",
-          item: {
-            type: "AgentMessage",
-            content: [
-              { type: "Text", text: progressMarker("discovery", 0, 8) },
-            ],
-          },
-        },
-      },
-      nativeCommand("older-review", progressMarker("attack_path", 3, 8)),
-      nativeCommand("newer-review", progressMarker("validation", 3, 8)),
-    ]) + "\n",
-  );
-  const updates: ScanProgress[] = [];
-  const tracker = costTracker(home, {
-    expectedFilesTotal: 8,
-    onProgress: (update) => updates.push(update),
-  });
+  await appendRollout(parent, [
+    nativeMessage(progressMarker("discovery", 0, 8)),
+    nativeCommand("older-review", progressMarker("attack_path", 3, 8)),
+    nativeCommand("newer-review", progressMarker("validation", 3, 8)),
+  ]);
+  const { updates, tracker } = progressTracker(home, 8);
   tracker.beginParentTurn();
   const first = completedCommand(
     "unpersisted-review",
@@ -1785,15 +1571,8 @@ test.each(["short literal", "UTF-8 truncation", "earlier literal"])(
         scenario === "UTF-8 truncation" ? 65_532 : 65_536,
       );
     } else expect(Buffer.byteLength(saved)).toBe(149);
-    await appendFile(
-      parent,
-      JSON.stringify(nativeCommand("review", saved)) + "\n",
-    );
-    const updates: ScanProgress[] = [];
-    const tracker = costTracker(home, {
-      expectedFilesTotal: 8,
-      onProgress: (update) => updates.push(update),
-    });
+    await appendRollout(parent, [nativeCommand("review", saved)]);
+    const { updates, tracker } = progressTracker(home, 8);
     tracker.start("scan-thread");
     try {
       await tracker.refresh();
@@ -1846,40 +1625,19 @@ test.each([
       "m".repeat(20_000) +
       tail;
     expect(Buffer.byteLength(saved)).toBe(64 * 1024);
-    await appendFile(
-      parent,
-      JSON.stringify(nativeCommand("review", saved)) + "\n",
-    );
-    const updates: ScanProgress[] = [];
-    const tracker = costTracker(home, {
-      expectedFilesTotal: 8,
-      onProgress: (update) => updates.push(update),
-    });
+    await appendRollout(parent, [nativeCommand("review", saved)]);
+    const { updates, tracker } = progressTracker(home, 8);
     tracker.start("scan-thread");
     try {
       await tracker.refresh();
       expect(updates).toEqual(reported ? [progress] : []);
       if (reported) {
         const latest = { ...progress, phase: "validation" } as const;
-        await appendFile(
-          parent,
-          JSON.stringify({
-            type: "event_msg",
-            payload: {
-              type: "item_completed",
-              item: {
-                type: "AgentMessage",
-                content: [
-                  {
-                    type: "Text",
-                    text:
-                      "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(latest),
-                  },
-                ],
-              },
-            },
-          }) + "\n",
-        );
+        await appendRollout(parent, [
+          nativeMessage(
+            "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(latest),
+          ),
+        ]);
         await tracker.refresh();
         expect(updates.at(-1)).toEqual(latest);
         // Parsing a prefix must preserve the original full-output signature.
@@ -1911,19 +1669,9 @@ test("cost-only tracking does not retain unrelated marker-free message history",
   try {
     for (let batch = 0; batch < 200; batch++) {
       const lines = Array.from({ length: 1_000 }, (_, index) =>
-        JSON.stringify({
-          type: "response_item",
-          payload: {
-            type: "message",
-            role: "assistant",
-            content: [
-              {
-                type: "output_text",
-                text: `Historical note ${batch * 1_000 + index}`,
-              },
-            ],
-          },
-        }),
+        JSON.stringify(
+          responseMessage(`Historical note ${batch * 1_000 + index}`),
+        ),
       );
       await file.write(lines.join("\n") + "\n");
     }
@@ -2007,35 +1755,18 @@ test.each(["é", "漢", "😀"])(
     };
     expect(tracker.recordParentProgress(progress, event)).toBe(true);
     tracker.acceptParentProgress(progress, event);
-    await appendFile(
-      parent,
-      JSON.stringify(
-        nativeCommand(
-          "inspect-source",
-          `${savedEdge}\n... command output truncated for persistence ...\n${savedEdge}`,
-        ),
-      ) + "\n",
-    );
-    await appendFile(
-      parent,
-      JSON.stringify({
-        type: "event_msg",
-        payload: {
-          type: "item_completed",
-          item: {
-            type: "AgentMessage",
-            content: [
-              {
-                type: "Text",
-                text:
-                  "CODEX_SECURITY_SCAN_PROGRESS " +
-                  JSON.stringify({ ...progress, phase: "validation" }),
-              },
-            ],
-          },
-        },
-      }) + "\n",
-    );
+    await appendRollout(parent, [
+      nativeCommand(
+        "inspect-source",
+        `${savedEdge}\n... command output truncated for persistence ...\n${savedEdge}`,
+      ),
+    ]);
+    await appendRollout(parent, [
+      nativeMessage(
+        "CODEX_SECURITY_SCAN_PROGRESS " +
+          JSON.stringify({ ...progress, phase: "validation" }),
+      ),
+    ]);
     await tracker.refresh();
     expect(tracker.recordParentProgress(progress, event)).toBe(false);
     await tracker.stop();
@@ -2187,20 +1918,17 @@ describe("scan cost", () => {
     try {
       await tracker.refresh();
       expect(opened).not.toHaveBeenCalled();
-      await appendFile(
-        worker,
-        jsonLines([
-          {
-            type: "event_msg",
-            payload: {
-              type: "token_count",
-              info: {
-                total_token_usage: { input_tokens: 200, output_tokens: 20 },
-              },
+      await appendRollout(worker, [
+        {
+          type: "event_msg",
+          payload: {
+            type: "token_count",
+            info: {
+              total_token_usage: { input_tokens: 200, output_tokens: 20 },
             },
           },
-        ]) + "\n",
-      );
+        },
+      ]);
       const snapshot = await tracker.refresh();
       expect(opened.mock.calls.map(([path]) => path)).toEqual([worker]);
       expect(snapshot.usage).toMatchObject({
@@ -2502,8 +2230,8 @@ describe("live scan cost tracking", () => {
         },
       },
     });
-    await appendFile(path, jsonLines([limit(limitAt, 12)]) + "\n");
-    await appendFile(unrelated, jsonLines([limit(later, 99)]) + "\n");
+    await appendRollout(path, [limit(limitAt, 12)]);
+    await appendRollout(unrelated, [limit(later, 99)]);
     const observations: ScanUsageObservation[] = [];
     const tracker = costTracker(home, {
       onUsageObservation: (observation) => observations.push(observation),
@@ -2527,14 +2255,11 @@ describe("live scan cost tracking", () => {
         "response",
         ownedSdkUsage,
       );
-      await appendFile(
-        path,
-        jsonLines([
-          { ...receipt, timestamp: tokensAt },
-          { ...receipt, timestamp: later },
-          limit(older, 3),
-        ]) + "\n",
-      );
+      await appendRollout(path, [
+        { ...receipt, timestamp: tokensAt },
+        { ...receipt, timestamp: later },
+        limit(older, 3),
+      ]);
       expect((await tracker.refresh()).usage).toEqual(ownedSdkUsage);
       await tracker.refresh();
       expect(observations.slice(1)).toEqual([
@@ -2553,13 +2278,10 @@ describe("live scan cost tracking", () => {
       cache_write_input_tokens: 12,
     };
     const path = await writeSession(home, scanThreadId, ownedSdkUsage);
-    await appendFile(
-      path,
-      jsonLines([
-        nativeUsageRecord(scanThreadId, "response-1", usage),
-        legacyUsageRecord(ownedSdkUsage),
-      ]) + "\n",
-    );
+    await appendRollout(path, [
+      nativeUsageRecord(scanThreadId, "response-1", usage),
+      legacyUsageRecord(ownedSdkUsage),
+    ]);
     const tracker = costTracker(home);
     tracker.start(scanThreadId);
     expect((await tracker.stop(ownedSdkUsage)).cost).toMatchObject({
@@ -2581,15 +2303,12 @@ describe("live scan cost tracking", () => {
       timestamp: string | undefined,
       input: number,
     ) =>
-      appendFile(
-        path,
-        jsonLines([
-          {
-            ...legacyUsageRecord({ input_tokens: input, output_tokens: 0 }),
-            timestamp,
-          },
-        ]) + "\n",
-      );
+      appendRollout(path, [
+        {
+          ...legacyUsageRecord({ input_tokens: input, output_tokens: 0 }),
+          timestamp,
+        },
+      ]);
     await measure(parent, first, 10);
     const times: Array<string | null> = [];
     const tracker = costTracker(home, {
@@ -2645,11 +2364,9 @@ describe("live scan cost tracking", () => {
       output_tokens: 13,
     };
     const path = await writeSession(home, scanThreadId, original);
-    await appendFile(
-      path,
-      jsonLines([nativeUsageRecord(scanThreadId, "response-1", original)]) +
-        "\n",
-    );
+    await appendRollout(path, [
+      nativeUsageRecord(scanThreadId, "response-1", original),
+    ]);
     const budget = new AbortController();
     const maxCostUsd = 0.000355;
     const tracker = new ScanCostTracker({
@@ -2670,32 +2387,26 @@ describe("live scan cost tracking", () => {
       compact,
       compactTotal,
     );
-    await appendFile(
-      path,
-      jsonLines([
-        compaction,
-        { type: "compacted", payload: { message: "Compacted context." } },
-        legacyUsageRecord(original),
-      ]) + "\n",
-    );
+    await appendRollout(path, [
+      compaction,
+      { type: "compacted", payload: { message: "Compacted context." } },
+      legacyUsageRecord(original),
+    ]);
     expect((await tracker.refresh()).cost?.estimatedUsd).toBe(0.00041);
     expect(budget.signal.aborted).toBe(true);
 
     const final = { ...ownedSdkUsage, input_tokens: 170, output_tokens: 15 };
     const stale = { ...ownedSdkUsage, input_tokens: 130, output_tokens: 12 };
-    await appendFile(
-      path,
-      jsonLines([
-        compaction,
-        nativeUsageRecord(
-          scanThreadId,
-          "response-2",
-          { ...ownedSdkUsage, input_tokens: 30, output_tokens: 2 },
-          final,
-        ),
-        legacyUsageRecord(stale),
-      ]) + "\n",
-    );
+    await appendRollout(path, [
+      compaction,
+      nativeUsageRecord(
+        scanThreadId,
+        "response-2",
+        { ...ownedSdkUsage, input_tokens: 30, output_tokens: 2 },
+        final,
+      ),
+      legacyUsageRecord(stale),
+    ]);
     expect((await tracker.stop(stale)).usage).toMatchObject({
       input_tokens: 170,
       output_tokens: 15,
@@ -2711,12 +2422,9 @@ describe("live scan cost tracking", () => {
       output_tokens: 100,
     };
     const parent = await writeSession(home, scanThreadId, inherited);
-    await appendFile(
-      parent,
-      jsonLines([
-        nativeUsageRecord(scanThreadId, "parent-response", inherited),
-      ]) + "\n",
-    );
+    await appendRollout(parent, [
+      nativeUsageRecord(scanThreadId, "parent-response", inherited),
+    ]);
     const child = await writeSession(home, childUuid7Thread, ownedSdkUsage, {
       parent: scanThreadId,
     });
@@ -2749,30 +2457,27 @@ describe("live scan cost tracking", () => {
       compact,
       compactTotal,
     );
-    await appendFile(child, jsonLines([compaction, compaction]) + "\n");
+    await appendRollout(child, [compaction, compaction]);
     expect((await tracker.stop(inherited)).usage).toMatchObject({
       input_tokens: 1_140,
       output_tokens: 113,
     });
 
-    await appendFile(
-      child,
-      jsonLines([
-        {
-          type: "event_msg",
-          payload: {
-            type: "task_started",
-            turn_id: "019f9e4d-b3bb-7000-8000-000000000004",
-          },
+    await appendRollout(child, [
+      {
+        type: "event_msg",
+        payload: {
+          type: "task_started",
+          turn_id: "019f9e4d-b3bb-7000-8000-000000000004",
         },
-        nativeUsageRecord(
-          childUuid7Thread,
-          "resumed-response",
-          { ...ownedSdkUsage, input_tokens: 60, output_tokens: 6 },
-          { ...ownedSdkUsage, input_tokens: 200, output_tokens: 19 },
-        ),
-      ]) + "\n",
-    );
+      },
+      nativeUsageRecord(
+        childUuid7Thread,
+        "resumed-response",
+        { ...ownedSdkUsage, input_tokens: 60, output_tokens: 6 },
+        { ...ownedSdkUsage, input_tokens: 200, output_tokens: 19 },
+      ),
+    ]);
     const resumed = costTracker(home);
     resumed.start(scanThreadId);
     expect((await resumed.stop(inherited)).usage).toMatchObject({
@@ -2789,17 +2494,14 @@ describe("live scan cost tracking", () => {
         ...ownedSdkUsage,
         input_tokens: 1_000,
       });
-      await appendFile(
-        path,
-        jsonLines([
-          nativeUsageRecord(
-            scanThreadId,
-            "resumed-response",
-            { ...ownedSdkUsage, input_tokens: 20, output_tokens: 2 },
-            { ...ownedSdkUsage, input_tokens: 1_020, output_tokens: 12 },
-          ),
-        ]) + "\n",
-      );
+      await appendRollout(path, [
+        nativeUsageRecord(
+          scanThreadId,
+          "resumed-response",
+          { ...ownedSdkUsage, input_tokens: 20, output_tokens: 2 },
+          { ...ownedSdkUsage, input_tokens: 1_020, output_tokens: 12 },
+        ),
+      ]);
       const tracker = costTracker(home);
       tracker.start(scanThreadId);
       expect(
@@ -3141,10 +2843,12 @@ describe("live scan cost tracking", () => {
     });
     tracker.start("scan-thread");
     await waitFor(() => events.length === 4);
-    await appendFile(
-      parent,
-      `${JSON.stringify({ type: "turn_context", payload: { instructions: "Check authorization" } })}\n`,
-    );
+    await appendRollout(parent, [
+      {
+        type: "turn_context",
+        payload: { instructions: "Check authorization" },
+      },
+    ]);
     await appendSessionItem(worker, {
       type: "function_call",
       name: "spawn_agent",
@@ -3196,14 +2900,7 @@ describe("live scan cost tracking", () => {
       `forwards archived session events once after %s (compressed=${compressed})`,
       async (mode) => {
         const { home, worker } = await workerSessionFixture();
-        const message = {
-          type: "response_item",
-          payload: {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: "Checking the next file." }],
-          },
-        };
+        const message = responseMessage("Checking the next file.");
         const call = {
           type: "response_item",
           payload: {
@@ -3214,7 +2911,7 @@ describe("live scan cost tracking", () => {
           },
         };
         // Identical messages at different positions are separate real events.
-        await appendFile(worker, jsonLines([message, call, message]) + "\n");
+        await appendRollout(worker, [message, call, message]);
         const contents = await filesystem.readFile(worker);
         const expected = contents
           .toString()
@@ -3260,14 +2957,14 @@ describe("live scan cost tracking", () => {
               },
             },
           ];
-          await appendFile(archived, jsonLines(continuation) + "\n");
+          await appendRollout(archived, continuation);
           expected.push(...continuation);
           await tracker.refresh();
           expect(workerEvents()).toEqual(expected);
 
           // A lagging copy catching up must not replay the new suffix.
           if (mode !== "move") {
-            await appendFile(worker, jsonLines(continuation) + "\n");
+            await appendRollout(worker, continuation);
             await tracker.refresh();
             expect(workerEvents()).toEqual(expected);
           }
@@ -3275,10 +2972,7 @@ describe("live scan cost tracking", () => {
             message,
             legacyUsageRecord({ input_tokens: 400, output_tokens: 40 }),
           ];
-          await appendFile(
-            mode === "move" ? archived : worker,
-            jsonLines(latest) + "\n",
-          );
+          await appendRollout(mode === "move" ? archived : worker, latest);
           expected.push(...latest);
           const snapshot = await tracker.refresh();
           expect(workerEvents()).toEqual(expected);
@@ -3498,7 +3192,7 @@ describe("live scan cost tracking", () => {
         { type: "response_item", payload: progressMessage(0) },
         { type: "response_item", payload: progressMessage(2) },
       ];
-      await appendFile(worker, jsonLines(continuation) + "\n");
+      await appendRollout(worker, continuation);
       await tracker.refresh();
       await tracker.refresh();
       expect(workerEvents()).toEqual([...expected, ...continuation]);
@@ -3698,10 +3392,7 @@ describe("live scan cost tracking", () => {
           await expect(tracker.refresh()).rejects.toMatchObject({ code });
         }
         const appendWorkerUsage = () =>
-          appendFile(
-            worker,
-            JSON.stringify(legacyUsageRecord(usage(1_000_000))) + "\n",
-          );
+          appendRollout(worker, [legacyUsageRecord(usage(1_000_000))]);
         if (capped) await appendWorkerUsage();
         const middle = await writeSession(home, "middle", usage(20), {
           parent: "scan-thread",
@@ -4500,9 +4191,7 @@ describe("live scan cost tracking", () => {
         worker: 1,
       }),
     ]);
-    expect(updates).toEqual([
-      { phase: "discovery", filesCompleted: 3, filesTotal: 8 },
-    ]);
+    expect(updates).toEqual([progress("discovery", 3, 8)]);
   });
 
   test("expands streamed worker reasoning without duplicating summaries or exposing encrypted content", async () => {
@@ -4710,28 +4399,20 @@ describe("live scan cost tracking", () => {
     await appendSessionItem(descendant, progressMessage(5));
     await appendSessionItem(unrelated, progressMessage(7));
 
-    const updates: ScanProgress[] = [];
-    const tracker = costTracker(home, {
-      expectedFilesTotal: 8,
-      onProgress: (progress) => updates.push(progress),
-    });
+    const { updates, tracker } = progressTracker(home, 8);
     tracker.start("scan-thread");
     await tracker.stop();
 
     expect(updates).toEqual([
       { phase: "discovery", filesCompleted: expect.any(Number), filesTotal: 8 },
-      { phase: "discovery", filesCompleted: 8, filesTotal: 8 },
+      progress("discovery", 8, 8),
     ]);
     expect([3, 5]).toContain(updates[0]!.filesCompleted);
   });
 
   test("forwards parent custom-tool progress without adding global counts to worker totals", async () => {
     const { home, parent, worker } = await workerSessionFixture();
-    const updates: ScanProgress[] = [];
-    const tracker = costTracker(home, {
-      expectedFilesTotal: 942,
-      onProgress: (update) => updates.push(update),
-    });
+    const { updates, tracker } = progressTracker(home, 942);
     tracker.start("scan-thread");
     await tracker.refresh();
     const marker =
@@ -4751,18 +4432,14 @@ describe("live scan cost tracking", () => {
     await appendSessionItem(parent, progressMessage(49, 942, "validation"));
     await tracker.stop();
     expect(updates).toEqual([
-      { phase: "discovery", filesCompleted: 49, filesTotal: 942 },
-      { phase: "validation", filesCompleted: 49, filesTotal: 942 },
+      progress("discovery", 49, 942),
+      progress("validation", 49, 942),
     ]);
   });
 
   test("keeps a global parent phase through equal worker progress and delayed provenance", async () => {
     const { home, parent, worker } = await workerSessionFixture();
-    const updates: ScanProgress[] = [];
-    const tracker = costTracker(home, {
-      expectedFilesTotal: 8,
-      onProgress: (update) => updates.push(update),
-    });
+    const { updates, tracker } = progressTracker(home, 8);
     tracker.start("scan-thread");
     await tracker.refresh();
     const progress = {
@@ -4780,16 +4457,7 @@ describe("live scan cost tracking", () => {
     updates.push(progress);
     await appendSessionItem(worker, progressMessage(8, 8, "validation"));
     await tracker.refresh();
-    await appendFile(
-      parent,
-      JSON.stringify({
-        type: "event_msg",
-        payload: {
-          type: "item_completed",
-          item: { type: "AgentMessage", content: [{ type: "Text", text }] },
-        },
-      }) + "\n",
-    );
+    await appendRollout(parent, [nativeMessage(text)]);
     await tracker.stop();
     expect(updates.map((update) => update.phase)).toEqual(["discovery"]);
   });
@@ -4798,11 +4466,7 @@ describe("live scan cost tracking", () => {
     "orders independent tool receipts by completion, not call start (%p)",
     async (overlap) => {
       const { home, parent } = await workerSessionFixture();
-      const updates: ScanProgress[] = [];
-      const tracker = costTracker(home, {
-        expectedFilesTotal: 8,
-        onProgress: (update) => updates.push(update),
-      });
+      const { updates, tracker } = progressTracker(home, 8);
       tracker.start("scan-thread");
       await tracker.refresh();
       const marker = (phase: string) => progressMarker(phase, 8, 8);
@@ -4820,33 +4484,15 @@ describe("live scan cost tracking", () => {
         overlap ? commandOutput(marker("discovery")) : persistedCommandOutput,
       );
       const records: unknown[] = overlap
-        ? [
-            call,
-            native,
-            {
-              type: "event_msg",
-              payload: {
-                type: "item_completed",
-                item: {
-                  type: "AgentMessage",
-                  content: [{ type: "Text", text: marker("validation") }],
-                },
-              },
-            },
-          ]
+        ? [call, native, nativeMessage(marker("validation"))]
         : [native, call];
-      records.push({
-        type: "response_item",
-        payload: {
-          type: "custom_tool_call_output",
-          call_id: "outer-call",
-          output: marker(overlap ? "discovery" : "validation"),
-        },
-      });
-      await appendFile(
-        parent,
-        records.map((record) => JSON.stringify(record)).join("\n") + "\n",
+      records.push(
+        customToolOutput(
+          marker(overlap ? "discovery" : "validation"),
+          "outer-call",
+        ),
       );
+      await appendRollout(parent, records);
       await tracker.refresh();
       const event = {
         type: "item.completed",
@@ -4873,11 +4519,7 @@ describe("live scan cost tracking", () => {
     "keeps recovered response progress ahead of an older live command (multipart: %p)",
     async (multipart) => {
       const { home, parent } = await workerSessionFixture();
-      const updates: ScanProgress[] = [];
-      const tracker = costTracker(home, {
-        expectedFilesTotal: 9,
-        onProgress: (update) => updates.push(update),
-      });
+      const { updates, tracker } = progressTracker(home, 9);
       const progress = {
         phase: "attack_path",
         filesCompleted: 3,
@@ -4887,32 +4529,18 @@ describe("live scan cost tracking", () => {
       const parts = multipart ? ["Report: ", text] : [text];
       // Paginated mode persists the concatenated message before the original
       // parts. Only the original response exposes the multipart marker here.
-      await appendFile(
-        parent,
-        [
-          nativeCommand("older-review", persistedCommandOutput),
-          {
-            type: "event_msg",
-            payload: {
-              type: "item_completed",
-              item: {
-                type: "AgentMessage",
-                content: [{ type: "Text", text: parts.join("") }],
-              },
-            },
+      await appendRollout(parent, [
+        nativeCommand("older-review", persistedCommandOutput),
+        nativeMessage(parts.join("")),
+        {
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: parts.map((text) => ({ type: "output_text", text })),
           },
-          {
-            type: "response_item",
-            payload: {
-              type: "message",
-              role: "assistant",
-              content: parts.map((text) => ({ type: "output_text", text })),
-            },
-          },
-        ]
-          .map((row) => JSON.stringify(row))
-          .join("\n") + "\n",
-      );
+        },
+      ]);
       tracker.start("scan-thread");
       try {
         await tracker.refresh();
@@ -4947,11 +4575,7 @@ describe("live scan cost tracking", () => {
 
   test("admits a newer recovered response that repeats an earlier live phase", async () => {
     const { home, parent } = await workerSessionFixture();
-    const updates: ScanProgress[] = [];
-    const tracker = costTracker(home, {
-      expectedFilesTotal: 9,
-      onProgress: (update) => updates.push(update),
-    });
+    const { updates, tracker } = progressTracker(home, 9);
     const first = {
       phase: "discovery",
       filesCompleted: 3,
@@ -4962,37 +4586,23 @@ describe("live scan cost tracking", () => {
       "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress);
     // Every native completion and its original multipart response is durable
     // before SDK delivery. Reusing a tuple is not reusing a message occurrence.
-    await appendFile(
-      parent,
-      [
-        ...[first, second].map((progress, index) =>
-          nativeCommand(`review-${index}`, marker(progress)),
-        ),
-        {
-          type: "event_msg",
-          payload: {
-            type: "item_completed",
-            item: {
-              type: "AgentMessage",
-              content: [{ type: "Text", text: "Report: " + marker(first) }],
-            },
-          },
+    await appendRollout(parent, [
+      ...[first, second].map((progress, index) =>
+        nativeCommand(`review-${index}`, marker(progress)),
+      ),
+      nativeMessage("Report: " + marker(first)),
+      {
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "assistant",
+          content: ["Report: ", marker(first)].map((text) => ({
+            type: "output_text",
+            text,
+          })),
         },
-        {
-          type: "response_item",
-          payload: {
-            type: "message",
-            role: "assistant",
-            content: ["Report: ", marker(first)].map((text) => ({
-              type: "output_text",
-              text,
-            })),
-          },
-        },
-      ]
-        .map((row) => JSON.stringify(row))
-        .join("\n") + "\n",
-    );
+      },
+    ]);
     tracker.start("scan-thread");
     try {
       for (const [index, progress] of [first, second].entries()) {
@@ -5032,11 +4642,7 @@ describe("live scan cost tracking", () => {
     "keeps parent phase when repeated receipts meet tied worker coverage (%p, %s, %s)",
     async (repeat, parentPhase, workerPhase) => {
       const { home, parent, worker } = await workerSessionFixture();
-      const updates: ScanProgress[] = [];
-      const tracker = costTracker(home, {
-        expectedFilesTotal: 9,
-        onProgress: (update) => updates.push(update),
-      });
+      const { updates, tracker } = progressTracker(home, 9);
       const inventory = {
         phase: "discovery",
         filesCompleted: 0,
@@ -5049,11 +4655,9 @@ describe("live scan cost tracking", () => {
       };
       const marker = (progress: ScanProgress) =>
         "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress);
-      await appendFile(
-        parent,
-        JSON.stringify(nativeCommand("inventory", persistedCommandOutput)) +
-          "\n",
-      );
+      await appendRollout(parent, [
+        nativeCommand("inventory", persistedCommandOutput),
+      ]);
       tracker.start("scan-thread");
       try {
         await appendSessionItem(parent, {
@@ -5091,11 +4695,7 @@ describe("live scan cost tracking", () => {
         });
         await tracker.refresh();
         await tracker.refresh();
-        expect(updates.at(-1)).toEqual({
-          phase: parentPhase,
-          filesCompleted: 9,
-          filesTotal: 10,
-        });
+        expect(updates.at(-1)).toEqual(progress(parentPhase, 9, 10));
         expect(updates).toHaveLength(2);
       } finally {
         await tracker.stop();
@@ -5112,11 +4712,7 @@ describe("live scan cost tracking", () => {
     "recovers multipart progress from the original response (%s, worker: %p)",
     async (mode, workerMessage) => {
       const { home, parent, worker } = await workerSessionFixture();
-      const updates: ScanProgress[] = [];
-      const tracker = costTracker(home, {
-        expectedFilesTotal: 8,
-        onProgress: (update) => updates.push(update),
-      });
+      const { updates, tracker } = progressTracker(home, 8);
       const expected: ScanProgress[] = [
         { phase: "discovery", filesCompleted: 1, filesTotal: 8 },
         { phase: "validation", filesCompleted: 2, filesTotal: 8 },
@@ -5133,32 +4729,18 @@ describe("live scan cost tracking", () => {
               type: "event_msg",
               payload: { type: "agent_message", message: finalized },
             }
-          : {
-              type: "event_msg",
-              payload: {
-                type: "item_completed",
-                item: {
-                  type: "AgentMessage",
-                  content: [{ type: "Text", text: finalized }],
-                },
-              },
-            };
-      await appendFile(
-        workerMessage ? worker : parent,
-        [
-          projection,
-          {
-            type: "response_item",
-            payload: {
-              type: "message",
-              role: "assistant",
-              content: parts.map((text) => ({ type: "output_text", text })),
-            },
+          : nativeMessage(finalized);
+      await appendRollout(workerMessage ? worker : parent, [
+        projection,
+        {
+          type: "response_item",
+          payload: {
+            type: "message",
+            role: "assistant",
+            content: parts.map((text) => ({ type: "output_text", text })),
           },
-        ]
-          .map((row) => JSON.stringify(row))
-          .join("\n") + "\n",
-      );
+        },
+      ]);
       tracker.start("scan-thread");
       await tracker.refresh();
       await tracker.stop();
@@ -5170,11 +4752,7 @@ describe("live scan cost tracking", () => {
     "preserves distinct notifications sharing a call ID (worker: %p)",
     async (workerOutput) => {
       const { home, parent, worker } = await workerSessionFixture();
-      const updates: ScanProgress[] = [];
-      const tracker = costTracker(home, {
-        expectedFilesTotal: 8,
-        onProgress: (update) => updates.push(update),
-      });
+      const { updates, tracker } = progressTracker(home, 8);
       tracker.start("scan-thread");
       await tracker.refresh();
       const values: ScanProgress[] = [
@@ -5208,11 +4786,7 @@ describe("live scan cost tracking", () => {
     "keeps distinct saved progress receipts after live output (%s, %s, %s)",
     async (type, shape, status) => {
       const { home, parent } = await workerSessionFixture();
-      const updates: ScanProgress[] = [];
-      const tracker = costTracker(home, {
-        expectedFilesTotal: 8,
-        onProgress: (update) => updates.push(update),
-      });
+      const { updates, tracker } = progressTracker(home, 8);
       const discovery: ScanProgress = {
         phase: "discovery",
         filesCompleted: 8,
@@ -5371,42 +4945,18 @@ describe("live scan cost tracking", () => {
         for (const [index, [projection, sourcePhases]] of rows.entries()) {
           const text = sourcePhases
             .split("/")
-            .map(
-              (phase) =>
-                "CODEX_SECURITY_SCAN_PROGRESS " +
-                JSON.stringify({
-                  phase,
-                  filesCompleted: 8,
-                  filesTotal: 8,
-                }),
-            )
+            .map((phase) => progressMarker(phase, 8, 8))
             .join("\n");
           const record =
             projection === "native"
-              ? {
-                  type: "event_msg",
-                  payload: {
-                    type: "item_completed",
-                    item: {
-                      type: "AgentMessage",
-                      content: [{ type: "Text", text }],
-                    },
-                  },
-                }
+              ? nativeMessage(text)
               : projection === "event"
                 ? {
                     type: "event_msg",
                     payload: { type: "agent_message", message: text },
                   }
-                : {
-                    type: "response_item",
-                    payload: {
-                      type: "message",
-                      role: "assistant",
-                      content: [{ type: "output_text", text }],
-                    },
-                  };
-          await appendFile(parent, JSON.stringify(record) + "\n");
+                : responseMessage(text);
+          await appendRollout(parent, [record]);
           if (staged) {
             await tracker.refresh();
             // The response must advance immediately; its later native copy
@@ -5445,34 +4995,14 @@ describe("live scan cost tracking", () => {
       const marker = (phase: "discovery" | "validation") =>
         "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress(phase));
       const projections = (phase: "discovery" | "validation") => [
-        {
-          type: "event_msg",
-          payload: {
-            type: "item_completed",
-            item: {
-              type: "AgentMessage",
-              content: [{ type: "Text", text: marker(phase) }],
-            },
-          },
-        },
+        nativeMessage(marker(phase)),
         {
           type: "event_msg",
           payload: { type: "agent_message", message: marker(phase) },
         },
-        {
-          type: "response_item",
-          payload: {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text: marker(phase) }],
-          },
-        },
+        responseMessage(marker(phase)),
       ];
-      const append = async (rows: unknown[]) =>
-        appendFile(
-          parent,
-          rows.map((row) => JSON.stringify(row)).join("\n") + "\n",
-        );
+      const append = async (rows: unknown[]) => appendRollout(parent, rows);
       if (history) await append(projections("discovery").slice(1));
       tracker.start("scan-thread");
       await tracker.refresh();
@@ -5507,40 +5037,21 @@ describe("live scan cost tracking", () => {
 
   test("deduplicates legacy parent message projections by occurrence", async () => {
     const { home, parent } = await workerSessionFixture();
-    const updates: ScanProgress[] = [];
-    const tracker = costTracker(home, {
-      expectedFilesTotal: 8,
-      onProgress: (update) => updates.push(update),
-    });
+    const { updates, tracker } = progressTracker(home, 8);
     tracker.start("scan-thread");
     await tracker.refresh();
     const text = ["discovery", "validation"]
-      .map(
-        (phase) =>
-          "CODEX_SECURITY_SCAN_PROGRESS " +
-          JSON.stringify({ phase, filesCompleted: 8, filesTotal: 8 }),
-      )
+      .map((phase) => progressMarker(phase, 8, 8))
       .join("\n");
     for (let occurrence = 0; occurrence < 2; occurrence++) {
-      await appendFile(
-        parent,
-        JSON.stringify({
+      await appendRollout(parent, [
+        {
           type: "event_msg",
           payload: { type: "agent_message", message: text },
-        }) + "\n",
-      );
+        },
+      ]);
       await tracker.refresh();
-      await appendFile(
-        parent,
-        JSON.stringify({
-          type: "response_item",
-          payload: {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text }],
-          },
-        }) + "\n",
-      );
+      await appendRollout(parent, [responseMessage(text)]);
       await tracker.refresh();
     }
     await tracker.stop();
@@ -5565,11 +5076,7 @@ describe("live scan cost tracking", () => {
     "keeps the global parent phase at equal worker coverage (%s, worker first: %p, parent: %s, worker: %s)",
     async (source, workerFirst, parentPhase, workerPhase) => {
       const { home, usage, parent, worker } = await workerSessionFixture();
-      const updates: ScanProgress[] = [];
-      const tracker = costTracker(home, {
-        expectedFilesTotal: 9,
-        onProgress: (update) => updates.push(update),
-      });
+      const { updates, tracker } = progressTracker(home, 9);
       const originalReaddir = filesystem.readdir;
       const listing = spyOn(filesystem, "readdir").mockImplementation((async (
         ...args: Parameters<typeof originalReaddir>
@@ -5619,11 +5126,7 @@ describe("live scan cost tracking", () => {
             await tracker.refresh();
           }
         }
-        expect(updates.at(-1)).toEqual({
-          phase: parentPhase,
-          filesCompleted: 8,
-          filesTotal: 9,
-        });
+        expect(updates.at(-1)).toEqual(progress(parentPhase, 8, 9));
         expect(updates.map((update) => update.phase)).toEqual(
           workerFirst ? [workerPhase, parentPhase] : [parentPhase],
         );
@@ -5631,11 +5134,7 @@ describe("live scan cost tracking", () => {
         // A later global parent update remains authoritative at the same count.
         await appendSessionItem(parent, progressMessage(8, 9, "reporting"));
         await tracker.refresh();
-        expect(updates.at(-1)).toEqual({
-          phase: "reporting",
-          filesCompleted: 8,
-          filesTotal: 9,
-        });
+        expect(updates.at(-1)).toEqual(progress("reporting", 8, 9));
 
         // Keep each worker's coverage even when its phase did not reach the UI.
         const additional = await writeSession(
@@ -5648,18 +5147,10 @@ describe("live scan cost tracking", () => {
         );
         await appendSessionItem(additional, progressMessage(1, 1, "discovery"));
         await tracker.refresh();
-        expect(updates.at(-1)).toEqual({
-          phase: "discovery",
-          filesCompleted: 9,
-          filesTotal: 9,
-        });
+        expect(updates.at(-1)).toEqual(progress("discovery", 9, 9));
         await appendSessionItem(parent, progressMessage(9, 9, "validation"));
         await tracker.stop();
-        expect(updates.at(-1)).toEqual({
-          phase: "validation",
-          filesCompleted: 9,
-          filesTotal: 9,
-        });
+        expect(updates.at(-1)).toEqual(progress("validation", 9, 9));
       } finally {
         await tracker.stop();
         listing.mockRestore();
@@ -5676,11 +5167,7 @@ describe("live scan cost tracking", () => {
     "keeps the global parent phase when inventory admits equal worker coverage (%p, parent: %s, worker: %s)",
     async (workerCount, parentPhase, workerPhase) => {
       const { home, parent, worker } = await workerSessionFixture();
-      const updates: ScanProgress[] = [];
-      const tracker = costTracker(home, {
-        expectedFilesTotal: 9,
-        onProgress: (update) => updates.push(update),
-      });
+      const { updates, tracker } = progressTracker(home, 9);
       try {
         await appendSessionItem(parent, progressMessage(8, 9, parentPhase));
         tracker.start("scan-thread");
@@ -5690,11 +5177,7 @@ describe("live scan cost tracking", () => {
           progressMessage(workerCount, 10, workerPhase),
         );
         await tracker.refresh();
-        expect(updates.at(-1)).toEqual({
-          phase: parentPhase,
-          filesCompleted: 8,
-          filesTotal: 9,
-        });
+        expect(updates.at(-1)).toEqual(progress(parentPhase, 8, 9));
         tracker.setExpectedFilesTotal(10);
         await tracker.refresh();
         expect(updates.at(-1)).toEqual({
@@ -5721,11 +5204,7 @@ describe("live scan cost tracking", () => {
     "uses only an eligible parent phase after inventory correction (live first: %p, parent total: %p, worker after: %p, parent: %s, worker: %s)",
     async (liveFirst, parentTotal, workerAfter, parentPhase, workerPhase) => {
       const { home, parent, worker } = await workerSessionFixture();
-      const updates: ScanProgress[] = [];
-      const tracker = costTracker(home, {
-        expectedFilesTotal: 8,
-        onProgress: (update) => updates.push(update),
-      });
+      const { updates, tracker } = progressTracker(home, 8);
       const inventory = {
         phase: "discovery",
         filesCompleted: 0,
@@ -5752,37 +5231,16 @@ describe("live scan cost tracking", () => {
         tracker.start("scan-thread");
         await tracker.refresh();
         tracker.beginParentTurn();
-        await appendFile(
-          parent,
-          JSON.stringify(nativeCommand("inventory", persistedCommandOutput)) +
-            "\n",
-        );
+        await appendRollout(parent, [
+          nativeCommand("inventory", persistedCommandOutput),
+        ]);
         if (liveFirst) {
           deliverInventory();
           await tracker.refresh();
         }
-        await appendFile(
-          parent,
-          JSON.stringify({
-            type: "event_msg",
-            payload: {
-              type: "item_completed",
-              item: {
-                type: "AgentMessage",
-                content: [
-                  {
-                    type: "Text",
-                    text: `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({
-                      phase: parentPhase,
-                      filesCompleted: 3,
-                      filesTotal: parentTotal,
-                    })}`,
-                  },
-                ],
-              },
-            },
-          }) + "\n",
-        );
+        await appendRollout(parent, [
+          nativeMessage(progressMarker(parentPhase, 3, parentTotal)),
+        ]);
         await tracker.refresh();
         if (!workerAfter) {
           await appendSessionItem(
@@ -5820,21 +5278,15 @@ describe("live scan cost tracking", () => {
       const accepted = await writeSession(home, "accepted-worker", usage, {
         parent: "scan-thread",
       });
-      const updates: ScanProgress[] = [];
-      const tracker = costTracker(home, {
-        expectedFilesTotal: 8,
-        onProgress: (update) => updates.push(update),
-      });
+      const { updates, tracker } = progressTracker(home, 8);
 
       tracker.start("scan-thread");
       try {
         await tracker.refresh();
         tracker.beginParentTurn();
-        await appendFile(
-          parent,
-          JSON.stringify(nativeCommand("inventory", persistedCommandOutput)) +
-            "\n",
-        );
+        await appendRollout(parent, [
+          nativeCommand("inventory", persistedCommandOutput),
+        ]);
         await appendSessionItem(parent, {
           type: "custom_tool_call_output",
           output: progressMarker(parentPhase, 4, 8),
@@ -5850,9 +5302,7 @@ describe("live scan cost tracking", () => {
           output: progressMarker(acceptedPhase, 3, 3),
         });
         await tracker.refresh();
-        expect(updates).toEqual([
-          { phase: parentPhase, filesCompleted: 4, filesTotal: 8 },
-        ]);
+        expect(updates).toEqual([progress(parentPhase, 4, 8)]);
         tracker.recordParentProgress(
           { phase: "discovery", filesCompleted: 0, filesTotal: 9 },
           {
@@ -5867,11 +5317,7 @@ describe("live scan cost tracking", () => {
           },
         );
         await tracker.stop();
-        expect(updates.at(-1)).toEqual({
-          phase: pendingPhase,
-          filesCompleted: 6,
-          filesTotal: 9,
-        });
+        expect(updates.at(-1)).toEqual(progress(pendingPhase, 6, 9));
       } finally {
         await tracker.stop();
       }
@@ -5880,11 +5326,7 @@ describe("live scan cost tracking", () => {
 
   test("does not replace a global parent phase with equal worker progress", async () => {
     const { home, parent, worker } = await workerSessionFixture();
-    const updates: ScanProgress[] = [];
-    const tracker = costTracker(home, {
-      expectedFilesTotal: 8,
-      onProgress: (update) => updates.push(update),
-    });
+    const { updates, tracker } = progressTracker(home, 8);
     tracker.start("scan-thread");
     await tracker.refresh();
     await appendSessionItem(parent, progressMessage(8, 8, "validation"));
@@ -5893,9 +5335,7 @@ describe("live scan cost tracking", () => {
     await tracker.refresh();
     await appendSessionItem(parent, progressMessage(8, 8, "validation"));
     await tracker.stop();
-    expect(updates).toEqual([
-      { phase: "validation", filesCompleted: 8, filesTotal: 8 },
-    ]);
+    expect(updates).toEqual([progress("validation", 8, 8)]);
   });
 
   test.each([false, true])(
@@ -5941,16 +5381,13 @@ describe("live scan cost tracking", () => {
       if (nativeCompletion) {
         // Even the full persisted completion can omit the marker. Its retained
         // command and output identify it without waiting for the missing text.
-        await appendFile(
-          parent,
-          JSON.stringify(
-            nativeCommand(
-              ["scan-progress", "1"],
-              persistedCommandOutput,
-              "native-latest",
-            ),
-          ) + "\n",
-        );
+        await appendRollout(parent, [
+          nativeCommand(
+            ["scan-progress", "1"],
+            persistedCommandOutput,
+            "native-latest",
+          ),
+        ]);
       }
       await tracker.refresh();
       expect(updates.at(-1)).toEqual(latest);
@@ -6003,22 +5440,13 @@ describe("live scan cost tracking", () => {
           type: "event_msg",
           payload: { type: "agent_message", message: text },
         },
-        response: {
-          type: "response_item",
-          payload: {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text }],
-          },
-        },
+        response: responseMessage(text),
       };
       tracker.start("scan-thread");
       try {
-        await appendFile(
+        await appendRollout(
           parent,
-          jsonLines(
-            projections.map((kind) => copies[kind as keyof typeof copies]),
-          ) + "\n",
+          projections.map((kind) => copies[kind as keyof typeof copies]),
         );
         await tracker.refresh();
         tracker.recordParentItem({
@@ -6049,24 +5477,15 @@ describe("live scan cost tracking", () => {
         });
         // Publish the older receipt and its ordering evidence in the same batch.
         // Until the persisted command is visible, the tool receipt can be newer.
-        await appendFile(
-          parent,
-          jsonLines([
-            {
-              type: "response_item",
-              payload: {
-                type: "custom_tool_call_output",
-                output: progressMarker("discovery", 0, 8),
-              },
-            },
-            native({
-              type: "CommandExecution",
-              command: ["inventory"],
-              aggregated_output: persistedCommandOutput,
-            }),
-            message,
-          ]) + "\n",
-        );
+        await appendRollout(parent, [
+          customToolOutput(progressMarker("discovery", 0, 8)),
+          native({
+            type: "CommandExecution",
+            command: ["inventory"],
+            aggregated_output: persistedCommandOutput,
+          }),
+          message,
+        ]);
         await tracker.refresh();
         await appendSessionItem(parent, progressMessage(2, 9));
         await tracker.stop();
@@ -6080,11 +5499,7 @@ describe("live scan cost tracking", () => {
 
   test("ignores old live phase copies without blocking new tool-only progress in legacy logs", async () => {
     const { home, parent } = await workerSessionFixture();
-    const updates: ScanProgress[] = [];
-    const tracker = costTracker(home, {
-      expectedFilesTotal: 8,
-      onProgress: (progress) => updates.push(progress),
-    });
+    const { updates, tracker } = progressTracker(home, 8);
     tracker.start("scan-thread");
     await tracker.refresh();
     for (const phase of ["discovery", "validation"] as const) {
@@ -6115,11 +5530,7 @@ describe("live scan cost tracking", () => {
 
   test("orders repeated commands by completion and allows a later tool-only repeated phase", async () => {
     const { home, parent } = await workerSessionFixture();
-    const updates: ScanProgress[] = [];
-    const tracker = costTracker(home, {
-      expectedFilesTotal: 8,
-      onProgress: (progress) => updates.push(progress),
-    });
+    const { updates, tracker } = progressTracker(home, 8);
     tracker.start("scan-thread");
     await tracker.refresh();
     const discovery = {
@@ -6154,9 +5565,8 @@ describe("live scan cost tracking", () => {
       validation,
       discovery,
     ].entries()) {
-      await appendFile(
-        parent,
-        JSON.stringify({
+      await appendRollout(parent, [
+        {
           type: "event_msg",
           payload: {
             type: "item_completed",
@@ -6169,8 +5579,8 @@ describe("live scan cost tracking", () => {
               aggregated_output: marker(progress),
             },
           },
-        }) + "\n",
-      );
+        },
+      ]);
     }
     await tracker.refresh();
     expect(updates.at(-1)).toEqual(discovery);
@@ -6195,11 +5605,7 @@ describe("live scan cost tracking", () => {
 
   test("does not derive ordering from a mismatched or unfamiliar command projection", async () => {
     const { home, parent } = await workerSessionFixture();
-    const updates: ScanProgress[] = [];
-    const tracker = costTracker(home, {
-      expectedFilesTotal: 8,
-      onProgress: (progress) => updates.push(progress),
-    });
+    const { updates, tracker } = progressTracker(home, 8);
     tracker.start("scan-thread");
     await tracker.refresh();
     const progress = {
@@ -6217,10 +5623,7 @@ describe("live scan cost tracking", () => {
       },
     });
     await appendSessionItem(parent, progressMessage(2));
-    await appendFile(
-      parent,
-      JSON.stringify(nativeCommand("different", text)) + "\n",
-    );
+    await appendRollout(parent, [nativeCommand("different", text)]);
     await tracker.stop();
     expect(updates).toEqual([{ ...progress, filesCompleted: 2 }]);
   });
@@ -6246,11 +5649,7 @@ describe("live scan cost tracking", () => {
           output: [
             {
               type: "input_text",
-              text: `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({
-                phase: "discovery",
-                filesCompleted,
-                filesTotal,
-              })}`,
+              text: progressMarker("discovery", filesCompleted, filesTotal),
             },
           ],
         });
@@ -6260,8 +5659,8 @@ describe("live scan cost tracking", () => {
       await appendSessionItem(parent, progressMessage(8, filesTotal + 1));
       await tracker.stop();
       expect(updates).toEqual([
-        { phase: "discovery", filesCompleted: 0, filesTotal },
-        { phase: "discovery", filesCompleted: 7, filesTotal },
+        progress("discovery", 0, filesTotal),
+        progress("discovery", 7, filesTotal),
       ]);
     },
   );
@@ -6272,11 +5671,7 @@ describe("live scan cost tracking", () => {
       parent: "scan-thread",
     });
     const unrelated = await writeSession(home, "unrelated-thread", usage);
-    const updates: ScanProgress[] = [];
-    const tracker = costTracker(home, {
-      expectedFilesTotal: 1_258,
-      onProgress: (progress) => updates.push(progress),
-    });
+    const { updates, tracker } = progressTracker(home, 1_258);
     tracker.start("scan-thread");
     await tracker.refresh();
 
@@ -6290,11 +5685,7 @@ describe("live scan cost tracking", () => {
     await appendSessionItem(parent, progressMessage(1_200, 1_258));
     await appendSessionItem(unrelated, progressMessage(1_200, 1_258));
 
-    const marker = `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({
-      phase: "discovery",
-      filesCompleted: 1_200,
-      filesTotal: 1_249,
-    })}`;
+    const marker = progressMarker("discovery", 1_200, 1_249);
     await appendSessionItem(otherWorker, {
       type: "custom_tool_call_output",
       call_id: "failed-shard-review",
@@ -6319,11 +5710,11 @@ describe("live scan cost tracking", () => {
     await tracker.stop();
 
     expect(updates).toEqual([
-      { phase: "discovery", filesCompleted: 3, filesTotal: 1_258 },
-      { phase: "discovery", filesCompleted: 5, filesTotal: 1_258 },
-      { phase: "discovery", filesCompleted: 1_200, filesTotal: 1_258 },
-      { phase: "discovery", filesCompleted: 1_251, filesTotal: 1_258 },
-      { phase: "validation", filesCompleted: 1_251, filesTotal: 1_258 },
+      progress("discovery", 3, 1_258),
+      progress("discovery", 5, 1_258),
+      progress("discovery", 1_200, 1_258),
+      progress("discovery", 1_251, 1_258),
+      progress("validation", 1_251, 1_258),
     ]);
   });
 
@@ -6338,11 +5729,7 @@ describe("live scan cost tracking", () => {
       parent: "scan-thread",
     });
     const unrelated = await writeSession(home, "unrelated-worker", usage);
-    const updates: ScanProgress[] = [];
-    const tracker = costTracker(home, {
-      expectedFilesTotal: 4_198,
-      onProgress: (progress) => updates.push(progress),
-    });
+    const { updates, tracker } = progressTracker(home, 4_198);
     tracker.start("scan-thread");
     await tracker.refresh();
 
@@ -6358,10 +5745,10 @@ describe("live scan cost tracking", () => {
     await tracker.stop();
 
     expect(updates).toEqual([
-      { phase: "discovery", filesCompleted: 250, filesTotal: 4_198 },
-      { phase: "discovery", filesCompleted: 350, filesTotal: 4_198 },
-      { phase: "discovery", filesCompleted: 940, filesTotal: 4_198 },
-      { phase: "discovery", filesCompleted: 1_679, filesTotal: 4_198 },
+      progress("discovery", 250, 4_198),
+      progress("discovery", 350, 4_198),
+      progress("discovery", 940, 4_198),
+      progress("discovery", 1_679, 4_198),
     ]);
   });
 
@@ -6428,18 +5815,14 @@ describe("live scan cost tracking", () => {
       await appendSessionItem(worker, payload);
     }
 
-    const updates: ScanProgress[] = [];
-    const tracker = costTracker(home, {
-      expectedFilesTotal: 8,
-      onProgress: (progress) => updates.push(progress),
-    });
+    const { updates, tracker } = progressTracker(home, 8);
     tracker.start("scan-thread");
     await tracker.stop();
 
     expect(updates).toEqual([
-      { phase: "discovery", filesCompleted: 3, filesTotal: 8 },
-      { phase: "discovery", filesCompleted: 4, filesTotal: 8 },
-      { phase: "discovery", filesCompleted: 5, filesTotal: 8 },
+      progress("discovery", 3, 8),
+      progress("discovery", 4, 8),
+      progress("discovery", 5, 8),
     ]);
   });
 
@@ -6456,11 +5839,9 @@ describe("live scan cost tracking", () => {
     tracker.start("scan-thread");
 
     try {
-      await expect(reportedProgress).resolves.toEqual({
-        phase: "discovery",
-        filesCompleted: 3,
-        filesTotal: 8,
-      });
+      await expect(reportedProgress).resolves.toEqual(
+        progress("discovery", 3, 8),
+      );
     } finally {
       await tracker.stop();
     }
@@ -6468,11 +5849,7 @@ describe("live scan cost tracking", () => {
 
   test("reports newly completed worker batches once per progress update", async () => {
     const { home, worker } = await workerSessionFixture();
-    const updates: ScanProgress[] = [];
-    const tracker = costTracker(home, {
-      expectedFilesTotal: 8,
-      onProgress: (progress) => updates.push(progress),
-    });
+    const { updates, tracker } = progressTracker(home, 8);
     tracker.start("scan-thread");
     await tracker.refresh();
 
@@ -6485,8 +5862,8 @@ describe("live scan cost tracking", () => {
     await tracker.stop();
 
     expect(updates).toEqual([
-      { phase: "discovery", filesCompleted: 3, filesTotal: 8 },
-      { phase: "discovery", filesCompleted: 5, filesTotal: 8 },
+      progress("discovery", 3, 8),
+      progress("discovery", 5, 8),
     ]);
   });
 
@@ -6707,11 +6084,9 @@ describe("live scan cost tracking", () => {
       coverageScope: ["thread:scan-thread", "thread:worker-thread"],
     });
 
-    await appendFile(
-      worker,
-      jsonLines([legacyUsageRecord({ input_tokens: 0, output_tokens: 0 })]) +
-        "\n",
-    );
+    await appendRollout(worker, [
+      legacyUsageRecord({ input_tokens: 0, output_tokens: 0 }),
+    ]);
     expect((await tracker.refresh()).usage).toMatchObject({
       ...parentUsage,
       total_tokens: 1_100_000,
@@ -6725,12 +6100,9 @@ describe("live scan cost tracking", () => {
     });
     expect(usages).toHaveLength(1);
 
-    await appendFile(
-      worker,
-      jsonLines([
-        legacyUsageRecord({ input_tokens: 500_000, output_tokens: 50_000 }),
-      ]) + "\n",
-    );
+    await appendRollout(worker, [
+      legacyUsageRecord({ input_tokens: 500_000, output_tokens: 50_000 }),
+    ]);
     expect((await tracker.stop(parentUsage)).usage).toMatchObject({
       input_tokens: 1_500_000,
       output_tokens: 150_000,
@@ -6773,20 +6145,17 @@ describe("live scan cost tracking", () => {
           timestamp: "2026-07-26T12:01:00Z",
         },
       );
-      await appendFile(
-        worker,
-        jsonLines([
-          {
-            type: "event_msg",
-            timestamp: "2026-07-26T12:03:00Z",
-            payload: {
-              type: "token_count",
-              info: null,
-              rate_limits: { primary: { used_percent: 5 } },
-            },
+      await appendRollout(worker, [
+        {
+          type: "event_msg",
+          timestamp: "2026-07-26T12:03:00Z",
+          payload: {
+            type: "token_count",
+            info: null,
+            rate_limits: { primary: { used_percent: 5 } },
           },
-        ]) + "\n",
-      );
+        },
+      ]);
       const compressed = zlib.zstdCompressSync(
         await filesystem.readFile(worker),
       );

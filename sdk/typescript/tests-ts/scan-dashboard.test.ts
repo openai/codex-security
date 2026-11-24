@@ -32,6 +32,12 @@ function createDashboard(
   });
 }
 
+function startDashboard(...args: Parameters<typeof createDashboard>) {
+  const dashboard = createDashboard(...args);
+  dashboard.start();
+  return Object.assign(dashboard, { [Symbol.dispose]: () => dashboard.stop() });
+}
+
 function budgetRequest(signal = new AbortController().signal) {
   return {
     maxCostUsd: 20,
@@ -82,8 +88,8 @@ class DashboardTestInput extends EventEmitter {
 describe("live scan dashboard", () => {
   test("invalidates complete totals when usage becomes partial or unavailable", () => {
     const stderr = capture(true);
-    const dashboard = createDashboard(stderr.stream, { showCost: true });
-    dashboard.start();
+    using dashboard = startDashboard(stderr.stream, { showCost: true });
+
     const usage = {
       input_tokens: 100,
       cached_input_tokens: 0,
@@ -128,7 +134,6 @@ describe("live scan dashboard", () => {
     });
     expect(lastFrame(stderr)).toContain("usage unavailable");
     expect(lastFrame(stderr)).not.toContain("105");
-    dashboard.stop();
   });
 
   test("keeps activity while a terminal is backpressured and restores the screen", async () => {
@@ -172,8 +177,8 @@ describe("live scan dashboard", () => {
   test("keeps whole and fragmented function keys out of worker selection", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
-    const dashboard = createDashboard(stderr.stream, { input });
-    dashboard.start();
+    using _dashboard = startDashboard(stderr.stream, { input });
+
     input.emit("data", "d");
     for (const key of ["", "\u001B", "\u001B\u001B"].flatMap((prefix) =>
       ["\u001BO1;5P", "\u001B[1;2Q"].map((key) => prefix + key),
@@ -186,7 +191,6 @@ describe("live scan dashboard", () => {
     }
     input.emit("data", "3");
     expect(lastFrame(stderr)).toContain("DETAILS · worker 3");
-    dashboard.stop();
   });
 
   test.each(["\u001BO", "\u001BO1;"])(
@@ -287,8 +291,8 @@ describe("live scan dashboard", () => {
 
   test("styles numeric inline content without matching its timestamp", () => {
     const stderr = capture(true);
-    const dashboard = createDashboard(stderr.stream, { color: true });
-    dashboard.start();
+    using dashboard = startDashboard(stderr.stream, { color: true });
+
     dashboard.record({
       id: "numeric-markup",
       kind: "message",
@@ -301,7 +305,6 @@ describe("live scan dashboard", () => {
     expect(stderr.text()).toContain(
       "and \u001B]8;;https://example.test/report\u000709\u001B]8;;\u0007.",
     );
-    dashboard.stop();
   });
   test.each([21, 32, 120])(
     "keeps worker labels outside inline markup at width %d",
@@ -309,11 +312,11 @@ describe("live scan dashboard", () => {
       for (const kind of ["message", "reasoning"] as const) {
         for (const markup of ["`1`", "[1](https://example.test/report)"]) {
           const stderr = capture(true);
-          const dashboard = createDashboard(
+          using dashboard = startDashboard(
             { ...stderr.stream, columns, rows: 24 },
             { color: true },
           );
-          dashboard.start();
+
           dashboard.record({
             id: "worker-markup",
             worker: 1,
@@ -337,7 +340,6 @@ describe("live scan dashboard", () => {
           );
           const tag = markup.startsWith("`") ? "code" : "link";
           expect(frame).toContain(`worker 1 · See <${tag}>1</${tag}>.`);
-          dashboard.stop();
         }
       }
     },
@@ -382,11 +384,11 @@ describe("live scan dashboard", () => {
     (_name, output) => {
       const stderr = capture(true);
       const input = new DashboardTestInput();
-      const dashboard = createDashboard(
+      using dashboard = startDashboard(
         { ...stderr.stream, columns: 88, rows: 24 },
         { input },
       );
-      dashboard.start();
+
       input.emit("data", "d");
       dashboard.recordDetails({
         threadId: "synthetic-thread",
@@ -407,7 +409,6 @@ describe("live scan dashboard", () => {
       for (const line of lastFrame(stderr).split("\n")) {
         expect(line.length).toBeLessThanOrEqual(88);
       }
-      dashboard.stop();
     },
   );
 
@@ -468,11 +469,11 @@ describe("live scan dashboard", () => {
       for (const view of ["prose", "code", "details"] as const) {
         const stderr = capture(true);
         const input = new DashboardTestInput();
-        const dashboard = createDashboard(
+        using dashboard = startDashboard(
           { ...stderr.stream, columns: 120, rows: 24 },
           { input, color: false },
         );
-        dashboard.start();
+
         if (view === "details") {
           input.emit("data", "d");
           dashboard.recordDetails({
@@ -496,7 +497,6 @@ describe("live scan dashboard", () => {
         expect(lastFrame(stderr)).toContain(expected);
         expect(stderr.text()).not.toContain("\u001B]");
         expect(stderr.text()).not.toContain("\u001B[31m");
-        dashboard.stop();
       }
     },
   );
@@ -505,12 +505,12 @@ describe("live scan dashboard", () => {
     "wraps code after escaping terminal control %j",
     (control) => {
       const stderr = capture(true);
-      const dashboard = createDashboard({
+      using dashboard = startDashboard({
         ...stderr.stream,
         columns: 40,
         rows: 24,
       });
-      dashboard.start();
+
       dashboard.record({
         id: "escaped-code",
         kind: "message",
@@ -523,7 +523,6 @@ describe("live scan dashboard", () => {
       expect(frame.replace(/\s+/gu, "")).toContain(
         "callWithLongName(value123)",
       );
-      dashboard.stop();
     },
   );
 
@@ -604,8 +603,8 @@ describe("live scan dashboard", () => {
   test("ignores Delete and function keys when filtering session details", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
-    const dashboard = createDashboard(stderr.stream, { input });
-    dashboard.start();
+    using _dashboard = startDashboard(stderr.stream, { input });
+
     input.emit("data", "d");
     for (const key of ["\u001B[3~", "\u001B[15~"]) {
       input.emit("data", key);
@@ -613,28 +612,26 @@ describe("live scan dashboard", () => {
     }
     input.emit("data", "3");
     expect(lastFrame(stderr)).toContain("DETAILS · worker 3");
-    dashboard.stop();
   });
 
   test("uses the full verification viewport", () => {
     const stderr = capture(true);
-    const dashboard = createDashboard(
+    using _dashboard = startDashboard(
       { ...stderr.stream, columns: 80, rows: 24 },
       { presentation: "verification" },
     );
-    dashboard.start();
+
     expect(
       stripVTControlCharacters(stderr.text().split("\u001B[H").at(-1)!).split(
         "\n",
       ),
     ).toHaveLength(24);
-    dashboard.stop();
   });
 
   test("styles inline code without changing generated terminal escapes", () => {
     const stderr = capture(true);
-    const dashboard = createDashboard(stderr.stream, { color: true });
-    dashboard.start();
+    using dashboard = startDashboard(stderr.stream, { color: true });
+
     dashboard.record({
       id: "inline-ansi",
       kind: "message",
@@ -645,7 +642,6 @@ describe("live scan dashboard", () => {
     expect(lastFrame(stderr)).toContain("The code is [2m.");
     expect(stderr.text()).toContain("The code is \u001B[2m[2m\u001B[22m");
     expect(lastFrame(stderr)).not.toContain("\u001B");
-    dashboard.stop();
   });
 
   test.each([
@@ -705,12 +701,12 @@ describe("live scan dashboard", () => {
 
   test("wraps wide activity text to terminal columns without losing it", () => {
     const stderr = capture(true);
-    const dashboard = createDashboard({
+    using dashboard = startDashboard({
       ...stderr.stream,
       columns: 40,
       rows: 24,
     });
-    dashboard.start();
+
     dashboard.record({
       id: "wide-text",
       kind: "message",
@@ -728,7 +724,6 @@ describe("live scan dashboard", () => {
         ),
       ).toBeLessThanOrEqual(40);
     }
-    dashboard.stop();
   });
 
   test.each([
@@ -750,27 +745,26 @@ describe("live scan dashboard", () => {
     "shows a cost row only when %s has pricing in %j",
     (model, pricingContext, priced) => {
       const stderr = capture(true);
-      const dashboard = createDashboard(stderr.stream, {
+      using _dashboard = startDashboard(stderr.stream, {
         model: { model, reasoningEffort: "xhigh" },
         pricingContext,
         showCost: true,
       });
-      dashboard.start();
+
       const frame = lastFrame(stderr);
       expect(/^\s*COST\b/m.test(frame)).toBe(priced);
       if (priced) expect(frame).toMatch(/COST\s+waiting for usage/);
       expect(frame).not.toContain("model pricing missing");
-      dashboard.stop();
     },
   );
 
   test("keeps cost bounds and assumptions readable on a narrow terminal", () => {
     const stderr = capture(true);
-    const dashboard = createDashboard(
+    using dashboard = startDashboard(
       { ...stderr.stream, columns: 60, rows: 24 },
       { repository: "/synthetic/repository", showCost: true },
     );
-    dashboard.start();
+
     dashboard.setCost({
       model: "synthetic-model",
       inputTokens: 1,
@@ -789,7 +783,6 @@ describe("live scan dashboard", () => {
     );
     expect(frame.split("\n")).toHaveLength(24);
     expect(frame.split("\n").every((line) => line.length <= 60)).toBe(true);
-    dashboard.stop();
   });
 
   test("keeps the token and cost measurement time on later timer redraws", () => {
@@ -798,7 +791,7 @@ describe("live scan dashboard", () => {
     let now = Date.parse(measured);
     let redraw: (() => void) | undefined;
     const terminal = { ...stderr.stream, columns: 60, rows: 24 };
-    const dashboard = createDashboard(terminal, {
+    using dashboard = startDashboard(terminal, {
       showCost: true,
       clock: {
         ...fakeClock(() => now),
@@ -808,7 +801,7 @@ describe("live scan dashboard", () => {
         },
       },
     });
-    dashboard.start();
+
     dashboard.setUsageObservation({
       tokensUpdatedAt: measured,
       accountRateLimits: [],
@@ -851,7 +844,6 @@ describe("live scan dashboard", () => {
     expect(resized).toContain("13:15:07");
     expect(resized).toContain("Ctrl+C to exit");
     expect(resized.split("\n")).toHaveLength(12);
-    dashboard.stop();
   });
 
   test("keeps the clock and budget visible when allowance readings need several pages", async () => {
@@ -911,11 +903,11 @@ describe("live scan dashboard", () => {
 
   test("shows ChatGPT account windows before any token measurement", () => {
     const stderr = capture(true);
-    const dashboard = createDashboard(
+    using dashboard = startDashboard(
       { ...stderr.stream, columns: 60, rows: 24 },
       { mode: "deep" },
     );
-    dashboard.start();
+
     expect(lastFrame(stderr)).not.toMatch(/^\s*LIMITS\b/m);
     dashboard.setChatGptAuth(true);
     expect(lastFrame(stderr).replace(/\s+/gu, " ")).toMatch(
@@ -939,7 +931,6 @@ describe("live scan dashboard", () => {
     expect(frame).toContain("14:23:19");
     expect(frame).not.toMatch(/unavailable|not reported/i);
     expect(frame.split("\n")).toHaveLength(24);
-    dashboard.stop();
   });
 
   test("edits a higher total budget while continuing to show live cost", async () => {
@@ -2120,12 +2111,11 @@ describe("live scan dashboard", () => {
   test("batches trackpad scroll events without dropping movement", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
-    const dashboard = createDashboard(
+    using dashboard = startDashboard(
       { ...stderr.stream, columns: 80, rows: 14 },
       { input },
     );
 
-    dashboard.start();
     recordActions(dashboard, 30);
 
     const framesBefore = stderr.text().match(/\u001B\[H/gu)?.length ?? 0;
@@ -2143,7 +2133,6 @@ describe("live scan dashboard", () => {
     expect(frame).toContain("finding-28");
     expect(frame).not.toContain("finding-30");
     expect(stderr.text().match(/\u001B\[H/gu)?.length).toBe(framesBefore + 2);
-    dashboard.stop();
   });
 
   test("keeps scrolled history in place once the oldest activity is dropped", () => {
@@ -2198,12 +2187,11 @@ describe("live scan dashboard", () => {
   test("scrolls half a page with Mac-friendly Ctrl+U and Ctrl+D", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
-    const dashboard = createDashboard(
+    using dashboard = startDashboard(
       { ...stderr.stream, columns: 80, rows: 14 },
       { input },
     );
 
-    dashboard.start();
     recordActions(dashboard, 20);
 
     input.emit("data", "\u0015");
@@ -2226,18 +2214,16 @@ describe("live scan dashboard", () => {
     input.emit("data", "\u001B");
     input.emit("data", "[6~");
     expect(lastFrame(stderr)).not.toContain("above live");
-    dashboard.stop();
   });
 
   test("preserves chronological session events and strips terminal controls from activity", () => {
     const stderr = capture(true);
     const input = new DashboardTestInput();
-    const dashboard = createDashboard(
+    using dashboard = startDashboard(
       { ...stderr.stream, columns: 140, rows: 24 },
       { input, color: true },
     );
 
-    dashboard.start();
     dashboard.record({
       id: "activity-1",
       kind: "command",
@@ -2356,7 +2342,6 @@ describe("live scan dashboard", () => {
     input.emit("data", "d");
     frame = lastFrame(stderr);
     expect(frame).toContain("rg -n synthetic-secret routes/login.ts");
-    dashboard.stop();
   });
 
   test("filters workers and scrolls the details separately from scan activity", () => {
@@ -2445,13 +2430,12 @@ describe("live scan dashboard", () => {
 
   test("wraps real reasoning and assistant prose into chronological history", () => {
     const stderr = capture(true);
-    const dashboard = createDashboard({
+    using dashboard = startDashboard({
       ...stderr.stream,
       columns: 55,
       rows: 18,
     });
 
-    dashboard.start();
     dashboard.record({
       id: "thinking-1",
       kind: "reasoning",
@@ -2481,7 +2465,6 @@ describe("live scan dashboard", () => {
     expect(frame.indexOf("◦ worker 1")).toBeLessThan(
       frame.indexOf("● worker 1"),
     );
-    dashboard.stop();
   });
 
   test("shows streamed worker reasoning fully expanded and updates it in place", () => {
@@ -2523,13 +2506,12 @@ describe("live scan dashboard", () => {
     const stderr = capture(true);
     const target =
       "/private/tmp/codex security/scans/promptfoo-cloud/artifacts/02_discovery/raw_candidates_02.jsonl";
-    const dashboard = createDashboard({
+    using dashboard = startDashboard({
       ...stderr.stream,
       columns: 55,
       rows: 18,
     });
 
-    dashboard.start();
     dashboard.record({
       id: "message-link",
       kind: "message",
@@ -2546,17 +2528,15 @@ describe("live scan dashboard", () => {
     expect(stderr.text()).toContain(
       `\u001B]8;;${pathToFileURL(target).href}\u0007raw_candidates_02.jsonl\u001B]8;;\u0007`,
     );
-    dashboard.stop();
   });
 
   test("renders fenced Markdown code with exact indentation and one timestamp", () => {
     const stderr = capture(true);
-    const dashboard = createDashboard(
+    using dashboard = startDashboard(
       { ...stderr.stream, columns: 90, rows: 18 },
       { color: true },
     );
 
-    dashboard.start();
     dashboard.record({
       id: "message-code",
       kind: "message",
@@ -2585,17 +2565,15 @@ describe("live scan dashboard", () => {
       paths: [],
     });
     expect(lastFrame(stderr).match(/\[09:41:00\]/gu)).toHaveLength(2);
-    dashboard.stop();
   });
 
   test("renders inline code while preserving clickable links and exact commands", () => {
     const stderr = capture(true);
-    const dashboard = createDashboard(
+    using dashboard = startDashboard(
       { ...stderr.stream, columns: 120, rows: 18 },
       { color: true },
     );
 
-    dashboard.start();
     dashboard.record({
       id: "message-inline-code",
       kind: "message",
@@ -2626,17 +2604,15 @@ describe("live scan dashboard", () => {
       paths: [],
     });
     expect(lastFrame(stderr)).toContain("printf '`db.raw(input)`'");
-    dashboard.stop();
   });
 
   test("preserves external Markdown link targets and rejects unsafe links", () => {
     const stderr = capture(true);
-    const dashboard = createDashboard(
+    using dashboard = startDashboard(
       { ...stderr.stream, columns: 120, rows: 18 },
       { color: false },
     );
 
-    dashboard.start();
     dashboard.record({
       id: "message-links",
       kind: "message",
@@ -2664,17 +2640,15 @@ describe("live scan dashboard", () => {
     expect(stderr.text()).not.toContain(
       `\u001B]8;;${pathToFileURL("/tmp/report.md").href}`,
     );
-    dashboard.stop();
   });
 
   test("preserves credential-shaped activity descriptions across line wrapping", () => {
     const stderr = capture(true);
-    const dashboard = createDashboard(
+    using dashboard = startDashboard(
       { ...stderr.stream, columns: 50, rows: 18 },
       { color: false },
     );
 
-    dashboard.start();
     dashboard.record({
       id: "wrapped-secret",
       kind: "command",
@@ -2686,14 +2660,12 @@ describe("live scan dashboard", () => {
 
     expect(lastFrame(stderr)).toContain("client_secret=");
     expect(lastFrame(stderr)).toContain("SYNTHETIC_SECRET_VALUE");
-    dashboard.stop();
   });
 
   test("colors important activity while keeping prose readable across terminal themes", () => {
     const stderr = capture(true);
-    const dashboard = createDashboard(stderr.stream, { color: true });
+    using dashboard = startDashboard(stderr.stream, { color: true });
 
-    dashboard.start();
     dashboard.record({
       id: "command-1",
       kind: "command",
@@ -2740,14 +2712,12 @@ describe("live scan dashboard", () => {
     );
     expect(raw).not.toContain("\u001B[1;37m");
     expect(raw).not.toContain("\u001B[1;36m");
-    dashboard.stop();
   });
 
   test("colors successful scan milestones and warnings distinctly", () => {
     const stderr = capture(true);
-    const dashboard = createDashboard(stderr.stream, { color: true });
+    using dashboard = startDashboard(stderr.stream, { color: true });
 
-    dashboard.start();
     for (const status of [
       "Started preflight",
       "Started reviewing files",
@@ -2764,14 +2734,12 @@ describe("live scan dashboard", () => {
     expect(stderr.text()).toContain(
       "\u001B[2m[09:41:00]\u001B[22m \u001B[33m▲ Preflight: worker delegation unavailable.\u001B[0m",
     );
-    dashboard.stop();
   });
 
   test("leaves activity uncolored when colors are disabled", () => {
     const stderr = capture(true);
-    const dashboard = createDashboard(stderr.stream, { color: false });
+    using dashboard = startDashboard(stderr.stream, { color: false });
 
-    dashboard.start();
     dashboard.record({
       id: "message-1",
       kind: "message",
@@ -2791,7 +2759,6 @@ describe("live scan dashboard", () => {
     expect(lastFrame(stderr)).toContain(
       "▲ Preflight: worker delegation unavailable.",
     );
-    dashboard.stop();
   });
 
   test("removes terminal escape sequences from repository-controlled paths", () => {
@@ -2914,11 +2881,11 @@ test.each([16, 25, 120])(
       for (const kind of ["message", "reasoning"] as const) {
         for (const markup of ["`x`", "[x](https://example.test/report)"]) {
           const stderr = capture(true);
-          const dashboard = createDashboard(
+          using dashboard = startDashboard(
             { ...stderr.stream, columns, rows: 60 },
             { color: true },
           );
-          dashboard.start();
+
           dashboard.record({
             id: "clipped-markup",
             worker,
@@ -2933,7 +2900,6 @@ test.each([16, 25, 120])(
               ? "\u001B[2mx\u001B[22m"
               : "\u001B]8;;https://example.test/report\u0007x\u001B]8;;\u0007",
           );
-          dashboard.stop();
         }
       }
       const stderr = capture(true);

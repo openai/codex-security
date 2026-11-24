@@ -1,6 +1,8 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, writeFile } from "node:fs/promises";
+import { jsonLines } from "./json.js";
 import { runNodePython } from "./python-probe.js";
 import { join } from "node:path";
+import type { ScanProgress } from "../../src/worker-progress.js";
 import type { ThreadEvent } from "@openai/codex-sdk";
 import assert from "node:assert/strict";
 
@@ -26,12 +28,65 @@ export const ownedPythonUsage = {
   totalTokens: 110,
 };
 
+export const progress = (
+  phase: ScanProgress["phase"],
+  filesCompleted: number,
+  filesTotal: number,
+): ScanProgress => ({ phase, filesCompleted, filesTotal });
+
 export function progressMarker(
   phase: string,
   filesCompleted: number,
   filesTotal: number,
 ): string {
   return `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({ phase, filesCompleted, filesTotal })}`;
+}
+
+// Exact ASCII fixture for the pinned native 64 KiB persistence representation.
+export const commandHead = "h".repeat(32_743);
+export const commandTail = "t".repeat(32_743);
+export const persistedCommandOutput = `${commandHead}\n... command output truncated for persistence ...\n${commandTail}`;
+export const commandOutput = (middle: string) =>
+  `${commandHead}\n${middle}\n${commandTail}`;
+
+export function appendRollout(path: string, rows: readonly unknown[]) {
+  return appendFile(path, jsonLines(rows) + "\n");
+}
+
+export function customToolOutput(output: string, callId?: string) {
+  return {
+    type: "response_item",
+    payload: {
+      type: "custom_tool_call_output",
+      ...(callId === undefined ? {} : { call_id: callId }),
+      output,
+    },
+  };
+}
+
+export function nativeMessage(text: string, id?: string) {
+  return {
+    type: "event_msg",
+    payload: {
+      type: "item_completed",
+      item: {
+        type: "AgentMessage",
+        ...(id === undefined ? {} : { id }),
+        content: [{ type: "Text", text }],
+      },
+    },
+  };
+}
+
+export function responseMessage(text: string) {
+  return {
+    type: "response_item",
+    payload: {
+      type: "message",
+      role: "assistant",
+      content: [{ type: "output_text", text }],
+    },
+  };
 }
 
 export function nativeCommand(
