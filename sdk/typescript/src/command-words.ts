@@ -12,9 +12,9 @@ export function splitCommand(
     if (character === "\\" && quote !== "'" && backslashes === "escape") {
       const next = command[++index];
       if (next === undefined) return null;
-      if (quote === '"' && !["$", "`", '"', "\\", "\n"].includes(next))
-        word += "\\";
-      if (next !== "\n") word += next;
+      if (next === "\n") continue;
+      if (quote === '"' && !["$", "`", '"', "\\"].includes(next)) word += "\\";
+      word += next;
       started = true;
     } else if (quote !== null) {
       if (character === quote) quote = null;
