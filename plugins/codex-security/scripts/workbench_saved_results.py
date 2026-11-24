@@ -75,6 +75,7 @@ from workbench_constants import PHASES
 from workbench_coverage_receipts import (
     _generic_surface_updates as _generic_surface_updates,
 )
+from workbench_scan_usage import _timestamp as parse_observation_time
 
 _PUBLICATION_FOLLOW_UP_WARNING = (
     "Saved scan evidence remains on disk; result publication needs follow-up:"
@@ -1252,6 +1253,23 @@ def mark_running_scan_failed(
     return updated.rowcount == 1
 
 
+def record_stopped_phase(
+    connection: sqlite3.Connection, scan: sqlite3.Row, args: argparse.Namespace
+) -> None:
+    phase = getattr(args, "observed_phase", None)
+    observed_at = getattr(args, "phase_observed_at", None)
+    observation = None
+    if scan["mode"] == "standard" and phase and parse_observation_time(observed_at) is not None:
+        observation = json.dumps({"phase": phase, "observedAt": observed_at})
+    # A new stop replaces the previous attempt's observation. A retry may fill a gap.
+    connection.execute(
+        "UPDATE scan_progress SET last_observed_phase_json = :observation "
+        "WHERE scan_id = :id AND last_observed_phase_json IS NOT :observation "
+        "AND (:running OR last_observed_phase_json IS NULL)",
+        {"observation": observation, "id": scan["id"], "running": scan["status"] == "running"},
+    )
+
+
 def touch_scan_progress(
     connection: sqlite3.Connection,
     scan_id: str,
@@ -1300,6 +1318,7 @@ def fail_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
             args.claim_token,
             error_message="Scan failure is owned by another continuation.",
         )
+        record_stopped_phase(connection, scan, args)
         if scan["status"] == "failed":
             connection.commit()
             record_stopped_scan_usage(db, connection, scan_id, cost_json)
@@ -1350,6 +1369,7 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
         timestamp = db.now()
         scan = db.require_scan(connection, scan_id)
         require_cancel_owner(db, connection, scan, thread_id)
+        record_stopped_phase(connection, scan, args)
         if scan["canceled_at"] is not None:
             connection.commit()
             record_stopped_scan_usage(db, connection, scan_id, cost_json)
@@ -1360,6 +1380,9 @@ def cancel_scan_locked(db: Any, connection: Any, args: Any) -> dict[str, Any]:
                 "canceledScanId": scan["id"],
             }
         if scan["status"] != "running":
+            if scan["status"] == "failed":
+                # Caller cancellation can arrive after the coordinator records failure.
+                connection.commit()
             raise SystemExit("Only a running scan can be canceled.")
         updated = connection.execute(
             """

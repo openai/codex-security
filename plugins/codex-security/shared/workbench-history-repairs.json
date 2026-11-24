@@ -1,5 +1,16 @@
 [
   [
+    "-- Move each branch's preview receipts by name before repairing earlier histories.",
+    "WITH history AS (",
+    "    SELECT json_extract(value, '$.version') AS destination, json_extract(value, '$.name') AS name",
+    "    FROM json_each(:history)",
+    ")",
+    "SELECT 'sql' AS operation,",
+    "    'UPDATE schema_migrations SET version = ' || destination || ' WHERE version = ' || version AS value",
+    "FROM schema_migrations JOIN history USING (name)",
+    "WHERE version BETWEEN 73 AND 77 AND destination BETWEEN 79 AND 87;"
+  ],
+  [
     "WITH input AS (SELECT :history AS history),",
     "previews AS (",
     "    SELECT version, CASE",
@@ -99,6 +110,15 @@
     "    'The Codex Security database has an unsupported source-scope migration history.' AS value",
     "FROM schema_migrations JOIN history USING (version)",
     "WHERE version IN (43, 50) AND schema_migrations.name != history.name;"
+  ],
+  [
+    "-- The stopped-phase preview added its column under another branch's receipt at 74.",
+    "SELECT 'timestamp' AS operation,",
+    "    'INSERT INTO schema_migrations (version, name, applied_at) VALUES (79, ' ||",
+    "        quote(json_extract(value, '$.name')) || ', ?)' AS value",
+    "FROM json_each(:history) WHERE json_extract(value, '$.version') = 79",
+    "    AND NOT EXISTS (SELECT 1 FROM schema_migrations WHERE version = 79)",
+    "    AND EXISTS (SELECT 1 FROM pragma_table_info('scan_progress') WHERE name = 'last_observed_phase_json');"
   ],
   [
     "-- A released reader can add its columns while a repository preview still owns the version.",

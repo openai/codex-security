@@ -2594,8 +2594,14 @@ summaries include the same navigation when the current run was registered, plus
 the last observed phase when available. A failure before registration has no
 scan ID. The handoff uses that run's registration receipt without querying scan
 history. Inspect its saved status before choosing resume or rerun, and supply
-the original custom prompt files for reruns. Structured history and log output
-and command selection defaults are unchanged.
+the original custom prompt files for reruns.
+
+For a failed or canceled local Standard scan using the default validation
+workflow, `scans show SCAN_ID` also shows the last phase the primary model
+reported directly, when available. In JSON,
+`progress.lastObservedPhase` contains the reported `phase` and the time the
+SDK received it (`observedAt`). The workbench checkpoint supplies
+`progress.phase` and the saved review counts.
 
 Without an ID, rerun selects the latest completed scan in the current worktree.
 If only a related checkout has a completed scan, rerun shows its ID, path, and

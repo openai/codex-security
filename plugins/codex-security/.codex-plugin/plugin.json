@@ -23,6 +23,7 @@
     "hostedScopeInventory": 1,
     "scopedInventoryReceipt": 1,
     "standardScanHandoff": 1,
+    "stoppedScanPhaseObservation": 1,
     "workerProviderSnapshot": 4
   },
   "interface": {

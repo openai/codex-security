@@ -357,6 +357,9 @@ def parse_args(description: str, *, inspection_only: bool = False) -> argparse.N
     fail_scan.add_argument("--model-thread-id")
     fail_scan.add_argument("--claim-token")
     fail_scan.add_argument("--cost-json")
+    for stop in (fail_scan, cancel_scan):
+        stop.add_argument("--observed-phase", choices=PHASES)
+        stop.add_argument("--phase-observed-at")
 
     preserve_scan = add_command("preserve-scan-results", "--scan-id")
     preserve_scan.add_argument("--thread-id")
