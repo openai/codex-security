@@ -21,7 +21,6 @@ import { withDependencyCheckOutput } from "../src/dependency-check-output";
 import {
   approveDependencyClaims,
   reviewScopes,
-  reference,
   reportedUse,
   verifyProposedUse,
   type Claim,
@@ -44,6 +43,11 @@ import {
 
 function agentInput(prompt: string) {
   return JSON.parse(prompt.split("\n\n").at(-1)!);
+}
+
+// Echo the received identity independently so a host reference bug cannot cancel itself out.
+function reference({ id, revision, hash }: PremiseRef) {
+  return { id, revision, hash };
 }
 
 type ReviewClaim = PremiseRef & {
@@ -511,11 +515,15 @@ test.each(["incomplete", "complete"] as const)(
           await expect(query(next)).rejects.toThrow(
             "changed since this cursor",
           );
-          await record({
+          const examine = {
             operation: "record_examined",
             partitionId: "first",
-            paths: [paths[0]],
-          });
+          };
+          // Reject the whole batch without marking any of the valid paths.
+          await expect(record({ ...examine, paths })).rejects.toThrow(
+            "outside the source partition",
+          );
+          await record({ ...examine, paths: [paths[0]] });
           expect(
             await query({
               partitionId: "first",

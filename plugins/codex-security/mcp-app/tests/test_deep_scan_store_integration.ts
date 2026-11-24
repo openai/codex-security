@@ -1,7 +1,7 @@
 import { fixturePython } from "./support/python.ts";
 import { readJson, writeJsonLine } from "./support/json.ts";
 import { readFixtureCoverage } from "./deep_scan_coverage_fixture.ts";
-import { apiSurface, finding } from "./scan-draft-fixture.ts";
+import { apiSurface, finding, reviewSurface } from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 import assert from "node:assert/strict";
 import { mock } from "node:test";
@@ -1070,12 +1070,9 @@ async function testPartialWorkerCoverageSurvivesParentCompletion() {
         const draft = await readJson(root, "result.json");
         draft.reviewState = {
           surfaces: [
-            {
-              id: "1",
-              label: "Request entry",
-              disposition: "needs_follow_up",
-              receiptRefs: ["artifacts/review.md"],
-            },
+            reviewSurface("1", "Request entry", "needs_follow_up", [
+              "artifacts/review.md",
+            ]),
             { label: "Response writer", disposition: "no_issue_found" },
           ],
           explicitExclusions: [
@@ -1227,12 +1224,9 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
           reviewState: {
             ...saved.reviewState,
             surfaces: [
-              {
-                id: "api",
-                label: `${label} API`,
-                disposition: "no_issue_found",
-                receiptRefs: ["artifacts/review.md"],
-              },
+              reviewSurface("api", `${label} API`, "no_issue_found", [
+                "artifacts/review.md",
+              ]),
             ],
             deferred: [
               ...saved.reviewState.deferred,
@@ -1711,12 +1705,9 @@ async function testReceiptRepairSurvivesStoppedRecovery(
               apiSurface("no_issue_found", ["artifacts/replacement.md"]),
               ...(crossSurface
                 ? [
-                    {
-                      id: "api-other",
-                      label: "Other API",
-                      disposition: "no_issue_found",
-                      receiptRefs: ["artifacts/replacement-other.md"],
-                    },
+                    reviewSurface("api-other", "Other API", "no_issue_found", [
+                      "artifacts/replacement-other.md",
+                    ]),
                   ]
                 : []),
             ],

@@ -1,65 +1,50 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createFixture, type Fixture, type SourceCase } from "./fixtures.mts";
-import { gradeResult, type Result, type SourceLocation } from "./grade.mts";
+import { createFixture, type SourceCase } from "./fixtures.mts";
+import { gradeResult, type Result } from "./grade.mts";
+
+const fixture = createFixture();
+
+function grade(...findings: Result["findings"]) {
+  return gradeResult({ findings }, fixture);
+}
+
+type FixtureFinding = Required<Result["findings"][number]>;
 
 function findingFor(
-  fixture: Fixture,
   expected: SourceCase,
   role = "root_control",
-) {
-  const codeEvidence: NonNullable<Result["findings"][number]["codeEvidence"]> =
-    [
+): FixtureFinding {
+  return {
+    title: expected.id,
+    taxonomy: { cwe: [expected.cwes[0]] },
+    locations: [{ path: expected.path, startLine: expected.line, role }],
+    codeEvidence: [
       {
         path: expected.path,
         startLine: expected.line,
         code: fixture.files[expected.path].split("\n")[expected.line - 1],
       },
-    ];
-  return {
-    title: expected.id,
-    taxonomy: { cwe: [expected.cwes[0]] },
-    locations: [
-      { path: expected.path, startLine: expected.line, role },
-    ] as SourceLocation[],
-    codeEvidence,
+    ],
   };
 }
 
-type FixtureFinding = ReturnType<typeof findingFor>;
-
-function sourceFixture(path: string) {
-  const fixture = createFixture();
-  const lines = fixture.files[path].split("\n");
-  return {
-    lines,
-    grade: (...findings: FixtureFinding[]) =>
-      gradeResult({ findings }, fixture),
-    findingAt(source: string, cwe: string) {
-      const line = lines.findIndex((row) => row.includes(source)) + 1;
-      assert.ok(line > 0, `Missing fixture source: ${source}`);
-      return findingFor(
-        fixture,
-        { id: source, path, line, cwes: [cwe] },
-        "sink",
-      );
-    },
-  };
+function findingAt(path: string, source: string, cwe: string) {
+  const line =
+    fixture.files[path].split("\n").findIndex((row) => row.includes(source)) +
+    1;
+  assert.ok(line > 0, `Missing fixture source: ${source}`);
+  return findingFor({ id: source, path, line, cwes: [cwe] }, "sink");
 }
 
-function completeResult(fixture: Fixture) {
-  return {
-    findings: fixture.positives.map((expected) =>
-      findingFor(fixture, expected),
-    ),
-  };
+function allFindings() {
+  return fixture.positives.map((expected) => findingFor(expected));
 }
 
 test("authentic source evidence matches every vulnerability family", () => {
-  const fixture = createFixture();
-  const result = completeResult(fixture);
-  result.findings[1].locations[0].role = "sink";
-  const report = gradeResult(result, fixture);
+  const findings = allFindings();
+  findings[1].locations[0].role = "sink";
+  const report = grade(...findings);
   assert.equal(report.passed, true);
   assert.equal(report.recall, 1);
   assert.equal(report.expectedCount, fixture.positives.length);
@@ -68,11 +53,10 @@ test("authentic source evidence matches every vulnerability family", () => {
 });
 
 test("missing SSRF reduces recall even when every other case is found", () => {
-  const fixture = createFixture();
-  const findings = completeResult(fixture).findings.filter(
+  const findings = allFindings().filter(
     (finding) => !finding.taxonomy.cwe.includes("CWE-918"),
   );
-  const report = gradeResult({ findings }, fixture);
+  const report = grade(...findings);
   assert.deepEqual(
     report.cases.filter((entry) => !entry.found),
     [{ id: "partner-status-ssrf", found: false }],
@@ -86,16 +70,14 @@ test("missing SSRF reduces recall even when every other case is found", () => {
 });
 
 test("SSRF earns credit at the user-selected destination and flags the allowlisted destination for review", () => {
-  const source = sourceFixture("src/partners.py");
-  const positive = source.grade(
-    source.findingAt('requests.head(request.args["url"]', "CWE-918"),
+  const path = "src/partners.py";
+  const positive = grade(
+    findingAt(path, 'requests.head(request.args["url"]', "CWE-918"),
   );
   assert.deepEqual(positive.matchedIds, ["partner-status-ssrf"]);
   assert.equal(positive.safeControlFindings, 0);
 
-  const control = source.grade(
-    source.findingAt("requests.head(url,", "CWE-918"),
-  );
+  const control = grade(findingAt(path, "requests.head(url,", "CWE-918"));
   assert.deepEqual(control.matchedIds, []);
   assert.deepEqual(
     control.safeControlDetails.map((entry) => entry.controlIds),
@@ -105,34 +87,35 @@ test("SSRF earns credit at the user-selected destination and flags the allowlist
 });
 
 test("path containment and tenant selection are independent controls", () => {
-  const source = sourceFixture("src/statements.py");
+  const path = "src/statements.py";
   const callerSelected = "send_file(statement_path(tenant_id, name)";
-  const report = source.grade(
-    source.findingAt(callerSelected, "CWE-639"),
-    source.findingAt("send_file(statement_path(g.tenant_id, name)", "CWE-639"),
-    source.findingAt("if not target.is_relative_to(root):", "CWE-22"),
+  const report = grade(
+    findingAt(path, callerSelected, "CWE-639"),
+    findingAt(path, "send_file(statement_path(g.tenant_id, name)", "CWE-639"),
+    findingAt(path, "if not target.is_relative_to(root):", "CWE-22"),
   );
   assert.deepEqual(report.matchedIds, ["statement-tenant-selection"]);
   assert.deepEqual(
     report.safeControlDetails.map((entry) => entry.controlIds),
     [["statement-session-tenant"], ["statement-contained-path"]],
   );
-  const traversal = source.grade(source.findingAt(callerSelected, "CWE-22"));
+  const traversal = grade(findingAt(path, callerSelected, "CWE-22"));
   assert.deepEqual(traversal.matchedIds, []);
   assert.equal(traversal.unmatchedFindings.length, 1);
 });
 
 test("grant verification distinguishes the selected tenant from the verified tenant", () => {
-  const source = sourceFixture("src/grants.py");
+  const path = "src/grants.py";
   for (const cwe of ["CWE-639", "CWE-862", "CWE-349", "CWE-252"]) {
-    const report = source.grade(
-      source.findingAt('return invoice_report(batch[0]["tenant_id"])', cwe),
-      source.findingAt('return invoice_report(grant["tenant_id"])', cwe),
-      source.findingAt(
+    const report = grade(
+      findingAt(path, 'return invoice_report(batch[0]["tenant_id"])', cwe),
+      findingAt(path, 'return invoice_report(grant["tenant_id"])', cwe),
+      findingAt(
+        path,
         "SELECT id, recipient, total FROM invoices WHERE tenant_id",
         cwe,
       ),
-      source.findingAt('tenant = signer.loads(grant["proof"],', cwe),
+      findingAt(path, 'tenant = signer.loads(grant["proof"],', cwe),
     );
     assert.deepEqual(report.matchedIds, ["report-unverified-grant"]);
     assert.deepEqual(
@@ -145,37 +128,39 @@ test("grant verification distinguishes the selected tenant from the verified ten
 });
 
 test("the discarded verification result is a grounded root control for the grant finding", () => {
-  const source = sourceFixture("src/grants.py");
-  const finding = source.findingAt("    verified_grant(batch)", "CWE-862");
+  const path = "src/grants.py";
+  const finding = findingAt(path, "    verified_grant(batch)", "CWE-862");
   finding.locations[0].role = "root_control";
-  const grade = () => source.grade(finding);
-  assert.deepEqual(grade().matchedIds, ["report-unverified-grant"]);
+  assert.deepEqual(grade(finding).matchedIds, ["report-unverified-grant"]);
 
   finding.locations[0].role = "supporting";
-  assert.deepEqual(grade().matchedIds, []);
+  assert.deepEqual(grade(finding).matchedIds, []);
   finding.locations[0].role = "root_control";
-  finding.codeEvidence = source.findingAt(
+  finding.codeEvidence = findingAt(
+    path,
     "    batch = submitted_grants()",
     "CWE-863",
   ).codeEvidence;
-  assert.deepEqual(grade().matchedIds, []);
-  assert.equal(grade().evidenceErrors.length, 1);
+  assert.deepEqual(grade(finding).matchedIds, []);
+  assert.equal(grade(finding).evidenceErrors.length, 1);
 });
 
 test("an unlabelled affected location can use the role on authentic evidence at the same gold line", () => {
-  const source = sourceFixture("src/grants.py");
-  const finding = source.findingAt("    verified_grant(batch)", "CWE-863");
+  const finding = findingAt(
+    "src/grants.py",
+    "    verified_grant(batch)",
+    "CWE-863",
+  );
   const [location] = finding.locations;
   const [snippet] = finding.codeEvidence;
-  const grade = () => source.grade(finding);
   delete location.role;
   for (const role of ["root_control", "sink", "entrypoint"]) {
     snippet.role = role;
-    assert.deepEqual(grade().matchedIds, ["report-unverified-grant"]);
+    assert.deepEqual(grade(finding).matchedIds, ["report-unverified-grant"]);
   }
   for (const role of ["entrypoint", "entrypoint/wrapper"]) {
     location.role = role;
-    assert.deepEqual(grade().matchedIds, ["report-unverified-grant"]);
+    assert.deepEqual(grade(finding).matchedIds, ["report-unverified-grant"]);
   }
   delete location.role;
   for (const role of [
@@ -185,30 +170,32 @@ test("an unlabelled affected location can use the role on authentic evidence at 
     "propagation",
   ]) {
     snippet.role = role;
-    assert.deepEqual(grade().matchedIds, []);
+    assert.deepEqual(grade(finding).matchedIds, []);
   }
 
   // Both lines are gold. A role on one cannot qualify a citation to the other.
   snippet.role = "sink";
   location.startLine++;
-  assert.deepEqual(grade().matchedIds, []);
+  assert.deepEqual(grade(finding).matchedIds, []);
   location.startLine--;
   location.role = "supporting";
-  assert.deepEqual(grade().matchedIds, []);
+  assert.deepEqual(grade(finding).matchedIds, []);
   delete location.role;
   snippet.code = "invented code";
-  const fabricated = grade();
+  const fabricated = grade(finding);
   assert.deepEqual(fabricated.matchedIds, []);
   assert.equal(fabricated.evidenceErrors.length, 1);
 });
 
 test("a safe sibling cited as a comparison stays clear, while an accusation is flagged", () => {
-  const source = sourceFixture("src/statements.py");
-  const finding = source.findingAt(
+  const path = "src/statements.py";
+  const finding = findingAt(
+    path,
     "send_file(statement_path(tenant_id, name)",
     "CWE-639",
   );
-  const safe = source.findingAt(
+  const safe = findingAt(
+    path,
     "send_file(statement_path(g.tenant_id, name)",
     "CWE-639",
   );
@@ -219,7 +206,7 @@ test("a safe sibling cited as a comparison stays clear, while an accusation is f
   const compare = (evidenceRole?: string, locationRole?: string) => {
     safe.locations[0].role = locationRole;
     safe.codeEvidence[0].role = evidenceRole;
-    return source.grade(finding);
+    return grade(finding);
   };
   const comparison = compare("expected_control");
   assert.deepEqual(comparison.matchedIds, ["statement-tenant-selection"]);
@@ -249,7 +236,7 @@ test("a safe sibling cited as a comparison stays clear, while an accusation is f
   const conflictSnippet = {
     ...safe.codeEvidence[0],
     role: "sink",
-    endLine: source.lines.length + 1,
+    endLine: fixture.files[path].split("\n").length + 1,
   };
   finding.codeEvidence.push(conflictSnippet);
   const conflict = compare("expected_control");
@@ -261,7 +248,8 @@ test("a safe sibling cited as a comparison stays clear, while an accusation is f
   );
   conflictSnippet.endLine = conflictSnippet.startLine;
   conflictSnippet.startLine--;
-  conflictSnippet.code = source.lines[conflictSnippet.startLine - 1];
+  conflictSnippet.code =
+    fixture.files[path].split("\n")[conflictSnippet.startLine - 1];
   const partialQuote = compare("expected_control");
   assert.deepEqual(partialQuote.evidenceErrors, []);
   assert.deepEqual(
@@ -271,9 +259,8 @@ test("a safe sibling cited as a comparison stays clear, while an accusation is f
 });
 
 test("a snippet cannot assign roles to trailing context outside its declared span", () => {
-  const fixture = createFixture();
   const findingWithContext = (expected: SourceCase, role: string) => {
-    const finding = findingFor(fixture, expected);
+    const finding = findingFor(expected);
     delete finding.locations[0].role;
     const [snippet] = finding.codeEvidence;
     snippet.role = role;
@@ -287,21 +274,20 @@ test("a snippet cannot assign roles to trailing context outside its declared spa
   };
   const [expected] = fixture.positives;
   const finding = findingWithContext(expected, "root_control");
-  const grade = () => gradeResult({ findings: [finding] }, fixture);
-  assert.deepEqual(grade().matchedIds, []);
+  assert.deepEqual(grade(finding).matchedIds, []);
   finding.locations[0].role = "sink";
-  assert.deepEqual(grade().matchedIds, [expected.id]);
+  assert.deepEqual(grade(finding).matchedIds, [expected.id]);
   delete finding.locations[0].role;
   const [snippet] = finding.codeEvidence;
   delete snippet.endLine;
-  assert.deepEqual(grade().matchedIds, [expected.id]);
+  assert.deepEqual(grade(finding).matchedIds, [expected.id]);
   snippet.endLine = expected.line;
   snippet.code = snippet.code.split("\n")[0];
-  assert.deepEqual(grade().matchedIds, []);
+  assert.deepEqual(grade(finding).matchedIds, []);
   const [control] = fixture.controls;
   const comparison = findingWithContext(control, "expected_control");
   assert.deepEqual(
-    gradeResult({ findings: [comparison] }, fixture).safeControlDetails.flatMap(
+    grade(comparison).safeControlDetails.flatMap(
       ({ controlIds }) => controlIds,
     ),
     [control.id],
@@ -309,7 +295,6 @@ test("a snippet cannot assign roles to trailing context outside its declared spa
 });
 
 test("additional fabricated locations invalidate an otherwise grounded finding", () => {
-  const fixture = createFixture();
   for (const role of ["root_control", "supporting"]) {
     for (const location of [
       { path: "src/invented.py", startLine: 500 },
@@ -317,9 +302,9 @@ test("additional fabricated locations invalidate an otherwise grounded finding",
       { path: "src/invoices.py", startLine: 0 },
       { path: "src/invoices.py", startLine: 8, endLine: 7 },
     ]) {
-      const result = completeResult(fixture);
-      result.findings[0].locations.push({ ...location, role });
-      const report = gradeResult(result, fixture);
+      const findings = allFindings();
+      findings[0].locations.push({ ...location, role });
+      const report = grade(...findings);
       assert.equal(report.passed, false);
       assert.equal(report.foundCount, fixture.positives.length - 1);
       assert.equal(report.needsAdjudication, true);
@@ -335,17 +320,15 @@ test("additional fabricated locations invalidate an otherwise grounded finding",
 });
 
 test("duplicate reports cannot increase recall", () => {
-  const fixture = createFixture();
-  const result = completeResult(fixture);
-  result.findings.push(structuredClone(result.findings[0]));
-  const report = gradeResult(result, fixture);
+  const findings = allFindings();
+  findings.push(structuredClone(findings[0]));
+  const report = grade(...findings);
   assert.equal(report.recall, 1);
   assert.equal(report.foundCount, fixture.positives.length);
   assert.equal(report.duplicateFindings, 1);
 });
 
 test("a different CWE, source line, or non-primary role does not earn a gold match", () => {
-  const fixture = createFixture();
   const alterations: Array<(finding: FixtureFinding) => void> = [
     (finding) => {
       finding.taxonomy.cwe = ["CWE-79"];
@@ -369,9 +352,9 @@ test("a different CWE, source line, or non-primary role does not earn a gold mat
     },
   ];
   for (const alter of alterations) {
-    const result = completeResult(fixture);
-    alter(result.findings[0]);
-    const report = gradeResult(result, fixture);
+    const findings = allFindings();
+    alter(findings[0]);
+    const report = grade(...findings);
     assert.equal(report.foundCount, fixture.positives.length - 1);
     assert.equal(report.unmatchedFindings.length, 1);
     assert.equal(report.needsAdjudication, true);
@@ -381,7 +364,6 @@ test("a different CWE, source line, or non-primary role does not earn a gold mat
 });
 
 test("missing, fabricated, misplaced, or unrelated evidence cannot earn recall", () => {
-  const fixture = createFixture();
   const alterations: Array<(finding: FixtureFinding) => void> = [
     (finding) => {
       finding.codeEvidence = [];
@@ -406,9 +388,9 @@ test("missing, fabricated, misplaced, or unrelated evidence cannot earn recall",
     },
   ];
   for (const alter of alterations) {
-    const result = completeResult(fixture);
-    alter(result.findings[0]);
-    const report = gradeResult(result, fixture);
+    const findings = allFindings();
+    alter(findings[0]);
+    const report = grade(...findings);
     assert.equal(report.foundCount, fixture.positives.length - 1);
     assert.equal(report.passed, false);
     assert.ok(report.evidenceErrors.length > 0);
@@ -416,13 +398,12 @@ test("missing, fabricated, misplaced, or unrelated evidence cannot earn recall",
 });
 
 test("control accusations and unmatched findings have separate adjudication queues", () => {
-  const fixture = createFixture();
-  const result = completeResult(fixture);
-  result.findings.push(findingFor(fixture, fixture.controls[0]));
-  const unmatched = findingFor(fixture, fixture.positives[1]);
+  const findings = allFindings();
+  findings.push(findingFor(fixture.controls[0]));
+  const unmatched = findingFor(fixture.positives[1]);
   unmatched.taxonomy.cwe = ["CWE-400"];
-  result.findings.push(unmatched);
-  const report = gradeResult(result, fixture);
+  findings.push(unmatched);
+  const report = grade(...findings);
   assert.equal(report.recall, 1);
   assert.equal(report.safeControlFindings, 1);
   assert.deepEqual(report.safeControlDetails[0].controlIds, [
@@ -434,24 +415,22 @@ test("control accusations and unmatched findings have separate adjudication queu
 });
 
 test("safe-control context does not become a control accusation", () => {
-  const fixture = createFixture();
-  const result = completeResult(fixture);
-  const context = findingFor(fixture, fixture.controls[0]);
+  const findings = allFindings();
+  const context = findingFor(fixture.controls[0]);
   context.locations[0].role = "expected_control";
-  result.findings[0].locations.push(...context.locations);
-  result.findings[0].codeEvidence.push(...context.codeEvidence);
-  assert.equal(gradeResult(result, fixture).passed, true);
+  findings[0].locations.push(...context.locations);
+  findings[0].codeEvidence.push(...context.codeEvidence);
+  assert.equal(grade(...findings).passed, true);
 });
 
 test("descriptive safe-control roles require adjudication rather than a false-positive verdict", () => {
-  const fixture = createFixture();
-  const result = completeResult(fixture);
-  const context = findingFor(fixture, fixture.controls[0]);
+  const findings = allFindings();
+  const context = findingFor(fixture.controls[0]);
   context.locations[0].role =
     "safe sibling showing the expected tenant control";
-  result.findings[0].locations.push(...context.locations);
-  result.findings[0].codeEvidence.push(...context.codeEvidence);
-  const report = gradeResult(result, fixture);
+  findings[0].locations.push(...context.locations);
+  findings[0].codeEvidence.push(...context.codeEvidence);
+  const report = grade(...findings);
   assert.equal(report.recall, 1);
   assert.equal(report.safeControlFindings, 1);
   assert.equal(report.needsAdjudication, true);
@@ -462,9 +441,8 @@ test("descriptive safe-control roles require adjudication rather than a false-po
 });
 
 test("source snippets may span the sink", () => {
-  const fixture = createFixture();
-  const result = completeResult(fixture);
-  for (const finding of result.findings) {
+  const findings = allFindings();
+  for (const finding of findings) {
     const evidence = finding.codeEvidence[0];
     const source = fixture.files[evidence.path];
     evidence.startLine--;
@@ -473,11 +451,10 @@ test("source snippets may span the sink", () => {
       .slice(evidence.startLine - 1, evidence.startLine + 1)
       .join("\n");
   }
-  assert.equal(gradeResult(result, fixture).passed, true);
+  assert.equal(grade(...findings).passed, true);
 });
 
 test("fixture source is deterministic and contains no gold identifiers", () => {
-  const fixture = createFixture();
   assert.deepEqual(createFixture(), fixture);
   const source = Object.values(fixture.files).join("\n");
   for (const expected of [...fixture.positives, ...fixture.controls]) {

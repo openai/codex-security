@@ -84,68 +84,6 @@ interface ObservedCall {
   witnesses: Map<string, number[]>;
 }
 
-type WitnessSummary = Omit<Witness, "frames"> & {
-  frame_count: number;
-  frame_order: "root_first";
-};
-interface ObservedCallSummary extends Omit<ObservedCall, "witnesses"> {
-  witness: string;
-  positions: number[];
-  occurrences_found: number;
-  receiptSelections: CatalogReceiptSelection[];
-  truncated?: boolean;
-}
-
-interface NodeGraphQuery {
-  node: GraphNode;
-  paths: Fact[];
-  evidence: Fact[];
-  service_lookup?: ServiceQuestion["status"];
-  service_lookup_detail?: { reason: string; source?: string };
-  witness?: WitnessSummary;
-  witnesses_found?: number;
-  witnesses?: WitnessSummary[];
-  observed_calls_found?: number;
-  observed_calls?: ObservedCallSummary[];
-}
-
-type GraphQueryResult = (
-  | NodeGraphQuery
-  | {
-      matches: GraphNode[];
-      matches_found?: number;
-      witness_found?: boolean;
-      witnesses_found?: number;
-      witnesses?: WitnessSummary[];
-    }
-  | {
-      witness: WitnessSummary;
-      frames: string[];
-      frame_order: "root_first";
-      nodes: GraphNode[];
-      frame_receipts: {
-        position: number;
-        receiptSelections: CatalogReceiptSelection[];
-      }[];
-    }
-  | {
-      code_paths_found: number;
-      services_found: number;
-      services: Pick<
-        GraphNode,
-        "id" | "name" | "scope" | "receiptSelections"
-      >[];
-      witnesses_found?: number;
-      observed_calls_found?: number;
-      observations_omitted?: number;
-      witnesses?: WitnessSummary[];
-    }
-) & {
-  truncated?: boolean;
-  response_omitted_items?: number;
-  response_omitted_fields?: number;
-};
-
 export interface ObservationSummary {
   received: number;
   retained: number;
@@ -796,10 +734,7 @@ export class EvidenceGraph {
     };
   }
 
-  query(
-    node?: string,
-    options: { witness?: string; search?: string } = {},
-  ): GraphQueryResult {
+  query(node?: string, options: { witness?: string; search?: string } = {}) {
     const witness =
       options.witness === undefined
         ? undefined
@@ -891,7 +826,7 @@ export class EvidenceGraph {
         ...limit(matches.length),
       });
     const subject = matches[0]!;
-    const detail: NodeGraphQuery = { node: subject, paths: [], evidence: [] };
+    const detail = { node: subject, paths: [], evidence: [] };
     if (witness) {
       const calls = [...this.observedCalls.values()]
         .filter(
