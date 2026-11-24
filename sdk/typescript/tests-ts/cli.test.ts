@@ -436,27 +436,6 @@ describe("CLI", () => {
     }
   });
 
-  test("uses the singular when validating one finding", async () => {
-    const scanDir = await mkdtemp(join(tmpdir(), "scan-validation-"));
-    const stderr = capture();
-    try {
-      expect(
-        await main(
-          ["scan", ".", "--validate", "--json"],
-          capture().stream,
-          stderr.stream,
-          dependencies({
-            result: scanResultAt(scanDir, ["high"]),
-            currentDirectory: await realpath(tmpdir()),
-          }),
-        ),
-      ).toBe(0);
-      expect(stderr.text()).toMatch(/Validating 1 scan finding$/mu);
-    } finally {
-      await rm(scanDir, { recursive: true, force: true });
-    }
-  });
-
   test.each([
     ["ordinary", "validation failed"],
     ["terminal controls", "synthetic\u001b[31m failure\u0007"],
@@ -485,6 +464,7 @@ describe("CLI", () => {
           manifest: { scan: { status: "completed" } },
           validation: { status: "failed", message },
         });
+        expect(stderr.text()).toMatch(/Validating 1 scan finding$/mu);
         expect(stderr.text()).not.toContain("\u001b");
         expect(stderr.text()).not.toContain("\u0007");
         expect(stderr.text()).toContain(
@@ -951,7 +931,7 @@ describe("CLI", () => {
       "bulk-scan [input]",
       "export [scanDir]",
       "import github <repository>",
-      "validate <findings...>",
+      "validate [findings...]",
       "verify-fix [findings...]",
       "patch [issues...]",
       "findings false-positive <occurrenceId>",
@@ -3921,7 +3901,7 @@ describe("CLI", () => {
       [["export", "scan", "--format", "sarif"], "Invalid format"],
       [["export", "scan", "--export-format", "xml"], "Invalid option"],
       [["export", "scan-a", "scan-b"], "Unexpected positional"],
-      [["validate"], "findings..."],
+      [["validate"], "requires a finding or --scan"],
       [["validate", ""], "A finding must not be empty"],
       [
         ["patch"],
