@@ -476,28 +476,33 @@ codex-security scan . --provider fireworks --model accounts/fireworks/models/qwe
 export CHEAPER_INFERENCE_API_KEY="<your-cheaper-inference-api-key>"
 codex-security scan . --provider cheaperinference --model gpt-5.4
 
-export STANDARDCOMPUTE_API_KEY="<your-standardcompute-api-key>"
-codex-security scan . --provider standardcompute --model StandardCompute
+export STANDARD_COMPUTE_API_KEY="<your-standardcompute-api-key>"
+codex-security scan . --provider standardcompute --model standardcompute --codex 'web_search="disabled"'
 ```
 
 The Standard Compute preset applies only to an explicit
 `--provider standardcompute` selection without an existing table of that name.
 The preset requires its API key. It cannot use ChatGPT authentication.
-Live scan completion remains unverified. Existing native tables keep their
-endpoint and authentication settings. To configure the equivalent native
-provider in the SDK, set the same environment variable and pass these
-`codexOverrides` to `CodexSecurity`.
+The [provider’s Codex guide](https://docs.standardcompute.com/agents/codex)
+disables web search. These examples apply that setting explicitly and use
+[smart routing](https://docs.standardcompute.com/models). You can select
+an exact model ID instead. Live scan completion remains unverified.
+
+Existing native tables keep their endpoint and authentication settings.
+To configure the equivalent provider in the SDK, set the same environment
+variable and pass these `codexOverrides` to `CodexSecurity`.
 
 ```json
 {
-  "model": "StandardCompute",
+  "model": "standardcompute",
+  "web_search": "disabled",
   "model_provider": "standardcompute",
   "model_providers": {
     "standardcompute": {
       "name": "Standard Compute",
       "base_url": "https://api.stdcmpt.com/v1",
       "wire_api": "responses",
-      "env_key": "STANDARDCOMPUTE_API_KEY"
+      "env_key": "STANDARD_COMPUTE_API_KEY"
     }
   }
 }

@@ -46,10 +46,10 @@ export const CHEAPERINFERENCE_CODEX_PROVIDER = {
 
 // A CLI-only preset. Registering it as an implicit SDK default could attach
 // a credential to an existing provider with the same ID but a different URL.
-export const STANDARDCOMPUTE_CODEX_PROVIDER = {
+export const STANDARD_COMPUTE_CODEX_PROVIDER = {
   name: "Standard Compute",
   base_url: "https://api.stdcmpt.com/v1",
-  env_key: "STANDARDCOMPUTE_API_KEY",
+  env_key: "STANDARD_COMPUTE_API_KEY",
   wire_api: "responses",
 } as const satisfies JsonObject;
 
@@ -69,37 +69,8 @@ export function selectedProviderTable(
   return isObject(table) ? table : undefined;
 }
 
-export function isStandardComputeKey(name: unknown): boolean {
-  return (
-    typeof name === "string" &&
-    name.toUpperCase() === STANDARDCOMPUTE_CODEX_PROVIDER.env_key
-  );
-}
-
-/** Keep the Standard Compute credential only when the selected provider uses it. */
-export function standardComputeEnvironment<Value>(
-  environment: Readonly<Record<string, Value>>,
-  config?: JsonObject,
-  provider = config && scanModelProvider(config),
-): Record<string, Value> {
-  if (!Object.keys(environment).some(isStandardComputeKey)) return environment;
-  // Codex ignores custom provider tables for these built-in IDs.
-  const settings =
-    config &&
-    typeof provider === "string" &&
-    !["openai", "ollama", "lmstudio"].includes(provider)
-      ? selectedProviderTable(config, provider)
-      : undefined;
-
-  if (
-    isStandardComputeKey(settings?.["env_key"]) ||
-    (isObject(settings?.["env_http_headers"]) &&
-      Object.values(settings["env_http_headers"]).some(isStandardComputeKey))
-  )
-    return environment;
-  return Object.fromEntries(
-    Object.entries(environment).filter(([name]) => !isStandardComputeKey(name)),
-  );
+export function isStandardComputeKey(name?: string): boolean {
+  return name?.toUpperCase() === STANDARD_COMPUTE_CODEX_PROVIDER.env_key;
 }
 
 export type ExternalModelProvider = keyof typeof EXTERNAL_CODEX_PROVIDERS;

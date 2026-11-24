@@ -245,7 +245,7 @@ import {
   scanModelProvider,
   scanProviderEnvKey,
   writeCodexConfig,
-  STANDARDCOMPUTE_CODEX_PROVIDER,
+  STANDARD_COMPUTE_CODEX_PROVIDER,
   selectedProviderTable,
   type CodexSecurityConfig,
   type JsonObject,
@@ -14659,7 +14659,7 @@ export function parseCodexOverrides(
       !selectedProviderTable(configured, provider)
     ) {
       return mergeCodexOverrides(
-        { model_providers: { [provider]: STANDARDCOMPUTE_CODEX_PROVIDER } },
+        { model_providers: { [provider]: STANDARD_COMPUTE_CODEX_PROVIDER } },
         result,
       );
     }

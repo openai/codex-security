@@ -80,7 +80,7 @@ describe("CodexSecurity orchestration", () => {
         base_url: "https://provider.example/v1",
         wire_api: "responses",
         ...(selection === "profile"
-          ? { env_http_headers: { "X-Synthetic": "STANDARDCOMPUTE_API_KEY" } }
+          ? { env_http_headers: { "X-Synthetic": "STANDARD_COMPUTE_API_KEY" } }
           : {}),
         auth,
       };
@@ -138,7 +138,7 @@ describe("CodexSecurity orchestration", () => {
           environment: {
             CODEX_HOME: relative(process.cwd(), home),
             CODEX_SECURITY_STATE_DIR: state,
-            STANDARDCOMPUTE_API_KEY: "synthetic-header",
+            STANDARD_COMPUTE_API_KEY: "synthetic-header",
             ...(selection === "profile" ||
             selection === "profile-providers-ambient"
               ? {
@@ -195,7 +195,7 @@ describe("CodexSecurity orchestration", () => {
           "synthetic command-auth scan started",
         );
         expect(captured?.apiKey).toBeUndefined();
-        expect(captured?.env?.["STANDARDCOMPUTE_API_KEY"]).toBe(
+        expect(captured?.env?.["STANDARD_COMPUTE_API_KEY"]).toBe(
           selection === "profile" ? "synthetic-header" : undefined,
         );
         expect(captured?.env).not.toHaveProperty("OPENAI_API_KEY");

@@ -225,7 +225,7 @@ export class CodexSdkWorkerExecutor implements CodexWorkerExecutor {
       // Each managed scan owns the provider credentials its workers may inherit.
       if (runtimeSettings.environment !== undefined) {
         for (const name of Object.keys(childEnv)) {
-          if (name.toUpperCase() === "STANDARDCOMPUTE_API_KEY")
+          if (name.toUpperCase() === "STANDARD_COMPUTE_API_KEY")
             delete childEnv[name];
         }
       }

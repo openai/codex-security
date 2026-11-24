@@ -60,18 +60,16 @@ export function resolveSkillAuthentication(
       (explicitChatgpt && providerKeyConfigured));
   let authentication: ScanAuthentication;
   let configOverrides: string[] = [];
-  const preset =
-    provider === "standardcompute" && isStandardComputeKey(providerEnvKey);
-  if (preset && !commandAuth) {
-    authentication = scanAuthentication(
-      processEnvironment,
-      options.auth,
-      provider,
-      false,
-      false,
-      providerEnvKey,
-    );
-  } else if (providerEnvKey !== undefined && !commandAuth && !explicitChatgpt) {
+  const requiredKey =
+    provider === "standardcompute" && isStandardComputeKey(providerEnvKey)
+      ? providerEnvKey
+      : undefined;
+  if (
+    !requiredKey &&
+    providerEnvKey !== undefined &&
+    !commandAuth &&
+    !explicitChatgpt
+  ) {
     const key = environmentEntry(processEnvironment, providerEnvKey)?.trim();
     if (!key && options.auth === "api-key") {
       throw new AuthenticationRequiredError(
@@ -87,6 +85,8 @@ export function resolveSkillAuthentication(
       options.auth,
       provider,
       commandAuth,
+      false,
+      requiredKey,
     );
   }
   if (
@@ -102,7 +102,7 @@ export function resolveSkillAuthentication(
     processEnvironment,
     authentication.method === "command" ? "chatgpt" : options.auth,
     provider,
-    preset ? providerEnvKey : undefined,
+    requiredKey,
     config,
   );
   if (

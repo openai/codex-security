@@ -1865,52 +1865,42 @@ describe("semantic scan comparison", () => {
     const source = {
       CODEX_HOME: home,
       CODEX_SECURITY_STATE_DIR: state,
-      STANDARDCOMPUTE_API_KEY: "synthetic-standardcompute-key",
+      STANDARD_COMPUTE_API_KEY: "synthetic-standardcompute-key",
       OPENAI_API_KEY: "synthetic-openai-key",
     };
-    const openai = await comparisonEnvironment(
+    const key = "STANDARD_COMPUTE_API_KEY";
+    const openai = await comparisonEnvironment(source, account);
+    expect(openai).not.toHaveProperty(key);
+    expect(openai["OPENAI_API_KEY"]).toBe(source.OPENAI_API_KEY);
+    await writeFile(
+      join(home, "config.toml"),
+      'model_provider = "standardcompute"\n[model_providers.standardcompute]\nenv_key = "STANDARD_COMPUTE_API_KEY"\n',
+    );
+    for (const OPENAI_API_KEY of [source.OPENAI_API_KEY, undefined]) {
+      const selected = await comparisonEnvironment(
+        { ...source, OPENAI_API_KEY },
+        account,
+      );
+      expect(selected[key]).toBe(source[key]);
+      expect(selected["CODEX_HOME"]).toBe(home);
+      expect(selected).not.toHaveProperty("OPENAI_API_KEY");
+    }
+    const gateway = await comparisonEnvironment(
       source,
       account,
       undefined,
       undefined,
-      { model_provider: "openai" },
-    );
-    expect(openai).not.toHaveProperty("STANDARDCOMPUTE_API_KEY");
-    expect(openai["OPENAI_API_KEY"]).toBe(source.OPENAI_API_KEY);
-    await writeFile(
-      join(home, "config.toml"),
-      'model_provider = "standardcompute"\n[model_providers.standardcompute]\nenv_key = "STANDARDCOMPUTE_API_KEY"\n',
-    );
-    const selected = await comparisonEnvironment(source, account);
-    expect(selected["STANDARDCOMPUTE_API_KEY"]).toBe(
-      source.STANDARDCOMPUTE_API_KEY,
-    );
-    expect(selected).not.toHaveProperty("OPENAI_API_KEY");
-    const onlyProvider = await comparisonEnvironment(
-      { ...source, OPENAI_API_KEY: undefined },
-      account,
-    );
-    expect(onlyProvider["CODEX_HOME"]).toBe(home);
-    const gateway = {
-      model_provider: "gateway",
-      model_providers: {
-        gateway: {
-          auth: { command: "synthetic-command" },
-          env_http_headers: { "X-Provider-Key": "STANDARDCOMPUTE_API_KEY" },
+      {
+        model_provider: "gateway",
+        model_providers: {
+          gateway: {
+            auth: { command: "synthetic-command" },
+            env_http_headers: { "X-Provider-Key": key },
+          },
         },
       },
-    };
-    expect(
-      (
-        await comparisonEnvironment(
-          source,
-          account,
-          undefined,
-          undefined,
-          gateway,
-        )
-      )["STANDARDCOMPUTE_API_KEY"],
-    ).toBe(source.STANDARDCOMPUTE_API_KEY);
+    );
+    expect(gateway[key]).toBe(source[key]);
     expect(account).not.toHaveBeenCalled();
   });
 

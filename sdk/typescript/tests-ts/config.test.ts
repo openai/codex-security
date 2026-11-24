@@ -3,11 +3,7 @@ import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
-import {
-  scanAuthentication,
-  selectedScanEnvironment,
-  scanRuntimeCodexConfig,
-} from "../src/api.js";
+import { selectedScanEnvironment, scanRuntimeCodexConfig } from "../src/api.js";
 import {
   scanProviderEnvKey,
   type JsonObject,
@@ -1688,7 +1684,7 @@ describe("Codex configuration", () => {
 });
 
 test("native standardcompute tables never acquire a preset endpoint or credential", async () => {
-  const environment = { STANDARDCOMPUTE_API_KEY: "synthetic-unused-key" };
+  const environment = { STANDARD_COMPUTE_API_KEY: "synthetic-unused-key" };
   const tables: Record<string, string>[] = [
     { name: "Native", env_key: "OPENAI_API_KEY" },
     { name: "Local", base_url: "http://localhost:1234/v1" },
@@ -1710,19 +1706,9 @@ test("native standardcompute tables never acquire a preset endpoint or credentia
         table["env_key"],
         config,
       ),
-    ).not.toHaveProperty("STANDARDCOMPUTE_API_KEY");
+    ).not.toHaveProperty("STANDARD_COMPUTE_API_KEY");
   }
   expect(
-    scanAuthentication(environment, "auto", "standardcompute").method,
-  ).toBe("stored_credentials");
-  expect(() =>
-    scanAuthentication(
-      environment,
-      "chatgpt",
-      "standardcompute",
-      false,
-      false,
-      "STANDARDCOMPUTE_API_KEY",
-    ),
-  ).toThrow(/ChatGPT/);
+    scanProviderEnvKey({ model_provider: "standardcompute" }),
+  ).toBeUndefined();
 });

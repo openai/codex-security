@@ -86,7 +86,7 @@ import {
   EXTERNAL_CODEX_PROVIDERS,
   isStandardComputeKey,
   selectedProviderTable,
-  standardComputeEnvironment,
+  STANDARD_COMPUTE_CODEX_PROVIDER,
   inlineToml,
   isExternalModelProvider,
   hasCommandAuth,
@@ -7060,16 +7060,39 @@ export async function runtimeScanAuthentication(
 }
 
 /** Local helpers do not authenticate model requests. */
-function withoutProviderKey(
-  environment: ProcessEnvironment,
+function withoutProviderKey<Value>(
+  environment: Record<string, Value>,
   key: string | undefined,
-): ProcessEnvironment {
+): Record<string, Value> {
   if (key === undefined) return environment;
   const child = { ...environment };
   for (const name of Object.keys(child)) {
     if (name.toUpperCase() === key.toUpperCase()) delete child[name];
   }
   return child;
+}
+
+/** Only a selected native table can request the opt-in credential. */
+export function standardComputeEnvironment<Value>(
+  environment: Record<string, Value>,
+  config?: JsonObject,
+  provider = config && scanModelProvider(config),
+): Record<string, Value> {
+  if (!Object.keys(environment).some(isStandardComputeKey)) return environment;
+  // Codex ignores provider tables for the built-in OpenAI and local providers.
+  if (
+    config &&
+    typeof provider === "string" &&
+    !["openai", "ollama", "lmstudio"].includes(provider) &&
+    providerCredentialNames(selectedProviderTable(config, provider)).some(
+      isStandardComputeKey,
+    )
+  )
+    return environment;
+  return withoutProviderKey(
+    environment,
+    STANDARD_COMPUTE_CODEX_PROVIDER.env_key,
+  );
 }
 
 /** @internal */
@@ -7746,23 +7769,21 @@ async function requireCurrentDeepScanPlugin(
   }
 }
 
+function providerCredentialNames(table: unknown): string[] {
+  if (!isRecord(table)) return [];
+  const headers = table["env_http_headers"];
+  return [
+    table["env_key"],
+    ...(isRecord(headers) ? Object.values(headers) : []),
+  ].filter((name): name is string => typeof name === "string");
+}
+
 function declaredProviderEnvironment(
   providers: unknown,
   environment: ProcessEnvironment,
 ): Record<string, string> {
   const names = isRecord(providers)
-    ? Object.values(providers)
-        .flatMap((providerConfig) =>
-          isRecord(providerConfig)
-            ? [
-                providerConfig["env_key"],
-                ...(isRecord(providerConfig["env_http_headers"])
-                  ? Object.values(providerConfig["env_http_headers"])
-                  : []),
-              ]
-            : [],
-        )
-        .filter((name): name is string => typeof name === "string")
+    ? Object.values(providers).flatMap(providerCredentialNames)
     : [];
   return Object.fromEntries(
     names.flatMap((name) => {

@@ -63,7 +63,7 @@ import {
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
-  STANDARDCOMPUTE_CODEX_PROVIDER,
+  STANDARD_COMPUTE_CODEX_PROVIDER,
   scanModelConfiguration,
   mergedCodexConfig,
 } from "../src/config.js";
@@ -3432,9 +3432,9 @@ describe("CLI", () => {
     [
       "Standard Compute",
       "standardcompute",
-      "StandardCompute",
+      "standardcompute",
       "anthropic/claude-sonnet-5",
-      STANDARDCOMPUTE_CODEX_PROVIDER,
+      STANDARD_COMPUTE_CODEX_PROVIDER,
     ],
   ] as const)(
     "routes scans through %s",

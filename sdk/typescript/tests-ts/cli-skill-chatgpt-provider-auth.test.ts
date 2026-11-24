@@ -69,72 +69,35 @@ function providerSettings(
 }
 
 describe("skill authentication configuration", () => {
-  test("a Standard Compute skill requires an explicit provider key and rejects ChatGPT", () => {
-    const options = {
-      command: "patch" as const,
-      modelProvider: "standardcompute",
-    };
-    const environment = {
-      STANDARDCOMPUTE_API_KEY: "synthetic-key",
-      OPENAI_API_KEY: "unused-account",
-    };
-    const config = {
-      model_providers: {
-        standardcompute: { env_key: "STANDARDCOMPUTE_API_KEY" },
-      },
-    };
-    const skill = resolveSkillAuthentication(
-      { ...options, auth: "auto" },
-      environment,
-      config,
-    );
-    expect(skill.environment).toEqual({
-      STANDARDCOMPUTE_API_KEY: "synthetic-key",
-    });
-    expect(skill.requiresOpenAiAuth).toBe(false);
-    expect(() =>
+  test("scopes the Standard Compute key to the selected skill credential", () => {
+    const key = "STANDARD_COMPUTE_API_KEY";
+    const resolve = (
+      provider: string,
+      auth: "auto" | "chatgpt",
+      table: JsonObject = { env_key: key },
+    ) =>
       resolveSkillAuthentication(
-        { ...options, auth: "chatgpt" },
-        environment,
-        config,
-      ),
-    ).toThrow(/ChatGPT/);
-  });
-
-  test("custom ChatGPT gateways and ignored OpenAI tables cannot forward the Standard Compute key", () => {
-    for (const provider of ["gateway", "openai"]) {
-      const skill = resolveSkillAuthentication(
-        { command: "patch", auth: provider === "gateway" ? "chatgpt" : "auto" },
-        { STANDARDCOMPUTE_API_KEY: "unused" },
-        {
-          model_provider: provider,
-          model_providers: {
-            [provider]: { env_key: "STANDARDCOMPUTE_API_KEY" },
-          },
-        },
+        { command: "patch", modelProvider: provider, auth },
+        { [key]: "synthetic", OPENAI_API_KEY: "account" },
+        { model_providers: { [provider]: table } },
       );
-      expect(skill.requiresOpenAiAuth).toBe(true);
-      expect(skill.environment).not.toHaveProperty("STANDARDCOMPUTE_API_KEY");
-    }
-  });
-
-  test("ChatGPT gateways retain an explicitly mapped Standard Compute header", () => {
-    const environment = { STANDARDCOMPUTE_API_KEY: "synthetic-header" };
-    const skill = resolveSkillAuthentication(
-      { command: "patch", auth: "chatgpt" },
-      environment,
-      {
-        model_provider: "gateway",
-        model_providers: {
-          gateway: {
-            requires_openai_auth: true,
-            env_http_headers: { "X-Synthetic": "STANDARDCOMPUTE_API_KEY" },
-          },
-        },
-      },
-    );
-    expect(skill.requiresOpenAiAuth).toBe(true);
-    expect(skill.environment).toEqual(environment);
+    const credential = { [key]: "synthetic" };
+    const preset = resolve("standardcompute", "auto");
+    expect(preset.requiresOpenAiAuth).toBe(false);
+    expect(preset.environment).toEqual(credential);
+    expect(() => resolve("standardcompute", "chatgpt")).toThrow(/ChatGPT/);
+    expect(resolve("openai", "auto").environment).toEqual({
+      OPENAI_API_KEY: "account",
+    });
+    const primary = resolve("gateway", "chatgpt");
+    expect(primary.requiresOpenAiAuth).toBe(true);
+    expect(primary.environment).toEqual({});
+    const header = resolve("gateway", "chatgpt", {
+      requires_openai_auth: true,
+      env_http_headers: { "X-Synthetic": key },
+    });
+    expect(header.requiresOpenAiAuth).toBe(true);
+    expect(header.environment).toEqual(credential);
   });
 
   test.each(

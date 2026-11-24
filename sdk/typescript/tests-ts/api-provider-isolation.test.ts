@@ -163,13 +163,13 @@ async function effectiveProvider(
 test("OpenAI scans omit ambient Standard Compute credentials", () => {
   const environment = {
     OPENAI_API_KEY: "synthetic-account-key",
-    StandardCompute_API_Key: "synthetic-provider-key",
+    Standard_Compute_API_Key: "synthetic-provider-key",
   };
   for (const auth of ["auto", "api-key", "chatgpt"] as const) {
     for (const provider of [undefined, "openai"]) {
       expect(
         selectedScanEnvironment(environment, auth, provider),
-      ).not.toHaveProperty("StandardCompute_API_Key");
+      ).not.toHaveProperty("Standard_Compute_API_Key");
     }
   }
 });
@@ -730,7 +730,7 @@ const fileProviderKeyCases = [
   ["gateway", "missing custom primary", "SYNTHETIC_GATEWAY_TOKEN"],
   ["openrouter", "default", "OPENROUTER_API_KEY"],
   ["openrouter", "Standard Compute header", "OPENROUTER_API_KEY"],
-  ["standardcompute", "default", "STANDARDCOMPUTE_API_KEY"],
+  ["standardcompute", "default", "STANDARD_COMPUTE_API_KEY"],
   ["openrouter", "custom only", "SYNTHETIC_CUSTOM_API_KEY"],
   ["openrouter", "canonical header", "SYNTHETIC_CUSTOM_API_KEY"],
   ["openrouter", "missing custom primary", "SYNTHETIC_CUSTOM_API_KEY"],
@@ -798,7 +798,7 @@ for (const mode of ["standard", "deep"] as const) {
       const headerKey =
         gatewayHeader ??
         (_selection === "Standard Compute header"
-          ? "STANDARDCOMPUTE_API_KEY"
+          ? "STANDARD_COMPUTE_API_KEY"
           : _selection === "canonical header"
             ? canonicalKey
             : undefined);
@@ -884,7 +884,7 @@ for (const mode of ["standard", "deep"] as const) {
             if (args[0] === "register-cli-scan") {
               expect(options.environment).not.toHaveProperty(providerKey);
               expect(options.environment).not.toHaveProperty(
-                "STANDARDCOMPUTE_API_KEY",
+                "STANDARD_COMPUTE_API_KEY",
               );
               if (gatewayHeader) {
                 expect(options.environment).not.toHaveProperty(gatewayHeader);
@@ -908,7 +908,7 @@ for (const mode of ["standard", "deep"] as const) {
                     "OPENROUTER_API_KEY",
                     "FIREWORKS_API_KEY",
                     "CHEAPER_INFERENCE_API_KEY",
-                    "STANDARDCOMPUTE_API_KEY",
+                    "STANDARD_COMPUTE_API_KEY",
                   ]) {
                     expect(environment[name]).toBe(
                       name === providerKey ||
@@ -1316,7 +1316,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     await writeFile(process.argv[2], JSON.stringify({
       inherited: Object.fromEntries([
         "SYNTHETIC_CUSTOM_API_KEY", "SYNTHETIC_CUSTOM_HEADER",
-        "SYNTHETIC_REQUIRED_KEY", "SYNTHETIC_UNUSED_KEY", "STANDARDCOMPUTE_API_KEY",
+        "SYNTHETIC_REQUIRED_KEY", "SYNTHETIC_UNUSED_KEY", "STANDARD_COMPUTE_API_KEY",
       ].map((name) => [name, process.env[name] ?? null])),
       recovered: settings.environment,
     }));
@@ -1349,7 +1349,7 @@ test.each([
   "CODEX_API_KEY",
   "OPENROUTER_API_KEY",
   "FIREWORKS_API_KEY",
-  "STANDARDCOMPUTE_API_KEY",
+  "STANDARD_COMPUTE_API_KEY",
 ])(
   "native plugin workers recover the selected %s and other provider variables",
   async (providerKey) => {
@@ -1362,14 +1362,15 @@ test.each([
     await mkdir(scan, { mode: 0o700 });
     await mkdir(sourceHome, { mode: 0o700 });
     const plugin = await createPluginProbe(root, report);
-    const external = [
-      "OPENROUTER_API_KEY",
-      "FIREWORKS_API_KEY",
-      "STANDARDCOMPUTE_API_KEY",
-    ].includes(providerKey);
-    const providerId = external
-      ? providerKey.split("_")[0]!.toLowerCase()
-      : "synthetic.gateway";
+    const external = ["OPENROUTER_API_KEY", "FIREWORKS_API_KEY"].includes(
+      providerKey,
+    );
+    const providerId =
+      providerKey === "STANDARD_COMPUTE_API_KEY"
+        ? "standardcompute"
+        : external
+          ? providerKey.split("_")[0]!.toLowerCase()
+          : "synthetic.gateway";
     const declaredKey =
       process.platform === "win32" && providerId === "standardcompute"
         ? providerKey.toLowerCase()
@@ -1398,7 +1399,7 @@ test.each([
               env_key: declaredKey,
               env_http_headers: {
                 "X-Synthetic-Token": headerKey,
-                ...(!external ? { "X-Synthetic-Primary": providerKey } : {}),
+                ...(!external ? { "X-Synthetic-Primary": declaredKey } : {}),
                 "X-Synthetic-Missing": "SYNTHETIC_UNSET_KEY",
               },
             },
@@ -1430,10 +1431,9 @@ test.each([
             async runStreamed() {
               expect(options.apiKey).toBeUndefined();
               expect(options.env!["OPENAI_API_KEY"]).toBeUndefined();
-              const selectedKey =
-                external && providerId !== "standardcompute"
-                  ? "synthetic-custom-key"
-                  : providerEnvironment[providerKey];
+              const selectedKey = external
+                ? "synthetic-custom-key"
+                : providerEnvironment[providerKey];
               expect(options.env![declaredKey]).toBe(selectedKey);
               const status = await nativeRequest(
                 options.env!,
@@ -1455,7 +1455,7 @@ test.each([
                   SYNTHETIC_CUSTOM_HEADER: null,
                   SYNTHETIC_REQUIRED_KEY: null,
                   SYNTHETIC_UNUSED_KEY: null,
-                  STANDARDCOMPUTE_API_KEY: null,
+                  STANDARD_COMPUTE_API_KEY: null,
                 },
                 recovered: {
                   [declaredKey]: selectedKey,

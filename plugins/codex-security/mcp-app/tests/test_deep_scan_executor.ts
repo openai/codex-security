@@ -2906,7 +2906,7 @@ async function testExternalProviderCredentialsReachWorker() {
   for (const [provider, key, headerKey] of [
     ["openrouter", "OPENROUTER_API_KEY"],
     ["fireworks", "FIREWORKS_API_KEY"],
-    ["standardcompute", "STANDARDCOMPUTE_API_KEY"],
+    ["standardcompute", "STANDARD_COMPUTE_API_KEY"],
     ["account-gateway", "CODEX_API_KEY", "OPENAI_API_KEY"],
     ["synthetic", "SYNTHETIC_GATEWAY_KEY", "CODEX_API_KEY"],
     ["synthetic", "SYNTHETIC_GATEWAY_KEY", "OPENAI_API_KEY"],
@@ -2948,7 +2948,7 @@ async function testExternalProviderCredentialsReachWorker() {
                     name: parentProvider,
                     base_url: "https://parent.example.test/v1",
                     wire_api: "responses",
-                    env_key: "STANDARDCOMPUTE_API_KEY",
+                    env_key: "STANDARD_COMPUTE_API_KEY",
                   },
                 }
               : {}),
@@ -2977,7 +2977,7 @@ async function testExternalProviderCredentialsReachWorker() {
         CODEX_API_KEY: undefined,
         OPENROUTER_API_KEY: undefined,
         FIREWORKS_API_KEY: undefined,
-        STANDARDCOMPUTE_API_KEY: undefined,
+        STANDARD_COMPUTE_API_KEY: undefined,
         SYNTHETIC_GATEWAY_KEY: undefined,
       };
       const saved = Object.keys(environment).map(
@@ -2990,7 +2990,7 @@ async function testExternalProviderCredentialsReachWorker() {
           parentSandbox: trustedParentSandbox,
         });
         for (const turn of ["fresh", "resume", "compare"]) {
-          process.env.STANDARDCOMPUTE_API_KEY = "changed-ambient-key";
+          process.env.STANDARD_COMPUTE_API_KEY = "changed-ambient-key";
           process.env[key] = "changed-ambient-key";
           if (headerKey) process.env[headerKey] = "changed-ambient-header";
           if (turn === "compare") {
@@ -3015,9 +3015,9 @@ async function testExternalProviderCredentialsReachWorker() {
               invocation.openaiAuthentication[key],
             selectedKey,
           );
-          if (key !== "STANDARDCOMPUTE_API_KEY")
+          if (key !== "STANDARD_COMPUTE_API_KEY")
             assert.equal(
-              invocation.providerHeaders.STANDARDCOMPUTE_API_KEY,
+              invocation.providerHeaders.STANDARD_COMPUTE_API_KEY,
               undefined,
             );
           assert.deepEqual(invocation.openaiAuthentication, {
