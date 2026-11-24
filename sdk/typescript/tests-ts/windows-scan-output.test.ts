@@ -500,6 +500,25 @@ windowsTest("rejects a parent that can be emptied and retagged", async () => {
   await expect(runtime.prepareOutputDir(output, "fixture")).rejects.toThrow();
 });
 
+windowsTest("output errors name the first rejected directory", async () => {
+  const root = await realpath(await temporaryDirectory());
+  const shared = join(root, "shared");
+  const rejected = join(shared, "nested");
+  await mkdir(rejected, { recursive: true });
+  // Everyone can replace "nested" through its parent, so validation first fails there.
+  await icacls(shared, "/grant", "*S-1-1-0:F");
+  const detail = `First rejected directory: ${rejected}. Check the owner and permissions of that directory and its parent.`;
+
+  await expect(
+    runtime.prepareOutputDir(join(rejected, "scan"), "fixture"),
+  ).rejects.toThrow(
+    `could not be trusted (Windows error 5): ${join(rejected, "scan")}. ${detail}`,
+  );
+  await expect(
+    runtime.prepareOutputDir(undefined, "fixture", rejected),
+  ).rejects.toThrow(detail);
+});
+
 windowsTest(
   "output admission distinguishes effective parent delete-child grants",
   async () => {
