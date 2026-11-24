@@ -1,7 +1,5 @@
 import assert from "node:assert/strict";
-import { join } from "node:path";
 import test from "node:test";
-import { pathToFileURL } from "node:url";
 import {
   EvidenceGraph,
   MAX_GRAPH_RESPONSE_BYTES,
@@ -10,7 +8,7 @@ import type {
   TraceEntity,
   TraceObservation,
 } from "../src/dependency-trace/types.ts";
-import { applicationRoot, buildServer } from "./build-server.ts";
+import { loadGraphSession } from "./build-server.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 
 const frame = (
@@ -391,7 +389,7 @@ test("successive large collections remain queryable within the response budget",
     ["second-workload", "receipt-second"],
   ] as const) {
     const node = graph.query(`${name}-function-63`);
-    assert("node" in node && node.witnesses?.length);
+    assert("node" in node && "witnesses" in node && node.witnesses.length);
     assert.equal(node.witnesses_found, 1000);
     assert.equal(node.witnesses[0]!.native_id, `${name}-sample-0`);
     const calls = graph.query(node.node.id, { witness: node.witnesses[0]!.id });
@@ -483,15 +481,7 @@ test("host ingestion reuses the existing query tool without exposing a mutation 
   t.after(() => temps.cleanup());
   const checkout = await temps.create("dependency-observations-checkout-");
   const runtime = await temps.create("dependency-observations-session-");
-  const bundle = join(runtime, "session.cjs");
-  await buildServer(bundle, {
-    entryPoints: [join(applicationRoot, "src/dependency-trace/session.ts")],
-  });
-  const { createDependencyGraphSession } = (
-    (await import(pathToFileURL(bundle).href)) as {
-      default: typeof import("../src/dependency-trace/session.ts");
-    }
-  ).default;
+  const { createDependencyGraphSession } = await loadGraphSession(runtime);
   const session = await createDependencyGraphSession(checkout, false);
   t.after(() => session.close());
   assert.equal(session.tools.length, 3);

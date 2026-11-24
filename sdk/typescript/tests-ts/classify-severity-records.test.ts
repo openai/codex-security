@@ -5,6 +5,7 @@ import { PassThrough, Writable } from "node:stream";
 import {
   classifySeverityRecords,
   type ClassifySeverityRecordsInput,
+  type ClassifySeverityRecordsOptions,
   type SeverityClassificationReviewRequest,
 } from "../src/classify-severity-records.js";
 import { main } from "../src/cli.js";
@@ -12,6 +13,13 @@ import { capture, dependencies } from "./cli-fixtures.js";
 
 const hash = (value: string) =>
   createHash("sha256").update(value, "utf8").digest("hex");
+function classify(
+  input: ClassifySeverityRecordsInput,
+  run: ClassifySeverityRecordsOptions["reviewRunner"]["run"],
+) {
+  return classifySeverityRecords(input, { reviewRunner: { run } });
+}
+
 function input(effort = "high"): ClassifySeverityRecordsInput & {
   rubric: NonNullable<ClassifySeverityRecordsInput["rubric"]>;
 } {
@@ -51,22 +59,18 @@ test.each(efforts)("preserves UTF-8 records and effort %p", async (effort) => {
   const original = input(effort);
   const before = structuredClone(original);
   const requests: SeverityClassificationReviewRequest[] = [];
-  const result = await classifySeverityRecords(original, {
-    reviewRunner: {
-      async run(request) {
-        requests.push(request);
-        expect(request.model).toBe(original.model);
-        expect(request.effort).toBe(original.effort);
-        expect(JSON.parse(request.prompt).rubric).toEqual([
-          original.rubric.markdown,
-        ]);
-        expect(request.trustedInstructions).toContain("Do not use tools");
-        expect(request.schema).toHaveProperty("required");
-        expect(request.prompt).toContain(original.records[0]!.findingJson);
-        expect(JSON.parse(request.prompt).finding.severity.level).toBe("low");
-        return answer(request);
-      },
-    },
+  const result = await classify(original, async (request) => {
+    requests.push(request);
+    expect(request.model).toBe(original.model);
+    expect(request.effort).toBe(original.effort);
+    expect(JSON.parse(request.prompt).rubric).toEqual([
+      original.rubric.markdown,
+    ]);
+    expect(request.trustedInstructions).toContain("Do not use tools");
+    expect(request.schema).toHaveProperty("required");
+    expect(request.prompt).toContain(original.records[0]!.findingJson);
+    expect(JSON.parse(request.prompt).finding.severity.level).toBe("low");
+    return answer(request);
   });
   expect(result).toMatchObject({
     version: 1,
@@ -120,13 +124,9 @@ test.each([
   }
   let calls = 0;
   await expect(
-    classifySeverityRecords(data, {
-      reviewRunner: {
-        async run() {
-          calls++;
-          return {};
-        },
-      },
+    classify(data, async () => {
+      calls++;
+      return {};
     }),
   ).rejects.toThrow();
   expect(calls).toBe(0);
@@ -151,22 +151,18 @@ test.each([
     inputSha256: hash(findingJson),
   });
   let calls = 0;
-  const result = await classifySeverityRecords(data, {
-    reviewRunner: {
-      async run(request) {
-        calls++;
-        const result: Record<string, unknown> = answer(request);
-        if (calls <= 3) return result;
-        if (scenario === "host-failure")
-          throw new Error("Host could not complete review");
-        if (scenario === "wrong-id") result["findingId"] = "canonical-one";
-        if (scenario === "missing") delete result["rationale"];
-        if (scenario === "extra") result["extra"] = true;
-        if (scenario === "assessed-null") result["level"] = null;
-        if (scenario === "excluded-level") result["decision"] = "excluded";
-        return result;
-      },
-    },
+  const result = await classify(data, async (request) => {
+    calls++;
+    const result: Record<string, unknown> = answer(request);
+    if (calls <= 3) return result;
+    if (scenario === "host-failure")
+      throw new Error("Host could not complete review");
+    if (scenario === "wrong-id") result["findingId"] = "canonical-one";
+    if (scenario === "missing") delete result["rationale"];
+    if (scenario === "extra") result["extra"] = true;
+    if (scenario === "assessed-null") result["level"] = null;
+    if (scenario === "excluded-level") result["decision"] = "excluded";
+    return result;
   });
   expect(result).toMatchObject({
     status: "unresolved",
@@ -181,17 +177,13 @@ test.each([
 });
 
 test("exclusion is distinct from low severity", async () => {
-  const result = await classifySeverityRecords(input(), {
-    reviewRunner: {
-      async run(request) {
-        return {
-          ...answer(request),
-          decision: "excluded",
-          level: null,
-          rubricLabel: null,
-        };
-      },
-    },
+  const result = await classify(input(), async (request) => {
+    return {
+      ...answer(request),
+      decision: "excluded",
+      level: null,
+      rubricLabel: null,
+    };
   });
   expect(result.assessments[0]).toMatchObject({
     decision: "excluded",
@@ -203,16 +195,12 @@ test("exclusion is distinct from low severity", async () => {
 test("snapshots mutable caller input before the first host request", async () => {
   const data = input();
   const digest = data.rubric.sha256;
-  const result = await classifySeverityRecords(data, {
-    reviewRunner: {
-      async run(request) {
-        data.rubric.revision = 99;
-        data.rubric.markdown = "changed";
-        data.records[0]!.revision = 99;
-        data.records.push(data.records[0]!);
-        return answer(request);
-      },
-    },
+  const result = await classify(data, async (request) => {
+    data.rubric.revision = 99;
+    data.rubric.markdown = "changed";
+    data.records[0]!.revision = 99;
+    data.records.push(data.records[0]!);
+    return answer(request);
   });
   expect(result).toMatchObject({
     rubric: { revision: 4, sha256: digest },
@@ -367,13 +355,9 @@ test("empty records probe version 1 without host execution", async () => {
   data.records = [];
   let calls = 0;
   expect(
-    await classifySeverityRecords(data, {
-      reviewRunner: {
-        async run() {
-          calls++;
-          return {};
-        },
-      },
+    await classify(data, async () => {
+      calls++;
+      return {};
     }),
   ).toEqual({
     version: 1,
@@ -408,12 +392,8 @@ test("canonical records use majority voting and highest severity for a three-way
     [["medium", "critical", "high"], "critical"],
   ] as const) {
     let calls = 0;
-    const result = await classifySeverityRecords(input(), {
-      reviewRunner: {
-        async run(request) {
-          return { ...answer(request), level: levels[calls++] };
-        },
-      },
+    const result = await classify(input(), async (request) => {
+      return { ...answer(request), level: levels[calls++] };
     });
     expect(calls).toBe(3);
     expect(result.assessments[0]?.level).toBe(expected);
@@ -475,16 +455,10 @@ test("omitted canonical rubric uses the bundled policy and returns its exact bin
   const data: ClassifySeverityRecordsInput = input();
   delete data.rubric;
   const requests: SeverityClassificationReviewRequest[] = [];
-  const result = await classifySeverityRecords(data, {
-    reviewRunner: {
-      async run(request) {
-        requests.push(request);
-        expect(JSON.parse(request.prompt).rubric).toEqual([
-          defaultSeverityRubric,
-        ]);
-        return answer(request);
-      },
-    },
+  const result = await classify(data, async (request) => {
+    requests.push(request);
+    expect(JSON.parse(request.prompt).rubric).toEqual([defaultSeverityRubric]);
+    return answer(request);
   });
   expect(requests).toHaveLength(3);
   expect(new Set(requests.map(({ requestId }) => requestId)).size).toBe(3);

@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
+const applicationRoot = fileURLToPath(new URL("../", import.meta.url));
 const moduleDirectory = mkdtempSync(
   join(tmpdir(), "codex-security-test-modules-"),
 );
@@ -38,11 +39,14 @@ export async function importModule(options: BuildOptions) {
 }
 
 export function importSource(entryPoint: string, options: BuildOptions = {}) {
-  return importModule({ entryPoints: [entryPoint], ...options });
+  return importModule({
+    absWorkingDir: applicationRoot,
+    entryPoints: [entryPoint],
+    ...options,
+  });
 }
 
 export async function importCoordinatorServer(fixture: string) {
-  const applicationRoot = fileURLToPath(new URL("../", import.meta.url));
   const server = new URL("../server.ts", import.meta.url);
   const source = await readFile(server, "utf8");
   return importModule({
@@ -65,4 +69,16 @@ export async function importCoordinatorServer(fixture: string) {
     },
     loader: { ".md": "text" },
   });
+}
+
+// Native bindings are installed beside the generated server and helper bundles.
+export function bundledMcpUrl(entry: "helpers" | "server") {
+  return new URL(
+    `../../../../sdk/typescript/_bundled_plugin/mcp/${entry}.mjs`,
+    import.meta.url,
+  );
+}
+
+export function bundledMcpDefine(entry: "helpers" | "server") {
+  return { "import.meta.url": JSON.stringify(bundledMcpUrl(entry).href) };
 }

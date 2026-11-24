@@ -269,8 +269,10 @@ def collect_scan_usage(
     the window, Codex state, or relevant threads cannot be established.
     """
 
-    roots = _scan_root_thread_ids(connection, scan, thread_id)
-    parent_ids = set(_scan_root_thread_ids(connection, scan, thread_id, include_workers=False))
+    owners, workers = _scan_threads(connection, scan)
+    parents = _thread_ids(thread_id, *owners)
+    roots = _thread_ids(*parents, *workers)
+    parent_ids = set(parents)
     if validation_thread_id:
         roots.append(validation_thread_id)
         parent_ids.add(validation_thread_id)
@@ -531,28 +533,23 @@ def _worker_usage_receipts(
     return receipts, missing, scope
 
 
-def _scan_root_thread_ids(
-    connection: sqlite3.Connection,
-    scan: sqlite3.Row,
-    supplied_thread_id: str | None,
-    *,
-    include_owner_threads: bool = True,
-    include_workers: bool = True,
-) -> list[str]:
-    candidates: list[str | None] = [supplied_thread_id]
-    if include_owner_threads:
-        if "continuation_thread_id" in scan.keys():
-            candidates.append(scan["continuation_thread_id"])
-        if "deep_scan_owner_thread_id" in scan.keys():
-            candidates.append(scan["deep_scan_owner_thread_id"])
-        workspace = connection.execute(
-            "SELECT thread_id FROM workspaces WHERE id = ?",
-            (scan["workspace_id"],),
-        ).fetchone()
-        if workspace is not None:
-            candidates.append(workspace["thread_id"])
-    if include_workers and scan["mode"] == "deep":
-        candidates.extend(
+def _thread_ids(*ids: str | None) -> list[str]:
+    return list(dict.fromkeys(value for value in ids if isinstance(value, str) and value.strip()))
+
+
+def _scan_threads(
+    connection: sqlite3.Connection, scan: sqlite3.Row
+) -> tuple[list[str | None], list[str | None]]:
+    owner_fields = ("continuation_thread_id", "deep_scan_owner_thread_id")
+    owners = [scan[key] for key in owner_fields if key in scan.keys()]
+    workspace = connection.execute(
+        "SELECT thread_id FROM workspaces WHERE id = ?", (scan["workspace_id"],)
+    ).fetchone()
+    if workspace is not None:
+        owners.append(workspace["thread_id"])
+    workers = []
+    if scan["mode"] == "deep":
+        workers = [
             row["sdk_thread_id"]
             for row in connection.execute(
                 """
@@ -563,22 +560,18 @@ def _scan_root_thread_ids(
                 """,
                 (scan["id"],),
             )
-        )
-    roots: dict[str, None] = {}
-    for candidate in candidates:
-        if isinstance(candidate, str) and candidate.strip():
-            roots[candidate] = None
-    return list(roots)
+        ]
+    return owners, workers
 
 
-def _scan_execution_thread_ids(connection: sqlite3.Connection, scan: sqlite3.Row) -> list[str]:
+def scan_thread_fields(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict[str, list[str]]:
+    owners, workers = _scan_threads(connection, scan)
     # CLI recipes identify dedicated executions; Desktop continuations can be shared.
-    return _scan_root_thread_ids(
-        connection,
-        scan,
-        scan["continuation_thread_id"] if scan["recipe_json"] is not None else None,
-        include_owner_threads=False,
-    )
+    execution = scan["continuation_thread_id"] if scan["recipe_json"] is not None else None
+    return {
+        "threadIds": _thread_ids(*owners, *workers),
+        "executionThreadIds": _thread_ids(execution, *workers),
+    }
 
 
 def _scan_worker_directories(

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 
-interface WorkflowStep {
+export interface WorkflowStep {
   name?: string;
   id?: string;
   uses?: string;
@@ -12,7 +12,20 @@ interface WorkflowStep {
   "continue-on-error"?: boolean;
 }
 
+interface Concurrency {
+  group: string;
+  queue?: string;
+  "cancel-in-progress"?: boolean | string;
+}
+
 interface WorkflowJob {
+  name?: string;
+  permissions?: Record<string, string>;
+  secrets?: Record<string, string>;
+  concurrency?: Concurrency;
+  "timeout-minutes"?: number | string;
+  "continue-on-error"?: boolean;
+  "cache-mode"?: string;
   uses?: string;
   needs?: string | string[];
   if?: string;
@@ -20,20 +33,35 @@ interface WorkflowJob {
   outputs?: Record<string, string>;
   with?: Record<string, unknown>;
   env?: Record<string, unknown>;
-  strategy?: { matrix: Record<string, unknown> | string };
+  strategy?: {
+    "fail-fast"?: boolean;
+    matrix: Record<string, unknown> | string;
+  };
   steps?: WorkflowStep[];
 }
 
-export function workflow(name: string) {
-  return Bun.YAML.parse(
-    readFileSync(
-      new URL(`../../../../.github/workflows/${name}.yml`, import.meta.url),
-      "utf8",
-    ),
-  ) as {
-    on: Record<string, unknown>;
-    env?: Record<string, unknown>;
-    concurrency?: { group: string; queue?: string };
-    jobs: Record<string, WorkflowJob>;
+export interface Workflow {
+  on: Record<string, unknown> & {
+    workflow_call?: { secrets?: Record<string, { required?: boolean }> };
+    pull_request?: { types?: string[] };
   };
+  env?: Record<string, unknown>;
+  permissions?: Record<string, string>;
+  concurrency?: Concurrency;
+  jobs: Record<string, WorkflowJob>;
+}
+
+export function workflowSource(name: string) {
+  return readFileSync(
+    new URL(`../../../../.github/workflows/${name}.yml`, import.meta.url),
+    "utf8",
+  );
+}
+
+export function parseWorkflow(source: string) {
+  return Bun.YAML.parse(source) as Workflow;
+}
+
+export function workflow(name: string) {
+  return parseWorkflow(workflowSource(name));
 }
