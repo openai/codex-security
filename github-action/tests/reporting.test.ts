@@ -31,8 +31,11 @@ test('finding titles and messages cannot become Markdown links, images or raw HT
 
 test('findings beyond the summary limit are counted with the matching noun', () => {
   const finding = {severity:'low',title:'Finding',summary:'Summary',path:'src/app.ts',startLine:1};
-  const summarize = (count: number) => resultSummary({scanStatus:'completed',policyStatus:'passed',reportStatus:'ready',counts:{critical:0,high:0,medium:0,low:count,informational:0},errors:[],
-    findings:Array(count).fill(finding)} as unknown as ScanResults,parseInputs(()=>'', '/checkout'),{repository:'/checkout',scannedSha:'a'.repeat(40),analysisRef:'refs/heads/main',publishable:true,emptyDiff:false});
+  const summarize = (count: number, reportStatus: ScanResults['reportStatus'] = 'ready') =>
+    renderSummary({findings: Array(count).fill(finding), reportStatus});
+  for (const status of ['partial', 'failed'] as const) {
+    assert.ok(summarize(31, status).includes('1 additional finding is omitted from this summary.'));
+  }
   assert.ok(summarize(31).includes('1 additional finding is available in the JSON/SARIF reports.'));
   assert.ok(summarize(32).includes('2 additional findings are available in the JSON/SARIF reports.'));
 });
@@ -49,7 +52,7 @@ function renderSummary(overrides: Partial<ScanResults>): string {
 
 test('the summary byte limit keeps finding blocks and counts omitted findings', () => {
   const finding = {severity:'low', title:'Finding', summary:'A & B < C. 😀 '.repeat(100), path:'src/app.ts', startLine:1} as const;
-  const findings = Array.from({length:31}, () => finding);
+  const findings = Array(31).fill(finding);
   const summary = renderSummary({findings});
   const displayed = [...summary.matchAll(/<h3>/g)].length;
 
@@ -77,7 +80,7 @@ test('long scope notes leave room for the scan status and report guidance', () =
   assert.ok(notes.every(line => line === `- ${'&amp;'.repeat(4000)}`));
   assert.ok(summary.includes('SARIF report is unavailable'));
   assert.ok(summary.includes('Scan execution failed.'));
-  assert.ok(summary.includes('Use the action outputs for full JSON and SARIF.'));
+  assert.ok(summary.includes('Check the action outputs for available reports.'));
 });
 
 test('the summary keeps the last finding when the complete report fits exactly', () => {

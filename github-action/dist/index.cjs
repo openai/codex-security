@@ -97575,7 +97575,7 @@ function resultTitle(result, inputs) {
   return "Scan completed. No findings meet the failure threshold.";
 }
 function resultSummary(result, inputs, target, artifactUrl) {
-  const esc = (value, limit2 = 4e3) => html(plain(value, limit2));
+  const esc = (value, limit = 4e3) => html(plain(value, limit));
   const counts = result.counts ? Object.entries(result.counts).map(([level, count]) => `${level}: ${count}`).join(" \xB7 ") : "unavailable";
   const usage = result.usage;
   const tokens = usage ? `${usage.input_tokens.toLocaleString("en-US")} input (${usage.cached_input_tokens.toLocaleString("en-US")} cached) \xB7 ${usage.output_tokens.toLocaleString("en-US")} output` : "unavailable";
@@ -97596,12 +97596,13 @@ function resultSummary(result, inputs, target, artifactUrl) {
   const statusNotes = [];
   if (result.reportStatus === "partial") statusNotes.push("SARIF report is unavailable; scan results and other reports are still available.");
   if (result.scanStatus !== "completed") statusNotes.push("**Scan execution failed. Retained findings are shown below; absence of findings is inconclusive.**");
-  const footer = "Use the action outputs for full JSON and SARIF. Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.";
-  const omittedFindings = (count) => `${count} additional ${count === 1 ? "finding is" : "findings are"} available in the JSON/SARIF reports.`;
+  const ready = result.reportStatus === "ready";
+  const footer = (ready ? "Use the action outputs for full JSON and SARIF." : "Check the action outputs for available reports.") + " Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.";
+  const omittedFindings = (count) => `${count} additional ${count === 1 ? "finding is" : "findings are"} ${ready ? "available in the JSON/SARIF reports" : "omitted from this summary"}.`;
   const findingCount = result.findings.length;
-  const limit = 58e3 - Buffer.byteLength([...statusNotes, footer].join("\n\n"));
-  const renderBody = (budget) => {
-    let remaining = budget;
+  const maxBytes = 58e3;
+  const render = (reserved) => {
+    let remaining = maxBytes - reserved - Buffer.byteLength([...statusNotes, footer].join("\n\n"));
     const fits = (block, separatorBytes = 2) => {
       const bytes = Buffer.byteLength(block) + separatorBytes;
       if (bytes > remaining) return false;
@@ -97634,16 +97635,11 @@ function resultSummary(result, inputs, target, artifactUrl) {
       blocks2.push(block);
       displayed += 1;
     }
-    return { blocks: blocks2, displayed, remaining };
+    if (displayed < findingCount) blocks2.push(omittedFindings(findingCount - displayed));
+    return [...blocks2, footer].join("\n\n");
   };
-  let body2 = renderBody(limit);
-  const omitted = findingCount - body2.displayed;
-  if (omitted > 0 && Buffer.byteLength(omittedFindings(omitted)) + 2 > body2.remaining) {
-    body2 = renderBody(limit - Buffer.byteLength(omittedFindings(findingCount)) - 2);
-  }
-  const additional = findingCount - body2.displayed;
-  if (additional > 0) body2.blocks.push(omittedFindings(additional));
-  return [...body2.blocks, footer].join("\n\n");
+  const summary2 = render(0);
+  return Buffer.byteLength(summary2) <= maxBytes ? summary2 : render(Buffer.byteLength(omittedFindings(findingCount)) + 2);
 }
 function emitAnnotations(result) {
   for (const finding of result.findings.slice(0, 50)) {

@@ -46,14 +46,16 @@ export function resultSummary(result: ScanResults, inputs: Inputs, target: Targe
   const statusNotes: string[] = [];
   if (result.reportStatus === 'partial') statusNotes.push('SARIF report is unavailable; scan results and other reports are still available.');
   if (result.scanStatus !== 'completed') statusNotes.push('**Scan execution failed. Retained findings are shown below; absence of findings is inconclusive.**');
-  const footer = 'Use the action outputs for full JSON and SARIF. Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.';
+  const ready = result.reportStatus === 'ready';
+  const footer = (ready ? 'Use the action outputs for full JSON and SARIF.' : 'Check the action outputs for available reports.') +
+    ' Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.';
   const omittedFindings = (count: number) =>
-    `${count} additional ${count === 1 ? 'finding is' : 'findings are'} available in the JSON/SARIF reports.`;
+    `${count} additional ${count === 1 ? 'finding is' : 'findings are'} ${ready ? 'available in the JSON/SARIF reports' : 'omitted from this summary'}.`;
   const findingCount = result.findings.length;
-  const limit = 58_000 - Buffer.byteLength([...statusNotes, footer].join('\n\n'));
+  const maxBytes = 58_000;
 
-  const renderBody = (budget: number) => {
-    let remaining = budget;
+  const render = (reserved: number) => {
+    let remaining = maxBytes - reserved - Buffer.byteLength([...statusNotes, footer].join('\n\n'));
     // Each block precedes a separator, including the one before the footer.
     const fits = (block: string, separatorBytes = 2): boolean => {
       const bytes = Buffer.byteLength(block) + separatorBytes;
@@ -84,19 +86,13 @@ export function resultSummary(result: ScanResults, inputs: Inputs, target: Targe
       blocks.push(block);
       displayed += 1;
     }
-    return {blocks, displayed, remaining};
+    if (displayed < findingCount) blocks.push(omittedFindings(findingCount - displayed));
+    return [...blocks, footer].join('\n\n');
   };
 
-  // Try the full budget first so a summary that fits exactly keeps every block.
-  let body = renderBody(limit);
-  const omitted = findingCount - body.displayed;
-  if (omitted > 0 && Buffer.byteLength(omittedFindings(omitted)) + 2 > body.remaining) {
-    // The second pass can omit more findings, so reserve room for the largest count.
-    body = renderBody(limit - Buffer.byteLength(omittedFindings(findingCount)) - 2);
-  }
-  const additional = findingCount - body.displayed;
-  if (additional > 0) body.blocks.push(omittedFindings(additional));
-  return [...body.blocks, footer].join('\n\n');
+  // Reserve space for the largest omission notice only if the summary actually overflows.
+  const summary = render(0);
+  return Buffer.byteLength(summary) <= maxBytes ? summary : render(Buffer.byteLength(omittedFindings(findingCount)) + 2);
 }
 
 export function emitAnnotations(result: ScanResults): void {
