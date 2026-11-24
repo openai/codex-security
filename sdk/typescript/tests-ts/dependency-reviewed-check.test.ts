@@ -728,6 +728,45 @@ test("a positive use requires an endpoint on each explicitly bounded side", asyn
   }
 });
 
+test("a Git-only advisory starts local discovery without supplying a package version", async () => {
+  await using f = await fixture();
+  const cve = "CVE-2099-0001";
+  const advisory = {
+    id: cve,
+    url: "https://example.invalid/advisory",
+    affected: [
+      {
+        ranges: [
+          {
+            type: "GIT",
+            repo: "https://example.invalid/fixture-parser.git",
+            events: [{ introduced: "0" }],
+          },
+        ],
+      },
+    ],
+  };
+  const result = await runReviewedDependencyCheck(
+    { directory: f.path, subject: cve, signal },
+    {
+      lookupCve: async () => ({
+        cve,
+        advisories: [{ ...advisory, sha256: dependencyRecordHash(advisory) }],
+      }),
+      runAgent: async ({ prompt }) => {
+        const { scopes, claims } = agentInput(prompt);
+        if (claims) return approvedReview(claims);
+        expect(scopes[0].component).toBe("fixture-parser");
+        expect(scopes[0].selectedVersion).toBeUndefined();
+        return proposalJson({ ...f.use, version: null, verdict: "unknown" });
+      },
+    },
+  );
+  expect(result).toMatchObject({
+    uses: [{ component: "fixture-parser", version: null, verdict: "unknown" }],
+  });
+});
+
 test("an exploratory scope explanation retains reviewed uses, open handoffs and observed callers", async () => {
   await using f = await fixture({
     "package.json": JSON.stringify({
