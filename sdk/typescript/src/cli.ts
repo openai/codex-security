@@ -14324,13 +14324,12 @@ export function parseCodexOverrides(
   const result = Object.create(null) as JsonObject;
   if (model !== undefined) result["model"] = model;
   if (effort !== undefined) result["model_reasoning_effort"] = effort;
+  const hasProviderOverride = provider !== undefined && provider !== "openai";
+  if (hasProviderOverride) result["model_provider"] = provider;
   if (isExternalModelProvider(provider)) {
-    result["model_provider"] = provider;
     result["model_providers"] = {
       [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
     };
-  } else if (provider !== undefined && provider !== "openai") {
-    result["model_provider"] = provider;
   }
   for (const value of values) {
     const separator = value.indexOf("=");
@@ -14380,11 +14379,7 @@ export function parseCodexOverrides(
           "--effort conflicts with --codex model_reasoning_effort",
         );
       }
-      if (
-        provider !== undefined &&
-        provider !== "openai" &&
-        key === "model_provider"
-      ) {
+      if (hasProviderOverride && key === "model_provider") {
         throw new CodexSecurityError(
           "--provider conflicts with --codex model_provider",
         );
@@ -14393,7 +14388,7 @@ export function parseCodexOverrides(
     }
     cursor[final] = parsed;
   }
-  if (provider !== undefined && provider !== "openai") {
+  if (hasProviderOverride) {
     const configured = mergeCodexOverrides(defaults ?? {}, result);
     const selectedModel = scanModel(configured);
     if (typeof selectedModel !== "string" || !selectedModel.trim()) {

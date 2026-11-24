@@ -1,3 +1,4 @@
+import { providerHeaderNames } from "./support/fake-codex-source.ts";
 import {
   CodexSdkWorkerExecutor,
   resolveCodexPath,
@@ -1401,12 +1402,7 @@ function expectedProviderHeaders(environment?: NodeJS.ProcessEnv) {
   return Object.fromEntries(
     Object.entries(environment ?? {}).filter(
       ([name, value]) =>
-        value !== undefined &&
-        [
-          "SYNTHETIC_HEADER_VALUE",
-          "OPENROUTER_API_KEY",
-          "FIREWORKS_API_KEY",
-        ].includes(name),
+        value !== undefined && providerHeaderNames.includes(name),
     ),
   );
 }
@@ -2992,21 +2988,13 @@ async function testExternalProviderCredentialsReachWorker() {
             );
           }
           const invocation = await readJson(fixture.markerPath);
-          assert.equal(
-            invocation.providerKey ??
-              invocation.providerHeaders[key] ??
-              invocation.openaiAuthentication[key],
-            selectedKey,
-          );
-          if (key !== "STANDARD_COMPUTE_API_KEY")
-            assert.equal(
-              invocation.providerHeaders.STANDARD_COMPUTE_API_KEY,
-              undefined,
-            );
-          assert.deepEqual(invocation.openaiAuthentication, {
-            ...accountHeaders,
-            ...(key === "CODEX_API_KEY" ? { [key]: selectedKey } : {}),
-          });
+          const credentials = {
+            ...invocation.providerHeaders,
+            ...invocation.openaiAuthentication,
+          };
+          if (invocation.providerKey !== undefined)
+            credentials.SYNTHETIC_GATEWAY_KEY = invocation.providerKey;
+          assert.deepEqual(credentials, settings.environment);
           assertFlagPair(invocation.argv, "--profile", profile);
           assertConfigOverrides(invocation.argv, {
             model_provider: provider,

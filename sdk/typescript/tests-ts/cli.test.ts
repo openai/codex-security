@@ -64,6 +64,7 @@ import {
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
   STANDARD_COMPUTE_CODEX_PROVIDER,
+  writeCodexConfig,
   scanModelConfiguration,
   mergedCodexConfig,
 } from "../src/config.js";
@@ -3460,23 +3461,20 @@ describe("CLI", () => {
       "codex-security-standardcompute-profile-",
     );
     const home = fixture.path;
-    await writeFile(
-      join(home, "review.config.toml"),
-      '[model_providers.standardcompute]\nname="Native"\nbase_url="https://gateway.example.test/v1"\n[model_providers.standardcompute.env_http_headers]\nX-Gateway="SYNTHETIC_GATEWAY_KEY"\n',
-    );
+    const gateway = {
+      name: "Native",
+      base_url: "https://gateway.example.test/v1",
+      env_http_headers: { "X-Gateway": "SYNTHETIC_GATEWAY_KEY" },
+    };
+    await writeCodexConfig(join(home, "review.config.toml"), {
+      model_providers: { standardcompute: gateway },
+    });
     const { runCli, stderr } = createCliTest(main);
-    for (const [override, environment, expectedKey, expectedUrl] of [
-      [
-        'profile="review"',
-        { SYNTHETIC_GATEWAY_KEY: "synthetic", CODEX_API_KEY: "synthetic" },
-        undefined,
-        "https://gateway.example.test/v1",
-      ],
+    for (const [override, expected] of [
+      ['profile="review"', gateway],
       [
         'model_providers.standardcompute.env_key="OPENAI_API_KEY"',
-        { OPENAI_API_KEY: "synthetic" },
-        "OPENAI_API_KEY",
-        undefined,
+        { env_key: "OPENAI_API_KEY" },
       ],
     ] as const) {
       let selected: CodexSecurityConfig | undefined;
@@ -3491,17 +3489,20 @@ describe("CLI", () => {
           override,
         ],
         dependencies({
-          environment: { CODEX_HOME: home, ...environment },
+          environment: {
+            CODEX_HOME: home,
+            SYNTHETIC_GATEWAY_KEY: "synthetic-header",
+            OPENAI_API_KEY: "synthetic-account",
+            STANDARD_COMPUTE_API_KEY: "unused-credential",
+          },
           onConfig: (config) => (selected = config),
         }),
       );
       expect(status, stderr.text()).toBe(0);
       const effective = await mergedCodexConfig(selected!, home);
-      const native = (
-        effective["model_providers"] as Record<string, JsonObject>
-      )["standardcompute"];
-      expect(native?.["env_key"]).toBe(expectedKey);
-      expect(native?.["base_url"]).toBe(expectedUrl);
+      expect(effective["model_providers"]).toEqual({
+        standardcompute: expected,
+      });
     }
   });
 
