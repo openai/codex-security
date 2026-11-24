@@ -68,6 +68,7 @@ test(function testWorkerErrorClassificationPreservesExplicitFailures() {
 
 test(function testNativeTurnFailureClassification() {
   for (const message of [
+    "This content was flagged for possible biological risk.",
     "Request blocked by cyberPolicy.",
     "Request blocked by a safety policy violation.",
     "This content was flagged for possible cybersecurity risk.",
