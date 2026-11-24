@@ -14,6 +14,7 @@ import {
   deduplicateRecords,
   recordsReviewAttribution,
   type DeduplicateRecordsInput,
+  type DeduplicateRecordsOptions,
 } from "../src/deduplication/records.js";
 import type { DeduplicationReviewRequest } from "../src/deduplication/review.js";
 import { runHostRecordsProtocol } from "../src/host-records-protocol.js";
@@ -72,6 +73,13 @@ function record(id: string, title = id) {
   };
   return { id, finding };
 }
+function deduplicate(
+  input: DeduplicateRecordsInput,
+  run: DeduplicateRecordsOptions["reviewRunner"]["run"],
+) {
+  return deduplicateRecords(input, { reviewRunner: { run } });
+}
+
 function input(): DeduplicateRecordsInput {
   return {
     version: 1,
@@ -148,22 +156,20 @@ test("a locationless import with no neighbors returns its original ID without re
   const run = mock(async () => {
     throw new Error("Unexpected review");
   });
-  expect(
-    (await deduplicateRecords(request, { reviewRunner: { run } })).groups,
-  ).toEqual([
+  expect((await deduplicate(request, run)).groups).toEqual([
     { representativeObservationId: imported.id, observationIds: [imported.id] },
   ]);
   expect(run).not.toHaveBeenCalled();
   // The same evidence must still fail the default native contract.
   await expect(
-    deduplicateRecords(
+    deduplicate(
       {
         ...request,
         observations: [
           { id: imported.id, finding: imported.finding as unknown as Finding },
         ],
       },
-      { reviewRunner: { run } },
+      run,
     ),
   ).rejects.toThrow("Finding schema");
 });
@@ -184,29 +190,25 @@ test.each(["native", "imported"])(
       ],
     };
     let pair = false;
-    const result = await deduplicateRecords(request, {
-      reviewRunner: {
-        async run(review) {
-          if (review.stage === "pair-review") {
-            pair = true;
-            const findings = assigned(review);
-            const validate = new Ajv2020({ strict: false }).compile(
-              review.findingSchema as object,
-            );
-            expect(findings.map((finding) => validate(finding))).toEqual([
-              true,
-              true,
-            ]);
-            expect(validate({ ...findings[1], locations: [] })).toBe(
-              kind === "imported",
-            );
-            expect(findings[0]?.["originalSource"]).toEqual(
-              anchor.finding.originalSource,
-            );
-          }
-          return answer(review);
-        },
-      },
+    const result = await deduplicate(request, async (review) => {
+      if (review.stage === "pair-review") {
+        pair = true;
+        const findings = assigned(review);
+        const validate = new Ajv2020({ strict: false }).compile(
+          review.findingSchema as object,
+        );
+        expect(findings.map((finding) => validate(finding))).toEqual([
+          true,
+          true,
+        ]);
+        expect(validate({ ...findings[1], locations: [] })).toBe(
+          kind === "imported",
+        );
+        expect(findings[0]?.["originalSource"]).toEqual(
+          anchor.finding.originalSource,
+        );
+      }
+      return answer(review);
     });
     expect(pair).toBe(true);
     expect(result.status).toBe("completed");
@@ -220,28 +222,24 @@ test.each(["native", "imported"])(
 test("records groups original observations and retrieved neighbors with unique representatives", async () => {
   const original = input();
   const requests: DeduplicationReviewRequest[] = [];
-  const result = await deduplicateRecords(original, {
-    reviewRunner: {
-      async run(review) {
-        requests.push(review);
-        expect(review.trustedInstructions).toContain("approved repository");
-        expect(review.findingSchema).toHaveProperty("required");
-        const validateFinding = new Ajv2020({ strict: false }).compile(
-          JSON.parse(JSON.stringify(review.findingSchema)) as object,
-        );
-        const finding = original.observations[0]!.finding;
-        expect(validateFinding(finding)).toBe(true);
-        expect(validateFinding({ ...finding, title: "" })).toBe(false);
-        expect(review).not.toHaveProperty("validate");
-        expect(review).not.toHaveProperty("findingIds");
-        for (const finding of assigned(review))
-          expect(finding.provenance).toHaveProperty(
-            "revision",
-            "synthetic-revision",
-          );
-        return answer(review);
-      },
-    },
+  const result = await deduplicate(original, async (review) => {
+    requests.push(review);
+    expect(review.trustedInstructions).toContain("approved repository");
+    expect(review.findingSchema).toHaveProperty("required");
+    const validateFinding = new Ajv2020({ strict: false }).compile(
+      JSON.parse(JSON.stringify(review.findingSchema)) as object,
+    );
+    const finding = original.observations[0]!.finding;
+    expect(validateFinding(finding)).toBe(true);
+    expect(validateFinding({ ...finding, title: "" })).toBe(false);
+    expect(review).not.toHaveProperty("validate");
+    expect(review).not.toHaveProperty("findingIds");
+    for (const finding of assigned(review))
+      expect(finding.provenance).toHaveProperty(
+        "revision",
+        "synthetic-revision",
+      );
+    return answer(review);
   });
   expect(result.status).toBe("completed");
   expect(
@@ -275,7 +273,7 @@ test("records groups original observations and retrieved neighbors with unique r
 
 test("records honors explicit observation neighborhoods and handles empty/isolated inputs without reviews", async () => {
   for (const observations of [[], [record("a")]]) {
-    const result = await deduplicateRecords(
+    const result = await deduplicate(
       {
         version: 1,
         observations: [...observations, record("unused")],
@@ -284,11 +282,7 @@ test("records honors explicit observation neighborhoods and handles empty/isolat
           candidateObservationIds: [],
         })),
       },
-      {
-        reviewRunner: {
-          run: rejecting("No model call expected"),
-        },
-      },
+      rejecting("No model call expected"),
     );
     expect(result.status).toBe("completed");
     expect(result.groups).toHaveLength(observations.length);
@@ -308,13 +302,9 @@ test("candidate-only observations are grouped without becoming additional anchor
     ],
   };
   const requests: DeduplicationReviewRequest[] = [];
-  const result = await deduplicateRecords(data, {
-    reviewRunner: {
-      async run(review) {
-        requests.push(review);
-        return answer(review);
-      },
-    },
+  const result = await deduplicate(data, async (review) => {
+    requests.push(review);
+    return answer(review);
   });
   expect(result.status).toBe("completed");
   expect(
@@ -341,22 +331,14 @@ test("records retries in a new invocation preserve membership with fresh review 
       { observationId: "A", candidateObservationIds: ["D"] },
     ],
   };
-  const failed = await deduplicateRecords(data, {
-    reviewRunner: {
-      async run(review) {
-        requests.push(review);
-        throw new Error("Remote acceptance unknown");
-      },
-    },
+  const failed = await deduplicate(data, async (review) => {
+    requests.push(review);
+    throw new Error("Remote acceptance unknown");
   });
   expect(failed.status).toBe("unresolved");
-  const completed = await deduplicateRecords(data, {
-    reviewRunner: {
-      async run(review) {
-        requests.push(review);
-        return answer(review);
-      },
-    },
+  const completed = await deduplicate(data, async (review) => {
+    requests.push(review);
+    return answer(review);
   });
   expect(completed.status).toBe("completed");
   expect(requests).toHaveLength(3);
@@ -407,11 +389,7 @@ test.each([
       }
       return valid;
     });
-    const result = await deduplicateRecords(input(), {
-      reviewRunner: {
-        run: runMock,
-      },
-    });
+    const result = await deduplicate(input(), runMock);
     expect(result.status).toBe("unresolved");
     expect(result.groups).toEqual([]);
     expect(result.unresolved.map(({ observationId }) => observationId)).toEqual(
@@ -467,11 +445,10 @@ test("rejects invalid inputs before calling the host", async () => {
   ];
   for (const data of cases)
     await expect(
-      deduplicateRecords(data as DeduplicateRecordsInput, {
-        reviewRunner: {
-          run: rejecting("Host must not be called"),
-        },
-      }),
+      deduplicate(
+        data as DeduplicateRecordsInput,
+        rejecting("Host must not be called"),
+      ),
     ).rejects.toThrow();
 });
 
@@ -1024,23 +1001,19 @@ test.each(["screening", "pair-review"] as const)(
   async (stage) => {
     let refused = false;
     let reviewsAfterRefusal = 0;
-    const result = await deduplicateRecords(input(), {
-      reviewRunner: {
-        async run(review) {
-          if (refused) reviewsAfterRefusal++;
-          if (review.stage === stage) {
-            refused = true;
-            throw new DeduplicationReviewError({
-              stage,
-              model: review.model,
-              category: "refusal",
-              attempts: 1,
-              reason: "Synthetic review refusal.",
-            });
-          }
-          return answer(review);
-        },
-      },
+    const result = await deduplicate(input(), async (review) => {
+      if (refused) reviewsAfterRefusal++;
+      if (review.stage === stage) {
+        refused = true;
+        throw new DeduplicationReviewError({
+          stage,
+          model: review.model,
+          category: "refusal",
+          attempts: 1,
+          reason: "Synthetic review refusal.",
+        });
+      }
+      return answer(review);
     });
     expect(refused).toBe(true);
     expect(reviewsAfterRefusal).toBe(0);
@@ -1072,24 +1045,17 @@ test("records isolates each host review's finding schema", async () => {
   let previous: PropertyDescriptor | undefined;
   try {
     for (let invocation = 0; invocation < 2; invocation++) {
-      const result = await deduplicateRecords(data, {
-        reviewRunner: {
-          async run(review) {
-            const schema = review.findingSchema as FindingSchema;
-            pristine ??= structuredClone(schema);
-            expect(schema).toEqual(pristine);
-            requests.push(review);
-            if (annotated === undefined) {
-              annotated = schema.properties.title;
-              previous = Object.getOwnPropertyDescriptor(
-                annotated,
-                "description",
-              );
-              annotated["description"] = "Host-local adapter annotation.";
-            }
-            return answer(review);
-          },
-        },
+      const result = await deduplicate(data, async (review) => {
+        const schema = review.findingSchema as FindingSchema;
+        pristine ??= structuredClone(schema);
+        expect(schema).toEqual(pristine);
+        requests.push(review);
+        if (annotated === undefined) {
+          annotated = schema.properties.title;
+          previous = Object.getOwnPropertyDescriptor(annotated, "description");
+          annotated["description"] = "Host-local adapter annotation.";
+        }
+        return answer(review);
       });
       expect(result.status).toBe("completed");
       expect(

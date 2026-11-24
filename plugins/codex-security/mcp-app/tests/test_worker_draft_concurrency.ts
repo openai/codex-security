@@ -9,7 +9,7 @@ import { finding, scanId, workerDraft } from "./scan-draft-fixture.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
 const { createCodexSecurityArtifactWriterServer } = await importSource(
-  path.join(import.meta.dirname, "../artifact-writer-main.ts"),
+  "artifact-writer-main.ts",
 );
 
 async function worker(root: string, label: string) {

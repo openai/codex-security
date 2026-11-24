@@ -815,11 +815,7 @@ test("scales contradiction grouping with conflict neighbors instead of all clust
     undefined,
     metrics,
   );
-  expect(groups).toHaveLength(1);
-  expect(groups[0]!.size).toBe(count - 1);
-  expect(groups[0]!.has(ids[0]!) && groups[0]!.has(ids[count - 1]!)).toBe(
-    false,
-  );
+  expect(groups).toEqual([ids.slice(0, -1)]);
   expect(metrics.candidateEvaluations).toBeLessThan(count * samePairs.length);
   expect(metrics.conflictNeighborChecks).toBeLessThan(
     metrics.candidateEvaluations * 3,

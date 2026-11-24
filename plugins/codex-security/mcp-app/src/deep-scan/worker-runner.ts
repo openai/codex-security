@@ -61,6 +61,7 @@ type FinalAttemptStatus = "succeeded" | "failed" | "canceled";
 type WorkerAttemptOutcome =
   | {
       status: "validated";
+      result: ScanDraftInput;
       attempt: number;
       threadId?: string;
       finish: (status: FinalAttemptStatus) => Promise<void>;
@@ -70,7 +71,7 @@ type WorkerAttemptOutcome =
       error: Error;
       replaceableFailureKind?: DeepScanReplaceableFailureKind;
     }
-  | { status: "canceled" };
+  | { status: "canceled"; validated: boolean };
 
 /** Owns prompt rendering, retries, validation, and persistence for each worker. */
 export class DeepScanWorkerRunner {
@@ -85,7 +86,6 @@ export class DeepScanWorkerRunner {
     const workerRoot = join(artifacts.workersRoot, workerLabel);
     const artifactDir = join(workerRoot, "output");
     const promptPath = join(workerRoot, "prompt.md");
-    const promptRoot = join(workerRoot, "prompts");
     const resultPath = join(artifactDir, "result.json");
     await fs.mkdir(artifactDir, { recursive: true });
     const feedbackPath = join(
@@ -115,7 +115,7 @@ export class DeepScanWorkerRunner {
       feedback,
     );
     await writePrivateFile(promptPath, basePrompt);
-    await this.options.store.updateWorker({
+    const worker: DeepScanWorkerMutation = {
       id: workerId,
       scanId: run.scanId,
       kind: "discovery",
@@ -123,31 +123,17 @@ export class DeepScanWorkerRunner {
       promptPath,
       artifactDir,
       attempt: 1,
-    });
-    let discoveryResult: ScanDraftInput | undefined;
-    const outcome = await this.runWorkerWithRetries({
-      workerId,
-      workerLabel,
-      promptPath,
-      promptRoot,
-      artifactDir,
-      validate: async () => {
-        discoveryResult = await validateDiscoveryArtifacts(
-          artifacts,
-          resultPath,
-          run.scanId,
-          run,
-        );
-      },
-    });
-    if (!discoveryResult) {
-      await fs.rm(resultPath, { force: true });
-    }
-    if (outcome.status === "failed") {
-      return { ...outcome, workerId };
-    }
-    if (outcome.status === "canceled") {
-      return { status: "canceled", workerId };
+    };
+    await this.options.store.updateWorker(worker);
+    const outcome = await this.runAttempts(worker, workerLabel, resultPath);
+    if (outcome.status !== "validated") {
+      // Cancellation can arrive after validation. Preserve that completed artifact.
+      if (outcome.status === "failed" || !outcome.validated) {
+        await fs.rm(resultPath, { force: true });
+      }
+      return outcome.status === "failed"
+        ? { ...outcome, workerId }
+        : { status: "canceled", workerId };
     }
 
     let finalStatus: FinalAttemptStatus = "failed";
@@ -155,20 +141,12 @@ export class DeepScanWorkerRunner {
     try {
       if (this.options.signal.aborted) {
         finalStatus = "canceled";
-        await this.cancelAttempt(
-          { workerId, promptPath, artifactDir },
-          outcome.attempt,
-          outcome.threadId,
-        );
+        await this.cancelAttempt(worker, outcome.attempt, outcome.threadId);
         return { status: "canceled", workerId };
       }
       persisted = await this.options.store.updateWorker({
-        id: workerId,
-        scanId: run.scanId,
-        kind: "discovery",
+        ...worker,
         status: "succeeded",
-        promptPath,
-        artifactDir,
         attempt: outcome.attempt,
         threadId: outcome.threadId,
         resultManifestPath: resultPath,
@@ -207,41 +185,40 @@ export class DeepScanWorkerRunner {
       worker: {
         id: workerId,
         resultPath,
-        result: discoveryResult!,
+        result: outcome.result,
         attempt: persisted.attempt,
       },
     };
   }
 
-  private async runWorkerWithRetries(input: {
-    workerId: string;
-    workerLabel: string;
-    promptPath: string;
-    promptRoot: string;
-    artifactDir: string;
-    validate: () => Promise<void>;
-  }): Promise<WorkerAttemptOutcome> {
-    const { run, signal } = this.options;
+  private async runAttempts(
+    worker: DeepScanWorkerMutation,
+    workerLabel: string,
+    resultPath: string,
+  ): Promise<WorkerAttemptOutcome> {
+    const { artifacts, run, signal } = this.options;
+    const { id: workerId, scanId, kind, artifactDir, promptPath } = worker;
+    const identity = { scanId, workerId, kind };
     const maximumAttempts = this.options.retryDelaysMs.length + 1;
     let resumableThreadId: string | undefined;
     let continuationPrompt: string | undefined;
     let lastThreadId: string | undefined;
-    let executionPromptPath = input.promptPath;
+    let executionPromptPath = promptPath;
     for (let attempt = 1; ; attempt += 1) {
-      if (signal.aborted) {
-        return await this.cancelAttempt(input, attempt, lastThreadId);
-      }
+      let outcome: WorkerAttemptOutcome["status"] = "failed";
+      let draft: ScanDraftInput | undefined;
+      const cancel = async (threadId: string | undefined) => {
+        outcome = "canceled";
+        await this.cancelAttempt(worker, attempt, threadId);
+        return { status: "canceled", validated: Boolean(draft) } as const;
+      };
+      if (signal.aborted) return await cancel(lastThreadId);
       let validationStarted = false;
-      let validationCompleted = false;
       let activeThreadId = resumableThreadId;
       let terminalFailure: Promise<WorkerAttemptOutcome> | undefined;
       const baseMutation: DeepScanWorkerMutation = {
-        id: input.workerId,
-        scanId: run.scanId,
-        kind: "discovery",
+        ...worker,
         status: "running",
-        promptPath: input.promptPath,
-        artifactDir: input.artifactDir,
         attempt,
         threadId: resumableThreadId,
       };
@@ -251,14 +228,11 @@ export class DeepScanWorkerRunner {
       let attribution: WorkerAttribution = { attemptId };
       let startLogged = false;
       let finishedAt: number | undefined;
-      let outcome: "validated" | "failed" | "canceled" = "failed";
       const receipt: WorkerUsageReceipt = {
         schemaVersion: 1,
         source: "codex_sdk",
         usageScope: "thread_cumulative",
-        scanId: run.scanId,
-        workerId: input.workerId,
-        kind: "discovery",
+        ...identity,
         attemptId,
         attempt,
         resumed: resumableThreadId !== undefined,
@@ -273,9 +247,7 @@ export class DeepScanWorkerRunner {
         startLogged = true;
         this.log({
           event: "worker_started",
-          scanId: run.scanId,
-          workerId: input.workerId,
-          kind: "discovery",
+          ...identity,
           attempt,
           ...attribution,
           timestamp: receipt.startedAt,
@@ -296,9 +268,7 @@ export class DeepScanWorkerRunner {
         } catch (error) {
           this.log({
             event: "worker_usage_unavailable",
-            scanId: run.scanId,
-            workerId: input.workerId,
-            kind: "discovery",
+            ...identity,
             attempt,
             ...attribution,
             reason: `Could not retain worker usage: ${error instanceof Error ? error.message : String(error)}`,
@@ -315,9 +285,7 @@ export class DeepScanWorkerRunner {
         const finished = finishedAt ?? this.options.clock.now();
         this.log({
           event: "worker_finished",
-          scanId: run.scanId,
-          workerId: input.workerId,
-          kind: "discovery",
+          ...identity,
           attempt,
           ...attribution,
           ...(activeThreadId ? { threadId: activeThreadId } : {}),
@@ -338,7 +306,7 @@ export class DeepScanWorkerRunner {
           workerUsageDirectory: run.workerUsageDirectory,
           kind: "discovery",
           promptPath: executionPromptPath,
-          workingDirectory: input.artifactDir,
+          workingDirectory: artifactDir,
           subagents: run.config.subagents,
           signal,
           onNonRetryableError: (error) => {
@@ -362,11 +330,11 @@ export class DeepScanWorkerRunner {
               ? `${resumePrompt}\nApply the saved rubric when assigning severity.\n${JSON.stringify({ severityRubric: run.severityRubric })}`
               : resumePrompt,
           artifactContext: {
-            root: input.artifactDir,
+            root: artifactDir,
             layout: "worker",
             discoveryBoard: {
-              root: this.options.artifacts.peerNotesRoot,
-              author: input.workerLabel,
+              root: artifacts.peerNotesRoot,
+              author: workerLabel,
             },
           },
           onAttribution: (value) => {
@@ -390,9 +358,7 @@ export class DeepScanWorkerRunner {
             await persistUsage();
             this.log({
               event: "worker_thread_started",
-              scanId: run.scanId,
-              workerId: input.workerId,
-              kind: "discovery",
+              ...identity,
               attempt,
               threadId,
             });
@@ -404,37 +370,32 @@ export class DeepScanWorkerRunner {
         receipt.turnId = result.turnId ?? receipt.turnId;
         if (result.usage !== undefined) receipt.usage = result.usage;
         if (terminalFailure) return terminalFailure;
-        if (signal.aborted) {
-          outcome = "canceled";
-          return await this.cancelAttempt(input, attempt, activeThreadId);
-        }
+        if (signal.aborted) return await cancel(activeThreadId);
         await persistUsage();
         validationStarted = true;
-        try {
-          await input.validate();
-        } catch (validationError) {
+        // Keep the validation promise boundary so a pending abort can precede acceptance.
+        draft = await validateDiscoveryArtifacts(
+          artifacts,
+          resultPath,
+          scanId,
+          run,
+        ).catch((validationError) => {
           throw withWorkerDiagnostics(validationError, result.diagnostics);
-        }
-        validationCompleted = true;
-        if (signal.aborted) {
-          outcome = "canceled";
-          return await this.cancelAttempt(input, attempt, activeThreadId);
-        }
+        });
+        if (signal.aborted) return await cancel(activeThreadId);
         outcome = "validated";
         return {
           status: "validated",
+          result: draft,
           finish: finishAttempt,
           attempt,
-          threadId: result.threadId ?? activeThreadId,
+          threadId: activeThreadId,
         };
       } catch (error) {
         finishedAt = this.options.clock.now();
         if (confirmedOwnershipChange(error, run.scanId)) throw error;
         if (terminalFailure) return terminalFailure;
-        if (signal.aborted) {
-          outcome = "canceled";
-          return await this.cancelAttempt(input, attempt, activeThreadId);
-        }
+        if (signal.aborted) return await cancel(activeThreadId);
         const normalized = asError(error);
         const retryable = !(normalized instanceof DeepScanNonRetryableError);
         if (!retryable || attempt === maximumAttempts) {
@@ -470,9 +431,9 @@ export class DeepScanWorkerRunner {
         });
         if (
           validationStarted &&
-          !validationCompleted &&
+          !draft &&
           activeThreadId &&
-          isMissingWorkerResult(normalized, input.artifactDir)
+          isMissingWorkerResult(normalized, artifactDir)
         ) {
           // A missing result does not establish whether source review finished.
           // Resume the conversation to finish review or save blocked progress.
@@ -484,12 +445,13 @@ export class DeepScanWorkerRunner {
         } else {
           resumableThreadId = undefined;
           continuationPrompt = undefined;
-          await this.archiveWorkerAttempt(input.artifactDir, attempt);
-          if (validationStarted && !validationCompleted) {
+          await this.archiveWorkerAttempt(artifactDir, attempt);
+          if (validationStarted && !draft) {
             executionPromptPath = await writeValidationRetryPrompt({
-              basePromptPath: input.promptPath,
+              basePromptPath: promptPath,
               destinationPath: join(
-                input.promptRoot,
+                dirname(promptPath),
+                "prompts",
                 `attempt-${String(attempt + 1).padStart(2, "0")}.md`,
               ),
               failedAttempt: attempt,
@@ -504,9 +466,7 @@ export class DeepScanWorkerRunner {
         );
         this.log({
           event: "worker_retry_scheduled",
-          scanId: run.scanId,
-          workerId: input.workerId,
-          kind: "discovery",
+          ...identity,
           attempt,
           count: delayMs,
           reason: deepScanErrorMessage(normalized),
@@ -514,9 +474,7 @@ export class DeepScanWorkerRunner {
         try {
           await this.options.clock.sleep(delayMs, signal);
         } catch (sleepError) {
-          if (signal.aborted) {
-            return await this.cancelAttempt(input, attempt, activeThreadId);
-          }
+          if (signal.aborted) return await cancel(activeThreadId);
           throw sleepError;
         }
       } finally {
@@ -544,30 +502,22 @@ export class DeepScanWorkerRunner {
     );
   }
 
-  private async cancelAttempt(
-    input: Pick<
-      Parameters<DeepScanWorkerRunner["runWorkerWithRetries"]>[0],
-      "workerId" | "promptPath" | "artifactDir"
-    >,
+  private cancelAttempt(
+    worker: DeepScanWorkerMutation,
     attempt: number,
     threadId: string | undefined,
-  ): Promise<WorkerAttemptOutcome> {
+  ) {
     const coordinatorShutdown =
       this.options.signal.reason === "mcp_transport_closed";
-    await this.options.store.updateWorker({
-      id: input.workerId,
-      scanId: this.options.run.scanId,
-      kind: "discovery",
+    return this.options.store.updateWorker({
+      ...worker,
       status: "canceled",
-      promptPath: input.promptPath,
-      artifactDir: input.artifactDir,
       attempt,
       threadId,
       ...(coordinatorShutdown
         ? { error: "coordinator_shutdown: mcp_transport_closed" }
         : {}),
     });
-    return { status: "canceled" };
   }
 }
 
