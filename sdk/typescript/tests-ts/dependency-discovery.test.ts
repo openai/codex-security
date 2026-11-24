@@ -35,7 +35,7 @@ test("caller ownership and installed versions come from the same committed works
       );
       await writeFile(
         join(repo, dir, "main.js"),
-        "// entry point\nimport codec from 'sample-codec';\ncodec.decode('file');\n",
+        "// entry point\nimport codec\nfrom 'sample-codec';\ncodec.decode('file');\n",
       );
       if (service !== "unlocked") {
         entries[dir] = manifest;
@@ -55,6 +55,19 @@ test("caller ownership and installed versions come from the same committed works
       JSON.stringify({ lockfileVersion: 3, packages: entries }, null, 2),
     );
     await writeFile(join(repo, "Dockerfile"), "FROM node:22\n");
+    await writeFile(
+      join(repo, "apps/alpha/ambient.d.ts"),
+      "import { Codec } from 'sample-codec';",
+    );
+    await writeFile(
+      join(repo, "apps/alpha/types.ts"),
+      [
+        "// import { decode } from 'sample-codec';",
+        "const example = \"import codec from 'sample-codec'\";",
+        "import type { CodecOptions } from 'sample-codec';",
+        "export type { CodecOptions } from 'sample-codec';",
+      ].join("\n"),
+    );
     git("init", "--quiet");
     git("add", ".");
     git(
@@ -100,6 +113,10 @@ test("caller ownership and installed versions come from the same committed works
       ],
     });
     expect(result.revision).toBe(revision);
+    expect(result.sourceLeads).toEqual([
+      "apps/alpha/ambient.d.ts",
+      "apps/alpha/types.ts",
+    ]);
     expect(
       result.callers.map(({ path, line, version }) => [path, line, version]),
     ).toEqual([
@@ -163,7 +180,7 @@ test("Python pins and module aliases require scoped source evidence", async () =
       );
       await writeFile(
         join(repo, project, "main.py"),
-        "from decoder import load\nload('sample')\n",
+        "from decoder import (\n    load,\n)\nload('sample')\n",
       );
     }
     git("init", "--quiet");
@@ -255,90 +272,6 @@ test("reports a nested build-only package in the active caller boundary", async 
   }
 });
 
-test("discovers multi-line runtime callers while skipping type-only, commented, and string-only matches", async () => {
-  const repo = await mkdtemp(join(tmpdir(), "dependency-callers-"));
-  const git = (...args: string[]) =>
-    execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
-  try {
-    await mkdir(join(repo, "src"), { recursive: true });
-    await writeFile(
-      join(repo, "package.json"),
-      JSON.stringify({ dependencies: { [pkg.name]: "1.2.3" } }),
-    );
-    await writeFile(
-      join(repo, "src/runtime.ts"),
-      [
-        "import {",
-        "  type CodecOptions,",
-        "  decode,",
-        "} from 'sample-codec';",
-        "const lazy = require(",
-        "  'sample-codec/sub'",
-        ");",
-      ].join("\n") + "\n",
-    );
-    await writeFile(
-      join(repo, "src/types-only.ts"),
-      [
-        "// import { decode } from 'sample-codec';",
-        "const example = \"import codec from 'sample-codec'\";",
-        "import type { CodecOptions } from 'sample-codec';",
-        "import { type CodecResult as Result } from 'sample-codec';",
-        "export type { CodecOptions } from 'sample-codec';",
-      ].join("\n") + "\n",
-    );
-    await writeFile(join(repo, "requirements.txt"), "sample-image==2.3.4\n");
-    await writeFile(
-      join(repo, "src/worker.py"),
-      [
-        '"""',
-        "from sample_image import ignored_docstring_symbol",
-        '"""',
-        "# import sample_image",
-        "import os, sample_image as img",
-      ].join("\n") + "\n",
-    );
-    git("init", "--quiet");
-    git("add", ".");
-    git(
-      "-c",
-      "user.name=Fixture",
-      "-c",
-      "user.email=fixture@example.invalid",
-      "commit",
-      "--quiet",
-      "-m",
-      "Fixture",
-    );
-
-    const npmResult = await discoverDependencyRepository({
-      repository: repo,
-      package: pkg,
-      environment: { PATH: "" },
-    });
-    expect(npmResult.callers.map(({ path, line }) => [path, line])).toEqual([
-      ["src/runtime.ts", 1],
-      ["src/runtime.ts", 5],
-    ]);
-    expect(npmResult.sourceLeads).toEqual(["src/types-only.ts"]);
-
-    const pypiResult = await discoverDependencyRepository({
-      repository: repo,
-      package: { ecosystem: "PyPI", name: "sample-image" },
-      environment: { PATH: "" },
-    });
-    expect(
-      pypiResult.callers.map(({ path, line, version }) => [
-        path,
-        line,
-        version,
-      ]),
-    ).toEqual([["src/worker.py", 5, "2.3.4"]]);
-  } finally {
-    await rm(repo, { recursive: true, force: true });
-  }
-});
-
 test("extracts JavaScript, TypeScript, and Python import bindings across multi-line and aliased forms", () => {
   const tsRefs = sourceReferences(
     "src/service.ts",
@@ -423,11 +356,12 @@ test("preserves minified imports, template expressions, and escaped newlines", (
     'import{decode}from"sample-codec"',
     'const codec = require("sample-codec")',
     'const result = `raw require("sample-codec") ${require("sample-codec")}`',
-    'const data = import("sample-codec/data.json", { with: { type: "json" } })',
+    'const data = await import("sample-codec/data.json", { with: { type: "json" } })',
+    'const promise = import("sample-codec")',
     'type Options = import("sample-codec").Options',
   ].join("\r\n");
   expect(sourceReferences("test.ts", text, pkg, [])).toEqual({
-    lines: [3, 4, 5, 6],
+    lines: [3, 4, 5, 6, 7],
     bindings: ["decode", "codec", "data"],
   });
 });
@@ -453,4 +387,17 @@ test("keeps the runtime branch after a Python typing guard and skips unfinished 
     lines: [5],
     bindings: ["load"],
   });
+});
+
+test("a truncated literal ends at the newline without exposing its contents", () => {
+  const prefix = "'" + "\\'".repeat(512) + "; ";
+  for (const [path, ecosystem, statement] of [
+    ["x.py", "PyPI", "import codec"],
+    ["x.js", "npm", 'import "codec"'],
+  ] as const) {
+    const text = prefix + statement + "\n" + statement;
+    expect(
+      sourceReferences(path, text, { ecosystem, name: "codec" }, []).lines,
+    ).toEqual([2]);
+  }
 });

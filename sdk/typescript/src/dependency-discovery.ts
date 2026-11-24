@@ -115,9 +115,10 @@ function newlinesIn(value: string): string {
 // Only package string literals survive as "@". Template expressions stay
 // visible, since they can contain real calls to require() or import().
 function javascriptCode(text: string, pkg: string): string {
+  // Consume truncated literals too, so escaped quotes never restart the scan.
   const tokens =
-    /\/\/[^\n]*|\/\*[\s\S]*?(?:\*\/|$)|'(?:\\[\s\S]|[^'\\\n])*(?:'|$)|"(?:\\[\s\S]|[^"\\\n])*(?:"|$)|[\w$]+|=>|\+\+|--|\s+|[^\s]/gu;
-  const templateChunk = /(?:\\[\s\S]|[^`\\$]|\$(?!\{))*(?:`|\$\{|$)/uy;
+    /\/\/[^\n]*|\/\*[\s\S]*?(?:\*\/|$)|'(?:\\[\s\S]|[^'\\\n])*'?|"(?:\\[\s\S]|[^"\\\n])*"?|[\w$]+|=>|\+\+|--|\s+|[^\s]/gu;
+  const templateChunk = /(?:\\[\s\S]|[^`\\$]|\$(?!\{))*(?:`|\$\{)?/uy;
   const regexBody = /(?:\\.|\[(?:\\.|[^\]\\\n])*\]|[^/\\[\n])+\/[a-z]*/uy;
   const templateDepth: number[] = [];
   let braces = 0;
@@ -178,7 +179,7 @@ function javascriptCode(text: string, pkg: string): string {
 
 function pythonCode(text: string): string {
   const code = text.replace(
-    /#[^\n]*|'''(?:\\[\s\S]|(?!''')[^\\])*(?:'''|$)|"""(?:\\[\s\S]|(?!""")[^\\])*(?:"""|$)|'(?:\\[\s\S]|[^'\\\n])*'|"(?:\\[\s\S]|[^"\\\n])*"/gu,
+    /#[^\n]*|'''(?:\\[\s\S]|(?!''')[^\\])*(?:''')?|"""(?:\\[\s\S]|(?!""")[^\\])*(?:""")?|'(?:\\[\s\S]|[^'\\\n])*'?|"(?:\\[\s\S]|[^"\\\n])*"?/gu,
     (token) => " " + newlinesIn(token),
   );
   if (!/\b(?:from|import)[ \t]+typing(?:_extensions)?\b/u.test(code))
@@ -198,27 +199,23 @@ function pythonCode(text: string): string {
     .join("\n");
 }
 
-function isInlineTypeSpecifier(specifier: string): boolean {
-  return /^type\s+(?!as\s+[\w$]+$)(?:[\w$]+|"[^"]*")(?:\s+as\s+[\w$]+)?$/u.test(
-    specifier,
-  );
+function importNames(clause: string) {
+  return clause
+    .replace(/[{}]/gu, "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
 }
 
-function destructuredBindings(pattern: string): string[] {
-  const targets = pattern.startsWith("{")
-    ? pattern
-        .slice(1, -1)
-        .split(",")
-        .map((part) =>
-          part
-            .split("=", 1)[0]!
-            .split(":")
-            .at(-1)!
-            .trim()
-            .replace(/^\.\.\.\s*/u, ""),
-        )
-    : [pattern];
-  return targets.filter((target) => /^[A-Za-z_$][\w$]*$/u.test(target));
+// Both an ES import and a destructured require can bind an alias.
+function localNames(names: string[]) {
+  return names.flatMap((name) => {
+    const binding = name.split("=", 1)[0]!.trim();
+    const local = /(?:^|\bas\s+|:\s*|\.\.\.\s*)([A-Za-z_$][\w$]*)$/u.exec(
+      binding,
+    );
+    return local ? [local[1]!] : [];
+  });
 }
 
 /** @internal */
@@ -229,7 +226,10 @@ export function sourceReferences(
   symbols: readonly string[],
 ) {
   const python = path.endsWith(".py") && pkg.ecosystem === "PyPI";
-  const javascript = /\.[cm]?[jt]sx?$/iu.test(path) && pkg.ecosystem === "npm";
+  const javascript =
+    pkg.ecosystem === "npm" &&
+    /\.[cm]?[jt]sx?$/iu.test(path) &&
+    !/\.d\.[cm]?ts$/iu.test(path);
   if (!python && !javascript) return { lines: [], bindings: [] };
 
   const matches: { offset: number; bindings: string[] }[] = [];
@@ -274,42 +274,38 @@ export function sourceReferences(
     )) {
       const clause = match[2] ?? "";
       if (/^type(?:\s+[\w$]|\s*[{*])/u.test(clause)) continue;
-      const specifiers = clause
-        .replace(/[{}]/gu, "")
-        .split(",")
-        .map((s) => s.trim())
-        .filter(Boolean);
-      const names = specifiers.filter((s) => !isInlineTypeSpecifier(s));
-      if (specifiers.length && !names.length) continue;
-      const locals = names.map((s) => s.replace(/^.*?\bas\s+/su, ""));
+      const names = importNames(clause);
+      // "type Foo" is erased, but "type as foo" imports a value named type.
+      const values = names.filter(
+        (name) => !/^type\s/u.test(name) || /^type\s+as\s+[\w$]+$/u.test(name),
+      );
+      if (names.length && !values.length) continue;
       matches.push({
         offset: match.index,
-        bindings:
-          match[1] === "export"
-            ? []
-            : locals.filter((s) => /^[A-Za-z_$][\w$]*$/u.test(s)),
+        bindings: match[1] === "export" ? [] : localNames(values),
       });
     }
 
-    // A call can stand alone or initialize a declaration (including a
-    // comma-separated binding). A type alias never executes its import.
+    const declaration =
+      /((?<![.$\w])(?:import\s+type|type|const|let|var|import)\b|,)\s*([\w$]+|\{[^{};()]*\})\s*=\s*(?:\(\s*)?(?:(await|typeof)\s+)?/u;
+    const call =
+      /(?<![.$\w])(require|import)\s*\(\s*"@"\s*(?:(?:,\s*)?\)(?:\s*\))?(?:\s*\.\s*[\w$]+)?|,)/u;
+    const loads = new RegExp(`(?:${declaration.source})?${call.source}`, "gu");
     const chained = /\s*[.(\[]/uy;
-    for (const match of sanitized.matchAll(
-      /(?:((?<![.$\w])(?:import\s+type|type|const|let|var|import)\b|,)\s*([\w$]+|\{[^{};()]*\})\s*=\s*(?:\(\s*)?(?:(await|typeof)\s+)?)?(?<![.$\w])(?:require|import)\s*\(\s*"@"\s*(?:,\s*)?(?:\)(?:\s*\))?(?:\s*\.\s*[\w$]+)?|(?=\{))/gu,
-    )) {
-      const [, declaration, target, operator] = match;
-      if (declaration?.endsWith("type")) continue;
-      // A binding of require("pkg").fn() is a call result, not the import.
+    for (const match of sanitized.matchAll(loads)) {
+      const [, kind, target, operator, load] = match;
+      if (kind?.endsWith("type")) continue;
+      // Track the imported value, not a promise or the result of calling it.
       chained.lastIndex = match.index + match[0].length;
+      const binds =
+        target &&
+        operator !== "typeof" &&
+        (load === "require" || operator === "await") &&
+        !chained.test(sanitized);
       matches.push({
         offset:
-          declaration === ","
-            ? match.index + match[0].indexOf(target!)
-            : match.index,
-        bindings:
-          target && operator !== "typeof" && !chained.test(sanitized)
-            ? destructuredBindings(target)
-            : [],
+          kind === "," ? match.index + match[0].indexOf(target!) : match.index,
+        bindings: binds ? localNames(importNames(target)) : [],
       });
     }
   }
