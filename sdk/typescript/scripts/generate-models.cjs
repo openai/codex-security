@@ -92,6 +92,7 @@ generate().then((models) => {
     "workbench-arguments",
     "executable-path",
     "contract-values",
+    "native-policy-refusals",
     "windows-path",
   ].map((name) => [
     `src/${name}.ts`,

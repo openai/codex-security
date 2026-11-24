@@ -1,22 +1,9 @@
+import { CYBERSECURITY_POLICY_REFUSAL_MESSAGES } from "../native-policy-refusals.js";
 import { asRecord } from "../record.js";
 import type { DeepScanRunState } from "./types.js";
 
 const STALE_COORDINATOR_GENERATION_MESSAGE =
   "Deep Scan coordinator lease belongs to a newer generation.";
-
-// The SDK currently exposes only the message for turn errors. Match known
-// terminal messages exactly so repository output embedded in another error
-// cannot be mistaken for a permanent failure.
-const CYBERSECURITY_POLICY_REFUSAL_MESSAGES = new Set([
-  "Request blocked by cyberPolicy.",
-  "Request blocked by a safety policy violation.",
-  "This content was flagged for possible cybersecurity risk.",
-  "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber",
-  "This content was flagged for potentially high-risk cyber activity.",
-  "This request has been flagged for possible cybersecurity risk.",
-  "This request has been flagged for potentially high-risk cyber activity.",
-  "This request was blocked due to a misalignment policy violation.",
-]);
 
 /** A confirmed terminal worker failure that stops the scan without retries. */
 export class DeepScanNonRetryableError extends Error {

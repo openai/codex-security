@@ -4438,59 +4438,42 @@ if __name__ == "__main__":
   });
 
   test.each([
-    {
-      message: "This content was flagged for possible cybersecurity risk.",
-      errorFirst: false,
-    },
-    {
-      message:
-        "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. To get authorized for security work, join the Trusted Access for Cyber program: https://chatgpt.com/cyber",
-      errorFirst: true,
-    },
-    {
-      message:
-        "This request was blocked due to a misalignment policy violation.",
-      errorFirst: true,
-    },
-  ])(
-    "records the Standard phase and stops on refusal: $message",
-    async ({ message, errorFirst }) => {
+    ["This content was flagged for possible cybersecurity risk.", false, 1],
+    [
+      "This request was blocked due to a misalignment policy violation.",
+      true,
+      1,
+    ],
+    [
+      "Command failed: This content was flagged for possible cybersecurity risk.",
+      true,
+      2,
+    ],
+  ] as const)(
+    "skips the Standard follow-up only for a native refusal: %s",
+    async (message, errorFirst, turns) => {
       const { repository, codexHome, scanDir } = await scanDirectories();
       async function* events(): AsyncGenerator<ThreadEvent> {
         yield { type: "thread.started", thread_id: "thread-1" };
         yield { type: "turn.started" };
-        yield {
-          type: "item.completed",
-          item: {
-            id: "worker-1",
-            type: "agent_message",
-            text: 'CODEX_SECURITY_WORKER_STATUS {"phase":"validation","planned":1,"started":1}',
-          },
-        };
         if (errorFirst) yield { type: "error", message };
         yield { type: "turn.failed", error: { message } };
       }
       const runStreamed = mock(async () => ({ events: events() }));
-      const calls: (readonly string[])[] = [];
+      let failure: readonly string[] | undefined;
       await using client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         createCodex: codexFactory(runStreamed),
         runWorkbench: async (_options, args, input) => {
-          if (args[0] === "update-progress" || args[0] === "fail-scan")
-            calls.push(args);
+          if (args[0] === "fail-scan") failure = args;
           return mockWorkbench(args, input);
         },
       });
       await expect(
         client.run(repository, { postScanPrompt: "Summarize the scan." }),
       ).rejects.toThrow(message);
-      expect(runStreamed).toHaveBeenCalledTimes(1);
-      expect(calls.map(([command]) => command)).toEqual([
-        "update-progress",
-        "fail-scan",
-      ]);
-      expect(calls[0]).toContain("validation");
-      expect(calls[1]).toContain(`--message=${message}`);
+      expect(runStreamed).toHaveBeenCalledTimes(turns);
+      expect(failure).toContain(`--message=${message}`);
     },
   );
 
