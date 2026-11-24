@@ -112,7 +112,6 @@ import {
   SCAN_AUTH_MODES,
   scanAuthentication,
   runtimeScanAuthentication,
-  selectedScanEnvironment,
   type DeepScanOptions,
   type ScanAuthMode,
   type ScanAuthentication,
@@ -2042,7 +2041,7 @@ async function runCodexSkillProcess(
         apiKey = environmentValue(selected, authentication.source)?.trim();
         // Match the SDK's key selection for native and nested plugin workers.
         selected = {
-          ...selectedScanEnvironment(selected, "chatgpt"),
+          ...withoutOpenAiApiKeys(selected),
           CODEX_API_KEY: apiKey,
         };
         if (output.appServer !== undefined) {

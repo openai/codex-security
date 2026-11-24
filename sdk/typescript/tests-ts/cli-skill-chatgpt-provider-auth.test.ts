@@ -118,6 +118,25 @@ describe("skill authentication configuration", () => {
     }
   });
 
+  test("ChatGPT gateways retain an explicitly mapped Standard Compute header", () => {
+    const environment = { STANDARDCOMPUTE_API_KEY: "synthetic-header" };
+    const skill = resolveSkillAuthentication(
+      { command: "patch", auth: "chatgpt" },
+      environment,
+      {
+        model_provider: "gateway",
+        model_providers: {
+          gateway: {
+            requires_openai_auth: true,
+            env_http_headers: { "X-Synthetic": "STANDARDCOMPUTE_API_KEY" },
+          },
+        },
+      },
+    );
+    expect(skill.requiresOpenAiAuth).toBe(true);
+    expect(skill.environment).toEqual(environment);
+  });
+
   test.each(
     (["override", "ambient", "profile"] as const).flatMap((source) =>
       [true, false, undefined].flatMap((requiresOpenAiAuth) =>

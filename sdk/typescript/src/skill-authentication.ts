@@ -103,7 +103,7 @@ export function resolveSkillAuthentication(
     authentication.method === "command" ? "chatgpt" : options.auth,
     provider,
     preset ? providerEnvKey : undefined,
-    explicitChatgpt && !commandAuth ? undefined : config,
+    config,
   );
   if (
     explicitChatgpt &&
