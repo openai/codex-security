@@ -26,6 +26,7 @@ import {
 import { capture, dependencies } from "./cli-fixtures.js";
 import { git } from "./git-fixture.js";
 import { createCliTest } from "./support/cli-run.js";
+import { requestMetadata } from "./support/request-metadata.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
 const cve = "CVE-2099-0001";
@@ -470,6 +471,12 @@ for (const [label, bindings, sinkFrames, ruledOut] of [
   ["unattributed version", [{ version: "2.1.0" }], [0], false],
   ["empty frame list", [{ version: "2.1.0", frameIndices: [] }], [0], false],
   ["queried wrapper only", [fixedWrapper], [0], false],
+  [
+    "affected prerelease",
+    [{ ...affectedSink, version: "1.5.0-beta.1" }],
+    [0],
+    false,
+  ],
   ["conflicting sink versions", [fixedSink, affectedSink], [0], false],
   ["fixed sink and affected wrapper", [fixedSink, affectedWrapper], [0], true],
   ["partially covered sinks", [fixedSink], [0, 1], false],
@@ -533,7 +540,11 @@ for (const sourceBound of [true, false]) {
   });
 }
 
-for (const version of ["1.5.0", "2.1.0"]) {
+for (const [version, affected] of [
+  ["1.5.0", true],
+  ["1.5.0-beta.1", true],
+  ["2.1.0", false],
+] as const) {
   test("potential verdict with only a build selecting " + version, async () => {
     await using dir = await scopedTemporaryDirectory("stack-configured-");
     const source = `import { decode } from "npm:sample-codec@${version}";\nexport function request(bytes) { return decode(bytes); }\n`;
@@ -570,7 +581,7 @@ for (const version of ["1.5.0", "2.1.0"]) {
       remainingQuestions: ["Which build ran?"],
     };
     const result = call("record-assessments", { items: [item] });
-    if (version === "1.5.0") {
+    if (affected) {
       await result;
       expect(await call("finalize")).toMatchObject({ verdict });
     } else {
@@ -701,6 +712,10 @@ async function reviewedStackCheck(
     async onCodex(argv, out, _env, prompt) {
       calls++;
       expect(argv[0]).toBe("exec");
+      expect(requestMetadata(argv)).toMatchObject({
+        codex_security_surface: "cli",
+        codex_security_command: "exploitability check",
+      });
       expect(argv).toContain("--ignore-user-config");
       expect(argv).toContain("mcp_servers={}");
       expect(out?.investigationServers).toEqual({});

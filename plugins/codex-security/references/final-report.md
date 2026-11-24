@@ -8,6 +8,8 @@ Use the scan runtime's checkpoint writer and completion owner. Preserve authorit
 
 Completion validates existing artifacts; it does not perform missing phases or create an absent draft. Do not claim completion or finish an existing scan goal until finalization succeeds and the generated report exists. No new goal is required by this reference.
 
+If completion includes supplemental `validation`, link its report and summarize its conclusions separately from the sealed source findings. An unavailable provider does not invalidate the completed source scan.
+
 ## Finding Semantics
 
 Use `schemas/tools/scan-draft.schema.json` for new drafts and `finding-detail-fields.md` for rich fields. Supply:

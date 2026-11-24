@@ -116,7 +116,7 @@ const escapes: Record<string, string> = {
   "'": "&#39;",
   "\r": "&#13;",
 };
-const escapeHtml = (text: string) =>
+export const escapeHtml = (text: string) =>
   text.replace(/[&<>"'\r]/gu, (character) => escapes[character]!);
 
 /** Match an explicitly reported expression once, in the original text before escaping. */

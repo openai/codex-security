@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
+import type { ExternalImportTarget } from "../src/external-import-contract.js";
 import {
   blackDuckReportRepositories,
   normalizeBlackDuckFindings,
@@ -14,6 +15,9 @@ import {
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
 const repository = "https://vcs.example.test/team/application";
+
+const normalize = (input: unknown, target?: ExternalImportTarget) =>
+  normalizeBlackDuckFindings(input, repository, target);
 
 function retainedUrl(
   source_data: Record<string, unknown> | undefined,
@@ -54,11 +58,9 @@ test("retains the complete BOM row, project version and caller's repository, not
     appliedFilters: ["ignored:true"],
   };
   const original = structuredClone(row);
-  const result = normalizeBlackDuckFindings(input, repository);
-  expect(result).toEqual(normalizeBlackDuckFindings([row], repository));
-  expect(result).toEqual(
-    normalizeBlackDuckFindings(input, repository, "local"),
-  );
+  const result = normalize(input);
+  expect(result).toEqual(normalize([row]));
+  expect(result).toEqual(normalize(input, "local"));
   expect(result.excluded).toEqual([]);
   const evidence = result.findings[0]!.evidence;
   expect(evidence).toMatchObject({
@@ -95,7 +97,7 @@ test("retains the complete BOM row, project version and caller's repository, not
 
 test("replay keeps native occurrence identity when package coordinates and advisory aliases change", () => {
   const row = blackDuckBomRow();
-  const original = normalizeBlackDuckFindings([row], repository).findings[0]!;
+  const original = normalize([row]).findings[0]!;
   expect(original.evidence.packages).toMatchObject([
     { name: "example:library", ecosystem: "maven", installed_version: "1.0" },
   ]);
@@ -109,7 +111,7 @@ test("replay keeps native occurrence identity when package coordinates and advis
       relatedVulnerability: row.vulnerabilityWithRemediation.vulnerabilityName,
     },
   };
-  const replay = normalizeBlackDuckFindings([updated], repository).findings[0]!;
+  const replay = normalize([updated]).findings[0]!;
   expect(replay.source_finding_id).toBe(original.source_finding_id);
   expect(replay.evidence.advisory_ids).toEqual(["BDSA-2099-0001"]);
   expect(replay.evidence.packages).toMatchObject([
@@ -120,10 +122,7 @@ test("replay keeps native occurrence identity when package coordinates and advis
       ...updated,
       packageUrl: `pkg:npm/${scope}/other@3.0?tag=preview#dist`,
     };
-    expect(
-      normalizeBlackDuckFindings([purl], repository).findings[0]!.evidence
-        .packages,
-    ).toMatchObject([
+    expect(normalize([purl]).findings[0]!.evidence.packages).toMatchObject([
       { name: "@example/other", ecosystem: "npm", installed_version: "3.0" },
     ]);
   }
@@ -132,7 +131,7 @@ test("replay keeps native occurrence identity when package coordinates and advis
     componentVersionOriginName: "custom",
     componentVersionOriginId: "opaque",
   };
-  const finding = normalizeBlackDuckFindings([opaque], repository).findings[0]!;
+  const finding = normalize([opaque]).findings[0]!;
   expect(finding.source_finding_id).toBe(original.source_finding_id);
   expect(finding.evidence.packages).toEqual([]);
   expect(finding.evidence.source_data?.["row"]).toEqual(opaque);
@@ -146,7 +145,7 @@ test("keeps GitHub package coordinates separate from the repository that was sca
     packageUrl: "pkg:github/LibraryOrg/Library@release%2Fv1.0",
   };
   for (const target of ["local", "cloud"] as const) {
-    const current = normalizeBlackDuckFindings([row], repository, target);
+    const current = normalize([row], target);
     expect(current.excluded).toEqual([]);
     expect(current.findings[0]).toMatchObject({
       evidence: {
@@ -162,15 +161,14 @@ test("keeps GitHub package coordinates separate from the repository that was sca
     });
   }
   row.packageUrl = "pkg:github/LibraryOrg/Library@" + "v".repeat(513);
-  const bounded = normalizeBlackDuckFindings([row], repository);
+  const bounded = normalize([row]);
   expect(bounded.findings[0]!.evidence.source_data?.["row"]).toEqual(row);
 });
 
 test("uses the full generic package path and keeps the origin fallback for an invalid namespace", () => {
   const row = blackDuckBomRow();
   const packages = (packageUrl: string) =>
-    normalizeBlackDuckFindings([{ ...row, packageUrl }], repository)
-      .findings[0]!.evidence.packages;
+    normalize([{ ...row, packageUrl }]).findings[0]!.evidence.packages;
   expect(packages("pkg:generic/tools/example/library@2.0")).toMatchObject([
     {
       name: "tools/example/library",
@@ -193,8 +191,7 @@ test("uses the full generic package path and keeps the origin fallback for an in
 test("uses the matching native coordinate for a versionless package URL", () => {
   const row = { ...blackDuckBomRow(), componentVersionName: "display label" };
   const packages = (packageUrl: string) =>
-    normalizeBlackDuckFindings([{ ...row, packageUrl }], repository)
-      .findings[0]!.evidence.packages;
+    normalize([{ ...row, packageUrl }]).findings[0]!.evidence.packages;
   expect(packages("pkg:maven/example/library")).toMatchObject([
     { name: "example:library", installed_version: "1.0" },
   ]);
@@ -209,69 +206,54 @@ test("adding or omitting an unrelated row and changing collection paging metadat
   const report = blackDuckBomReport([row, other]);
   report._meta.href += "?offset=0&limit=250";
   for (const target of ["cloud", "local"] as const) {
-    const retained = normalizeBlackDuckFindings([row], repository, target)
-      .findings[0];
-    expect(
-      normalizeBlackDuckFindings(report, repository, target).findings[0],
-    ).toEqual(retained);
-    expect(
-      normalizeBlackDuckFindings(blackDuckBomReport([row]), repository, target)
-        .findings[0],
-    ).toEqual(retained);
+    const retained = normalize([row], target).findings[0];
+    expect(normalize(report, target).findings[0]).toEqual(retained);
+    expect(normalize(blackDuckBomReport([row]), target).findings[0]).toEqual(
+      retained,
+    );
   }
 });
 
 test("only a complete project-version collection can establish an empty selection", () => {
   const empty = blackDuckBomReport([]);
-  expect(normalizeBlackDuckFindings(empty, repository)).toEqual({
+  expect(normalize(empty)).toEqual({
     read: 0,
     findings: [],
     excluded: [],
   });
   for (const totalCount of [5, -1, "0", null, undefined])
-    expect(() =>
-      normalizeBlackDuckFindings({ ...empty, totalCount }, repository),
-    ).toThrow(/totalCount/);
+    expect(() => normalize({ ...empty, totalCount })).toThrow(/totalCount/);
   for (const input of [
     [],
     {},
     { items: [], totalCount: 0 },
     { scanStatus: "SUCCESS" },
   ])
-    expect(() => normalizeBlackDuckFindings(input, repository)).toThrow();
+    expect(() => normalize(input)).toThrow();
   for (const suffix of ["?offset=1", "?offset=0&offset=3"])
     expect(() =>
-      normalizeBlackDuckFindings(
-        { ...empty, _meta: { href: empty._meta.href + suffix } },
-        repository,
-      ),
+      normalize({ ...empty, _meta: { href: empty._meta.href + suffix } }),
     ).toThrow(/page/);
   for (const rel of ["next", "prev"])
     expect(() =>
-      normalizeBlackDuckFindings(
-        {
-          ...empty,
-          _meta: {
-            ...empty._meta,
-            links: [{ rel, href: "https://elsewhere.example.test/page" }],
-          },
-        },
-        repository,
-      ),
-    ).toThrow(/page/);
-  expect(() =>
-    normalizeBlackDuckFindings(
-      {
+      normalize({
         ...empty,
         _meta: {
-          href: empty._meta.href.replace(
-            "vulnerable-bom-components",
-            "components",
-          ),
+          ...empty._meta,
+          links: [{ rel, href: "https://elsewhere.example.test/page" }],
         },
+      }),
+    ).toThrow(/page/);
+  expect(() =>
+    normalize({
+      ...empty,
+      _meta: {
+        href: empty._meta.href.replace(
+          "vulnerable-bom-components",
+          "components",
+        ),
       },
-      repository,
-    ),
+    }),
   ).toThrow(/vulnerable-bom-components/);
 });
 
@@ -289,15 +271,12 @@ test("selected array replay keeps distinct advisories, origins and sources; evid
   alternateOrigin._meta.links[0]!.href =
     alternateOrigin._meta.links[0]!.href.replace("origin-a", "origin-b");
   const rows = [first, second, alternateSource, alternateOrigin];
-  const result = normalizeBlackDuckFindings(
-    blackDuckBomReport(rows),
-    repository,
-  );
+  const result = normalize(blackDuckBomReport(rows));
   const ids = result.findings.map((finding) => finding.source_finding_id);
   expect(new Set(ids).size).toBe(4);
   first.vulnerabilityWithRemediation.severity = "LOW";
   first.vulnerabilityWithRemediation.remediationStatus = "IGNORED";
-  const selection = normalizeBlackDuckFindings(rows.toReversed(), repository);
+  const selection = normalize(rows.toReversed());
   expect(
     selection.findings.map((finding) => finding.source_finding_id),
   ).toEqual(ids.toReversed());
@@ -305,17 +284,11 @@ test("selected array replay keeps distinct advisories, origins and sources; evid
     selection.findings.map(({ evidence }) => evidence.source_data?.["row"]),
   ).toEqual(rows.toReversed());
   expect(selection.findings.at(-1)!.evidence.severity).toBe("low");
-  const duplicated = normalizeBlackDuckFindings(
-    [first, second, first],
-    repository,
-  );
+  const duplicated = normalize([first, second, first]);
   expect(duplicated.findings).toHaveLength(1);
-  expect(() =>
-    normalizeBlackDuckFindings(
-      blackDuckBomReport([first, second, first]),
-      repository,
-    ),
-  ).toThrow(/pages may overlap/i);
+  expect(() => normalize(blackDuckBomReport([first, second, first]))).toThrow(
+    /pages may overlap/i,
+  );
   expect(
     duplicated.excluded.map(({ position, source_finding_id }) => [
       position,
@@ -332,14 +305,9 @@ test("rejects overlapping complete pages even when a repeated row has no occurre
   const incomplete = { ...row, _meta: { links: [] } };
   const reversed = Object.fromEntries(Object.entries(incomplete).reverse());
   const report = blackDuckBomReport([row, incomplete]);
-  expect(normalizeBlackDuckFindings(report, repository).excluded).toHaveLength(
-    1,
-  );
+  expect(normalize(report).excluded).toHaveLength(1);
   expect(() =>
-    normalizeBlackDuckFindings(
-      { ...report, totalCount: 3, items: [...report.items, reversed] },
-      repository,
-    ),
+    normalize({ ...report, totalCount: 3, items: [...report.items, reversed] }),
   ).toThrow(/pages may overlap/);
 });
 
@@ -373,68 +341,51 @@ test("collection and every selected occurrence must identify the same server, pr
       [row, other],
       [other, row],
     ])
-      expect(() => normalizeBlackDuckFindings(input, repository)).toThrow(
-        /same project version/,
-      );
+      expect(() => normalize(input)).toThrow(/same project version/);
   }
   const envelope = blackDuckBomReport([row]);
   envelope._meta.href = envelope._meta.href.replace("/projects/", "/project/");
-  expect(
-    normalizeBlackDuckFindings(envelope, repository).findings[0]!
-      .source_finding_id,
-  ).toBe(
-    normalizeBlackDuckFindings([row], repository).findings[0]!
-      .source_finding_id,
+  expect(normalize(envelope).findings[0]!.source_finding_id).toBe(
+    normalize([row]).findings[0]!.source_finding_id,
   );
   const origin = {
     rel: "vulnerabilities",
     href: `${row.componentVersion}/origin/origin-a/vulnerabilities`,
   };
   const unscoped = { ...row, _meta: { links: [origin] } };
-  expect(() => normalizeBlackDuckFindings([row, unscoped], repository)).toThrow(
-    /Each selected/,
-  );
+  expect(() => normalize([row, unscoped])).toThrow(/Each selected/);
   expect(
-    normalizeBlackDuckFindings(blackDuckBomReport([unscoped]), repository)
-      .findings[0]!.source_finding_id,
-  ).toBe(
-    normalizeBlackDuckFindings([row], repository).findings[0]!
-      .source_finding_id,
-  );
+    normalize(blackDuckBomReport([unscoped])).findings[0]!.source_finding_id,
+  ).toBe(normalize([row]).findings[0]!.source_finding_id);
   row._meta.links.push({
     ...origin,
     href: origin.href.replace("origin-a", "origin-b"),
   });
-  expect(
-    normalizeBlackDuckFindings([row], repository).excluded[0]!.reason,
-  ).toMatch(/unambiguous/);
+  expect(normalize([row]).excluded[0]!.reason).toMatch(/unambiguous/);
 });
 
 test("invalid components and non-vulnerability rows are diagnosed without inventing occurrences", () => {
   const row = blackDuckBomRow();
   const report = blackDuckBomReport();
   const noOrigin = { ...row, _meta: { links: [] } };
-  const result = normalizeBlackDuckFindings(
-    {
-      ...report,
-      items: [
-        row,
-        { license: {} },
-        { policyStatus: "IN_VIOLATION" },
-        {
-          ...row,
-          componentVersion: row.componentVersion.replace(
-            "component-a",
-            "component-b",
-          ),
-        },
-        noOrigin,
-        { ...row, _meta: { links: null } },
-      ],
-      totalCount: 6,
-    },
-    repository,
-  );
+  const result = normalize({
+    ...report,
+    items: [
+      row,
+      { license: {} },
+      { policyStatus: "IN_VIOLATION" },
+      {
+        ...row,
+        componentVersion: row.componentVersion.replace(
+          "component-a",
+          "component-b",
+        ),
+      },
+      noOrigin,
+      { ...row, _meta: { links: null } },
+    ],
+    totalCount: 6,
+  });
   expect(result.findings).toHaveLength(1);
   expect(result.excluded.map(({ position }) => position)).toEqual([
     2, 3, 4, 5, 6,
@@ -448,21 +399,15 @@ test("invalid components and non-vulnerability rows are diagnosed without invent
   ]);
   const other = blackDuckBomRow(undefined, "release-b");
   expect(() =>
-    normalizeBlackDuckFindings(
-      {
-        ...report,
-        items: [{ ...other, _meta: { links: [null, ...other._meta.links] } }],
-      },
-      repository,
-    ),
+    normalize({
+      ...report,
+      items: [{ ...other, _meta: { links: [null, ...other._meta.links] } }],
+    }),
   ).toThrow(/same project version/);
   const large = { ...row, extra: "x".repeat(270_000) };
-  expect(normalizeBlackDuckFindings([large], repository).excluded).toHaveLength(
-    1,
-  );
+  expect(normalize([large]).excluded).toHaveLength(1);
   expect(
-    normalizeBlackDuckFindings([large], repository, "local").findings[0]!
-      .evidence.source_data?.["row"],
+    normalize([large], "local").findings[0]!.evidence.source_data?.["row"],
   ).toEqual(large);
 });
 
@@ -538,16 +483,14 @@ test("accepts a nested repository URL and retains it independently of the mutabl
     }),
   ).toThrow(/same project version/);
   row.vulnerabilityWithRemediation.source = "UNRECOGNIZED";
-  expect(
-    normalizeBlackDuckFindings([row], repository).excluded[0]!.reason,
-  ).toMatch(/advisory source/);
+  expect(normalize([row]).excluded[0]!.reason).toMatch(/advisory source/);
 });
 
 test("normalized input cannot relabel one native occurrence with another finding's ID", () => {
-  const [first, second] = normalizeBlackDuckFindings(
-    [blackDuckBomRow(), blackDuckBomRow("BDSA-2099-0002")],
-    repository,
-  ).findings;
+  const [first, second] = normalize([
+    blackDuckBomRow(),
+    blackDuckBomRow("BDSA-2099-0002"),
+  ]).findings;
   const data = first!.evidence.source_data;
   expect(retainedUrl(data, first!.source_finding_id)).toBe(repository);
   expect(() => retainedUrl(data, second!.source_finding_id)).toThrow(
@@ -565,7 +508,7 @@ test("reads JSON and gzip by content and rejects a truncated collection in eithe
   await using directory = await scopedTemporaryDirectory("blackduck-bom-");
   const path = join(directory.path, "report");
   const items = [blackDuckBomRow(), blackDuckBomRow("BDSA-2099-0002")];
-  const expected = normalizeBlackDuckFindings(items, repository);
+  const expected = normalize(items);
   for (const bytes of [
     Buffer.from(JSON.stringify(items)),
     gzipSync(JSON.stringify(items)),
@@ -593,11 +536,11 @@ test("checks the component even when a vulnerabilities link omits the origin", (
     href: row.componentVersion + "/vulnerabilities",
   };
   row._meta.links.push(link);
-  expect(normalizeBlackDuckFindings([row], repository).excluded).toEqual([]);
+  expect(normalize([row]).excluded).toEqual([]);
   link.href = link.href.replace("component-a", "component-b");
-  expect(
-    normalizeBlackDuckFindings([row], repository).excluded[0]!.reason,
-  ).toMatch(/contradicts componentVersion/);
+  expect(normalize([row]).excluded[0]!.reason).toMatch(
+    /contradicts componentVersion/,
+  );
 });
 
 test("binds row remediation URLs to the project version, component version and origin", () => {
@@ -611,30 +554,23 @@ test("binds row remediation URLs to the project version, component version and o
     rel: "vulnerabilities",
     href: row.componentVersion + "/origin/origin-a/vulnerabilities",
   };
-  const baseline = normalizeBlackDuckFindings([row], repository).findings[0]!
-    .source_finding_id;
+  const baseline = normalize([row]).findings[0]!.source_finding_id;
   for (const self of [href, href.replace("/origins/origin-a", "")]) {
     const onlySelf = { ...row, _meta: { href: self, links: [origin] } };
-    expect(
-      normalizeBlackDuckFindings([onlySelf], repository).findings[0]!
-        .source_finding_id,
-    ).toBe(baseline);
+    expect(normalize([onlySelf]).findings[0]!.source_finding_id).toBe(baseline);
     expect(() =>
-      normalizeBlackDuckFindings(
-        {
-          ...blackDuckBomReport(),
-          items: [
-            {
-              ...row,
-              _meta: {
-                href: self.replace("release-a", "release-b"),
-                links: [origin],
-              },
+      normalize({
+        ...blackDuckBomReport(),
+        items: [
+          {
+            ...row,
+            _meta: {
+              href: self.replace("release-a", "release-b"),
+              links: [origin],
             },
-          ],
-        },
-        repository,
-      ),
+          },
+        ],
+      }),
     ).toThrow(/same project version/);
   }
   for (const [from, to] of [
@@ -645,9 +581,7 @@ test("binds row remediation URLs to the project version, component version and o
       ...row,
       _meta: { href: href.replace(from, to), links: row._meta.links },
     };
-    expect(
-      normalizeBlackDuckFindings([conflicting], repository).excluded,
-    ).toHaveLength(1);
+    expect(normalize([conflicting]).excluded).toHaveLength(1);
   }
   const componentLink = {
     rel: "matched-files",
@@ -655,18 +589,17 @@ test("binds row remediation URLs to the project version, component version and o
   };
   const partial = { ...row, _meta: { links: [componentLink] } };
   expect(
-    normalizeBlackDuckFindings(
-      { ...blackDuckBomReport(), items: [row, partial], totalCount: 2 },
-      repository,
-    ),
+    normalize({
+      ...blackDuckBomReport(),
+      items: [row, partial],
+      totalCount: 2,
+    }),
   ).toMatchObject({
     findings: [{ source_finding_id: baseline }],
     excluded: [{ position: 2 }],
   });
   expect(
-    normalizeBlackDuckFindings(
-      [{ ...partial, _meta: { links: [componentLink, origin] } }],
-      repository,
-    ).findings[0]!.source_finding_id,
+    normalize([{ ...partial, _meta: { links: [componentLink, origin] } }])
+      .findings[0]!.source_finding_id,
   ).toBe(baseline);
 });

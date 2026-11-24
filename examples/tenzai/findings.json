@@ -1,0 +1,47 @@
+[
+  {
+    "id": "10000000-0000-4000-8000-000000000001",
+    "testId": "20000000-0000-4000-8000-000000000001",
+    "appId": "30000000-0000-4000-8000-000000000001",
+    "leadId": "40000000-0000-4000-8000-000000000001",
+    "displayId": "FIND-1",
+    "name": "Missing object authorization",
+    "description": "A signed-in user can read another user's record.",
+    "severity": "HIGH",
+    "status": "OPEN",
+    "cwe": "CWE-639",
+    "cve": null,
+    "cvss": {
+      "version": "4.0",
+      "score": null,
+      "vector": null,
+      "metrics": null,
+      "severity": "HIGH"
+    },
+    "impact": "Unauthorized disclosure of records.",
+    "steps": ["Request a record owned by a different user."],
+    "verifiedClaims": [
+      { "claim": "The response contains the other record.", "artifactRefs": [] }
+    ],
+    "codeReferences": [{ "file": "00_api/src/records.ts", "startLine": 12 }],
+    "affectedEndpoints": [
+      {
+        "id": "50000000-0000-4000-8000-000000000001",
+        "testId": "20000000-0000-4000-8000-000000000001",
+        "method": "GET",
+        "url": "https://app.example/records/2",
+        "createdBy": "example",
+        "createdAt": "2026-01-01T00:00:00Z"
+      }
+    ],
+    "evidence": [],
+    "remediation": {
+      "codeFixes": [
+        { "title": "Authorize access", "description": "Check ownership." }
+      ],
+      "codingAgentPrompt": "Check record ownership before returning it."
+    },
+    "createdBy": "example",
+    "createdAt": "2026-01-01T00:00:00Z"
+  }
+]

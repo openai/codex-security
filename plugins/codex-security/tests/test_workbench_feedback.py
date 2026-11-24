@@ -384,7 +384,7 @@ def test_sealed_same_target_feedback_keeps_latest_decision_across_upgrade(
     first = producer.create_cli_scan(
         state, tmp_path / "results", repository, target_revision=revision
     )
-    finding = run_workbench(state, "get-scan", "--scan-id", first["scanId"])["scan"]["findings"][0]
+    finding = get_scan(state, first["scanId"])["scan"]["findings"][0]
     if legacy_first:
         with sqlite3.connect(state / "workbench.sqlite3") as connection:
             connection.execute(
@@ -395,9 +395,7 @@ def test_sealed_same_target_feedback_keeps_latest_decision_across_upgrade(
         state, tmp_path / "results", repository, target_revision=revision, finding=rediscovered
     )
     if rediscovered:
-        later_finding = run_workbench(state, "get-scan", "--scan-id", later["scanId"])["scan"][
-            "findings"
-        ][0]
+        later_finding = get_scan(state, later["scanId"])["scan"]["findings"][0]
         assert later_finding["findingId"] == finding["findingId"]
         assert later_finding["triage"]["status"] == "open"
     current = producer.create_cli_scan(

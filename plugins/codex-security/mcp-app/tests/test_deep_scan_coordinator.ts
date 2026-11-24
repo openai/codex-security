@@ -1035,6 +1035,7 @@ async function testWaiterDetachAndCancellation() {
   coordinator.cancel("user canceled in UI");
   const canceled = await coordinator.wait(undefined, 5_000);
   assert.equal(canceled?.status, "canceled");
+  assert.deepEqual(await coordinator.wait(waiterAbort.signal), canceled);
   assert.equal(executor.runningDiscovery, 0);
   assert.ok(
     [...store.workers.values()].every((worker) => worker.status === "canceled"),

@@ -48,6 +48,7 @@ export class ContractSchemaError extends ContractValidationError {}
 type LoadContractOptions = {
   pluginRoot: string;
   expectedScanId?: string;
+  expectedManifestDigest?: string;
   expectation?: ScanExpectation;
   workbenchValidated?: boolean;
   signal?: AbortSignal;
@@ -98,6 +99,7 @@ export async function loadContractWithScanDirectory(
     const result = (await helper.loadSealedContract(scanDirectory, {
       pluginRoot: options.pluginRoot,
       expectedScanId: options.expectedScanId,
+      expectedManifestDigest: options.expectedManifestDigest,
       signal: options.signal,
     })) as {
       contract: LoadedContract;

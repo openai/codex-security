@@ -7,7 +7,10 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from workbench_test_support import read_review_state, saved_draft, write_checkpoint
+from workbench_test_support import (
+    read_review_state,
+    review_surface,
+)
 
 
 @pytest.mark.parametrize(
@@ -28,25 +31,13 @@ def test_stopped_scan_requires_valid_rejection_evidence_before_sealing(
     report_path.unlink()
     finding = copy.deepcopy(scan.findings[0])
     finding["provenance"] = {"source": "local_plugin", "candidateId": "candidate-a"}
-    checkpoint = write_checkpoint(
-        scan.scan_dir / "checkpoints",
-        saved_draft(scan.scan_id, findings=[finding]),
-        mtime_ns=100,
-    )
+    checkpoint = scan.checkpoint(scan.scan_dir, findings=[finding], mtime_ns=100)
     checkpoint_bytes = checkpoint.read_bytes()
     (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
     scan.coverage["surfaces"] = (
         []
         if label is None
-        else [
-            {
-                "id": "rejection",
-                "candidateId": "candidate-a",
-                "label": label,
-                "disposition": "rejected",
-                "receiptRefs": [],
-            }
-        ]
+        else [review_surface("rejection", label, "rejected", candidate_id="candidate-a")]
     )
     coverage_path = scan.scan_dir / "coverage.json"
     coverage_path.write_text(json.dumps(scan.coverage))
@@ -103,12 +94,9 @@ def test_standard_completion_requires_valid_closure_evidence_before_sealing(
     scan = publication_scan(mode="standard")
     report_path = scan.scan_dir / "report.md"
     report_path.unlink()
-    checkpoint = write_checkpoint(
-        scan.scan_dir / "checkpoints",
-        saved_draft(
-            scan.scan_id,
-            deferred=[{"id": "review", "reason": "Review authorization remains pending."}],
-        ),
+    checkpoint = scan.checkpoint(
+        scan.scan_dir,
+        deferred=[{"id": "review", "reason": "Review authorization remains pending."}],
         mtime_ns=100,
     )
     checkpoint_bytes = checkpoint.read_bytes()
@@ -127,9 +115,7 @@ def test_standard_completion_requires_valid_closure_evidence_before_sealing(
         assert completed["warnings"] == []
 
     assert checkpoint.read_bytes() == checkpoint_bytes
-    status = workbench_db.execute(
-        "SELECT status FROM scans WHERE id = ?", (scan.scan_id,)
-    ).fetchone()[0]
+    status = scan.scan_row()["status"]
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
     if invalid:
         assert status == "running"

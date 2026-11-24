@@ -1,10 +1,9 @@
-import { join } from "node:path";
 import { readFile } from "node:fs/promises";
 import assert from "node:assert/strict";
 import { importSource } from "./import-module.ts";
 
 const { renderDiscoveryPrompt } = await importSource(
-  join(import.meta.dirname, "../src/deep-scan/templates.ts"),
+  "src/deep-scan/templates.ts",
   { loader: { ".md": "text" } },
 );
 

@@ -99,106 +99,83 @@ export function contradictionFreeSubgroups(
   distinctPairs: readonly (readonly [string, string])[],
   signal?: AbortSignal,
   metrics?: ContradictionGroupingMetrics,
-): Set<string>[] {
-  const indexes = new Map(
-    findingIds.map((findingId, index) => [findingId, index]),
-  );
-  const clusters = new Map(
-    findingIds.map((findingId, index) => [index, new Set([findingId])]),
-  );
-  const support = new Map<number, Map<number, number>>();
-  for (const [left, right] of samePairs) {
-    const leftIndex = indexes.get(left)!;
-    const rightIndex = indexes.get(right)!;
-    const leftSupport = support.get(leftIndex) ?? new Map<number, number>();
-    const rightSupport = support.get(rightIndex) ?? new Map<number, number>();
-    leftSupport.set(rightIndex, (leftSupport.get(rightIndex) ?? 0) + 1);
-    rightSupport.set(leftIndex, (rightSupport.get(leftIndex) ?? 0) + 1);
-    support.set(leftIndex, leftSupport);
-    support.set(rightIndex, rightSupport);
+): string[][] {
+  type Cluster = {
+    index: number;
+    members: string[];
+    support: Map<Cluster, number> | null;
+    conflicts: Set<Cluster> | null;
+  };
+  const clusters = new Map<string, Cluster>();
+  for (const [index, id] of findingIds.entries())
+    clusters.set(id, { index, members: [id], support: null, conflicts: null });
+  for (const [a, b] of samePairs) {
+    const left = clusters.get(a)!;
+    const right = clusters.get(b)!;
+    const weight = (left.support?.get(right) ?? 0) + 1;
+    (left.support ??= new Map()).set(right, weight);
+    (right.support ??= new Map()).set(left, weight);
   }
-  const conflicts = new Map<number, Set<number>>();
-  for (const [left, right] of distinctPairs) {
-    const leftIndex = indexes.get(left)!;
-    const rightIndex = indexes.get(right)!;
-    const leftConflicts = conflicts.get(leftIndex) ?? new Set<number>();
-    const rightConflicts = conflicts.get(rightIndex) ?? new Set<number>();
-    leftConflicts.add(rightIndex);
-    rightConflicts.add(leftIndex);
-    conflicts.set(leftIndex, leftConflicts);
-    conflicts.set(rightIndex, rightConflicts);
+  for (const [a, b] of distinctPairs) {
+    const left = clusters.get(a)!;
+    const right = clusters.get(b)!;
+    (left.conflicts ??= new Set()).add(right);
+    (right.conflicts ??= new Set()).add(left);
   }
 
+  // Conflicts inherited from one side can block support on the other.
+  function blocked(left: Cluster, right: Cluster): number {
+    if (!left.conflicts) return 0;
+    let weight = 0;
+    for (const other of left.conflicts) {
+      if (metrics) metrics.conflictNeighborChecks++;
+      if (!right.conflicts?.has(other))
+        weight += right.support!.get(other) ?? 0;
+    }
+    return weight;
+  }
   while (true) {
     signal?.throwIfAborted();
-    let selected: readonly [number, number] | undefined;
-    let selectedScore: readonly number[] | undefined;
-    for (const leftCluster of clusters.keys()) {
-      for (const [rightCluster, gain] of support.get(leftCluster) ?? []) {
-        if (
-          leftCluster >= rightCluster ||
-          conflicts.get(leftCluster)?.has(rightCluster)
-        )
-          continue;
+    let best:
+      { left: Cluster; right: Cluster; net: number; gain: number } | undefined;
+    for (const left of clusters.values()) {
+      for (const [right, gain] of left.support ?? []) {
+        if (left.index >= right.index || left.conflicts?.has(right)) continue;
         if (metrics) metrics.candidateEvaluations++;
-        let newlyBlocked = 0;
-        const leftConflicts = conflicts.get(leftCluster);
-        const rightConflicts = conflicts.get(rightCluster);
-        for (const other of leftConflicts ?? []) {
-          if (metrics) metrics.conflictNeighborChecks++;
-          if (other !== rightCluster && !rightConflicts?.has(other))
-            newlyBlocked += support.get(rightCluster)?.get(other) ?? 0;
-        }
-        for (const other of rightConflicts ?? []) {
-          if (metrics) metrics.conflictNeighborChecks++;
-          if (other !== leftCluster && !leftConflicts?.has(other))
-            newlyBlocked += support.get(leftCluster)?.get(other) ?? 0;
-        }
-        const score = [
-          gain - newlyBlocked,
-          gain,
-          -newlyBlocked,
-          -leftCluster,
-          -rightCluster,
-        ];
-        if (selectedScore !== undefined) {
-          const index = score.findIndex(
-            (value, position) => value !== selectedScore![position],
-          );
-          if (index === -1 || !(score[index]! > selectedScore[index]!)) {
-            continue;
-          }
-        }
-        selected = [leftCluster, rightCluster];
-        selectedScore = score;
+        // Equal net and gross gains imply equal blocked weight.
+        const net = gain - blocked(left, right) - blocked(right, left);
+        if (
+          !best ||
+          (net - best.net ||
+            gain - best.gain ||
+            best.left.index - left.index ||
+            best.right.index - right.index) > 0
+        )
+          best = { left, right, net, gain };
       }
     }
-    if (selected === undefined)
-      return [...clusters.values()].filter((members) => members.size > 1);
-    const [leftCluster, rightCluster] = selected;
-    for (const member of clusters.get(rightCluster)!)
-      clusters.get(leftCluster)!.add(member);
-    clusters.delete(rightCluster);
+    if (!best)
+      return [...clusters.values()]
+        .filter((cluster) => cluster.members.length > 1)
+        .map((cluster) => cluster.members);
+    const { left, right } = best;
+    for (const member of right.members) left.members.push(member);
+    clusters.delete(findingIds[right.index]!);
 
-    const leftSupport = support.get(leftCluster)!;
-    leftSupport.delete(rightCluster);
-    for (const [neighbor, rightWeight] of support.get(rightCluster)!) {
-      if (neighbor === leftCluster || neighbor === rightCluster) continue;
-      const weight = (leftSupport.get(neighbor) ?? 0) + rightWeight;
-      leftSupport.set(neighbor, weight);
-      support.get(neighbor)!.set(leftCluster, weight).delete(rightCluster);
+    const support = left.support!;
+    support.delete(right);
+    for (const [neighbor, rightWeight] of right.support!) {
+      if (neighbor === left || neighbor === right) continue;
+      const weight = (support.get(neighbor) ?? 0) + rightWeight;
+      support.set(neighbor, weight);
+      neighbor.support!.set(left, weight).delete(right);
     }
-    support.delete(rightCluster);
-
-    const mergedConflicts = conflicts.get(leftCluster) ?? new Set<number>();
-    for (const id of conflicts.get(rightCluster) ?? []) mergedConflicts.add(id);
-    mergedConflicts.delete(leftCluster);
-    mergedConflicts.delete(rightCluster);
-    for (const neighbor of mergedConflicts) {
-      conflicts.get(neighbor)!.add(leftCluster).delete(rightCluster);
+    left.conflicts?.delete(left);
+    for (const neighbor of right.conflicts ?? []) {
+      if (neighbor === right) continue;
+      (left.conflicts ??= new Set()).add(neighbor);
+      neighbor.conflicts!.add(left).delete(right);
     }
-    conflicts.set(leftCluster, mergedConflicts);
-    conflicts.delete(rightCluster);
   }
 }
 
@@ -356,7 +333,7 @@ export class FindingDeduplicator<
       const conflicts = rejectedByRoot.get(componentRoot!);
       const groups =
         conflicts === undefined
-          ? [new Set(members)]
+          ? [members]
           : contradictionFreeSubgroups(
               members,
               supportedByRoot.get(componentRoot!)!,
@@ -364,17 +341,15 @@ export class FindingDeduplicator<
               this.signal,
             );
       for (const group of groups) {
-        const groupMembers = [...group];
-        if (!groupMembers.some((member) => selected.has(member))) continue;
-        groupMembers.sort(
+        if (!group.some((member) => selected.has(member))) continue;
+        group.sort(
           (left, right) =>
             SCAN_SEVERITIES.indexOf(findings.get(left)!.severity.level) -
               SCAN_SEVERITIES.indexOf(findings.get(right)!.severity.level) ||
             (left < right ? -1 : left > right ? 1 : 0),
         );
-        duplicateGroups.push(groupMembers);
-        for (const member of groupMembers)
-          canonical.set(member, groupMembers[0]!);
+        duplicateGroups.push(group);
+        for (const member of group) canonical.set(member, group[0]!);
       }
     }
     return {

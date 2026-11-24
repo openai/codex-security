@@ -11,9 +11,7 @@ import { importSource } from "./import-module.ts";
 const {
   candidateAttackPathsInputSchema,
   recordCodexSecurityCandidateAttackPaths,
-} = await importSource(
-  path.join(import.meta.dirname, "../src/artifact-candidate-ledger.ts"),
-);
+} = await importSource("src/artifact-candidate-ledger.ts");
 
 const scanId = "11111111-1111-4111-8111-111111111111";
 const temporaryDirectories = createTemporaryDirectories(true);
