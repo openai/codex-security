@@ -49,6 +49,7 @@ export interface ProjectConfigSource {
 }
 
 export interface ResolvedProjectConfig {
+  exploitability?: ProjectConfigInput["exploitability"];
   config: { codexOverrides: JsonObject };
   options: ResolvedScanSettings;
   sources: ConfigurationSources;
@@ -67,6 +68,7 @@ const PROJECT_SETTING_KEYS = {
   knowledgeBasePaths: "scan.knowledge_base",
   scanPromptFile: "scan.instructions_file",
   validationPromptFile: "scan.validation_file",
+  validationProvider: "scan.validation.provider",
   outputDir: "output.directory",
   failureSeverity: "policy.fail_on_severity",
   maxCostUsd: "limits.max_cost_usd_per_scan",
@@ -442,6 +444,11 @@ export function resolveScanSettings(
       filePath(file?.scan?.validation_file),
       cliPath(overrides.validationPromptFile),
     ),
+    validationProvider: choose(
+      "scan.validation.provider",
+      file?.scan?.validation,
+      overrides.validationProvider,
+    ),
     postScanPromptFile: cliPath(overrides.postScanPromptFile),
     outputDir: choose(
       "output.directory",
@@ -465,6 +472,9 @@ export function resolveScanSettings(
     config: { codexOverrides },
     options: settings,
     sources: resolvedSources,
+    ...(file?.exploitability === undefined
+      ? {}
+      : { exploitability: structuredClone(file.exploitability) }),
     ...(project?.path === undefined
       ? {}
       : { projectConfig: { path: project.path, sources: resolvedSources } }),

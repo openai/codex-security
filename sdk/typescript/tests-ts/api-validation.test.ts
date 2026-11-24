@@ -40,6 +40,48 @@ describe("CodexSecurity finding validation", () => {
     runtimePreparer,
   } = createValidationFixtures();
 
+  test.each(["before dispatch", "during validation"])(
+    "honors provider cancellation %s",
+    async (when) => {
+      await using client = TestClient.withDependencies({});
+      const controller = new AbortController();
+      const validate = mock(async () => {
+        controller.abort();
+        throw new Error("interrupted");
+      });
+      if (when === "before dispatch") controller.abort();
+      await expect(
+        client.validate({
+          repositoryPath: await temporaryDirectory(),
+          finding: "Synthetic finding",
+          signal: controller.signal,
+          validationProvider: { name: "synthetic", version: "1", validate },
+        }),
+      ).rejects.toBeInstanceOf(ScanInterruptedError);
+      expect(validate).toHaveBeenCalledTimes(
+        when === "before dispatch" ? 0 : 1,
+      );
+    },
+  );
+
+  test("defers a finding when its validation provider throws synchronously", async () => {
+    await using client = TestClient.withDependencies({});
+    const result = await client.validate({
+      repositoryPath: await temporaryDirectory(),
+      finding: "Synthetic finding",
+      validationProvider: {
+        name: "synthetic",
+        version: "1",
+        validate: throwing("provider unavailable"),
+      },
+    });
+    expect(result).toMatchObject({
+      disposition: "deferred",
+      unavailable: "provider unavailable",
+      provenance: { provider: "synthetic", providerVersion: "1" },
+    });
+  });
+
   test.each([false, true])(
     "validates oversized evidence through a temporary file (failure=%p)",
     async (fail) => {
@@ -156,6 +198,18 @@ describe("CodexSecurity finding validation", () => {
         ...assessment,
         outputDir: options.outputDir,
         threadId: "validation-thread",
+      });
+      expect(captured.turn?.outputSchema).toEqual({
+        type: "object",
+        properties: {
+          disposition: {
+            type: "string",
+            enum: ["reportable", "suppressed", "not_applicable", "deferred"],
+          },
+          report: { type: "string", minLength: 1 },
+        },
+        required: ["disposition", "report"],
+        additionalProperties: false,
       });
       expect(workbench).not.toHaveBeenCalled();
       expect(captured.prompt).toContain(
@@ -479,6 +533,21 @@ describe("CodexSecurity finding validation", () => {
     [
       "empty report",
       '{"disposition":"reportable","report":" "}',
+      true,
+      "invalid result",
+    ],
+    [
+      "model-authored provider provenance",
+      JSON.stringify({
+        ...assessment,
+        provenance: { provider: "continuum", providerVersion: "1" },
+      }),
+      true,
+      "invalid result",
+    ],
+    [
+      "model-authored provider failure",
+      JSON.stringify({ ...assessment, unavailable: "No AWS connection" }),
       true,
       "invalid result",
     ],

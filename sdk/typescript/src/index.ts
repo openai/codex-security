@@ -45,6 +45,10 @@ export type {
   ProjectConfigInput,
   ProjectScope,
 } from "./project-config-schema.js";
+export type {
+  DependencyEndpointConfiguration,
+  DependencyRuntimeSelector,
+} from "./dependency-caller-scope.js";
 export type { ScanSettings } from "./scan-settings.js";
 export type { SeverityRubricSnapshot } from "./severity-rubric.js";
 export { classifySeverity } from "./classify-severity.js";
@@ -97,6 +101,19 @@ export type {
 export type { ScanPricingContext, ScanTokenUsage } from "./cost-model.js";
 export type { DeepScanProgress } from "./scan-progress.js";
 export type { CustomValidationResult } from "./custom-validation.js";
+export type {
+  ValidationProvider,
+  ValidationProviderAssessment,
+  ValidationProviderContext,
+  ValidationProvenance,
+  ValidationItemRecord,
+  ValidationResultScope,
+  ValidationBasis,
+  ValidationClaimMatch,
+} from "./validation-provider.js";
+export { ContinuumValidationProvider } from "./continuum-validation-provider.js";
+export type { ContinuumValidationOptions } from "./continuum-validation-provider.js";
+export type { ValidationProviderSettings } from "./scan-settings.js";
 export type { ScanActivity, ScanActivityStatus } from "./scan-activity.js";
 export { matchScanFindings } from "./scan-comparison.js";
 export type {
@@ -337,6 +354,8 @@ export type {
   ClassifySeverityRecordsResult,
   CanonicalSeverityAssessment,
   SeverityClassificationReviewRequest,
+  SeverityDiagnosticCode,
+  SeverityRecordDiagnosticCode,
 } from "./classify-severity-records.js";
 export { validateRecords } from "./validation-records.js";
 export type {
