@@ -2888,8 +2888,7 @@ def scan_result(
         **scan_usage.stored_scan_cost_fields(scan["cost_json"]),
         "contract": scan_contract(scan),
         "continuationThreadId": scan["continuation_thread_id"],
-        "threadIds": scan_usage._scan_root_thread_ids(connection, scan, None),
-        "executionThreadIds": scan_usage._scan_execution_thread_ids(connection, scan),
+        **scan_usage.scan_thread_fields(connection, scan),
         "failureMessage": scan["failure_message"],
         "lifecycle": json.loads(scan["lifecycle_json"]),
         "findings": [

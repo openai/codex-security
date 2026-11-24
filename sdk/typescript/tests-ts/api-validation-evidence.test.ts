@@ -361,31 +361,17 @@ describe("CodexSecurity finding validation", () => {
         CODEX_SECURITY_GIT: selectedGit,
         CODEX_SECURITY_STATE_DIR: fixture.stateDirectory,
       };
-      const scanDir = join(root, "scan");
-      await mkdir(scanDir, { mode: 0o700 });
-      const registration = await runWorkbench(
-        { python: fixture.python, pluginRoot: PLUGIN_ROOT, environment },
-        [
-          "register-cli-scan",
-          "--repository",
-          repository,
-          "--scan-dir",
-          scanDir,
-          "--recipe-json",
-          JSON.stringify({
-            repository,
-            mode: "standard",
-            target: { kind: "repository", paths: [] },
-            config: {},
-          }),
-        ],
+      const scanId = await registerValidationScan(
+        fixture,
+        repository,
+        environment,
       );
       const workflowId = "git-tool-validation";
       await fixture.bindWorkflow(workflowId, environment);
       const request = {
         ...fixture.options,
         outputDir: undefined,
-        scanId: registration["scanId"] as string,
+        scanId,
         workflowId,
       };
       const first = await client.validate(request);
