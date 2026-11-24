@@ -1,3 +1,4 @@
+import { completedMessage, scanProgress } from "./support/usage-rollout.js";
 import { copyCompletedScan, PLUGIN_ROOT } from "./plugin-root.js";
 import { once } from "node:events";
 import { chmod, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
@@ -65,10 +66,7 @@ async function* tacEvents(
   for (const item of items) {
     yield { type: "item.completed", item };
   }
-  yield {
-    type: "item.completed",
-    item: { id: "message-1", type: "agent_message", text: "scan complete" },
-  };
+  yield completedMessage("message-1", "scan complete");
 }
 
 async function runTacEvents(
@@ -577,16 +575,7 @@ describe("one-shot scan events", () => {
       async function* reconnectingEvents(): AsyncGenerator<ThreadEvent> {
         yield { type: "thread.started", thread_id: "thread-1" };
         yield { type: "error", message: "Reconnecting... 2/5" };
-        yield {
-          type: "turn.completed",
-          usage: {
-            input_tokens: 1,
-            cached_input_tokens: 0,
-            cache_write_input_tokens: 0,
-            output_tokens: 1,
-            reasoning_output_tokens: 0,
-          },
-        };
+        yield completedTurn({ input_tokens: 1, output_tokens: 1 });
       }
 
       await expect(
@@ -624,14 +613,7 @@ describe("one-shot scan events", () => {
         reconnectSeen.resolve();
         await paused.promise;
         yield { type: "error", message: "Reconnecting… 3/5" };
-        yield {
-          type: "item.completed",
-          item: {
-            id: "message-1",
-            type: "agent_message",
-            text: "scan complete",
-          },
-        };
+        yield completedMessage("message-1", "scan complete");
         yield completedTurn();
       } finally {
         closed = true;
@@ -843,14 +825,10 @@ describe("one-shot scan events", () => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());
     const statuses: ScanWorkerStatus[] = [];
     async function* workerEvents(): AsyncGenerator<ThreadEvent> {
-      yield {
-        type: "item.completed",
-        item: {
-          id: "message-1",
-          type: "agent_message",
-          text: 'CODEX_SECURITY_WORKER_STATUS {"phase":"ranking","planned":6,"started":3}',
-        },
-      };
+      yield completedMessage(
+        "message-1",
+        'CODEX_SECURITY_WORKER_STATUS {"phase":"ranking","planned":6,"started":3}',
+      );
     }
 
     await expect(
@@ -954,14 +932,7 @@ describe("one-shot scan events", () => {
         'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
         'CODEX_SECURITY_SCAN_PROGRESS {"phase":"validation","filesCompleted":8,"filesTotal":8}',
       ]) {
-        yield {
-          type: "item.completed",
-          item: {
-            id: `progress-${updates.length}`,
-            type: "agent_message",
-            text,
-          },
-        };
+        yield completedMessage(`progress-${updates.length}`, text);
       }
     }
 
@@ -971,9 +942,9 @@ describe("one-shot scan events", () => {
       }),
     ).resolves.toBeDefined();
     expect(updates).toEqual([
-      { phase: "discovery", filesCompleted: 0, filesTotal: 8 },
-      { phase: "discovery", filesCompleted: 3, filesTotal: 8 },
-      { phase: "validation", filesCompleted: 8, filesTotal: 8 },
+      scanProgress("discovery", 0, 8),
+      scanProgress("discovery", 3, 8),
+      scanProgress("validation", 8, 8),
     ]);
   });
 });

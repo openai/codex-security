@@ -38,6 +38,16 @@ function plainTarEntries(bytes: Buffer): PlainTarEntry[] {
   return archive.entries;
 }
 
+function readme(
+  text: string,
+  options: Omit<Parameters<typeof tarRecord>[1], "name"> = {},
+) {
+  return tarRecord(Buffer.from(text), {
+    name: "package/README.md",
+    ...options,
+  });
+}
+
 const invalidTarEntryError = "npm tarball contains an invalid tar entry.";
 const sparseEntryError = "npm tarball contains an unsupported sparse entry.";
 const internalReferenceError = "npm tarball contains an internal reference.";
@@ -48,12 +58,7 @@ describe("plain npm tar entries", () => {
     (terminator) => {
       expect(
         plainTarEntries(
-          archive(
-            tarRecord(Buffer.from("readme"), {
-              name: "package/README.md",
-              sizeField: octal(6, 12, terminator),
-            }),
-          ),
+          archive(readme("readme", { sizeField: octal(6, 12, terminator) })),
         ),
       ).toEqual([{ path: "package/README.md", size: 6 }]);
     },
@@ -81,16 +86,9 @@ describe("plain npm tar entries", () => {
 
   test("rejects unsupported entry types and malformed extended headers", () => {
     for (const type of [0x31, 0x32, 0x33, 0x34, 0x36, 0x44, 0x4b, 0x67, 0x78]) {
-      expect(() =>
-        plainTarEntries(
-          archive(
-            tarRecord(Buffer.from("x"), {
-              name: "package/README.md",
-              type,
-            }),
-          ),
-        ),
-      ).toThrow(invalidTarEntryError);
+      expect(() => plainTarEntries(archive(readme("x", { type })))).toThrow(
+        invalidTarEntryError,
+      );
     }
   });
 
@@ -123,7 +121,7 @@ describe("plain npm tar entries", () => {
       plainTarEntries(
         archive(
           tarRecord(attributes, { name: "package/PaxHeaders/README.md", type }),
-          tarRecord(Buffer.from("readme"), { name: "package/README.md" }),
+          readme("readme"),
         ),
       ),
     ).toEqual([{ path: "package/README.md", size: 6 }]);
@@ -181,15 +179,14 @@ describe("plain npm tar entries", () => {
             name: "package/PaxHeaders/README.md",
             type: 0x78,
           }),
-          tarRecord(Buffer.from("readme"), { name: "package/README.md" }),
+          readme("readme"),
         ),
       ),
     ).toThrow(internalReferenceError);
   });
 
   test("rejects the old GNU sparse typeflag", () => {
-    const member = tarRecord(Buffer.from("data"), {
-      name: "package/README.md",
+    const member = readme("data", {
       type: 0x53,
       magic: "ustar ",
       version: " \0",
@@ -204,8 +201,7 @@ describe("plain npm tar entries", () => {
   ] as const)(
     "rejects a regular GNU member with a sparse field at byte %i",
     (offset, field) => {
-      const member = tarRecord(Buffer.from("data"), {
-        name: "package/README.md",
+      const member = readme("data", {
         type: 0x30,
         magic: "ustar ",
         version: " \0",
@@ -230,14 +226,9 @@ describe("plain npm tar entries", () => {
           name: "PaxHeaders/readme",
           type,
         });
-        expect(() =>
-          readTarArchive(
-            archive(
-              header,
-              tarRecord(Buffer.from("data"), { name: "package/README.md" }),
-            ),
-          ),
-        ).toThrow(sparseEntryError);
+        expect(() => readTarArchive(archive(header, readme("data")))).toThrow(
+          sparseEntryError,
+        );
       }
     },
   );
@@ -250,7 +241,7 @@ describe("plain npm tar entries", () => {
     expect(() =>
       readTarArchive(
         archive(
-          tarRecord(Buffer.from("data"), { name: "package/README.md" }),
+          readme("data"),
           tarRecord(attributes, { name: "PaxHeaders/readme", type: 0x78 }),
         ),
       ),
@@ -258,20 +249,14 @@ describe("plain npm tar entries", () => {
   });
 
   test("scans regular file contents under a GNU header", () => {
-    const member = tarRecord(Buffer.from("go/example"), {
-      name: "package/README.md",
-      magic: "ustar ",
-      version: " \0",
-    });
+    const member = readme("go/example", { magic: "ustar ", version: " \0" });
     expect(() => plainTarEntries(archive(member))).toThrow(
       internalReferenceError,
     );
   });
 
   test("checks markers across concatenated archive metadata", () => {
-    const record = tarRecord(Buffer.from("Public contents."), {
-      name: "package/README.md",
-    });
+    const record = readme("Public contents.");
     record.write("go/", record.length - 3);
     expect(() =>
       plainTarEntries(
@@ -302,14 +287,7 @@ describe("plain npm tar entries", () => {
     base256[11] = 1;
     for (const sizeField of [base256, Buffer.from("00000000008\0")]) {
       expect(() =>
-        plainTarEntries(
-          archive(
-            tarRecord(Buffer.from("x"), {
-              name: "package/README.md",
-              sizeField,
-            }),
-          ),
-        ),
+        plainTarEntries(archive(readme("x", { sizeField }))),
       ).toThrow(invalidTarEntryError);
     }
   });
@@ -318,12 +296,7 @@ describe("plain npm tar entries", () => {
     expect(
       plainTarEntries(
         archive(
-          tarRecord(Buffer.from("readme"), {
-            name: "package/README.md",
-            type,
-            magic: "\0".repeat(6),
-            version: "\0\0",
-          }),
+          readme("readme", { type, magic: "\0".repeat(6), version: "\0\0" }),
         ),
       ),
     ).toEqual([{ path: "package/README.md", size: 6 }]);
@@ -335,28 +308,14 @@ describe("plain npm tar entries", () => {
       { magic: "ustar\0", version: " \0" },
     ]) {
       expect(() =>
-        plainTarEntries(
-          archive(
-            tarRecord(Buffer.from("x"), {
-              name: "package/README.md",
-              ...options,
-            }),
-          ),
-        ),
+        plainTarEntries(archive(readme("x", { ...options }))),
       ).toThrow(invalidTarEntryError);
     }
   });
 
   test("scans complete header text fields", () => {
     expect(() =>
-      plainTarEntries(
-        archive(
-          tarRecord(Buffer.from("clean"), {
-            name: "package/README.md",
-            user: "public\0go/example",
-          }),
-        ),
-      ),
+      plainTarEntries(archive(readme("clean", { user: "public\0go/example" }))),
     ).toThrow(internalReferenceError);
   });
 
@@ -371,14 +330,7 @@ describe("plain npm tar entries", () => {
       { reserved: Buffer.from("go/example") },
     ]) {
       expect(() =>
-        plainTarEntries(
-          archive(
-            tarRecord(Buffer.from("clean"), {
-              name: "package/README.md",
-              ...options,
-            }),
-          ),
-        ),
+        plainTarEntries(archive(readme("clean", { ...options }))),
       ).toThrow(internalReferenceError);
     }
   });
@@ -400,8 +352,7 @@ describe("plain npm tar entries", () => {
     expect(
       plainTarEntries(
         archive(
-          tarRecord(Buffer.from("readme"), {
-            name: "package/README.md",
+          readme("readme", {
             magic: "ustar ",
             version: " \0",
             prefix: "00000000000",
@@ -412,7 +363,7 @@ describe("plain npm tar entries", () => {
   });
 
   test("accepts padding, optional end markers, and zero blocks between files", () => {
-    const record = tarRecord(Buffer.from("x"), { name: "package/README.md" });
+    const record = readme("x");
     record[record.length - 1] = 1;
     const secondRecord = tarRecord(Buffer.from("y"), {
       name: "package/LICENSE",
@@ -445,7 +396,7 @@ describe("plain npm tar entries", () => {
   });
 
   test("still scans padding and rejects partial blocks or truncated contents", () => {
-    const record = tarRecord(Buffer.from("x"), { name: "package/README.md" });
+    const record = readme("x");
     const paddingMarker = Buffer.from(record);
     paddingMarker.write("go/example", blockSize + 1);
     expect(() => plainTarEntries(paddingMarker)).toThrow(
