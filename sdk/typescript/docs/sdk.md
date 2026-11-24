@@ -908,7 +908,7 @@ For a reviewed repository check, select MCP servers through
 `exploitability.evidence_sources` in the project file. The investigator can
 query those servers and cite their replies. A deployment record can establish
 which build ran. Establishing caller access takes evidence of who could reach
-the affected operation. See the [CLI configuration example](cli.md#experimental-dependency-investigations).
+the affected operation. See the [CLI configuration example](dependency-exploitability.md#set-the-scope-and-evidence-sources).
 
 ## Containerized bulk scans
 

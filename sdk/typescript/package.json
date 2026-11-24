@@ -55,6 +55,7 @@
     "LICENSE",
     "README.md",
     "docs/cli.md",
+    "docs/dependency-exploitability.md",
     "docs/sdk.md",
     "docs/findings-service.md",
     "docs/dedupe-records.md",
