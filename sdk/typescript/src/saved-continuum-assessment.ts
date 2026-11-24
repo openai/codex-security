@@ -4,6 +4,7 @@ import {
   assessmentStore,
   continuumAssessmentVersion,
 } from "./continuum-assessment-store.js";
+import { continuumObservations } from "./continuum-validation-evidence.js";
 import { compareTimestamps } from "./timestamps.js";
 import type { ProcessEnvironment } from "./runtime.js";
 import type {
@@ -30,11 +31,16 @@ const verdict = z.enum([
   "DISCARDED",
   "NOT_PURSUED",
 ]);
+const memberScope = {
+  siblingOnly: z.boolean().optional(),
+  siblingArtifacts: z.array(z.string()).optional(),
+};
 // Keep the live issue member count in reports. It can change independently of the verdict.
 const conclusion = admission.extend({
   issueId: id.optional(),
   issueArn: z.string().optional(),
   issueUnlinked: z.literal(true).optional(),
+  ...memberScope,
   validationArtifactId: id.optional(),
   scoringArtifactId: id.optional(),
   scoringPending: z.boolean().optional(),
@@ -74,6 +80,12 @@ const retryItem = z
   })
   .nullable()
   .catch(null);
+const workbenchPoll = z.object({
+  requestedAt: z.number().optional(),
+  changedAt: z.number().optional(),
+  ...memberScope,
+});
+export type WorkbenchPoll = z.infer<typeof workbenchPoll>;
 const cached = z.object({
   schemaVersion: z
     .literal([2, 3, 4, 5, 6, continuumAssessmentVersion])
@@ -86,6 +98,7 @@ const cached = z.object({
     items: z.array(z.looseObject({ itemId: id })),
   }),
   retry: z.array(retryItem).nullable().optional(),
+  polls: z.record(id, workbenchPoll).optional(),
 });
 
 function scopeOf(record: Admission, destination?: Destination) {
@@ -171,6 +184,8 @@ function forRemediation(item: Conclusion) {
     issueId,
     issueArn,
     issueUnlinked,
+    siblingOnly,
+    siblingArtifacts,
     validationArtifactId,
     scoringArtifactId,
     submittedAt,
@@ -198,7 +213,12 @@ export async function saveCliContinuumAssessments(
 ) {
   if (configuration.provider.trim().toLowerCase() !== "continuum") return;
   const destination = binding.parse(configuration).continuum;
-  const accepted = records.flatMap((raw) => project(raw, destination) ?? []);
+  const accepted = records.flatMap((record) => {
+    const item = project(record, destination);
+    return record && item
+      ? [{ ...item, ...continuumObservations.get(record) }]
+      : [];
+  });
   if (!accepted.length) return;
   const store = await assessmentStore(environment, scanId, repositoryPath);
   await store.writeSnapshots(destination.environment_id, accepted, requestedAt);
@@ -243,7 +263,7 @@ function withoutScore(item: Conclusion) {
 // The workbench saw older evidence on return to a disputed issue. Its
 // public UNKNOWN result alone cannot distinguish this from a validation tie.
 const disputedScore = z.object({
-  reconfirmAfter: z.number(),
+  reconfirmAfter: z.number().optional(),
   record: conclusion,
 });
 function pendingScore(
@@ -260,6 +280,7 @@ function pendingScore(
   const raw = retries[0]?.disputes?.[plugin.issueArn];
   const pending = disputedScore.safeParse(raw).data;
   const tied = pending?.record;
+  if (tied) tied.siblingOnly = plugin.siblingOnly;
   if (
     tied?.scoringPending &&
     tied.freshness.scoredAt &&
@@ -272,46 +293,76 @@ function pendingScore(
     return pending;
 }
 
+function after(requestedAt: number | undefined, change: number | undefined) {
+  return (
+    change === undefined || (requestedAt !== undefined && requestedAt > change)
+  );
+}
+
 /** CLI requests establish membership in start order. Evidence from previous
  * visits can reveal disputes but cannot restore a verdict or a score. */
 function selectConclusion(
-  cli: { item: Conclusion; requestedAt: number | undefined }[],
+  cli: {
+    item: Conclusion;
+    requestedAt?: number;
+    completedAt?: number;
+    issueChanged: boolean;
+  }[],
   plugin: Conclusion | undefined,
   pending: z.infer<typeof disputedScore> | undefined,
+  poll?: WorkbenchPoll,
 ) {
-  const issue = cli.findLast(({ item }) => item.issueArn || item.issueUnlinked)
-    ?.item.issueArn;
-  const change = cli.findLast(
-    ({ item }) =>
-      item.issueUnlinked || (item.issueArn && item.issueArn !== issue),
+  const membership = cli.findLast(
+    ({ item }) => item.issueArn || item.issueUnlinked,
   );
+  const issue = membership?.item.issueArn;
+  const departures = cli.filter(
+    ({ item, issueChanged }) =>
+      issueChanged ||
+      item.issueUnlinked ||
+      (item.issueArn && item.issueArn !== issue),
+  );
+  const change = departures.at(-1);
   if (plugin?.issueUnlinked && issue) return;
-  if (change && plugin?.issueArn && plugin.issueArn !== issue) return;
+  if (membership && plugin?.issueArn && plugin.issueArn !== issue) return;
 
   // Missing or equal request times cannot confirm a return.
-  const needsConfirmation = Boolean(change || pending);
-  const cutoff = Math.max(
-    change ? (change.requestedAt ?? Infinity) : 0,
-    pending?.reconfirmAfter ?? 0,
-  );
+  const cliChangedAt = change && (change.requestedAt ?? Infinity);
+  const changedAt = poll?.changedAt ?? pending?.reconfirmAfter;
   const current: Conclusion[] = [];
   const history: Conclusion[] = [];
-  for (const { item, requestedAt } of cli) {
+  for (const entry of cli) {
+    const { item, requestedAt } = entry;
+    // One request can observe both a departure and a confirmed return.
+    const returned =
+      entry === change && entry.issueChanged && item.issueArn === issue;
     if (
-      !needsConfirmation ||
-      (item === change?.item && !issue) ||
-      (requestedAt !== undefined && requestedAt > cutoff)
+      (entry === change && !issue) ||
+      (after(requestedAt, changedAt) &&
+        (returned || after(requestedAt, cliChangedAt)))
     )
       current.push(item);
     else if (issue && item.issueArn === issue && evidenceTime(item))
       history.push(item);
   }
-  if (needsConfirmation && issue && plugin?.issueArn === issue)
-    history.push(pending?.record ?? plugin);
+  if (issue && pending && changedAt !== undefined) history.push(pending.record);
+  // CLI requests can finish out of order. The poll must follow every departure.
+  else if (
+    plugin?.issueArn &&
+    departures.some(
+      ({ completedAt }) => !after(poll?.requestedAt, completedAt ?? Infinity),
+    )
+  )
+    history.push(plugin);
   else if (plugin) current.unshift(plugin);
 
   const terminal = current.find((item) => item.verdict !== "UNAVAILABLE");
-  if (needsConfirmation && issue && terminal?.issueArn !== issue) return;
+  if (
+    (change || changedAt !== undefined) &&
+    issue &&
+    terminal?.issueArn !== issue
+  )
+    return;
   if (!terminal) return current.at(-1);
   // A failed artifact read can still confirm that the finding changed issues.
   if (
@@ -342,7 +393,23 @@ function selectEvidence(current: Conclusion[], history: Conclusion[]) {
   const evidence = current
     .concat(history)
     .filter((item) => item.verdict !== "UNAVAILABLE");
-  const latest = newest(evidence, evidenceTime);
+  // Older snapshots did not distinguish issue runs from bundles for other
+  // members. A later poll can identify those bundles by artifact ID.
+  const siblings = new Set(
+    evidence.flatMap((item) => item.siblingArtifacts ?? []),
+  );
+  const applicable: Conclusion[] = [];
+  let confirmed = false;
+  for (const item of evidence) {
+    if (!item.siblingOnly && !siblings.has(item.validationArtifactId ?? "")) {
+      applicable.push(item);
+      if (item.siblingOnly === false || item.resultScope === "finding")
+        confirmed = true;
+    }
+    delete item.siblingOnly;
+    delete item.siblingArtifacts;
+  }
+  const latest = newest(confirmed ? applicable : evidence, evidenceTime);
   const first = latest[0];
   if (!first || history.includes(first)) return;
   if (latest.length === 1) return first;
@@ -407,15 +474,22 @@ async function readAssessments(
     if (item?.["admissionConflict"]) continue;
     const plugin =
       !legacy && destination && item ? project(item, destination) : undefined;
+    const poll = plugin && saved?.polls?.[occurrence];
+    if (plugin && poll) {
+      plugin.siblingOnly = poll.siblingOnly;
+      plugin.siblingArtifacts = poll.siblingArtifacts;
+    }
     const pin = plugin ?? legacy?.get(occurrence);
     if (item && !pin && !unsubmitted(item)) continue;
     const candidates = (entries ?? []).flatMap(
-      ({ record, environmentId, requestedAt }) => {
+      ({ record, environmentId, requestedAt, completedAt }) => {
         const item = project(
           record,
           destination ?? { environment_id: environmentId },
         );
-        return item ? [{ item, requestedAt }] : [];
+        const issueChanged =
+          "issueChanged" in record && record.issueChanged === true;
+        return item ? [{ item, requestedAt, completedAt, issueChanged }] : [];
       },
     );
     const selected = pin ?? candidates.at(-1)?.item;
@@ -435,6 +509,7 @@ async function readAssessments(
       candidates.filter(({ item }) => sameAdmission(item, selected)),
       plugin,
       pendingScore(plugin, retries.get(occurrence)),
+      poll,
     );
     if (active) assessments.set(occurrence, active);
   }
