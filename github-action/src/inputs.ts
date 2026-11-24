@@ -50,7 +50,7 @@ export function parseInputs(read: (name: string) => string, workspace: string) {
     repository: str('repository', workspace), scope, paths, diffBase, mode, cyberAccessProgram,
     provider, model, effort: str('effort', 'xhigh'),
     maxCost: num('max-cost', false, Number.MIN_VALUE), maxTimeHours, failOnSeverity,
-    verbose: bool('verbose', true), dryRun,
+    verbose: bool('verbose', true), dryRun, useRunnerNpmConfig: bool('use-runner-npm-config', false),
     summary: bool('summary', true), annotations: bool('annotations', true),
     uploadArtifacts: bool('upload-artifacts', false), artifactName: str('artifact-name', 'codex-security'), retentionDays: num('retention-days', true, 1, 90) ?? 7,
   };

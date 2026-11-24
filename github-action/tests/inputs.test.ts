@@ -8,7 +8,7 @@ test('defaults are stable across events', () => {
   assert.deepEqual(input, {
     repository: '/checkout', scope: 'repository', paths: [], diffBase: undefined, mode: 'standard', cyberAccessProgram: undefined,
     provider: 'openai', model: 'gpt-5.6-sol', effort: 'xhigh', maxCost: undefined, maxTimeHours: undefined, failOnSeverity: 'none',
-    verbose: true, dryRun: false, summary: true, annotations: true,
+    verbose: true, dryRun: false, useRunnerNpmConfig: false, summary: true, annotations: true,
     uploadArtifacts: false, artifactName: 'codex-security', retentionDays: 7,
   });
   const args = scanArguments(input, {repository:'/checkout'}, '/results');

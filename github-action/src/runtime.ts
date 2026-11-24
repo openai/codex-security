@@ -40,7 +40,12 @@ export interface RuntimeOptions {
   repository: string;
   provider: ScanCredentials['provider'];
   model: string;
+  runnerNpmConfig?: RunnerNpmConfig;
   log?: (line: string) => void;
+}
+export interface RunnerNpmConfig {
+  userConfig?: string;
+  extraCaCerts?: string;
 }
 export interface Runtime {
   nodePath: string;
@@ -96,6 +101,14 @@ async function regularFile(path: string): Promise<string> {
   const info = await lstat(target);
   if (!info.isFile()) throw new Error('Runtime prerequisite must be a regular file.');
   return target;
+}
+
+async function runnerConfigurationFile(path: string | undefined, name: 'NPM_CONFIG_USERCONFIG' | 'NODE_EXTRA_CA_CERTS'): Promise<string | undefined> {
+  if (path === undefined) return undefined;
+  const invalid = `${name} must be an absolute path to a regular file.`;
+  if (!isAbsolute(path)) throw new Error(invalid);
+  try { return await regularFile(path); }
+  catch { throw new Error(invalid); }
 }
 
 /** Anchor PATH lookup before installer, scanner, or worker cwd changes. */
@@ -219,6 +232,8 @@ export async function setupRuntime(options: RuntimeOptions): Promise<Runtime> {
   const runnerLibraryPath = process.env.LD_LIBRARY_PATH;
   const tempRoot = await realpath(options.tempRoot);
   const actionRoot = await realpath(options.actionRoot);
+  const runnerUserConfig = await runnerConfigurationFile(options.runnerNpmConfig?.userConfig, 'NPM_CONFIG_USERCONFIG');
+  const runnerCaCerts = await runnerConfigurationFile(options.runnerNpmConfig?.extraCaCerts, 'NODE_EXTRA_CA_CERTS');
   const npmPath = await resolveTool('npm', runnerPath);
   const pythonPath = await resolveTool('python3', runnerPath);
   const nodePath = process.execPath;
@@ -244,11 +259,18 @@ export async function setupRuntime(options: RuntimeOptions): Promise<Runtime> {
     const destination = join(root, 'install');
     await copyFile(packagePath, join(destination, 'package.json'));
     await writeFile(join(destination, 'package-lock.json'), lockBytes, { mode: 0o600, flag: 'wx' });
-    const userConfig = join(root, 'npm-user.conf');
+    const userConfig = runnerUserConfig ?? join(root, 'npm-user.conf');
     const globalConfig = join(root, 'npm-global.conf');
-    await writeFile(userConfig, '', { mode: 0o600, flag: 'wx' });
+    if (!runnerUserConfig) await writeFile(userConfig, '', { mode: 0o600, flag: 'wx' });
     await writeFile(globalConfig, '', { mode: 0o600, flag: 'wx' });
-    const install = await runProcess(npmPath, ['ci', '--ignore-scripts', '--include=optional', `--registry=${REGISTRY}`, `--userconfig=${userConfig}`, `--globalconfig=${globalConfig}`, `--cache=${join(root, 'npm-cache')}`, '--no-audit', '--no-fund', '--loglevel=error'], { cwd: destination, env, timeoutMs: 10 * 60 * 1000, log: options.log });
+    const installEnv = {...env};
+    if (runnerUserConfig) installEnv.NPM_CONFIG_USERCONFIG = runnerUserConfig;
+    if (runnerCaCerts) installEnv.NODE_EXTRA_CA_CERTS = runnerCaCerts;
+    const install = await runProcess(npmPath, ['ci', '--ignore-scripts', '--include=optional',
+      ...(!runnerUserConfig ? [`--registry=${REGISTRY}`] : []),
+      `--userconfig=${userConfig}`, `--globalconfig=${globalConfig}`, `--cache=${join(root, 'npm-cache')}`,
+      '--no-audit', '--no-fund', '--loglevel=error'],
+    { cwd: destination, env: installEnv, timeoutMs: 10 * 60 * 1000, log: options.log });
     if (install.exitCode !== 0 || install.timedOut || install.interrupted) {
       // npm can write lockfile diagnostics to stdout.
       const details = safeLogLines([install.stderr, install.stdout].join('\n')).join('\n');
