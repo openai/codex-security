@@ -1,5 +1,4 @@
 import { expect, onTestFinished, test } from "bun:test";
-import { execFileSync } from "node:child_process";
 import { hash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -85,10 +84,22 @@ test("captures a pinned public source or advisory once and binds only actual lin
   await expect(
     reopened.read({ sourceId, startLine: 3, endLine: 4 }),
   ).rejects.toThrow();
-  await expect(
-    tools.fetch({ ...request, path: "../private" }),
-  ).rejects.toThrow();
-  await expect(tools.fetch({ ...request, commit: "main" })).rejects.toThrow();
+  for (const invalid of [
+    { ...request, path: "../private" },
+    { ...request, repository: ".." },
+    { ...request, owner: "example/other" },
+    { ...request, commit: "main" },
+    { kind: "npm", name: "decoder", version: "1.2.3", path: "index.js" },
+  ])
+    await expect(tools.fetch(invalid)).rejects.toThrow();
+  expect(calls).toHaveLength(1);
+  const partial = sourceTools({
+    ...options,
+    fetcher: async () => new Response("incomplete", { status: 206 }),
+  });
+  await expect(partial.fetch({ ...request, path: "partial" })).rejects.toThrow(
+    "HTTP 206",
+  );
   const saved = options.store.get<JsonObject>(
     "source-artifact",
     String(sourceId),
@@ -151,80 +162,4 @@ test("reads a historical Git tree without following later worktree changes or us
     receiptId: "historical-receipt",
   });
   expect(git(repo.path, "rev-parse", "HEAD")).toBe(current);
-});
-
-test("checks the release identity, registry origin and archive digest before reading one npm member", async () => {
-  await using temp = await scopedTemporaryDirectory("dependency-npm-source-");
-  const python = process.platform === "win32" ? "python" : "python3";
-  const source = "export const fix = true;\n";
-  const archive = execFileSync(python, [
-    "-I",
-    "-B",
-    "-c",
-    [
-      "import io, sys, tarfile",
-      "with tarfile.open(fileobj=sys.stdout.buffer, mode='w|gz') as archive:",
-      "    data = sys.argv[1].encode()",
-      "    member = tarfile.TarInfo('package/index.js')",
-      "    member.size = len(data)",
-      "    archive.addfile(member, io.BytesIO(data))",
-    ].join("\n"),
-    source,
-  ]);
-  const request = {
-    kind: "npm",
-    name: "example-codec",
-    version: "1.2.3",
-    path: "index.js",
-  };
-  const tarball =
-    "https://registry.npmjs.org/example-codec/-/example-codec-1.2.3.tgz";
-  const integrity = "sha512-" + hash("sha512", archive, "base64");
-  const metadata = {
-    name: request.name,
-    version: request.version,
-    dist: { tarball, integrity },
-  };
-  function open(release: unknown) {
-    return sourceTools({
-      store: attemptStore(),
-      repository: temp.path,
-      python,
-      recordExcerpt: () => "npm-receipt",
-      async fetcher(url) {
-        if (url === tarball) return new Response(new Uint8Array(archive));
-        expect(url).toBe("https://registry.npmjs.org/example-codec/1.2.3");
-        return Response.json(release);
-      },
-    });
-  }
-  const good = open(metadata);
-  const { sourceId } = await good.fetch(request);
-  expect(await good.read({ sourceId, startLine: 1, endLine: 1 })).toMatchObject(
-    {
-      request,
-      archiveIntegrity: integrity,
-      url: tarball,
-      text: source,
-      sha256: hash("sha256", source),
-    },
-  );
-  await expect(
-    open({ ...metadata, version: "9.9.9" }).fetch(request),
-  ).rejects.toThrow("does not match");
-  await expect(
-    open({
-      ...metadata,
-      dist: { integrity, tarball: "https://example.com/other.tgz" },
-    }).fetch(request),
-  ).rejects.toThrow("must come from the npm registry");
-  await expect(
-    open({
-      ...metadata,
-      dist: {
-        tarball,
-        integrity: "sha256-" + Buffer.alloc(32).toString("base64"),
-      },
-    }).fetch(request),
-  ).rejects.toThrow("integrity digest");
 });

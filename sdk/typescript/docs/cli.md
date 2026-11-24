@@ -93,6 +93,8 @@ The coordinator uses high reasoning effort, reviewers use low effort and investi
 
 In `uses`, check the component, version, verdict and citations for each caller, package copy and deployment. `proof.sink` identifies the dependency call. An optional `trace` gives the ordered source references and marks missing links. In `coverage`, a dismissal explains why a candidate was excluded. An unresolved entry records what was verified and what remains open.
 
+The investigator can read files from local Git history. For external source it can request public files at full GitHub commit IDs and public GitHub maintainer advisories. These requests send the repository and file path or advisory ID to GitHub without credentials. The tool rejects redirects and saves the content hash. It does not fetch package archives or run downloaded code. Use checkout evidence to establish which copy was selected, since published packages may differ from upstream source.
+
 Each approved assessment links to a reviewed claim revision. A replacement must pass review before it supersedes an assessment whose evidence is still current.
 
 An MCP citation identifies the response by `receiptId` and `originalPayloadSha256`. Without `selection`, it cites the whole response. Otherwise, `selection.record` is the path to the JSON value. `selection.textBlock` is either a JSON text block index or `null` for structured content.

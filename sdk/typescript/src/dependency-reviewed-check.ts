@@ -472,7 +472,7 @@ function createActivityProgress(
       ...(files.length > 0 && { files }),
       ...(typeof args["symbol"] === "string" && { symbol: args["symbol"] }),
       ...(name === "fetch_dependency_source" && {
-        upstream: args["repository"] ?? args["name"] ?? args["kind"],
+        upstream: args["repository"] ?? args["kind"],
       }),
     };
     const activity = {
