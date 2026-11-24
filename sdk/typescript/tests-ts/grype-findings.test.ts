@@ -120,39 +120,38 @@ test("excludes ambiguous duplicate matches sharing an identity", () => {
   expect(output.excluded[0]!.reason).toMatch(/ambiguous duplicate/i);
 });
 
-test("uses a directory accessPath when Grype records an absolute path", () => {
+test("directory access paths resolve from the scan root and retain occurrence identity", () => {
   const native = match();
-  const input = report({
-    ...native,
-    artifact: {
-      ...native.artifact,
-      locations: [
-        {
-          path: "/checkout/package-lock.json",
-          accessPath: "./package-lock.json",
-        },
-      ],
-    },
-  });
-  const finding = normalizeGrypeFindings(input).findings[0]!;
-  expect(finding.evidence.locations).toEqual([
-    { path: "package-lock.json", line: null },
-  ]);
-  expect(finding.source_finding_id).toBe(
-    normalizeGrypeFindings(report(native)).findings[0]!.source_finding_id,
-  );
-  input.source.type = "image";
-  expect(normalizeGrypeFindings(input).findings[0]!.evidence.locations).toEqual(
-    [],
-  );
+  const path = "nested/package-lock.json";
+  const row = (location: { path: string; accessPath?: string }) =>
+    normalizeGrypeFindings(
+      report({
+        ...native,
+        artifact: { ...native.artifact, locations: [location] },
+      }),
+    ).findings[0]!;
+  const id = row({ path }).source_finding_id;
+  for (const location of [
+    { path: `/${path}`, accessPath: `/${path}` },
+    { path: `/checkout/${path}`, accessPath: `./${path}` },
+  ]) {
+    const finding = row(location);
+    expect(finding.source_finding_id).toBe(id);
+    expect(finding.evidence.locations).toEqual([{ path, line: null }]);
+    expect(finding.evidence.packages![0]!.manifest_path).toBe(path);
+  }
+  for (const accessPath of [undefined, "//host/file", "/../outside"]) {
+    expect(
+      row({ path: "/absolute/file", accessPath }).evidence.locations,
+    ).toEqual([]);
+  }
 });
 
 test("keeps relative and absolute image paths out of repository locations", () => {
   const image = match();
-  image.artifact.locations = [
-    { path: "/usr/lib/node_modules/parser/index.js" },
-    { path: "app/package-lock.json" },
-  ];
+  const path = "/app/package-lock.json";
+  const rooted = { path, accessPath: path };
+  image.artifact.locations = [rooted, { path: "app/package-lock.json" }];
   const source = {
     type: "image",
     target: {

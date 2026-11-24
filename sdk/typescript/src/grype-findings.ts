@@ -51,10 +51,10 @@ function artifactPaths(artifact: NativeRecord, directory: boolean): string[] {
   )) {
     const location = record(value, "Grype location");
     const raw = text(location["path"]);
-    // Directory scans can pair an absolute resolved path with a relative accessPath.
+    // Syft roots directory access paths at the scanned directory.
     const path = directory
       ? (repositoryFilePath(raw) ??
-        repositoryFilePath(location["accessPath"]) ??
+        repositoryFilePath(text(location["accessPath"])?.replace(/^\//u, "")) ??
         raw)
       : raw;
     if (path) paths.add(path);

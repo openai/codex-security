@@ -38,7 +38,7 @@ with npm and Python matches.
 
 - `advisory_ids` starts with the match `id` and adds each `relatedVulnerabilities` id. `evidence.url` uses the first HTTP(S) link from `dataSource` or `urls`.
 - `packages[0]` carries the artifact name, the PURL type as its ecosystem, the installed version, the `fix.versions` as fixed versions, and the manifest or lockfile path when exactly one reported checkout location has a recognized manifest filename.
-- `locations` lists each checkout-relative artifact location. For directory scans, a relative `accessPath` can identify the checkout file when `path` is absolute. Grype reports no line numbers. All image paths stay in `source_data` only.
+- `locations` lists each checkout-relative artifact location. For directory scans, Grype can report an `accessPath` such as `/app/package-lock.json` rooted at the scanned directory. The reader imports it as `app/package-lock.json`. Grype reports no line numbers. All image paths stay in `source_data` only.
 - Grype ranks Negligible below Low. A Negligible match imports as `informational`; an Unknown or missing severity imports as `unknown`.
 - `evidence.source_data` keeps the native match, Grype version and scan source. Image configs, manifests and layer lists appear only once in the preview under `report.source`. Stored findings retain the image identifiers. Review the preview before sharing it.
 
