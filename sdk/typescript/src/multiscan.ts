@@ -280,6 +280,7 @@ export async function runMultiscan(
           lock.requireOwner,
         ),
     );
+    await lock.requireOwner();
     return (await realpath(requestedOutput).catch(() => undefined)) === output
       ? { ...result, resultsPath: join(requestedOutput, "results.jsonl") }
       : result;
@@ -337,7 +338,7 @@ async function runCampaign(
   output: string,
   resumePluginRoot: () => Promise<string>,
   documentRoots: () => Promise<DocumentRoots>,
-  requireLockOwner: () => Promise<void>,
+  requireOwner: () => Promise<void>,
 ): Promise<MultiscanResult> {
   const ledger = join(output, "results.jsonl");
   await ensureOutputDirectory(join(output, "checkouts"));
@@ -363,7 +364,7 @@ async function runCampaign(
       knowledgeByMode[mode] = { failure: { error } };
     }
   }
-  await requireLockOwner();
+  await requireOwner();
   await ensureManifest(
     join(output, "manifest.json"),
     tasks,
@@ -372,7 +373,7 @@ async function runCampaign(
   );
   const receipts = await readReceipts(
     ledger,
-    requireLockOwner,
+    requireOwner,
     new Set(tasks.map((task) => task.id.toLowerCase())),
     options.recoverScan !== undefined,
   );
@@ -441,13 +442,13 @@ async function runCampaign(
       continue;
     }
     if (artifactsPresent) {
-      if (receipt.cleanupPending) await requireLockOwner();
       if (receipt.status === "completed") {
         try {
           if (receipt.cleanupPending === "checkout") {
             await removeCheckout(
               join(output, "checkouts", task.id),
               artifactOutput,
+              requireOwner,
               options.signal,
             );
           } else if (receipt.cleanupPending === "recovery-checkout") {
@@ -460,6 +461,7 @@ async function runCampaign(
             await removeCheckout(
               join(taskRoot, `attempt-${receipt.attempt}`),
               artifactOutput,
+              requireOwner,
               options.signal,
             );
           }
@@ -543,7 +545,7 @@ async function runCampaign(
       }
       for (let retry = 0; retry < options.maxAttempts; retry += 1) {
         options.signal?.throwIfAborted();
-        await requireLockOwner();
+        await requireOwner();
         let attempt = maxAttempt;
         if (options.recoverScan === undefined) attempt = nextAttempt();
         else if (retry === 0) attempt = recoveryAttempt;
@@ -618,7 +620,7 @@ async function runCampaign(
                 knowledgeBaseFailure = true;
                 throw knowledge.failure.error;
               }
-              await requireLockOwner();
+              await requireOwner();
               result = await options.recoverScan(scanDir, {
                 ...options,
                 ...(options.maxTotalCostUsd === undefined
@@ -648,8 +650,8 @@ async function runCampaign(
               knowledgeBaseFailure = true;
               throw knowledge.failure.error;
             }
+            await requireOwner();
             if (options.recoverScan !== undefined) {
-              await requireLockOwner();
               const checkoutRoot = await ensureOutputDirectory(
                 join(output, "recovery-checkouts"),
               );
@@ -703,7 +705,7 @@ async function runCampaign(
               .filter(Boolean)
               .join("\n\n");
             operationId ??= randomUUID();
-            await requireLockOwner();
+            await requireOwner();
             result = await security.run(checkout, {
               ...scanSettings,
               knowledgeBaseSnapshot: knowledge?.snapshot,
@@ -769,8 +771,11 @@ async function runCampaign(
             : errorMessage(error);
         } finally {
           if (options.recoverScan === undefined && checkout !== undefined) {
-            await requireLockOwner();
-            cleanupFailure = await removeCheckout(checkout, scanDir);
+            cleanupFailure = await removeCheckout(
+              checkout,
+              scanDir,
+              requireOwner,
+            );
           }
         }
         const reportedErrors = [failure, cleanupFailure].filter(
@@ -812,16 +817,17 @@ async function runCampaign(
           policyFailed: attemptPolicyFailed,
         };
         const receiptLine = `${JSON.stringify(receipt)}\n`;
-        receiptTail = receiptTail.then(async () => {
-          // A supervisor that lost an expired lease must not extend the ledger.
-          await requireLockOwner();
-          await appendReceipt(ledger, receiptLine);
-        });
+        receiptTail = receiptTail.then(() =>
+          appendReceipt(ledger, receiptLine, requireOwner),
+        );
         await receiptTail;
         options.signal?.throwIfAborted();
         if (recoveryCheckout !== undefined) {
-          await requireLockOwner();
-          reportedError = await removeCheckout(recoveryCheckout, scanDir);
+          reportedError = await removeCheckout(
+            recoveryCheckout,
+            scanDir,
+            requireOwner,
+          );
         }
         notifyProgress(options, {
           repository: task.id,
@@ -893,6 +899,7 @@ async function checkoutMarker(
 async function removeCheckout(
   checkout: string,
   scanDir: string,
+  requireOwner: () => Promise<void>,
   signal?: AbortSignal,
 ): Promise<string | undefined> {
   try {
@@ -912,6 +919,7 @@ async function removeCheckout(
         )
       ).equals(expected)
     ) {
+      await requireOwner();
       await rm(checkout, { recursive: true, force: true });
     }
   } catch (error) {
@@ -974,9 +982,16 @@ async function ensureOutputDirectory(
   return canonical;
 }
 
-async function appendReceipt(path: string, receipt: string): Promise<void> {
+async function appendReceipt(
+  path: string,
+  receipt: string,
+  requireOwner: () => Promise<void>,
+): Promise<void> {
+  // Opening can create the ledger or block until after a lease takeover.
+  await requireOwner();
   const file = await open(path, "a", 0o600);
   try {
+    await requireOwner();
     await file.writeFile(receipt, "utf8");
     await file.sync();
   } finally {
@@ -1278,7 +1293,7 @@ async function ensureManifest(
 
 async function readReceipts(
   path: string,
-  requireLockOwner: () => Promise<void>,
+  requireOwner: () => Promise<void>,
   campaignIds: ReadonlySet<string>,
   preserveInterrupted = false,
 ): Promise<Map<string, MultiscanHistory>> {
@@ -1331,7 +1346,7 @@ async function readReceipts(
         mode: 0o600,
       });
     }
-    await requireLockOwner();
+    await requireOwner();
     await truncate(path, end);
   }
   return receipts;

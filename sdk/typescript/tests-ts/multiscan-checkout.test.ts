@@ -959,10 +959,7 @@ describe("multiscan", () => {
   test.each([false, true])(
     "preserves the replacement lock and checkout without writing a receipt (recover: %p)",
     async (recover) => {
-      const { paths } = await repositoryFixture(
-        "replacement-owner",
-        "replacement",
-      );
+      const { paths } = await repositoryFixture("replacement");
       const ledger = join(paths.output, "results.jsonl");
       if (recover)
         await runMultiscan(
@@ -973,16 +970,24 @@ describe("multiscan", () => {
       const before = recover ? await readFile(ledger, "utf8") : undefined;
       const lock = join(paths.output, ".lock");
       const owner = join(lock, "owner.json");
-      const replacement = JSON.stringify({ ownerId: "replacement-supervisor" });
-      const security = client(async (repository, scanOptions) => {
-        await rename(lock, join(paths.output, ".lock.stale-interrupted"));
+      const takeOver = async () => {
+        await rename(lock, join(paths.output, ".stale"));
         await mkdir(lock, { mode: 0o700 });
-        await writeFile(owner, replacement, { mode: 0o600 });
-        return completeRun(repository, scanOptions);
-      });
+        await writeFile(owner, "replacement", { mode: 0o600 });
+      };
+      const open = filesystem.open;
+      using _open = spyOn(filesystem, "open").mockImplementation(
+        async (...args) => {
+          if (recover && args[0] === ledger) await takeOver();
+          return open(...args);
+        },
+      );
       const settings = options(
         paths,
-        security,
+        client(async (...args) => {
+          if (!recover) await takeOver();
+          return completeRun(...args);
+        }),
         recover ? { recoverScan: async () => undefined } : {},
       );
       await expect(runMultiscan(settings)).rejects.toThrow(
@@ -996,7 +1001,7 @@ describe("multiscan", () => {
         ? join(paths.output, "recovery-checkouts", "replacement", "attempt-2")
         : join(paths.output, "checkouts", "replacement");
       expect((await lstat(checkout)).isDirectory()).toBe(true);
-      expect(await readFile(owner, "utf8")).toBe(replacement);
+      expect(await readFile(owner, "utf8")).toBe("replacement");
     },
   );
 
@@ -1014,11 +1019,8 @@ describe("multiscan", () => {
         recursive: true,
         mode: 0o700,
       });
-      const loseLock = () =>
-        renameSync(
-          join(paths.output, ".lock"),
-          join(paths.output, ".lock.stale"),
-        );
+      const lock = join(paths.output, ".lock");
+      const loseLock = () => renameSync(lock, lock + ".stale");
       const recoverScan = mock(async () => {
         if (when === "during") loseLock();
         return undefined;
