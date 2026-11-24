@@ -587,11 +587,6 @@ def scan_repository_generation(scan: sqlite3.Row | dict) -> str | None:
     return scan["repository_generation"] if "repository_generation" in scan.keys() else None
 
 
-def scan_repository_group(scan: sqlite3.Row | dict) -> tuple[str, str]:
-    generation = scan_repository_generation(scan)
-    return ("repository", generation) if generation is not None else ("target", scan["target_id"])
-
-
 @dataclass(frozen=True)
 class RepositoryScanScope:
     """A verified generation and, separately, its exact target's legacy scans."""
