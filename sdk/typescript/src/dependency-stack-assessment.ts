@@ -412,7 +412,7 @@ function affectedVersion(
   const results = sink.affectedVersions.map((range) => {
     if (sink.versionScheme.toLowerCase() === "semver") {
       if (!semverValid(version) || !semverValidRange(range)) return;
-      return semverSatisfies(version, range);
+      return semverSatisfies(version, range, { includePrerelease: true });
     }
     if (sink.versionScheme.toLowerCase() === "pep440")
       return pythonReleaseMatches(version, range);
