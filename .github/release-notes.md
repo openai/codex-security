@@ -19,6 +19,8 @@
 - render policy diffs directly from changed ranges ([#2829](https://github.com/openai/codex-security/pull/2829))
 - keep duplicate grouping evidence with each finding cluster ([#2832](https://github.com/openai/codex-security/pull/2832))
 - honor Continuum issue changes and member evidence across retries ([#2821](https://github.com/openai/codex-security/pull/2821))
+- simplify worker results and coordinator waits ([#2834](https://github.com/openai/codex-security/pull/2834))
+- simplify session progress and usage accounting ([#2835](https://github.com/openai/codex-security/pull/2835))
 
 </details>
 
