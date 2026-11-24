@@ -8,6 +8,6 @@ For standalone use or a shell on another host, set the command’s working direc
 
 For file-only access, read the applicable sections under `<plugin_root>/templates/skill-runtime/`.
 
-- For a shell command, read the quoting instructions and the named topic in `windows.md` (PowerShell) or `posix.md` (POSIX shell).
+- For a shell command, read the quoting instructions and the named topic in `windows.md` (PowerShell) or `posix.md` (POSIX shell). In the Windows catalog, replace each `cmd.exe` line with the `cmd-wrapper` block, inserting the original line at `<command>`. The runtime reader does this for you.
 - In `scans.md`, read the scan topic, using `standard-scan-<surface>` for Standard. Standard and Diff also use `checkpoints`. Desktop scans use `review-comments` for the final response.
 - For a workbench remediation, read `workbench` in `scans.md` followed by the authorized stage topic.

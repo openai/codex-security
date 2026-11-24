@@ -57,13 +57,21 @@ async function readSections(pluginRoot, name, headings) {
     "utf8",
   );
   const [intro, ...sections] = catalog.split(/^## /m);
-  const selected = headings.map((heading) => {
+  function readSection(heading) {
     const section = sections.find(
       (entry) => entry.split(/\r?\n/, 1)[0] === heading,
     );
     if (!section)
       throw new Error(`Missing ${name}.md instruction section: ${heading}`);
     return section.slice(heading.length).trim();
-  });
-  return intro + selected.join("\n\n") + "\n";
+  }
+  let body = headings.map(readSection).join("\n\n");
+  if (name === "windows") {
+    body = body.replace(/^cmd\.exe .+/gm, (command) =>
+      readSection("cmd-wrapper")
+        .replace(/^    /gm, "")
+        .replace("<command>", () => command),
+    );
+  }
+  return intro + body + "\n";
 }

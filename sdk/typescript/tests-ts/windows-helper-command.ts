@@ -55,14 +55,14 @@ export function windowsHelperFixture(
         );
       if (pipelineInput !== undefined)
         command = command.replace(
-          /^cmd\.exe/m,
+          /^ *cmd\.exe/m,
           () => `'${escapeSingleQuotes(pipelineInput)}' | cmd.exe`,
         );
       command =
         "$ProgressPreference = 'SilentlyContinue'\n" +
-        (topic.startsWith("policy-")
-          ? "$PSNativeCommandArgumentPassing = 'Standard'\n$PSNativeCommandUseErrorActionPreference = $true\n$ErrorActionPreference = 'Stop'\n"
-          : "") +
+        "$PSNativeCommandArgumentPassing = 'Standard'\n" +
+        "$PSNativeCommandUseErrorActionPreference = $true\n" +
+        "$ErrorActionPreference = 'Stop'\n" +
         `Set-Location -LiteralPath '${escapeSingleQuotes(workingDirectory)}' -ErrorAction Stop\n` +
         "$ExecutionContext.SessionState.LanguageMode = 'ConstrainedLanguage'\n" +
         command;
