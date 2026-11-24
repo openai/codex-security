@@ -451,9 +451,7 @@ def test_bounded_json_text_matches_exhaustive_prefix_oracle(value: str) -> None:
         budgets.update((size - 1, size, size + 1))
 
     for budget in sorted(budgets):
-        expected = next((item for item in reversed(prefixes) if item[1] <= budget), ("", 2))
+        expected = next((text for text, size in reversed(prefixes) if size <= budget), "")
         assert preview.bounded_json_text(value, budget) == expected, (repr(value), budget)
         if budget <= 0:
-            remaining = [budget]
-            assert preview.bounded_json_value(value, remaining) is None
-            assert remaining == [budget]
+            assert preview.bounded_json_value(value, budget) is None

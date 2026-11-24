@@ -254,14 +254,16 @@ def saved_discovery_worker(output: Path, worker_id: str = "worker", attempt: int
     }
 
 
-def merge_interrupted(module, scan_dir, scan_id, binding, workers=None, warnings=None, **options):
+def merge_interrupted(
+    module, scan_dir, scan_id, binding, workers=None, warnings=None, *, stopped=True, **options
+):
     return module.merge_saved_results(
         scan_dir,
         scan_id,
         binding,
         [] if workers is None else workers,
         [] if warnings is None else warnings,
-        stopped=True,
+        stopped=stopped,
         reason="interrupted",
         **options,
     )
@@ -271,14 +273,13 @@ def replay_saved_results(
     module, documents, scan_dir, scan_id, binding, workers=(), *, stopped=True
 ):
     """Rebuild the interrupted result using the source digests frozen in the supplied manifest."""
-    return module.merge_saved_results(
+    return merge_interrupted(
+        module,
         scan_dir,
         scan_id,
         binding,
         list(workers),
-        [],
         stopped=stopped,
-        reason="interrupted",
         frozen_source_digests=documents[0]["scan"]["preservedSources"],
     )
 
@@ -1053,12 +1054,7 @@ def write_completed_contract(
         "includePaths": include_paths,
         "excludePaths": [],
         "surfaces": [
-            {
-                "id": "surface_archive_extraction",
-                "label": "Archive extraction",
-                "disposition": "reported",
-                "receiptRefs": [],
-            }
+            review_surface("surface_archive_extraction", "Archive extraction", "reported")
         ],
         "explicitExclusions": [],
         "deferred": [],

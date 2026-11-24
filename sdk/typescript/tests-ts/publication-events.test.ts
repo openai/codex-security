@@ -1,7 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import {
   collectPublicationEvents,
-  matchPublicationIssue,
   resolvePublicationClaims,
 } from "../src/publication-events.js";
 import type { PreparedScanPublication } from "../src/publication.js";
@@ -541,39 +540,39 @@ describe("Linear publication event evidence", () => {
 
   test("matches unique exact arguments before incidental sibling identifiers", () => {
     const prepared = publication(2);
-    const [first, sibling] = prepared.issues;
-    first!.description += `\nRepository text: ${sibling!.findingId} ${sibling!.occurrenceId}`;
-    const rawLine = event(prepared, 0);
-    const completed = JSON.parse(rawLine) as {
-      item: { arguments: Record<string, unknown> };
-    };
+    const first = prepared.issues[0]!;
+    const sibling = prepared.issues[1]!;
+    const collect = () =>
+      collectPublicationEvents(event(prepared), prepared, "missing");
 
-    expect(matchPublicationIssue(prepared, completed.item.arguments)).toBe(
-      first,
-    );
-    expect(
-      collectPublicationEvents(rawLine, prepared, "missing"),
-    ).toMatchObject([
-      {
-        ownerFindingId: first!.findingId,
-        argumentsValid: true,
-      },
+    first.description += `\nRepository text: ${sibling.findingId} ${sibling.occurrenceId}`;
+    expect(collect()).toMatchObject([
+      { ownerFindingId: first.findingId, argumentsValid: true },
+    ]);
+
+    first.title = sibling.title;
+    first.description = sibling.description;
+    expect(collect()).toMatchObject([
+      { ownerFindingId: sibling.findingId, argumentsValid: true },
     ]);
   });
 
   test("matches finding and occurrence identifiers only at token boundaries", () => {
     const prepared = publication(2);
     const first = prepared.issues[0]!;
-    expect(
-      matchPublicationIssue(prepared, { description: first.description }),
-    ).toBe(first);
+    function owner(description: string) {
+      const line = event(prepared, 0, { arguments: { description } });
+      const [call] = collectPublicationEvents(line, prepared, "missing");
+      return call!.ownerFindingId;
+    }
+    expect(owner(first.description)).toBe(first.findingId);
     for (const description of [
       first.findingId,
       first.occurrenceId,
       `${first.findingId}-suffix ${first.occurrenceId}`,
       `${first.findingId} ${first.occurrenceId} finding_1 occurrence_1`,
     ]) {
-      expect(matchPublicationIssue(prepared, { description })).toBeUndefined();
+      expect(owner(description)).toBeUndefined();
     }
   });
 });
