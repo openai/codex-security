@@ -11,7 +11,7 @@ import {
 
 export { validationProviderFromConfiguration };
 export { codexSecurityStateDirectory } from "./runtime.js";
-export const continuumAssessmentVersion = 4;
+export const continuumAssessmentVersion = 6;
 export { withPublicationLock } from "./publication-state.js";
 export type { ValidationProviderConfiguration };
 

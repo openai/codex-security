@@ -171,14 +171,22 @@ test.each(["member", "failed issue", "sibling"])(
   },
 );
 
-test.each(["SUBMITTED", "VALIDATING"])(
-  "waits for current evidence when a %s finding joins an issue with historical proof",
-  async (status) => {
+test.each([
+  ["SUBMITTED", "historical"],
+  ["VALIDATING", "sibling"],
+])(
+  "keeps polling a %s finding with only %s evidence",
+  async (status, evidence) => {
     const { fake, proof } = scoringFixture();
-    const first = structuredClone(recorded);
-    first.artifacts[proofId].createdAt = "2026-11-06T15:19:00Z";
-    first.artifactLists.VALIDATION_EVIDENCE.items[0].createdAt =
-      first.artifacts[proofId].createdAt;
+    const first = structuredClone(fake);
+    if (evidence === "historical") {
+      first.artifacts[proofId].createdAt = "2026-11-06T15:19:00Z";
+      first.artifactLists.VALIDATION_EVIDENCE.items[0].createdAt =
+        first.artifacts[proofId].createdAt;
+    } else {
+      first.issue.findingIds.push("sibling");
+      validation(first).perFindingResults[0].findingId = "sibling";
+    }
     let polls = 0;
     const { record } = await provider(async (operation, args) => {
       if (operation === "get-code-finding") polls++;
@@ -419,23 +427,66 @@ describe("explicitly fake outcome variations", () => {
     expect(result.record).not.toHaveProperty("proofObservation");
   });
 
-  test("omits ambiguous issue scoring without delaying the verdict", async () => {
-    const { fake, score } = scoringFixture();
-    fake.artifactLists.EVIDENCE.items.push({
-      artifactId: "another-score",
-      createdAt: score.createdAt,
-    });
-    let polls = 0;
-    const result = await provider((op, args) => {
-      if (op === "get-code-finding") polls++;
-      return transport(fake)(op, args);
-    }).validate(finding, context);
-    expect(polls).toBe(1);
-    expect(result.disposition).toBe("reportable");
+  test("keeps the verdict retryable until the first issue score arrives", async () => {
+    const { fake } = scoringFixture();
+    fake.artifactLists.EVIDENCE.items = [];
+    const result = await provider(transport(fake)).validate(finding, context);
+    expect(result.disposition).toBe("deferred");
+    expect(result.record?.scoringPending).toBe(true);
     expect(result.record?.verdict).toBe("EXPLOITABLE");
-    expect(result.record?.scoringArtifactId).toBeUndefined();
-    expect(result.record?.reachableFromAttacker).toBeUndefined();
   });
+
+  test.each(["EVIDENCE", scoreId])(
+    "keeps the validated verdict and stops polling when reading %s fails",
+    async (target) => {
+      const launch = transport(withObservation());
+      const diagnostic = "AccessDeniedException\nSynthetic score read failure";
+      let polls = 0;
+      const result = await provider(async (op, args) => {
+        if (op === "get-code-finding") polls++;
+        if (args.at(-1) === target) throw new Error(diagnostic);
+        return launch(op, args);
+      }).validate(finding, context);
+      expect(result.unavailable).toContain(diagnostic);
+      expect(polls).toBe(1);
+      expect(result.report).toContain(diagnostic);
+      expect(result.record).toMatchObject({
+        verdict: "EXPLOITABLE",
+        resultScope: "finding",
+        terminalStatus: "COMPLETED",
+        validationArtifactId: proofId,
+        issueId: recorded.issueId,
+        scoringPending: true,
+        disposition: "deferred",
+        unavailable: result.unavailable,
+      });
+      expect(result.record?.scoringArtifactId).toBeUndefined();
+    },
+  );
+
+  test.each([true, false])(
+    "checks whether a concurrent issue score is also linked (%s)",
+    async (linked) => {
+      const { fake, score } = scoringFixture();
+      const concurrent = {
+        ...structuredClone(score),
+        artifactId: "concurrent",
+      };
+      if (!linked)
+        concurrent.body.prevalidationSignals.signals[0].exploitability.sourceValidationArtifactId =
+          "other";
+      fake.artifacts[concurrent.artifactId] = concurrent;
+      fake.artifactLists.EVIDENCE.items.push(concurrent);
+      const { record } = await provider(transport(fake)).validate(
+        finding,
+        context,
+      );
+      expect(record?.verdict).toBe("EXPLOITABLE");
+      expect(record?.scoringArtifactId).toBe(linked ? undefined : scoreId);
+      expect(record?.scoringPending).toBe(linked ? true : undefined);
+      expect(record?.reachableFromAttacker).toBe(linked ? undefined : true);
+    },
+  );
 
   test.each([1, 2])(
     "keeps a bundled proof separate with %i current members",

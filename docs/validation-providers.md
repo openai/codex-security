@@ -51,6 +51,30 @@ Review the destination in setup. The plugin saves the selection before the
 scan and submits the findings automatically after sealing. Rejoining keeps
 the saved settings. A standalone plugin source build has no AWS provider.
 
+## Review a saved scan before sending
+
+Run the scan without provider validation first. From the original checkout,
+find the scan, inspect its occurrence IDs, then review the full sealed
+findings. Keep the export private.
+
+```sh
+codex-security scans list --json
+codex-security scans show SCAN_ID --json
+codex-security export --scan SCAN_ID --export-format json --output -
+codex-security validate --scan SCAN_ID -c codex-security.yaml OCCURRENCE_ID --format json
+```
+
+Pass multiple IDs separated by spaces. **Omitting IDs selects all open
+findings.** `--scan latest` selects the latest completed scan for this
+directory. Use an explicit scan ID for retries. New submissions require
+the registered scan and the original source snapshot. A receipt allows
+polling an accepted finding after the checkout changes.
+
+The command returns `schemaVersion`, `scanId`, `status` and `items` in JSON.
+Check `status` even on exit code 0. An inconclusive verdict can be incomplete
+without a transport error. Exit code 1 can indicate a failure for just one
+finding. Check its `findingId` before assuming the upload failed.
+
 ## Read the results
 
 Scan completion writes `validation.md` and `validation.json` beside the scan
@@ -69,14 +93,16 @@ the exact identity, evidence, timestamps and disposition of each finding.
 Codex checks issue membership and reads validation runs newest first.
 When applicable runs share the newest timestamp, Codex defers the verdict.
 Retry after a newer run appears. While a finding is being submitted or
-validated, older issue evidence alone does not end polling.
+validated, only current evidence specific to that finding can end polling.
 It skips bundles explicitly for other findings when looking for a member
 result. A newer failed or partial run for the issue takes precedence over
 an older conclusive member result. A reason labelled `FINDING` comes from
 submitted context. `GRAPH`, `CODE` and `INFERRED` distinguish deployment
 evidence, source evidence and inference.
-Issue reachability requires a single score linked to the selected validation
-artifact and issue verdict. Missing or ambiguous scoring stays unknown.
+Issue reachability uses the newest score linked to the selected validation
+artifact and issue verdict. If a current verdict has no unambiguous
+linked score, the verdict remains visible and `scoringPending` is true.
+Retry the incomplete assessment to refresh its score.
 
 ## Resume without starting a new scan
 
@@ -88,6 +114,8 @@ can create a new AWS finding.
 
 Ask the plugin to repeat completion for the same scan ID to resume an
 incomplete batch. It can poll finished items again using their receipts.
+For a CLI retry, repeat `validate --scan` with the same ID, project file
+and affected occurrence IDs.
 
 A finding still marked `SUBMITTED` may be waiting for a build. For `FAILED`,
 open `issueUrl` and check the run or ask AWS privately for worker logs.

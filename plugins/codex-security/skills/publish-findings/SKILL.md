@@ -1,11 +1,17 @@
 ---
 name: publish-findings
-description: Import findings from scanners, CI reports, vendor CLIs, APIs, or connected tools into the local workbench. Publish a selection of stored vendor findings to Codex Security Cloud.
+description: Import scanner findings into the local workbench, publish stored vendor findings to Codex Security Cloud, or submit saved Codex findings to AWS Continuum for validation.
 ---
 
 # Publish external findings
 
 Use this workflow for third-party scanner evidence. For “publish these findings,” start with the local workbench. For “import,” acquire the requested records and store them locally. For “import and publish,” publish the selection returned by the import. Use the “Import external findings” section of `docs/sdk.md` in the installed `@openai/codex-security` package. For a global npm install, its directory is `$(npm root --global)/@openai/codex-security`. Run SDK snippets from that trusted directory with absolute paths to the checkout and reports.
+
+## Submit saved Codex findings to AWS Continuum
+
+Use this path when the user requests sending local scan findings to Continuum for validation. Resolve the completed scan with `codex-security scans list --json` and inspect `codex-security scans show SCAN_ID --json` for its occurrence IDs. Use the user's selected project file with `scan.validation.provider` set to `continuum` and the intended `environment_id`. For an authorized selection, run `codex-security validate --scan SCAN_ID -c PROJECT_FILE OCCURRENCE_ID --format json` from the checkout. Pass each requested ID. Omit IDs only when the user requests all open findings from that scan.
+
+Report each Codex `itemId`, AWS finding ID, associated issue link when present, verdict and `resultScope`. Attribute an issue-scoped verdict to the AWS issue even when it has one contributor. A finding ID with `UNAVAILABLE` means AWS accepted the finding and the assessment is incomplete. Report the reason. To resume, repeat the command with the same scan, selected IDs, destination and host state. To collect the AWS evidence, use the import instructions below with the returned AWS finding ID. [Validation guide](https://github.com/openai/codex-security/blob/main/docs/validation-providers.md)
 
 ## Select the evidence
 

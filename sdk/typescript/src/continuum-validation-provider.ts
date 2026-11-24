@@ -4,6 +4,7 @@ import {
   type ContinuumRequest,
 } from "./continuum-submissions.js";
 import { repositoryFilePath } from "./scanner-import.js";
+import { errorMessage } from "./errors.js";
 import { compareTimestamps } from "./timestamps.js";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
@@ -36,6 +37,8 @@ async function forEachPending(
   );
 }
 type Submission = ContinuumReceipt & { issueId?: string; issueArn?: string };
+
+class ScoreReadError extends Error {}
 
 export type ContinuumAwsLauncher = (
   operation: string,
@@ -385,8 +388,6 @@ async function* issueArtifacts(
   const items = Array.isArray(listed["items"])
     ? listed["items"].map(object)
     : [];
-  // Only a single unambiguous scorer can supply issue reachability.
-  if (kind === "EVIDENCE" && items.length !== 1) return;
   items.sort((a, b) => {
     const left = createdAt(a);
     const right = createdAt(b);
@@ -755,7 +756,10 @@ export class ContinuumValidationProvider implements ValidationProvider {
     const { outcome, artifact, scope: resultScope } = validation;
     const currentEvidence =
       compareTimestamps(createdAt(artifact), submittedAt.toISOString()) >= 0;
-    if (!currentEvidence && (status === "SUBMITTED" || status === "VALIDATING"))
+    if (
+      (status === "SUBMITTED" || status === "VALIDATING") &&
+      (!currentEvidence || resultScope === "issue")
+    )
       return;
     const issueVerdict = validationOutcome(artifact).verdict;
     const details = {
@@ -774,18 +778,44 @@ export class ContinuumValidationProvider implements ValidationProvider {
       return this.#report(finding, submittedAt, outcome, details);
 
     // A score describes the issue, even if this member has a different verdict.
-    for await (const { artifact: score } of issueArtifacts(
-      request,
-      issueArgs,
-      "EVIDENCE",
-    )) {
-      if (linkedScore(issue, artifact, score))
-        return this.#report(finding, submittedAt, outcome, {
-          ...details,
-          score,
-        });
+    // AWS can expose validation before publishing the corresponding score.
+    const readScore: ContinuumRequest = (...args) =>
+      request(...args).catch((error: unknown) => {
+        throw new ScoreReadError(errorMessage(error));
+      });
+    try {
+      let score: Record<string, unknown> | undefined;
+      for await (const { artifact: candidate, tied } of issueArtifacts(
+        readScore,
+        issueArgs,
+        "EVIDENCE",
+      )) {
+        if (linkedScore(issue, artifact, candidate)) {
+          // Two eligible scores with the same time cannot be ordered. Leave
+          // scoring pending until a newer, unambiguous score arrives.
+          if (score && score["artifactId"] !== candidate["artifactId"]) break;
+          score = candidate;
+        }
+        if (score && !tied)
+          return this.#report(finding, submittedAt, outcome, {
+            ...details,
+            score,
+          });
+      }
+    } catch (error) {
+      if (!(error instanceof ScoreReadError)) throw error;
+      const reason = "Could not read the linked issue score.";
+      return this.#report(
+        finding,
+        submittedAt,
+        { ...outcome, unavailable: `${reason} ${error.message}` },
+        { ...details, scoringPending: true },
+      );
     }
-    return this.#report(finding, submittedAt, outcome, details);
+    return this.#report(finding, submittedAt, outcome, {
+      ...details,
+      scoringPending: true,
+    });
   }
 
   #report(
@@ -802,6 +832,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
       issue = {},
       validationArtifact = {},
       score,
+      scoringPending,
       resultScope = "finding",
       issueFindingCount,
       issueVerdict,
@@ -809,6 +840,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
       issue?: Record<string, unknown>;
       validationArtifact?: Record<string, unknown>;
       score?: Record<string, unknown>;
+      scoringPending?: boolean;
       resultScope?: ValidationResultScope;
       issueFindingCount?: number;
       issueVerdict?: string;
@@ -843,7 +875,8 @@ export class ContinuumValidationProvider implements ValidationProvider {
       `Codex finding severity: ${severity} (retained).`,
     ];
     if (statusMessage) report.push(statusMessage);
-    if (unavailable && !terminalStatus) report.push(unavailable);
+    if (unavailable && !terminalStatus && !scoringPending)
+      report.push(unavailable);
     if (validationArtifactId) {
       report.push(
         "Codex has not independently verified that this result reproduces the submitted flaw. Deployment source identity is not compared.",
@@ -899,8 +932,12 @@ export class ContinuumValidationProvider implements ValidationProvider {
           })),
         ),
       );
-    } else if (conclusive) {
-      report.push("A single current issue score could not be established.");
+    } else if (scoringPending) {
+      unavailable ??=
+        "No unambiguous linked issue score is available. Retry validation to refresh the score.";
+      disposition = "deferred";
+      reasons.push({ basis: "INFERRED", reason: unavailable });
+      report.push(unavailable);
     }
     return {
       disposition,
@@ -913,6 +950,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
         ...(terminalStatus && { terminalStatus }),
         validationArtifactId,
         ...(score && { scoringArtifactId: text(score["artifactId"]) }),
+        ...(scoringPending && { scoringPending }),
         ...(statusMessage && { statusMessage }),
         ...(unavailable && { unavailable }),
         severityBefore: severity,

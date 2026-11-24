@@ -32,7 +32,7 @@ export type ValidationProviderConfiguration = {
 
 function unavailable(): never {
   throw new Error(
-    "For host-side validation, install the packaged plugin or build it from a checkout including sdk/typescript.",
+    "For host-side validation, install the packaged plugin or build it from a checkout including sdk/typescript. For a completed scan use codex-security validate --scan with the project file.",
   );
 }
 
@@ -41,7 +41,7 @@ export const validationProviderFromConfiguration: (
 ) => unknown = unavailable;
 export const assessPluginFindings: (...args: unknown[]) => never = unavailable;
 // Source-only builds can read the protected cache written by the packaged SDK.
-export const continuumAssessmentVersion = 4;
+export const continuumAssessmentVersion = 6;
 
 // Only the SDK can run the provider or update the saved assessment.
 export function withPublicationLock<T>(

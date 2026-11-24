@@ -56,6 +56,129 @@ test("no provider preserves standalone validation output", async () => {
   expect(stderr.text()).toBe("");
 });
 
+test("validates only the requested saved occurrence and reports its receipt on failure", async () => {
+  const root = await temporaryDirectory("saved-validation-");
+  const method = spyOn(ContinuumValidationProvider.prototype, "validateBatch");
+  try {
+    const config = join(root, "config.json");
+    await writeFile(
+      config,
+      JSON.stringify({ scan: { validation: configured } }),
+    );
+    const findings = fakeResult(["high", "high"]).findings.findings.map(
+      (f, i) => ({
+        ...f,
+        findingId: "csf_" + i,
+        occurrenceId: "occ_" + i,
+      }),
+    );
+    const record = {
+      itemId: "occ_1",
+      provider: "continuum",
+      findingId: "accepted",
+      disposition: "deferred" as const,
+      verdict: "UNAVAILABLE",
+      severityBefore: "high",
+      severityAfter: "high",
+      claimMatch: "unknown" as const,
+      freshness: { stale: false, reasons: [] },
+      reasons: [],
+      unavailable: "pending",
+    };
+    method.mockResolvedValue([
+      {
+        record,
+        report: "pending",
+        unavailable: "pending",
+        disposition: "deferred",
+        provenance: {
+          provider: "continuum",
+          providerVersion: "1",
+          validatedAt: "now",
+        },
+      },
+    ]);
+    const progress = { status: "failed" };
+    const deps = dependencies({
+      currentDirectory: root,
+      onWorkbench: () => ({
+        scan: {
+          scanId: "scan",
+          targetPath: root,
+          progress,
+          sealManifestDigest: "sha256:" + "a".repeat(64),
+          findings: findings.map(({ occurrenceId, findingId }) => ({
+            occurrenceId,
+            findingId,
+          })),
+        },
+      }),
+      readSavedFindings: async () => findings,
+    });
+    // Stopped scans can have sealed, exportable partial findings.
+    const stopped = createCliTest(main);
+    expect(
+      await stopped.runCli(["validate", "--scan", "scan", "-c", config], deps),
+    ).toBe(2);
+    expect(stopped.stderr.text()).toContain("requires a completed scan");
+    expect(method).not.toHaveBeenCalled();
+
+    progress.status = "complete";
+    const cli = createCliTest(main);
+    expect(
+      await cli.runCli(
+        [
+          "validate",
+          "--scan",
+          "scan",
+          "-c",
+          config,
+          "occ_1",
+          "--format",
+          "json",
+        ],
+        deps,
+      ),
+      cli.stderr.text(),
+    ).toBe(1);
+    expect(method.mock.calls[0]?.[0]).toEqual([findings[1]!]);
+    expect(JSON.parse(cli.stdout.text())).toMatchObject({
+      status: "incomplete",
+      items: [record],
+    });
+    expect(cli.stderr.text()).toContain("environment-1");
+    expect(cli.stderr.text()).toContain("validate --scan scan -c");
+    expect(cli.stderr.text()).toContain("occ_1");
+    expect(cli.stderr.text()).not.toContain("occ_0");
+    method.mockResolvedValue([
+      {
+        record: {
+          ...record,
+          unavailable: undefined,
+          terminalStatus: "PARTIAL",
+          verdict: "EXPLOITABLE",
+        },
+        report: "Partial assessment",
+        disposition: "deferred",
+        provenance: { provider: "continuum", providerVersion: "1" },
+      },
+    ]);
+    const partial = createCliTest(main);
+    expect(
+      await partial.runCli(
+        ["validate", "--scan", "scan", "-c", config, "occ_1"],
+        deps,
+      ),
+    ).toBe(0);
+    expect(partial.stdout.text()).toContain("incomplete");
+    expect(partial.stdout.text()).toContain("occ_1 — deferred");
+    expect(partial.stderr.text()).not.toContain("To retry");
+  } finally {
+    method.mockRestore();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("SDK accepts a provider implementation and contains provider failures", async () => {
   const client = new CodexSecurity();
   const provider = {
@@ -121,11 +244,14 @@ test.each(["--validate", "--validate=true", "--validate=continuum"])(
       issueUrl: "https://example.invalid/issue",
       freshness: { stale: false, reasons: [] },
     };
+    const overridden = flag === "--validate=continuum";
     const failed = {
       itemId: "fake-failed",
       provider: "continuum",
-      verdict: "UNCERTAIN",
-      terminalStatus: "FAILED",
+      verdict: overridden ? "UNAVAILABLE" : "UNCERTAIN",
+      ...(overridden
+        ? { unavailable: "Try again" }
+        : { terminalStatus: "FAILED" }),
       severityBefore: "medium",
       severityAfter: "medium",
       reasons: [],
@@ -149,6 +275,7 @@ test.each(["--validate", "--validate=true", "--validate=continuum"])(
       {
         disposition: "deferred",
         report: "Validation failed",
+        unavailable: "unavailable" in failed ? failed.unavailable : undefined,
         provenance: { provider: "continuum", providerVersion: "1" },
         record: failed,
       },
@@ -160,7 +287,7 @@ test.each(["--validate", "--validate=true", "--validate=continuum"])(
       const config = join(root, "codex-security.yaml");
       await writeFile(
         config,
-        `scan:\n  validation:\n    provider: ${flag === "--validate=continuum" ? "fake-unknown" : "continuum"}\n    continuum:\n      environment_id: example\n`,
+        `scan:\n  validation:\n    provider: ${overridden ? "fake-unknown" : "continuum"}\n    continuum:\n      environment_id: example\n`,
       );
       const base = fakeResult(["high", "medium"]);
       const result = new ScanResult({
@@ -181,6 +308,12 @@ test.each(["--validate", "--validate=true", "--validate=continuum"])(
         cli.stderr.text(),
       ).toBe(0);
       expect(batch).toHaveBeenCalledTimes(1);
+      if (overridden) {
+        expect(cli.stderr.text()).toContain(
+          "scan.validation.provider to continuum",
+        );
+        expect(cli.stderr.text()).toContain("validate --scan");
+      }
       expect(batch.mock.calls[0]?.[1]).toMatchObject({
         repositoryPath: repository,
         checkSubmissionTarget: expect.any(Function),
