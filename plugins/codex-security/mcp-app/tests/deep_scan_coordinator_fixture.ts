@@ -328,8 +328,6 @@ interface ExecutorOptions {
   discoveryCandidateId?: string;
   discoveryFailureMessage?: string;
   nonRetryableDiscoveryMessage?: string;
-  failDiscoveryWorkersAfterGate?: string[];
-  nonRetryableDiscoveryWorkers?: string[];
   discoveryDiagnostics?: CodexWorkerDiagnostic[];
   discoveryCandidates?: Record<string, string>;
   discoveryFailureMessages?: Record<string, string>;
@@ -352,7 +350,6 @@ export class FakeExecutor {
   discoveryContinuationPrompts: (string | undefined)[] = [];
   discoveryThreadIds: string[] = [];
   runningDiscovery = 0;
-  maximumDiscoveryConcurrency = 0;
 
   async run(request: CodexWorkerRequest): Promise<CodexWorkerResult> {
     const threadId = request.resumeThreadId ?? randomUUID();
@@ -372,10 +369,6 @@ export class FakeExecutor {
     promptPaths.add(request.promptPath);
     this.discoveryPromptPaths.set(workerId, promptPaths);
     this.runningDiscovery += 1;
-    this.maximumDiscoveryConcurrency = Math.max(
-      this.maximumDiscoveryConcurrency,
-      this.runningDiscovery,
-    );
     this.discoveryStarted.resolve();
     try {
       const message =
@@ -397,13 +390,7 @@ export class FakeExecutor {
           this.options.nonRetryableDiscoveryMessage,
         );
       }
-      if (this.options.nonRetryableDiscoveryWorkers?.includes(workerId)) {
-        throw new DeepScanNonRetryableError("fixture configuration failure");
-      }
       await this.options.discoveryGates?.[workerId];
-      if (this.options.failDiscoveryWorkersAfterGate?.includes(workerId)) {
-        throw new DeepScanNonRetryableError("fixture late discovery failure");
-      }
       if (
         this.options.blockDiscoveryAfterCalls !== undefined &&
         this.discoveryCalls > this.options.blockDiscoveryAfterCalls
@@ -516,13 +503,6 @@ export async function eventually(predicate: () => boolean) {
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   assert.fail("condition did not become true");
-}
-
-export async function assertNoPublishedCandidates(scanDir: string) {
-  await assert.rejects(
-    readFile(path.join(scanDir, "scan-manifest.json"), "utf8"),
-    (error: NodeJS.ErrnoException) => error.code === "ENOENT",
-  );
 }
 
 export const immediateClock: DeepScanClock = {

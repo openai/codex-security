@@ -1,3 +1,5 @@
+import { readSubprocess } from "./support/shell.js";
+import { buildNodeModule } from "./support/test-subprocess.js";
 import { existsSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import {
@@ -11,12 +13,17 @@ import {
 import { delimiter, join, sep } from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, test } from "bun:test";
-import type { ExternalFindings } from "../src/external-findings.js";
+import type {
+  ExternalFindings,
+  ExternalSourceRepository,
+} from "../src/external-findings.js";
 import { normalizeSnykIssues } from "../src/snyk-rest-findings.js";
 import { snykRestFixture } from "./support/snyk-rest-fixtures.js";
 import {
   listLocalExternalFindings,
   prepareNormalizedLocalImport,
+  type LocalExternalImportDependencies,
+  type NormalizedLocalImportOptions,
 } from "../src/external-findings-local.js";
 import { localFindingsFixture } from "./external-findings-local-helpers.js";
 
@@ -26,7 +33,24 @@ async function fixture(
 ) {
   const result = await localFindingsFixture(options);
   fixtures.push(result);
-  return result;
+  const { repository, environment } = result;
+  return {
+    ...result,
+    prepare: (
+      data: ExternalFindings,
+      deps: LocalExternalImportDependencies = { environment },
+    ) => prepareNormalizedLocalImport(data, { repository, ...source }, deps),
+    prepareSonar: (
+      sourceRepository: ExternalSourceRepository,
+      mapping?: Pick<NormalizedLocalImportOptions, "sourceRepositoryUrl">,
+    ) =>
+      prepareNormalizedLocalImport(
+        input(),
+        { repository, ...source, provider: "sonar", ...mapping },
+        { environment, sourceRepositories: [sourceRepository] },
+      ),
+    read: () => listLocalExternalFindings({ repository }, { environment }),
+  };
 }
 afterEach(async () => {
   await Promise.all(fixtures.splice(0).map((item) => item.dispose()));
@@ -114,26 +138,19 @@ describe("local normalized scanner findings", () => {
   });
 
   test("rejects unserializable report metadata before storing findings", async () => {
-    const { repository, stateDirectory, environment } = await fixture();
+    const { stateDirectory, prepare } = await fixture();
     await expect(
-      prepareNormalizedLocalImport(
-        { ...input(), report: { elapsedNs: 1n } },
-        { repository, ...source },
-        { environment },
-      ),
+      prepare({ ...input(), report: { elapsedNs: 1n } }),
     ).rejects.toThrow(/bigint/i);
     expect(existsSync(stateDirectory)).toBe(false);
   });
 
   test("persists sparse evidence through the native helper and reads it in a separate process", async () => {
-    const { repository, stateDirectory, environment } = await fixture();
+    const { repository, stateDirectory, environment, prepare, read } =
+      await fixture();
     const normalized = input();
     normalized.report = { errors: normalized.excluded };
-    const prepared = await prepareNormalizedLocalImport(
-      normalized,
-      { repository, ...source },
-      { environment },
-    );
+    const prepared = await prepare(normalized);
     expect(prepared.preview).toEqual({
       ...normalized,
       repository,
@@ -170,10 +187,7 @@ describe("local normalized scanner findings", () => {
       });
       expect(row.createdAt).toBe(row.updatedAt);
     }
-    const reloaded = await listLocalExternalFindings(
-      { repository },
-      { environment },
-    );
+    const reloaded = await read();
     expect(new Map(reloaded.map((row) => [row.id, row]))).toEqual(
       new Map(result.findings.map((row) => [row.id, row])),
     );
@@ -186,7 +200,7 @@ describe("local normalized scanner findings", () => {
   });
 
   test("upserts reordered and changed exports without deleting omitted records or mixing namespaces", async () => {
-    const { root, repository, environment } = await fixture();
+    const { root, repository, environment, read } = await fixture();
     const save = async (
       data: ExternalFindings,
       options = { repository, ...source },
@@ -251,20 +265,12 @@ describe("local normalized scanner findings", () => {
         { environment },
       ),
     ).toEqual(otherCheckout.findings);
-    expect(
-      (await listLocalExternalFindings({ repository }, { environment })).length,
-    ).toBe(4);
+    expect((await read()).length).toBe(4);
   });
 
   test("reads retained evidence after the checkout is removed and still requires a directory for new imports", async () => {
-    const { repository, environment } = await fixture();
-    const result = await (
-      await prepareNormalizedLocalImport(
-        input(),
-        { repository, ...source },
-        { environment },
-      )
-    ).import();
+    const { repository, environment, prepare } = await fixture();
+    const result = await (await prepare(input())).import();
     await rm(repository, { recursive: true });
     const reloaded = await listLocalExternalFindings(
       { repository: result.repository },
@@ -279,32 +285,23 @@ describe("local normalized scanner findings", () => {
         { environment },
       ),
     ).toEqual([result.findings[0]!]);
-    await expect(
-      prepareNormalizedLocalImport(
-        input(),
-        { repository, ...source },
-        { environment },
-      ),
-    ).rejects.toThrow("Repository is not a directory");
+    await expect(prepare(input())).rejects.toThrow(
+      "Repository is not a directory",
+    );
   });
 
   test("preparation and cancellation leave the database untouched", async () => {
-    const { repository, stateDirectory, environment } = await fixture();
+    const { stateDirectory, environment, prepare } = await fixture();
     const controller = new AbortController();
-    const prepared = await prepareNormalizedLocalImport(
-      input(),
-      { repository, ...source },
-      { environment, signal: controller.signal },
-    );
+    const prepared = await prepare(input(), {
+      environment,
+      signal: controller.signal,
+    });
     expect(existsSync(stateDirectory)).toBe(false);
     controller.abort();
     await expect(prepared.import()).rejects.toThrow();
     await expect(
-      prepareNormalizedLocalImport(
-        input(),
-        { repository, ...source },
-        { environment, signal: controller.signal },
-      ),
+      prepare(input(), { environment, signal: controller.signal }),
     ).rejects.toThrow();
     expect(existsSync(stateDirectory)).toBe(false);
   });
@@ -784,35 +781,25 @@ describe("local normalized scanner findings", () => {
   });
 
   test("rejects duplicate occurrence identities before creating local state", async () => {
-    const { repository, stateDirectory, environment } = await fixture();
+    const { stateDirectory, prepare } = await fixture();
     const duplicate = input();
     duplicate.findings.push(duplicate.findings[0]!);
-    await expect(
-      prepareNormalizedLocalImport(
-        duplicate,
-        { repository, ...source },
-        { environment },
-      ),
-    ).rejects.toThrow("Duplicate source finding id");
+    await expect(prepare(duplicate)).rejects.toThrow(
+      "Duplicate source finding id",
+    );
     expect(existsSync(stateDirectory)).toBe(false);
   });
 
   test("rejects non-finite JSON before it can be stored as null", async () => {
-    const { repository, stateDirectory, environment } = await fixture();
+    const { stateDirectory, prepare } = await fixture();
     const data = input();
     data.findings[0]!.evidence.source_data = JSON.parse('{"score":1e999}');
-    await expect(
-      prepareNormalizedLocalImport(
-        data,
-        { repository, ...source },
-        { environment },
-      ),
-    ).rejects.toThrow("non-finite numbers");
+    await expect(prepare(data)).rejects.toThrow("non-finite numbers");
     expect(existsSync(stateDirectory)).toBe(false);
   });
 
   test("local previews and storage capture the same numeric source data", async () => {
-    const { repository, environment } = await fixture();
+    const { prepare, read } = await fixture();
     const data = input();
     let reads = 0;
     const sourceData = {
@@ -833,21 +820,14 @@ describe("local normalized scanner findings", () => {
     };
     data.findings[0]!.evidence.source_data = sourceData;
     data.report = { value: sourceData.value, alias: sourceData.value };
-    const prepared = await prepareNormalizedLocalImport(
-      data,
-      { repository, ...source },
-      { environment },
-    );
+    const prepared = await prepare(data);
     const expected = { scores: [3], section: [1, 1], value: 0 };
     expect(reads).toBe(1);
     const preview = prepared.preview.findings[0]!.evidence.source_data!;
     expect(JSON.parse(JSON.stringify(preview))).toEqual(expected);
     expect(prepared.preview.report).toEqual({ value: 0, alias: 9 });
     expect((await prepared.import()).report).toEqual(prepared.preview.report);
-    const rows = await listLocalExternalFindings(
-      { repository },
-      { environment },
-    );
+    const rows = await read();
     expect(
       rows.find((item) => item.sourceFindingId === "scanner-finding-1")
         ?.evidence.source_data,
@@ -855,7 +835,7 @@ describe("local normalized scanner findings", () => {
   });
 
   test("captures numeric fields before later getters mutate the source", async () => {
-    const { repository, environment } = await fixture();
+    const { prepare, read } = await fixture();
     const data = input();
     class Scores {
       score = new Number(3);
@@ -875,11 +855,7 @@ describe("local normalized scanner findings", () => {
       vendorCursor: 2 ** 53,
       previousCursor: new Number(2 ** 53),
     });
-    const prepared = await prepareNormalizedLocalImport(
-      data,
-      { repository, ...source },
-      { environment },
-    );
+    const prepared = await prepare(data);
     expect(reads).toBe(1);
     const expected = { scores: { score: 3, getterScore: 5 } };
     expect(
@@ -888,10 +864,7 @@ describe("local normalized scanner findings", () => {
       ),
     ).toEqual(expected);
     await prepared.import();
-    const rows = await listLocalExternalFindings(
-      { repository },
-      { environment },
-    );
+    const rows = await read();
     expect(
       rows.find((item) => item.sourceFindingId === "scanner-finding-1")
         ?.evidence.source_data,
@@ -901,22 +874,16 @@ describe("local normalized scanner findings", () => {
   test.each([2 ** 53, new Number(2 ** 53)])(
     "rejects unsafe normalized evidence before writing any local state",
     async (score) => {
-      const { repository, stateDirectory, environment } = await fixture();
+      const { stateDirectory, prepare } = await fixture();
       const data = input();
       data.findings[0]!.evidence.source_data = { score };
-      await expect(
-        prepareNormalizedLocalImport(
-          data,
-          { repository, ...source },
-          { environment },
-        ),
-      ).rejects.toThrow("safe integer");
+      await expect(prepare(data)).rejects.toThrow("safe integer");
       expect(existsSync(stateDirectory)).toBe(false);
     },
   );
 
   test("uses the canonical selected checkout and rejects state inside it", async () => {
-    const { root, repository, environment } = await fixture();
+    const { root, repository, environment, prepare } = await fixture();
     const link = join(root, "repository-link");
     await symlink(
       repository,
@@ -930,16 +897,12 @@ describe("local normalized scanner findings", () => {
     );
     expect(prepared.preview.repository).toBe(repository);
     await expect(
-      prepareNormalizedLocalImport(
-        input(),
-        { repository, ...source },
-        {
-          environment: {
-            ...environment,
-            CODEX_SECURITY_STATE_DIR: join(repository, "state"),
-          },
+      prepare(input(), {
+        environment: {
+          ...environment,
+          CODEX_SECURITY_STATE_DIR: join(repository, "state"),
         },
-      ),
+      }),
     ).rejects.toThrow();
     const child = join(repository, "src");
     await mkdir(child);
@@ -1189,23 +1152,17 @@ describe("local normalized scanner findings", () => {
         join(import.meta.dir, "..", ".import-metadata-"),
       );
       try {
-        const built = await Bun.build({
-          entrypoints: [
-            join(import.meta.dir, "..", "src", "external-findings-local.ts"),
-          ],
-          outdir: bundle,
-          target: "node",
-          format: "esm",
-          packages: "external",
-        });
-        expect(built.success).toBe(true);
+        const modulePath = await buildNodeModule(
+          join(import.meta.dir, "..", "src", "external-findings-local.ts"),
+          bundle,
+        );
         const invocation = join(bundle, "invoke.mjs");
         await writeFile(
           invocation,
           `
           import assert from "node:assert/strict";
           import { existsSync } from "node:fs";
-          import { listLocalExternalFindings, prepareNormalizedLocalImport } from ${JSON.stringify(pathToFileURL(built.outputs[0]!.path).href)};
+          import { listLocalExternalFindings, prepareNormalizedLocalImport } from ${JSON.stringify(pathToFileURL(modulePath).href)};
           for (const { repository, state } of ${JSON.stringify(cases)}) {
             let helperCalls = 0;
             const dependencies = {
@@ -1238,11 +1195,7 @@ describe("local normalized scanner findings", () => {
           stdout: "pipe",
           stderr: "pipe",
         });
-        const [code, stdout, stderr] = await Promise.all([
-          child.exited,
-          new Response(child.stdout).text(),
-          new Response(child.stderr).text(),
-        ]);
+        const { status: code, stdout, stderr } = await readSubprocess(child);
         expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
         expect(stdout.trim()).toBe("metadata-pointer-cases:4");
       } finally {
@@ -1261,16 +1214,10 @@ describe("local normalized scanner findings", () => {
         join(import.meta.dir, "..", ".import-metadata-"),
       );
       try {
-        const built = await Bun.build({
-          entrypoints: [
-            join(import.meta.dir, "..", "src", "external-findings-local.ts"),
-          ],
-          outdir: bundle,
-          target: "node",
-          format: "esm",
-          packages: "external",
-        });
-        expect(built.success).toBe(true);
+        const modulePath = await buildNodeModule(
+          join(import.meta.dir, "..", "src", "external-findings-local.ts"),
+          bundle,
+        );
         const invocation = join(bundle, "invoke.mjs");
         await writeFile(
           invocation,
@@ -1280,7 +1227,7 @@ describe("local normalized scanner findings", () => {
           import { existsSync } from "node:fs";
           import { mkdir, realpath, writeFile } from "node:fs/promises";
           import { join, parse } from "node:path";
-          import { listLocalExternalFindings, prepareNormalizedLocalImport } from ${JSON.stringify(pathToFileURL(built.outputs[0]!.path).href)};
+          import { listLocalExternalFindings, prepareNormalizedLocalImport } from ${JSON.stringify(pathToFileURL(modulePath).href)};
           const root = ${JSON.stringify(root)};
           const drive = parse(root).root.slice(0, 2);
           const git = (args) => execFileSync("git", args, {
@@ -1364,11 +1311,7 @@ describe("local normalized scanner findings", () => {
           stdout: "pipe",
           stderr: "pipe",
         });
-        const [code, stdout, stderr] = await Promise.all([
-          child.exited,
-          new Response(child.stdout).text(),
-          new Response(child.stderr).text(),
-        ]);
+        const { status: code, stdout, stderr } = await readSubprocess(child);
         expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
         expect(stdout.trim()).toBe("windows-metadata-roots:3");
       } finally {
@@ -1517,7 +1460,7 @@ describe("local normalized scanner findings", () => {
   });
 
   test("matches source repository context against SSH remotes and reader metadata", async () => {
-    const { repository, stateDirectory, environment, git } = await fixture({
+    const { stateDirectory, environment, git, prepare } = await fixture({
       remote: "git@github.com:Example/Project.git",
     });
     const data = input();
@@ -1525,36 +1468,20 @@ describe("local normalized scanner findings", () => {
       kind: "sast",
       repository: { url: "https://github.com/example/project" },
     };
-    await prepareNormalizedLocalImport(
-      data,
-      { repository, ...source },
-      { environment },
-    );
+    await prepare(data);
     await expect(
-      prepareNormalizedLocalImport(
-        data,
-        { repository, ...source },
-        {
-          environment,
-          sourceRepositories: [{ url: "https://github.com/example/other" }],
-        },
-      ),
+      prepare(data, {
+        environment,
+        sourceRepositories: [{ url: "https://github.com/example/other" }],
+      }),
     ).rejects.toThrow("does not match a configured remote");
     data.findings[0]!.evidence.details.repository!.url =
       "https://github.com/example/other";
-    await expect(
-      prepareNormalizedLocalImport(
-        data,
-        { repository, ...source },
-        { environment },
-      ),
-    ).rejects.toThrow("does not match a configured remote");
-    git("remote", "add", "upstream", "https://github.com/example/other.git");
-    await prepareNormalizedLocalImport(
-      data,
-      { repository, ...source },
-      { environment },
+    await expect(prepare(data)).rejects.toThrow(
+      "does not match a configured remote",
     );
+    git("remote", "add", "upstream", "https://github.com/example/other.git");
+    await prepare(data);
     expect(existsSync(stateDirectory)).toBe(false);
   });
 
@@ -1571,33 +1498,25 @@ describe("local normalized scanner findings", () => {
       ),
     ),
   )("matches %s transport remotes with port %s", async (protocol, port) => {
-    const { repository, stateDirectory, environment } = await fixture({
+    const { stateDirectory, environment, prepare } = await fixture({
       remote: `${protocol}://git.example.test${port}/Example/Project.git`,
     });
     const expectedPort = port === ":19418" ? port : "";
-    await prepareNormalizedLocalImport(
-      input(),
-      { repository, ...source },
-      {
-        environment,
-        sourceRepositories: [
-          {
-            url: `https://git.example.test${expectedPort}/Example/Project`,
-          },
-        ],
-      },
-    );
+    await prepare(input(), {
+      environment,
+      sourceRepositories: [
+        {
+          url: `https://git.example.test${expectedPort}/Example/Project`,
+        },
+      ],
+    });
     for (const url of [
       `https://git.example.test${expectedPort}/Example/Other`,
       `https://git.example.test${expectedPort}/example/project`,
       `https://git.example.test${expectedPort ? "" : ":19418"}/Example/Project`,
     ]) {
       await expect(
-        prepareNormalizedLocalImport(
-          input(),
-          { repository, ...source },
-          { environment, sourceRepositories: [{ url }] },
-        ),
+        prepare(input(), { environment, sourceRepositories: [{ url }] }),
       ).rejects.toThrow("does not match a configured remote");
     }
     expect(existsSync(stateDirectory)).toBe(false);
@@ -1612,27 +1531,19 @@ describe("local normalized scanner findings", () => {
   )(
     "matches %s on %s over the HTTPS port without equating other SSH ports",
     async (protocol, host) => {
-      const { repository, stateDirectory, environment, git } = await fixture({
+      const { stateDirectory, environment, git, prepare } = await fixture({
         remote: `${protocol}://git@${host}:443/example/project.git`,
       });
       const dependencies = {
         environment,
         sourceRepositories: [{ url: "https://github.com/example/project" }],
       };
-      await prepareNormalizedLocalImport(
-        input(),
-        { repository, ...source },
-        dependencies,
-      );
+      await prepare(input(), dependencies);
       await expect(
-        prepareNormalizedLocalImport(
-          input(),
-          { repository, ...source },
-          {
-            environment,
-            sourceRepositories: [{ url: "https://github.com/example/other" }],
-          },
-        ),
+        prepare(input(), {
+          environment,
+          sourceRepositories: [{ url: "https://github.com/example/other" }],
+        }),
       ).rejects.toThrow("does not match a configured remote");
       git(
         "remote",
@@ -1640,13 +1551,9 @@ describe("local normalized scanner findings", () => {
         "origin",
         `${protocol}://git@ssh.github.com:2222/example/project.git`,
       );
-      await expect(
-        prepareNormalizedLocalImport(
-          input(),
-          { repository, ...source },
-          dependencies,
-        ),
-      ).rejects.toThrow("does not match a configured remote");
+      await expect(prepare(input(), dependencies)).rejects.toThrow(
+        "does not match a configured remote",
+      );
       expect(existsSync(stateDirectory)).toBe(false);
     },
   );
@@ -1655,7 +1562,7 @@ describe("local normalized scanner findings", () => {
     "a line break in the primary Git URL cannot establish a repository match: %j",
     async (suffix) => {
       const url = "https://github.com/example/project";
-      const { repository, environment, git } = await fixture();
+      const { repository, prepareSonar, git } = await fixture();
       // A quoted value preserves a trailing carriage return on older Git.
       const quotedSuffix = suffix.replaceAll("\n", "\\n");
       await appendFile(
@@ -1665,16 +1572,9 @@ describe("local normalized scanner findings", () => {
       expect(git("config", "--null", "--get", "remote.origin.url")).toBe(
         `${url}${suffix}\0`,
       );
-      await expect(
-        prepareNormalizedLocalImport(
-          input(),
-          { repository, ...source, provider: "sonar" },
-          {
-            environment,
-            sourceRepositories: [{ url }],
-          },
-        ),
-      ).rejects.toThrow("remote URL contains a line break");
+      await expect(prepareSonar({ url })).rejects.toThrow(
+        "remote URL contains a line break",
+      );
     },
   );
 
@@ -1691,16 +1591,12 @@ describe("local normalized scanner findings", () => {
   ])(
     "allows a manual Sonar mapping for %s alongside an HTTPS fork",
     async (upstream, url) => {
-      const { repository, environment, git } = await fixture({
+      const { prepareSonar, git } = await fixture({
         remote: "https://fork.example.invalid/team/project.git",
       });
       git("remote", "add", "upstream", upstream);
       const prepare = (sourceUrl: string, sourceRepositoryUrl?: string) =>
-        prepareNormalizedLocalImport(
-          input(),
-          { repository, ...source, provider: "sonar", sourceRepositoryUrl },
-          { environment, sourceRepositories: [{ url: sourceUrl }] },
-        );
+        prepareSonar({ url: sourceUrl }, { sourceRepositoryUrl });
       await expect(prepare(url)).rejects.toThrow(
         "does not match a configured remote",
       );
@@ -1729,11 +1625,10 @@ describe("local normalized scanner findings", () => {
   ])(
     "an explicit Sonar mapping accepts the dotted provider host in %s",
     async (remote, url) => {
-      const { repository, environment } = await fixture({ remote });
-      const prepared = await prepareNormalizedLocalImport(
-        input(),
-        { repository, ...source, provider: "sonar", sourceRepositoryUrl: url },
-        { environment, sourceRepositories: [{ url }] },
+      const { prepareSonar } = await fixture({ remote });
+      const prepared = await prepareSonar(
+        { url },
+        { sourceRepositoryUrl: url },
       );
       expect(prepared.matchesRepositoryRemote).toBe(false);
     },
@@ -1747,22 +1642,11 @@ describe("local normalized scanner findings", () => {
   ])(
     "a recognized Sonar SSH host cannot be remapped to another provider: %s",
     async (remote) => {
-      const { repository, environment } = await fixture({
-        remote,
-      });
+      const { prepareSonar } = await fixture({ remote });
       await expect(
-        prepareNormalizedLocalImport(
-          input(),
-          {
-            repository,
-            ...source,
-            provider: "sonar",
-            sourceRepositoryUrl: "https://github.com/team/project",
-          },
-          {
-            environment,
-            sourceRepositories: [{ url: "https://github.com/team/project" }],
-          },
+        prepareSonar(
+          { url: "https://github.com/team/project" },
+          { sourceRepositoryUrl: "https://github.com/team/project" },
         ),
       ).rejects.toThrow("does not match a configured remote");
     },
@@ -1787,11 +1671,10 @@ describe("local normalized scanner findings", () => {
   ] as const)(
     "a GitHub reader hint preserves a dotted Sonar mapping for %s and %s",
     async (remote, url, verified) => {
-      const { repository, environment } = await fixture({ remote });
-      const prepared = await prepareNormalizedLocalImport(
-        input(),
-        { repository, ...source, provider: "sonar", sourceRepositoryUrl: url },
-        { environment, sourceRepositories: [{ url, platform: "github" }] },
+      const { prepareSonar } = await fixture({ remote });
+      const prepared = await prepareSonar(
+        { url, platform: "github" },
+        { sourceRepositoryUrl: url },
       );
       expect(prepared.matchesRepositoryRemote).toBe(verified);
     },
@@ -1803,19 +1686,10 @@ describe("local normalized scanner findings", () => {
   ])(
     "a GitHub reader hint cannot remap a recognized GitLab SSH host: %s",
     async (remote) => {
-      const { repository, environment } = await fixture({ remote });
+      const { prepareSonar } = await fixture({ remote });
       const url = "https://github.com/team/project";
       await expect(
-        prepareNormalizedLocalImport(
-          input(),
-          {
-            repository,
-            ...source,
-            provider: "sonar",
-            sourceRepositoryUrl: url,
-          },
-          { environment, sourceRepositories: [{ url, platform: "github" }] },
-        ),
+        prepareSonar({ url, platform: "github" }, { sourceRepositoryUrl: url }),
       ).rejects.toThrow("does not match a configured remote");
     },
   );
@@ -1849,21 +1723,12 @@ describe("local normalized scanner findings", () => {
   });
 
   test("an explicit HTTPS mapping accepts an equivalent SCP reader claim for a checkout SSH alias", async () => {
-    const { repository, environment } = await fixture({
+    const { prepareSonar } = await fixture({
       remote: "git@work:team/project.git",
     });
-    const prepared = await prepareNormalizedLocalImport(
-      input(),
-      {
-        repository,
-        ...source,
-        provider: "sonar",
-        sourceRepositoryUrl: "https://github.com/team/project",
-      },
-      {
-        environment,
-        sourceRepositories: [{ url: "git@github.com:team/project.git" }],
-      },
+    const prepared = await prepareSonar(
+      { url: "git@github.com:team/project.git" },
+      { sourceRepositoryUrl: "https://github.com/team/project" },
     );
     expect(prepared.matchesRepositoryRemote).toBe(false);
   });
@@ -1872,34 +1737,19 @@ describe("local normalized scanner findings", () => {
     "https://git.example.invalid/team/project",
     "git@git.example.invalid:team/project.git",
   ])("a custom SSH remote must match the claimed project: %s", async (url) => {
-    const { repository, environment, git } = await fixture({
+    const { prepareSonar, git } = await fixture({
       remote: "git@git.example.invalid:team/other.git",
     });
-    await expect(
-      prepareNormalizedLocalImport(
-        input(),
-        { repository, ...source, provider: "sonar" },
-        {
-          environment,
-          sourceRepositories: [{ url }],
-        },
-      ),
-    ).rejects.toThrow("does not match a configured remote");
+    await expect(prepareSonar({ url })).rejects.toThrow(
+      "does not match a configured remote",
+    );
     git(
       "remote",
       "set-url",
       "origin",
       "git@git.example.invalid:team/project.git",
     );
-    expect(
-      (
-        await prepareNormalizedLocalImport(
-          input(),
-          { repository, ...source, provider: "sonar" },
-          { environment, sourceRepositories: [{ url }] },
-        )
-      ).matchesRepositoryRemote,
-    ).toBe(false);
+    expect((await prepareSonar({ url })).matchesRepositoryRemote).toBe(false);
   });
 
   test.each([
@@ -1921,12 +1771,8 @@ describe("local normalized scanner findings", () => {
   ] as const)(
     "checks the same Sonar binding for replay of %s as for discovery",
     async (remote, url, matches) => {
-      const { repository, environment } = await fixture({ remote });
-      const prepared = await prepareNormalizedLocalImport(
-        input(),
-        { repository, ...source, provider: "sonar" },
-        { environment, sourceRepositories: [{ url }] },
-      );
+      const { prepareSonar } = await fixture({ remote });
+      const prepared = await prepareSonar({ url });
       expect(prepared.matchesRepositoryRemote).toBe(matches);
     },
   );
@@ -1984,7 +1830,7 @@ describe("local normalized scanner findings", () => {
   test.each(["HOME", "GIT_CONFIG_GLOBAL"])(
     "isolates concurrent injected %s configurations without redirecting the selected repository",
     async (setting) => {
-      const { root, repository, stateDirectory, environment } = await fixture({
+      const { root, stateDirectory, environment, prepare } = await fixture({
         remote: "gh:project.git",
       });
       const other = await fixture({
@@ -2019,27 +1865,19 @@ describe("local normalized scanner findings", () => {
       }));
       await Promise.all(
         configurations.map((configuration) =>
-          prepareNormalizedLocalImport(
-            input(),
-            { repository, ...source },
-            {
-              environment: configuration.environment,
-              sourceRepositories: [{ url: configuration.url }],
-            },
-          ),
+          prepare(input(), {
+            environment: configuration.environment,
+            sourceRepositories: [{ url: configuration.url }],
+          }),
         ),
       );
       await Promise.all(
         configurations.map((configuration, index) =>
           expect(
-            prepareNormalizedLocalImport(
-              input(),
-              { repository, ...source },
-              {
-                environment: configuration.environment,
-                sourceRepositories: [{ url: configurations[1 - index]!.url }],
-              },
-            ),
+            prepare(input(), {
+              environment: configuration.environment,
+              sourceRepositories: [{ url: configurations[1 - index]!.url }],
+            }),
           ).rejects.toThrow("does not match a configured remote"),
         ),
       );
@@ -2059,40 +1897,28 @@ describe("local normalized scanner findings", () => {
   ])(
     "ignores local remote %s while enforcing any network remote",
     async (remote) => {
-      const { repository, stateDirectory, environment, git } = await fixture({
+      const { stateDirectory, environment, git, prepare } = await fixture({
         remote,
       });
       const dependencies = {
         environment,
         sourceRepositories: [{ url: "https://github.com/example/project" }],
       };
-      await prepareNormalizedLocalImport(
-        input(),
-        { repository, ...source },
-        dependencies,
-      );
+      await prepare(input(), dependencies);
       git("remote", "add", "upstream", "https://github.com/example/project");
-      await prepareNormalizedLocalImport(
-        input(),
-        { repository, ...source },
-        dependencies,
-      );
+      await prepare(input(), dependencies);
       await expect(
-        prepareNormalizedLocalImport(
-          input(),
-          { repository, ...source },
-          {
-            environment,
-            sourceRepositories: [{ url: "https://github.com/example/other" }],
-          },
-        ),
+        prepare(input(), {
+          environment,
+          sourceRepositories: [{ url: "https://github.com/example/other" }],
+        }),
       ).rejects.toThrow("does not match a configured remote");
       expect(existsSync(stateDirectory)).toBe(false);
     },
   );
 
   test("preserves Git configuration errors during repository matching", async () => {
-    const { repository, stateDirectory, environment } = await fixture({
+    const { repository, stateDirectory, environment, prepare } = await fixture({
       remote: "https://github.com/example/project",
     });
     await appendFile(join(repository, ".git", "config"), "[invalid\n");
@@ -2103,35 +1929,24 @@ describe("local normalized scanner findings", () => {
     expect(git.status).toBe(128);
     expect(git.stderr).toContain("fatal: bad config line");
     await expect(
-      prepareNormalizedLocalImport(
-        input(),
-        { repository, ...source },
-        {
-          environment,
-          sourceRepositories: [{ url: "https://github.com/example/other" }],
-        },
-      ),
+      prepare(input(), {
+        environment,
+        sourceRepositories: [{ url: "https://github.com/example/other" }],
+      }),
     ).rejects.toMatchObject({ code: git.status, stderr: git.stderr });
     expect(existsSync(stateDirectory)).toBe(false);
   });
 
   test("accepts repository context for checkouts without remotes and plain source directories", async () => {
-    const { repository, stateDirectory, environment } = await fixture();
+    const { repository, stateDirectory, environment, prepare } =
+      await fixture();
     const dependencies = {
       environment,
       sourceRepositories: [{ url: "https://github.com/example/project" }],
     };
-    await prepareNormalizedLocalImport(
-      input(),
-      { repository, ...source },
-      dependencies,
-    );
+    await prepare(input(), dependencies);
     await rm(join(repository, ".git"), { recursive: true });
-    const prepared = await prepareNormalizedLocalImport(
-      input(),
-      { repository, ...source },
-      dependencies,
-    );
+    const prepared = await prepare(input(), dependencies);
     expect(prepared.preview.repository).toBe(repository);
     expect(existsSync(stateDirectory)).toBe(false);
   });

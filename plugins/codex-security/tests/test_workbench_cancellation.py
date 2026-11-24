@@ -19,6 +19,7 @@ from workbench_test_support import (
     mark_handoff_delivered,
     scan_claim_command,
     scan_command,
+    scan_cost,
     start_delivered_scan,
     start_scan_command,
     write_completed_contract,
@@ -161,14 +162,7 @@ def test_workbench_cancels_running_scan_and_rejects_late_updates(tmp_path: Path)
     assert wrong_thread["returncode"] != 0
     assert "owning Codex thread" in str(wrong_thread["stderr"])
 
-    cost = {
-        "model": "synthetic-model",
-        "inputTokens": 25,
-        "cachedInputTokens": 0,
-        "cacheWriteInputTokens": 0,
-        "outputTokens": 1,
-        "estimatedUsd": 0.001,
-    }
+    cost = scan_cost("synthetic-model", input_tokens=25, output_tokens=1, usd=0.001)
     canceled = scan_command(
         state_dir, "cancel-scan", scan_id, "--thread-id", thread_id, "--cost-json", json.dumps(cost)
     )

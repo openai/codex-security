@@ -385,11 +385,7 @@ function title(f: Finding, path = f.anchor?.path) {
       : dependencyVerdictLabels[f.item.verdict];
   const site = f.anchor;
   if (!site) return prose(f.label) + " — " + status;
-  const prefix = {
-    reference: "Reference ",
-    last_verified: "Last verified step ",
-    call: "",
-  }[site.kind];
+  const prefix = site.kind === "reference" ? "Reference " : "";
   return prefix + code((path ?? site.path) + ":" + site.line) + " — " + status;
 }
 function contextLabel(f: Finding) {
