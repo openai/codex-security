@@ -21,6 +21,7 @@
 - honor Continuum issue changes and member evidence across retries ([#2821](https://github.com/openai/codex-security/pull/2821))
 - simplify worker results and coordinator waits ([#2834](https://github.com/openai/codex-security/pull/2834))
 - simplify session progress and usage accounting ([#2835](https://github.com/openai/codex-security/pull/2835))
+- index and reconcile Linear publication evidence once ([#2833](https://github.com/openai/codex-security/pull/2833))
 
 </details>
 
