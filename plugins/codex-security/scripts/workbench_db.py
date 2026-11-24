@@ -117,6 +117,7 @@ from workbench_setup import (
 )
 from workbench_source_excerpt import finding_source_excerpt
 from workbench_source_scopes import (
+    OBJECT_ID,
     capture_source_scopes,
     expected_target_kinds,
     public_scan_recipe,
@@ -1891,9 +1892,19 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
         raise SystemExit("Choose why this finding is being closed.")
     note = optional_text(args.note, maximum=2400)
     require_close_note(close_reason, note)
+    fixed_revision = getattr(args, "fixed_revision", None)
+    if fixed_revision is not None:
+        if close_reason != "already_fixed":
+            raise SystemExit("A fixed revision requires the already_fixed close reason.")
+        fixed_revision = fixed_revision.strip().lower()
+        if not OBJECT_ID.fullmatch(fixed_revision):
+            raise SystemExit(
+                "The fixed revision must be a full Git commit OID (40 or 64 hex digits)."
+            )
+        if note is None:
+            raise SystemExit("Include a note explaining the fix evidence at the fixed revision.")
     connection.execute("BEGIN IMMEDIATE")
     with connection:
-        timestamp = now()
         occurrence = require_occurrence(connection, args.occurrence_id)
         if args.status == "closed":
             remediation = remediation_state.latest_attempt(connection, occurrence["id"])
@@ -1908,53 +1919,23 @@ def set_finding_triage(connection: sqlite3.Connection, args: argparse.Namespace)
                 raise SystemExit(
                     "Wait for the pending remediation operation to finish before closing this finding."
                 )
-            if (
-                close_reason == "already_fixed"
-                and remediation is not None
-                and remediation["state"] == "verified"
-            ):
-                scan = require_scan(connection, occurrence["scan_id"])
-                require_remediation_checkout_unchanged(
-                    scan,
-                    remediation,
-                    require_applied_content=True,
-                )
-        previous_triage = connection.execute(
-            "SELECT status, close_reason, note FROM finding_triage WHERE occurrence_id = ?",
-            (occurrence["id"],),
-        ).fetchone()
-        if previous_triage is None or (
-            previous_triage["status"],
-            previous_triage["close_reason"],
-            previous_triage["note"],
-        ) != (args.status, close_reason, note):
-            connection.execute(
-                """
-                INSERT INTO finding_decisions (
-                    id, occurrence_id, status, close_reason, note, created_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    str(uuid.uuid4()),
-                    occurrence["id"],
-                    args.status,
-                    close_reason,
-                    note,
-                    timestamp,
-                ),
-            )
-        connection.execute(
-            """
-            INSERT INTO finding_triage (occurrence_id, status, close_reason, note, updated_at)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(occurrence_id) DO UPDATE SET
-                status = excluded.status,
-                close_reason = excluded.close_reason,
-                note = excluded.note,
-                updated_at = excluded.updated_at
-            """,
-            (occurrence["id"], args.status, close_reason, note, timestamp),
+        changed = scan_history.record_finding_decision(
+            connection, occurrence["id"], args.status, close_reason, note, fixed_revision, now()
         )
+        if (
+            changed
+            and fixed_revision is None
+            and args.status == "closed"
+            and close_reason == "already_fixed"
+            and remediation is not None
+            and remediation["state"] == "verified"
+        ):
+            scan = require_scan(connection, occurrence["scan_id"])
+            require_remediation_checkout_unchanged(
+                scan,
+                remediation,
+                require_applied_content=True,
+            )
     return scan_context(connection, occurrence["scan_id"])
 
 

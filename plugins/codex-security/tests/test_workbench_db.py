@@ -1020,6 +1020,84 @@ def test_reviewed_patch_matches_unversioned_checkout_bytes(
     assert workbench_api["require_reviewed_patch_applied"](scan, remediation, patch_name) == applied
 
 
+def test_finding_fix_evidence_persists_with_each_decision(tmp_path: Path) -> None:
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
+    write_completed_contract(scan_dir, scan_id, target)
+    occurrence = scan_command(state_dir, "complete-scan", scan_id)["scan"]["findings"][0][
+        "occurrenceId"
+    ]
+
+    def close(*extra: str) -> dict[str, object]:
+        return set_triage(
+            state_dir, occurrence, "closed", "--close-reason", "already_fixed", *extra
+        )["scan"]["findings"][0]["triage"]
+
+    note = "Regression test passed.\nOutput: --literal [verified]"
+    sha1 = "ab" * 20
+    sha256 = "cd" * 32
+    legacy = close()
+    assert "fixedRevision" not in legacy
+    # Reopen a v72 database containing an already_fixed decision.
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as db:
+        db.execute("DROP TRIGGER retain_finding_decision_revision")
+        db.execute("ALTER TABLE finding_triage DROP COLUMN fixed_revision")
+        db.execute("ALTER TABLE finding_decisions DROP COLUMN fixed_revision")
+        db.execute("DELETE FROM schema_migrations WHERE version IN (80, 81)")
+    migrated = close()
+    assert migrated == {**legacy, "updatedAt": migrated["updatedAt"]}
+    for reason, revision, rationale, diagnostic in (
+        (None, sha1, note, "already_fixed"),
+        ("wont_fix", sha1, note, "already_fixed"),
+        ("already_fixed", sha1, "  ", "note"),
+        ("already_fixed", "HEAD", note, "full Git commit OID"),
+        ("already_fixed", sha1[:12], note, "full Git commit OID"),
+    ):
+        flags = ["--fixed-revision", revision, "--note", rationale]
+        status = "open"
+        if reason:
+            flags.extend(("--close-reason", reason))
+            status = "closed"
+        rejected = set_triage(state_dir, occurrence, status, *flags, check=False)
+        assert rejected["returncode"] != 0
+        assert diagnostic in rejected["stderr"]
+
+    bound = close("--fixed-revision", sha1.upper(), "--note", note)
+    assert bound["fixedRevision"] == sha1
+    assert bound["note"] == note
+    for args in (("--fixed-revision", sha1, "--note", note), ("--note", note), ()):
+        replay = close(*args)
+        assert replay == {**bound, "updatedAt": replay["updatedAt"]}
+    rebound = close("--fixed-revision", sha256, "--note", note)
+    assert rebound["fixedRevision"] == sha256
+    unbound = close("--note", "Updated unbound rationale")
+    assert "fixedRevision" not in unbound
+    close("--fixed-revision", sha256, "--note", note)
+    reopened = set_triage(state_dir, occurrence, "open")["scan"]["findings"][0]["triage"]
+    assert reopened["status"] == "open"
+    assert "fixedRevision" not in reopened
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as db:
+        assert db.execute(
+            "SELECT status, close_reason, note, fixed_revision FROM finding_decisions "
+            "WHERE occurrence_id = ? ORDER BY rowid",
+            (occurrence,),
+        ).fetchall() == [
+            ("closed", "already_fixed", None, None),
+            ("closed", "already_fixed", note, sha1),
+            ("closed", "already_fixed", note, sha256),
+            ("closed", "already_fixed", "Updated unbound rationale", None),
+            ("closed", "already_fixed", note, sha256),
+            ("open", None, None, None),
+        ]
+        # A legacy writer can leave an old revision attached to an open row.
+        db.execute(
+            "UPDATE finding_triage SET fixed_revision = ? WHERE occurrence_id = ?",
+            (sha256, occurrence),
+        )
+    closed = close()
+    assert closed["status"] == "closed"
+    assert "fixedRevision" not in closed
+
+
 def test_completed_finding_triage_and_remediation_persist(tmp_path: Path, git_autocrlf) -> None:
     state_dir, target = empty_target_paths(tmp_path)
     source = target / "source.txt"
@@ -1254,6 +1332,96 @@ def test_completed_finding_triage_and_remediation_persist(tmp_path: Path, git_au
     reopened = set_triage(state_dir, occurrence_id, "open")["scan"]
     assert reopened["findings"][0]["triage"]["status"] == "open"
     assert reopened["findings"][0]["triage"]["closeReason"] is None
+
+
+@pytest.mark.parametrize("close_before_commit", [False, True])
+def test_verified_remediation_accepts_committed_fix_evidence(
+    tmp_path: Path, close_before_commit: bool
+) -> None:
+    state_dir, target = tmp_path / "state", tmp_path / "target"
+    initialize_git_repository(target)
+    source = target / "source.txt"
+    source.write_text("vulnerable\n")
+    subprocess.run(["git", "add", "source.txt"], cwd=target, check=True)
+    subprocess.run(["git", "commit", "-qm", "Add source fixture"], cwd=target, check=True)
+    revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=target, text=True).strip()
+    saved = create_saved_git_workspace(state_dir, target)
+    scan_id, scan_dir = start_workspace_scan(state_dir, str(saved["id"]), tmp_path / "scans")
+    write_completed_contract(
+        scan_dir,
+        scan_id,
+        target,
+        relative_path="source.txt",
+        target_kind="git_revision",
+        target_revision=revision,
+    )
+    completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
+    occurrence = completed["findings"][0]["occurrenceId"]
+    request = RemediationRequest(state_dir, occurrence)
+    token = str(uuid.uuid4())
+    request.start(token)
+    patch = scan_dir / "remediation.patch"
+    write_remediation_patch(patch)
+    request.generate(token, patch)
+    token = str(uuid.uuid4())
+    request.request_action("2", "apply", token)
+    subprocess.run(["git", "apply", str(patch)], cwd=target, check=True)
+    request.update(token, "3", "applied", "--base-revision", revision)
+    token = str(uuid.uuid4())
+    request.request_action("4", "verify", token)
+    request.update(token, "5", "verifying", "--base-revision", revision)
+    request.update(
+        token,
+        "6",
+        "verified",
+        "--base-revision",
+        revision,
+        "--verification-summary",
+        "The focused regression passed.",
+    )
+    if close_before_commit:
+        set_triage(state_dir, occurrence, "closed", "--close-reason", "already_fixed")
+    subprocess.run(["git", "commit", "-qam", "Commit verified fixture"], cwd=target, check=True)
+    fixed_revision = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=target, text=True
+    ).strip()
+    rejected = set_triage(
+        state_dir,
+        occurrence,
+        "closed",
+        "--close-reason",
+        "already_fixed",
+        "--note",
+        "A different unbound rationale.",
+        check=False,
+    )
+    assert "Repository HEAD changed" in rejected["stderr"]
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM finding_decisions").fetchone() == (
+            int(close_before_commit),
+        )
+    note = "Verified the correction at the committed revision."
+    closed = set_triage(
+        state_dir,
+        occurrence,
+        "closed",
+        "--close-reason",
+        "already_fixed",
+        "--fixed-revision",
+        fixed_revision,
+        "--note",
+        note,
+    )["scan"]["findings"][0]["triage"]
+    replayed = set_triage(state_dir, occurrence, "closed", "--close-reason", "already_fixed")[
+        "scan"
+    ]["findings"][0]["triage"]
+    assert replayed == {**closed, "updatedAt": replayed["updatedAt"]}
+    assert closed["fixedRevision"] == fixed_revision
+    assert closed["note"] == note
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM finding_decisions").fetchone() == (
+            int(close_before_commit) + 1,
+        )
 
 
 def test_filesystem_identity_serialization_supports_windows_stat_values() -> None:

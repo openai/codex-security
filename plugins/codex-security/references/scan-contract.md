@@ -135,7 +135,7 @@ A Deep parent retains the configured paths and notes from accepted reviews. Work
 
 For file-authored drafts, put `reviewState` inside `scan` in the unsealed manifest. Finalization preserves recovery details in checkpoints and replaces the draft state with the small `scan.review` summary. For tool-authored drafts, pass `reviewState` to `record_codex_security_scan_draft`.
 
-Comparison uses the later scan's execution status, configured scope and additional exclusions before classifying an absent finding as resolved.
+Comparison uses the later scan's execution status, configured scope and additional exclusions. A covered absence is resolved only when every earlier occurrence has an already-fixed decision with verification evidence for the exact scanned commit. Decisions without a verified revision remain available as triage history.
 
 ### Scan modes and inventory
 
@@ -182,6 +182,8 @@ Record each explicit exclusion with a `pattern` and `reason`. Record each deferr
 When retained, detailed ledgers live under the numbered scan artifact directories.
 Receipt references must point to regular non-symlink files under `artifacts/`.
 `scan.review` retains additional exclusions for adapters and comparison. Legacy sealed scans continue to reference their original `coverage.json`.
+Finalization binds the current format's final review checkpoint under `artifacts/checkpoints/` in `scan.artifacts`, separately from recovery inputs.
+Comparisons read its sealed deferred-work record without changing the checkpoint head or retained recovery ordering.
 
 ## Canonical Report Semantics
 

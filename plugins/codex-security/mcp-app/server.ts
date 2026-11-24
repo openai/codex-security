@@ -431,6 +431,11 @@ const findingTriageSchema = {
   closeReason: z
     .enum(["already_fixed", "wont_fix", "false_positive"])
     .optional(),
+  fixedRevision: requiredText
+    .optional()
+    .describe(
+      "For an already_fixed decision, the full Git commit OID (40 or 64 hex digits) where the fix was verified. Include the verification evidence in note.",
+    ),
   note: trimmedText.max(2400).optional(),
   occurrenceId: occurrenceIdSchema,
   status: z.enum(["open", "closed"]),
@@ -1336,6 +1341,30 @@ export function createCodexSecurityServer(): McpServer {
   );
 
   server.registerTool(
+    "get_codex_security_scan_comparison",
+    {
+      title: "Get Codex Security Scan Comparison",
+      description:
+        "App-only. Read the comparison for two completed scans with saved finding matches, including triage and fix evidence for findings absent from the later scan.",
+      inputSchema: {
+        beforeScanId: scanSchema.scanId,
+        afterScanId: scanSchema.scanId,
+      },
+      annotations: readingAnnotations,
+      _meta: appMeta,
+    },
+    async ({ beforeScanId, afterScanId }) =>
+      scanActionResult(
+        await workbench("compare-scans", {
+          beforeScanId,
+          afterScanId,
+          requireMatches: true,
+        }),
+        "Loaded the local Codex Security scan comparison.",
+      ),
+  );
+
+  server.registerTool(
     "list_codex_security_scans",
     {
       title: "List Codex Security Scans",
@@ -1733,12 +1762,13 @@ export function createCodexSecurityServer(): McpServer {
       annotations: writingAnnotations,
       _meta: appMeta,
     },
-    async ({ occurrenceId, status, closeReason, note }) =>
+    async ({ occurrenceId, status, closeReason, fixedRevision, note }) =>
       scanActionResult(
         await workbench("set-finding-triage", {
           occurrenceId,
           status,
           closeReason,
+          fixedRevision,
           note,
         }),
         "Updated the local Codex Security finding status.",

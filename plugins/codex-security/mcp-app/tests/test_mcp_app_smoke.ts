@@ -1624,6 +1624,9 @@ try {
   const finalizeUsage = findTool("finalize_codex_security_scan_usage");
   const fail = findTool("fail_codex_security_scan");
   const setFindingTriage = findTool("set_codex_security_finding_triage");
+  const getScanComparison = findTool("get_codex_security_scan_comparison");
+  assert.equal(getScanComparison.annotations.readOnlyHint, true);
+  assert.deepEqual(getScanComparison._meta.ui.visibility, ["app"]);
   const requestFindingRemediation = findTool(
     "request_codex_security_finding_remediation",
   );
@@ -2541,6 +2544,33 @@ try {
 
   const occurrenceId = results.findings[0].occurrenceId;
   const remediationRequestId = randomUUID();
+  const fixedRevision = "ab".repeat(20);
+  const fixNote = "Regression check passed.\nOutput: --literal [verified]";
+  await testServer.callSuccessfulTool(6060, {
+    name: "set_codex_security_finding_triage",
+    arguments: {
+      occurrenceId,
+      status: "closed",
+      closeReason: "already_fixed",
+      fixedRevision,
+      note: fixNote,
+    },
+  });
+  const scanWithFix = await testServer.callSuccessfulTool(6061, {
+    name: "get_codex_security_scan",
+    arguments: { scanId, occurrenceId },
+  });
+  const pageWithFix = await testServer.callSuccessfulTool(6062, {
+    name: "list_codex_security_findings",
+    arguments: { scanId, status: "closed" },
+  });
+  for (const finding of [
+    scanWithFix.structuredContent.scan.findings[0],
+    pageWithFix.structuredContent.findingsPage.findings[0],
+  ]) {
+    assert.equal(finding.triage.fixedRevision, fixedRevision);
+    assert.equal(finding.triage.note, fixNote);
+  }
   const closedFinding = await testServer.callSuccessfulTool(60, {
     name: "set_codex_security_finding_triage",
     arguments: {
@@ -2561,6 +2591,10 @@ try {
   assert.equal(
     closedFinding.structuredContent.scan.findings[0].triage.closeReason,
     "false_positive",
+  );
+  assert.equal(
+    closedFinding.structuredContent.scan.findings[0].triage.fixedRevision,
+    undefined,
   );
 
   const generationActionToken = randomUUID();
