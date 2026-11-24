@@ -1,12 +1,8 @@
 {
   "$schema": "http://json-schema.org/draft-07/schema#",
-  "title": "Codex Security triage-finding v0 result",
+  "title": "TriageResult",
   "type": "object",
-  "required": [
-    "schema_version",
-    "repository",
-    "findings"
-  ],
+  "required": ["schema_version", "repository", "findings"],
   "additionalProperties": false,
   "properties": {
     "schema_version": {
@@ -14,9 +10,7 @@
     },
     "repository": {
       "type": "object",
-      "required": [
-        "path"
-      ],
+      "required": ["path"],
       "additionalProperties": false,
       "properties": {
         "path": {
@@ -24,10 +18,7 @@
           "minLength": 1
         },
         "revision": {
-          "type": [
-            "string",
-            "null"
-          ]
+          "type": ["string", "null"]
         }
       }
     },
@@ -133,29 +124,16 @@
             }
           },
           "verdict": {
-            "enum": [
-              "confirmed",
-              "not_actionable",
-              "needs_review"
-            ]
+            "enum": ["confirmed", "not_actionable", "needs_review"]
           },
           "confidence": {
-            "enum": [
-              "high",
-              "medium",
-              "low"
-            ]
+            "enum": ["high", "medium", "low"]
           },
           "affected_locations": {
             "type": "array",
             "items": {
               "type": "object",
-              "required": [
-                "label",
-                "path",
-                "lines",
-                "detail"
-              ],
+              "required": ["label", "path", "lines", "detail"],
               "additionalProperties": false,
               "properties": {
                 "label": {
@@ -207,10 +185,7 @@
                 ]
               },
               "boundary_crossed": {
-                "type": [
-                  "boolean",
-                  "null"
-                ]
+                "type": ["boolean", "null"]
               },
               "policy_basis": {
                 "type": "string",
@@ -220,26 +195,14 @@
           },
           "exploitability_stack_rank": {
             "type": "object",
-            "required": [
-              "rank_queue",
-              "rank",
-              "rationale",
-              "drivers"
-            ],
+            "required": ["rank_queue", "rank", "rationale", "drivers"],
             "additionalProperties": false,
             "properties": {
               "rank_queue": {
-                "enum": [
-                  "confirmed",
-                  "needs_review",
-                  null
-                ]
+                "enum": ["confirmed", "needs_review", null]
               },
               "rank": {
-                "type": [
-                  "integer",
-                  "null"
-                ],
+                "type": ["integer", "null"],
                 "minimum": 1
               },
               "rationale": {
@@ -277,12 +240,10 @@
             "minLength": 1
           },
           "fix_finding_handoff": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": ["string", "null"]
           }
-        }
+        },
+        "title": "TriageFinding"
       }
     }
   }

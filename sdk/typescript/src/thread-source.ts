@@ -1,5 +1,6 @@
 export const CODEX_SECURITY_THREAD_SOURCES = {
   scan: "security_scan",
+  dependencyTriage: "security_dependency_triage",
   validation: "security_validation",
   remediation: "security_remediation",
   scanComparison: "security_scan_comparison",
