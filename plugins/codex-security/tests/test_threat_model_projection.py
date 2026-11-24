@@ -35,7 +35,7 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
             "format": "markdown",
             "content": body,
             "origin": "provided",
-            "scope": {"includePaths": ["."], "excludePaths": ["vendor/"]},
+            "scope": {"includePaths": ["."], "excludePaths": ["vendor/"], "summary": "--"},
         }
         self.manifest["scan"]["threatModel"] = model
         self.write_sealed_scan()
@@ -43,6 +43,7 @@ class ThreatModelProjectionTest(ScanFixtureTestCase):
         self.assertTrue(document.startswith(body.encode()))
         self.assertIn(b"Model origin: provided", document)
         self.assertIn(b"Model scope: .", document)
+        self.assertIn(b"- Model scope description: --\n", document)
         self.assertIn(b"Scan scope: src/", document)
         self.assertIn(b"Revision: deadbeef", document)
         snapshot_digest = self.manifest["scan"]["target"]["snapshotDigest"]
