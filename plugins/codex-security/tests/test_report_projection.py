@@ -112,21 +112,31 @@ def test_projection_normalizes_block_syntax_and_preserves_inline_tildes() -> Non
         ("1)", "Text: 1)"),
         ("---", "Text: ---"),
         ("--", "Text: --"),
+        ("-- -", "Text: -- -"),
     ],
 )
 def test_projection_prefixes_bare_markdown_block_markers(
     raw_value: str, expected_line: str
 ) -> None:
     markdown = report_with_finding(remediation=raw_value, summary=raw_value)
-    assert f"\n{raw_value}\n" not in markdown
-    assert expected_line in markdown
+    for section in ("Summary", "Remediation"):
+        assert f"#### {section}\n\n{expected_line}\n" in markdown
 
 
-@pytest.mark.parametrize("raw_value", ["--flag", "-1"])
-def test_projection_does_not_prefix_non_marker_dash_tokens(raw_value: str) -> None:
+@pytest.mark.parametrize("raw_value", ["--flag", "-1", "-- input", "1000000000."])
+def test_projection_does_not_prefix_non_markers(raw_value: str) -> None:
     markdown = report_with_finding(remediation=raw_value)
     assert f"Text: {raw_value}" not in markdown
     assert raw_value in markdown
+
+
+def test_projection_prefixes_markers_in_lists_but_preserves_metadata() -> None:
+    manifest, findings, coverage = canonical_documents()
+    manifest["scan"]["target"]["revision"] = "1."
+    findings["findings"][0]["remediationTests"] = ["#"]
+    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+    assert "- Revision: 1.\n" in markdown
+    assert "- Text: #\n" in markdown
 
 
 @pytest.mark.parametrize("linked_writeup", [False, True], ids=["inline", "linked"])
