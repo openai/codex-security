@@ -15,6 +15,7 @@ import {
   utimes,
   writeFile,
 } from "node:fs/promises";
+import { renameSync } from "node:fs";
 import * as filesystem from "node:fs/promises";
 import { hostname } from "node:os";
 import { delimiter, dirname, join } from "node:path";
@@ -996,6 +997,44 @@ describe("multiscan", () => {
         : join(paths.output, "checkouts", "replacement");
       expect((await lstat(checkout)).isDirectory()).toBe(true);
       expect(await readFile(owner, "utf8")).toBe(replacement);
+    },
+  );
+
+  test.each(["before", "during"])(
+    "does not reserve another attempt when the lock is lost %s recovery",
+    async (when) => {
+      const { paths } = await repositoryFixture("abandoned");
+      await runMultiscan(
+        options(paths, client(rejecting("Interrupted scan")), {
+          maxAttempts: 1,
+        }),
+      );
+      const artifacts = join(paths.output, "artifacts", "abandoned");
+      await mkdir(join(artifacts, "attempt-1"), {
+        recursive: true,
+        mode: 0o700,
+      });
+      const loseLock = () =>
+        renameSync(
+          join(paths.output, ".lock"),
+          join(paths.output, ".lock.stale"),
+        );
+      const recoverScan = mock(async () => {
+        if (when === "during") loseLock();
+        return undefined;
+      });
+      const settings = options(paths, client(completeRun), {
+        recoverScan,
+        onProgress: ({ status, attempt }) => {
+          if (when === "before" && status === "started" && attempt === 1)
+            loseLock();
+        },
+      });
+      await expect(runMultiscan(settings)).rejects.toThrow(
+        "no longer holds the output lock",
+      );
+      expect(recoverScan).toHaveBeenCalledTimes(when === "during" ? 1 : 0);
+      expect(await readdir(artifacts)).toEqual(["attempt-1"]);
     },
   );
 

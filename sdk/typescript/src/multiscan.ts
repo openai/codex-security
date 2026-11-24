@@ -618,6 +618,7 @@ async function runCampaign(
                 knowledgeBaseFailure = true;
                 throw knowledge.failure.error;
               }
+              await requireLockOwner();
               result = await options.recoverScan(scanDir, {
                 ...options,
                 ...(options.maxTotalCostUsd === undefined
@@ -648,6 +649,7 @@ async function runCampaign(
               throw knowledge.failure.error;
             }
             if (options.recoverScan !== undefined) {
+              await requireLockOwner();
               const checkoutRoot = await ensureOutputDirectory(
                 join(output, "recovery-checkouts"),
               );
