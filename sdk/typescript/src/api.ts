@@ -2552,43 +2552,37 @@ export class CodexSecurity {
       }
       checkOpen();
 
-      const workerProviderEnvironment = withoutOpenAiApiKeys(
-        selectedScanEnvironment(
-          runtime.environment,
-          options.auth,
-          modelProvider,
-          session.providerEnvKey,
-          effectiveConfig,
-          "selected",
+      const workerProviderEnvironment = {
+        ...withoutOpenAiApiKeys(
+          selectedScanEnvironment(
+            runtime.environment,
+            options.auth,
+            modelProvider,
+            session.providerEnvKey,
+            effectiveConfig,
+            "selected",
+          ),
         ),
-      );
-      const selectedWorkerCredentials = {
-        ...session.nativeProviderEnvironment,
         ...(session.apiKey === null
           ? {}
           : {
               [session.providerEnvKey ?? "CODEX_API_KEY"]: session.apiKey,
             }),
       };
-      let alternateProviderEnvironment: ProcessEnvironment | undefined;
-      if (
-        mode === "deep" &&
-        (options.auth !== "chatgpt" ||
-          authentication.method !== "stored_credentials")
-      ) {
-        alternateProviderEnvironment =
-          options.auth !== "chatgpt" && authentication.method === "api_key"
-            ? this.#dependencies.environment
-            : withoutOpenAiApiKeys(this.#dependencies.environment);
-      }
       const { environment: workerEnvironment, ...workerRuntimeConfig } =
         selectedWorkerRuntimeConfig(
           effectiveConfig,
           modelProvider,
           scanDir,
-          workerProviderEnvironment,
-          selectedWorkerCredentials,
-          alternateProviderEnvironment,
+          modelProvider === "standardcompute"
+            ? {
+                ...session.nativeProviderEnvironment,
+                ...workerProviderEnvironment,
+              }
+            : workerProviderEnvironment,
+          modelProvider === "standardcompute"
+            ? undefined
+            : session.nativeProviderEnvironment,
         );
       const sqliteHome = workerRuntimeConfig["sqlite_home"];
       const sqliteEnvironment: Record<string, string> =
@@ -7830,30 +7824,16 @@ function selectedWorkerRuntimeConfig(
   selectedProvider: unknown,
   workingDirectory: string,
   environment: ProcessEnvironment,
-  selectedCredentials: Record<string, string>,
-  alternateProviderEnvironment?: ProcessEnvironment,
+  nativeProviderEnvironment?: Record<string, string>,
 ): JsonObject {
   const provider =
     typeof selectedProvider === "string" ? selectedProvider : undefined;
   const resolved = resolveCodexProfile(config);
   resolveNestedConfigPaths(resolved, workingDirectory);
   const providers = resolved["model_providers"];
-  const alternateProviders =
-    isRecord(providers) && alternateProviderEnvironment !== undefined
-      ? Object.fromEntries(
-          Object.entries(providers).filter(([id]) => id !== provider),
-        )
-      : undefined;
-  const providerEnvironment = {
-    // Only declared credentials enter the snapshot. The parent provider's
-    // prepared values take precedence over credentials for alternate workers.
-    ...declaredProviderEnvironment(
-      alternateProviders,
-      alternateProviderEnvironment ?? {},
-    ),
-    ...declaredProviderEnvironment(providers, environment),
-    ...declaredProviderEnvironment(providers, selectedCredentials),
-  };
+  const providerEnvironment =
+    nativeProviderEnvironment ??
+    declaredProviderEnvironment(providers, environment);
   // Workers use separate directories; preserve the parent scan's native paths.
   for (const key of [...MODEL_FILE_SETTINGS, "sqlite_home"]) {
     const file = resolved[key];
