@@ -10,6 +10,7 @@ import { createInterface } from "node:readline";
 
 export const summaryCve = "CVE-2099-1001";
 export const reviewedCve = "CVE-2026-48801";
+export const mixedServiceVersions = { notes: "5.0.0", reviews: "5.0.2" };
 export const precondition =
   "A caller can send an empty array of samples to the long-lived summary service.";
 export const sha256 = (bytes) =>

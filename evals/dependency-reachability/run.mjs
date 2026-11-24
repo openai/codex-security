@@ -19,6 +19,7 @@ import {
   git,
   jsonFile,
   mixedFixture,
+  mixedServiceVersions,
   restorePackets,
   reviewedCve,
   sha256,
@@ -141,7 +142,10 @@ async function initialize(fixture) {
 async function contracts(fixture) {
   const { manifest, tool } = await initialize(fixture);
   const next = await tool("next");
-  const item = await tool("read-stacks", { workItemId: next.workItem.id });
+  // The harness can also compare CLI builds that returned only a frame count.
+  const item = Array.isArray(next.workItem.observation.frames)
+    ? { ...next.workItem, receiptId: next.receiptId }
+    : await tool("read-stacks", { workItemId: next.workItem.id });
   const binding = item.observation.bindings[0];
   const result = await tool("record-claims", {
     claims: [
@@ -178,11 +182,11 @@ async function contracts(fixture) {
   assert.equal(report.runId, manifest.runId);
   assert.equal(report.attemptId, manifest.attemptId);
   await jsonFile(join(out, "scripted-report.json"), report);
-  const grade = gradeStack(report, fixture);
+  const grade = gradeStack(report, fixture, { reviewed: false });
   const tampered = structuredClone(report);
   tampered.claims[0].receipts[0].result.version = "0.2.0";
   assert.throws(
-    () => gradeStack(tampered, fixture),
+    () => gradeStack(tampered, fixture, { reviewed: false }),
     /original capture selection/u,
   );
   return grade;
@@ -287,7 +291,7 @@ try {
         await writeFile(transcript, "", { mode: 0o600 });
         await jsonFile(records, {
           notes: {
-            release_record: `Service notes was running revision ${fixture.sha} and loaded npm package linkify-it version 5.0.0.`,
+            release_record: `Service notes was running revision ${fixture.sha} and loaded npm package linkify-it version ${mixedServiceVersions.notes}.`,
             ...(id === "mixed-evidence" && {
               request_record: `An anonymous client sent its own text to POST /preview on service notes at revision ${fixture.sha}, and received the parsed links from its submitted body.`,
             }),
@@ -368,7 +372,7 @@ try {
                 id === "mixed-package",
                 calls && { calls, withAccess: id === "mixed-evidence" },
               )
-            : gradeStack(report, fixture);
+            : gradeStack(report, fixture, { reviewed: true });
           result.status = "passed";
         }
       } catch (error) {

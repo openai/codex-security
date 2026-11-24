@@ -1,4 +1,5 @@
 import { readingAnnotations, writingAnnotations } from "./tool-annotations.js";
+import { readCompletedValidation } from "../validation-provider.js";
 import type {
   McpServer,
   ToolCallback,
@@ -189,14 +190,18 @@ export function registerCompactArtifactTools(
     name: "get_codex_security_completed_scan",
     title: "Get Completed Codex Security Scan",
     description:
-      "Read the selected scan's existing completed, sealed canonical documents.",
+      "Read the selected scan's sealed canonical documents and saved supplemental validation.",
     inputSchema: completedScanInputSchema,
     readOnly: true,
     handler: async (input, requestContext) => {
-      return getCodexSecurityCompletedScan(
-        await scanContext(input, options, false, requestContext),
-        input,
-      );
+      const context = await scanContext(input, options, false, requestContext);
+      const completed = await getCodexSecurityCompletedScan(context, input);
+      const validation = await readCompletedValidation({
+        scanId: input.scanId,
+        scanDir: context.root,
+        targetPath: context.repoRoot,
+      });
+      return validation ? { ...completed, validation } : completed;
     },
   });
   registerCompactTool(server, {

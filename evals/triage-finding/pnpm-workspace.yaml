@@ -9,12 +9,8 @@ trustLockfile: true
 overrides:
   "glob@13": 14.0.3
   "minimatch@10": 11.0.2
-  "@azure/identity@>=4.13.2 <=4.13.3>@azure/msal-node": 7.1.0
-  "promptfoo@0.124.1>@hono/node-server": 2.1.5
-  "@openai/codex": "$@openai/codex-sdk"
-  "@openai/codex-sdk": "$@openai/codex-sdk"
-  "ibm-cloud-sdk-core@5.6.0>axios": 1.20.0
-  "get-uri@8.0.1>basic-ftp": 6.2.1
+  "promptfoo@0.125.1>@hono/node-server": 2.1.8
+  "get-uri@8.0.1>basic-ftp": 6.2.6
 
 allowBuilds:
   "@playwright/browser-chromium": false
@@ -26,7 +22,6 @@ allowBuilds:
 
 # Triage uses the Codex provider, JSON and YAML fixtures, and JavaScript assertions.
 ignoredOptionalDependencies:
-  - "@anthropic-ai/claude-agent-sdk"
   - "@aws-sdk/*"
   - "@aws/bedrock-token-generator"
   - "@azure/*"
