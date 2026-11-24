@@ -8,7 +8,7 @@ import {
   writingAnnotations,
 } from "./src/server/tool-annotations.js";
 import type { JsonObject } from "./src/types.js";
-import { isRecord as isJsonObject } from "./src/record.js";
+import { asRecord, isNonEmptyString, isRecord } from "./src/record.js";
 import { randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
@@ -609,7 +609,7 @@ export function createCodexSecurityServer(): McpServer {
       }
       const started = await startConversationScan(input, threadId, extra);
       const scan = startedScanSchema.safeParse(started).data?.scan;
-      const progress = isJsonObject(scan?.progress) ? scan.progress : undefined;
+      const progress = asRecord(scan?.progress);
       const handoffClaimToken = scan?.handoffClaimToken;
       if (
         !scan ||
@@ -721,7 +721,7 @@ export function createCodexSecurityServer(): McpServer {
             result.action === "decline" ? "declined" : "cancelled",
           );
         }
-        if (!isJsonObject(result.content)) {
+        if (!isRecord(result.content)) {
           throw new Error(
             "Accepted user input did not contain structured answers.",
           );
@@ -773,19 +773,35 @@ export function createCodexSecurityServer(): McpServer {
         );
       }
       const threadId = threadIdFromExtra(extra);
-      if (!threadId && !input.sessionId) {
-        return openWorkspaceResult(await createWorkspace({ ...input, mode }));
-      }
-      if (!threadId) {
-        throw new Error(
-          "Thread metadata is required to create or reopen a Codex Security workspace.",
+      let workspace;
+      if (input.sessionId) {
+        if (!threadId) {
+          throw new Error(
+            "Thread metadata is required to create or reopen a Codex Security workspace.",
+          );
+        }
+        workspace = await workbench("get-workspace", {
+          workspaceId: input.sessionId,
+          threadId,
+        });
+      } else {
+        workspace = await workbench(
+          "create-workspace",
+          {
+            workspaceId: randomUUID(),
+            threadId,
+            mode,
+            targetPath: input.targetPath,
+            targetTitle: input.targetTitle,
+            targetSummary: input.targetSummary,
+            scope: input.scope,
+            userContextStdin: Boolean(input.userContext),
+            ...diffTargetFields(input.diffTarget),
+          },
+          input.userContext,
         );
       }
-      return openWorkspaceResult(
-        input.sessionId
-          ? await getWorkspace(input.sessionId, threadId)
-          : await createWorkspace({ ...input, mode }, threadId),
-      );
+      return openWorkspaceResult(workspace as WorkspaceState);
     },
   );
 
@@ -1191,16 +1207,14 @@ export function createCodexSecurityServer(): McpServer {
         const current = (await workbench("get-scan", { scanId }))[
           "workspace"
         ] as JsonObject;
-        const scan = current["results"];
-        const progress = isJsonObject(scan) ? scan["progress"] : undefined;
+        const scan = asRecord(current.results);
+        const progress = asRecord(scan?.progress);
         return {
           status:
-            isJsonObject(progress) && typeof progress["status"] === "string"
-              ? progress["status"]
-              : undefined,
+            typeof progress?.status === "string" ? progress.status : undefined,
           failureMessage:
-            isJsonObject(scan) && typeof scan["failureMessage"] === "string"
-              ? scan["failureMessage"]
+            typeof scan?.failureMessage === "string"
+              ? scan.failureMessage
               : undefined,
         };
       },
@@ -1210,7 +1224,7 @@ export function createCodexSecurityServer(): McpServer {
       const saved = (await workbench("get-scan", { scanId }))
         .workspace as WorkspaceState;
       const scan = saved.results;
-      const progress = isJsonObject(scan?.progress) ? scan.progress : undefined;
+      const progress = asRecord(scan?.progress);
       if (progress?.status !== "running") {
         return workspaceResult(
           saved,
@@ -1275,11 +1289,10 @@ export function createCodexSecurityServer(): McpServer {
       annotations: destructiveAnnotations,
       _meta: appMeta,
     },
-    async ({ scanId }) =>
-      scanActionResult(
-        await workbench("recover-scan-results", { scanId }),
-        "Recovered retained Codex Security scan results.",
-      ),
+    workbenchAction(
+      "recover-scan-results",
+      "Recovered retained Codex Security scan results.",
+    ),
   );
 
   registerScanHandoffTools(server, { appMeta, runWorkbench, workspaceResult });
@@ -1296,9 +1309,7 @@ export function createCodexSecurityServer(): McpServer {
     },
     async ({ scanId, occurrenceId }) => {
       const context = await workbench("get-scan", { scanId, occurrenceId });
-      const loadedId = isJsonObject(context.scan)
-        ? context.scan.scanId
-        : undefined;
+      const loadedId = asRecord(context.scan)?.scanId;
       return scanActionResult(
         context,
         "Loaded Codex Security scan state.",
@@ -1317,11 +1328,7 @@ export function createCodexSecurityServer(): McpServer {
       annotations: readingAnnotations,
       _meta: appMeta,
     },
-    async (input) =>
-      scanActionResult(
-        await workbench("list-scans", input),
-        "Loaded Codex Security scan summaries.",
-      ),
+    workbenchAction("list-scans", "Loaded Codex Security scan summaries."),
   );
 
   server.registerTool(
@@ -1334,11 +1341,10 @@ export function createCodexSecurityServer(): McpServer {
       annotations: readingAnnotations,
       _meta: appMeta,
     },
-    async (input) =>
-      scanActionResult(
-        await workbench("list-global-findings", input),
-        "Loaded Codex Security global findings.",
-      ),
+    workbenchAction(
+      "list-global-findings",
+      "Loaded Codex Security global findings.",
+    ),
   );
 
   server.registerTool(
@@ -1351,11 +1357,7 @@ export function createCodexSecurityServer(): McpServer {
       annotations: readingAnnotations,
       _meta: appMeta,
     },
-    async (input) =>
-      scanActionResult(
-        await workbench("list-repositories", input),
-        "Loaded Codex Security repositories.",
-      ),
+    workbenchAction("list-repositories", "Loaded Codex Security repositories."),
   );
 
   server.registerTool(
@@ -1408,9 +1410,7 @@ export function createCodexSecurityServer(): McpServer {
                 ? cached.claimToken
                 : "",
           });
-      const scan = isJsonObject(scanContext.scan)
-        ? scanContext.scan
-        : undefined;
+      const scan = asRecord(scanContext.scan);
       if (
         handoffClaimToken &&
         threadId &&
@@ -1441,11 +1441,7 @@ export function createCodexSecurityServer(): McpServer {
       annotations: writingAnnotations,
       _meta: appMeta,
     },
-    async ({ scanId, name }) =>
-      scanActionResult(
-        await workbench("rename-scan", { scanId, name }),
-        "Renamed Codex Security scan.",
-      ),
+    workbenchAction("rename-scan", "Renamed Codex Security scan."),
   );
 
   const updateRunningScanContext = async (input: {
@@ -1510,9 +1506,7 @@ export function createCodexSecurityServer(): McpServer {
     },
     async ({ scanId, userContext }) => {
       const current = await workbench("get-scan", { scanId });
-      const workspace = isJsonObject(current.workspace)
-        ? current.workspace
-        : undefined;
+      const workspace = asRecord(current.workspace);
       if (typeof workspace?.id !== "string") {
         return toolErrorResult(
           "Updating scan context requires its owning workspace.",
@@ -1536,15 +1530,15 @@ export function createCodexSecurityServer(): McpServer {
       annotations: writingAnnotations,
       _meta: modelActionMeta,
     },
-    async ({ handoffClaimToken, ...progress }, extra) => {
+    async ({ scanId, handoffClaimToken, ...progress }, extra) => {
+      const modelSettings = codexModelSettingsFromExtra(extra);
       const { scan, deepPreflight } = await workbench("update-progress", {
+        scanId,
         ...progress,
         modelUpdate: true,
         modelThreadId: threadIdFromExtra(extra) ?? "",
-        coordinatorGeneration: deepScanStore.coordinatorGeneration(
-          progress.scanId,
-        ),
-        ...codexModelSettingsFromExtra(extra),
+        coordinatorGeneration: deepScanStore.coordinatorGeneration(scanId),
+        ...modelSettings,
         claimToken: handoffClaimToken,
       });
       return scanActionResult(
@@ -1576,9 +1570,10 @@ export function createCodexSecurityServer(): McpServer {
           modelThreadId: threadId ?? "",
           turnId: securityScanTurnId(extra),
         });
-        const validation = isJsonObject(completed.scan)
+        const scan = asRecord(completed.scan);
+        const validation = scan
           ? await validateCompletedScan(
-              completed.scan,
+              scan,
               undefined,
               abortSignalFromExtra(extra),
             )
@@ -1590,7 +1585,7 @@ export function createCodexSecurityServer(): McpServer {
           }),
           "Validated and indexed the completed Codex Security scan." +
             validationCompletionText(validation),
-          isJsonObject(completed.scan) ? completed.scan.scanId : undefined,
+          scan?.scanId,
         );
       } catch (error) {
         throw new Error(completionFailureMessage(error));
@@ -1613,11 +1608,10 @@ export function createCodexSecurityServer(): McpServer {
       annotations: writingAnnotations,
       _meta: appMeta,
     },
-    async (input) =>
-      scanActionResult(
-        await workbench("finalize-scan-usage", input),
-        "Recorded final Codex Security scan usage.",
-      ),
+    workbenchAction(
+      "finalize-scan-usage",
+      "Recorded final Codex Security scan usage.",
+    ),
   );
 
   server.registerTool(
@@ -1637,14 +1631,13 @@ export function createCodexSecurityServer(): McpServer {
         message,
         claimToken: handoffClaimToken,
       });
-      const scan = failed["scan"];
-      const progress = isJsonObject(scan) ? scan["progress"] : undefined;
-      if (isJsonObject(progress) && progress["status"] === "failed")
+      const scan = asRecord(failed.scan);
+      if (asRecord(scan?.progress)?.status === "failed")
         deepScanCoordinators.get(scanId)?.failExternallyPersisted(message);
       return scanActionResult(
         modelScanContext(failed),
         "Recorded the Codex Security scan failure.",
-        isJsonObject(scan) ? scan.scanId : undefined,
+        scan?.scanId,
       );
     },
   );
@@ -1659,11 +1652,10 @@ export function createCodexSecurityServer(): McpServer {
       annotations: writingAnnotations,
       _meta: appMeta,
     },
-    async (input) =>
-      scanActionResult(
-        await workbench("set-finding-triage", input),
-        "Updated the local Codex Security finding status.",
-      ),
+    workbenchAction(
+      "set-finding-triage",
+      "Updated the local Codex Security finding status.",
+    ),
   );
 
   server.registerTool(
@@ -1676,11 +1668,10 @@ export function createCodexSecurityServer(): McpServer {
       annotations: writingAnnotations,
       _meta: appMeta,
     },
-    async (input) =>
-      scanActionResult(
-        await workbench("request-finding-remediation", input),
-        "Queued the local Codex Security finding remediation request.",
-      ),
+    workbenchAction(
+      "request-finding-remediation",
+      "Queued the local Codex Security finding remediation request.",
+    ),
   );
 
   server.registerTool(
@@ -1748,8 +1739,7 @@ export function createCodexSecurityServer(): McpServer {
         annotations,
         _meta: appMeta,
       },
-      async (input) =>
-        scanActionResult(await workbench(command, input), message),
+      workbenchAction(command, message),
     );
   }
 
@@ -1805,11 +1795,10 @@ export function createCodexSecurityServer(): McpServer {
       annotations: writingAnnotations,
       _meta: appMeta,
     },
-    async (input) =>
-      scanActionResult(
-        await workbench("list-findings", input),
-        "Loaded a local Codex Security findings page.",
-      ),
+    workbenchAction(
+      "list-findings",
+      "Loaded a local Codex Security findings page.",
+    ),
   );
 
   registerFindingIssueTools(server, runWorkbench);
@@ -1827,45 +1816,6 @@ export function createCodexSecurityServer(): McpServer {
   });
 
   return server;
-}
-
-async function createWorkspace(
-  input: {
-    diffTarget?: z.infer<typeof diffTargetSchema>;
-    mode?: "diff" | "standard" | "deep";
-    scope?: string;
-    targetPath?: string;
-    targetSummary?: string;
-    targetTitle?: string;
-    userContext?: string;
-  },
-  threadId?: string,
-): Promise<WorkspaceState> {
-  return (await workbench(
-    "create-workspace",
-    {
-      workspaceId: randomUUID(),
-      threadId,
-      mode: input.mode,
-      targetPath: input.targetPath,
-      targetTitle: input.targetTitle,
-      targetSummary: input.targetSummary,
-      scope: input.scope,
-      userContextStdin: Boolean(input.userContext),
-      ...diffTargetFields(input.diffTarget),
-    },
-    input.userContext,
-  )) as WorkspaceState;
-}
-
-async function getWorkspace(
-  workspaceId: string,
-  threadId?: string,
-): Promise<WorkspaceState> {
-  return (await workbench("get-workspace", {
-    workspaceId,
-    threadId,
-  })) as WorkspaceState;
 }
 
 async function startConversationScan(
@@ -2019,16 +1969,14 @@ function modelScanContext<T extends JsonObject>(
   context: T,
   options?: { omitHandoffClaim: boolean },
 ): T {
-  const workspace = isJsonObject(context.workspace)
-    ? context.workspace
-    : undefined;
+  const workspace = asRecord(context.workspace);
   // Only a workbench action handoff authorizes a model to act on a finding.
   for (const scan of [context.scan, workspace?.results]) {
-    if (!isJsonObject(scan)) continue;
+    if (!isRecord(scan)) continue;
     if (options?.omitHandoffClaim) delete scan.handoffClaimToken;
     if (!Array.isArray(scan.findings)) continue;
     for (const finding of scan.findings) {
-      if (isJsonObject(finding) && isJsonObject(finding.remediationState)) {
+      if (isRecord(finding) && isRecord(finding.remediationState)) {
         delete finding.remediationState.actionClaimToken;
       }
     }
@@ -2037,7 +1985,7 @@ function modelScanContext<T extends JsonObject>(
 }
 
 function validationNotice(value: unknown): string {
-  return isJsonObject(value) && typeof value.validationNotice === "string"
+  return isRecord(value) && typeof value.validationNotice === "string"
     ? "\n" + value.validationNotice
     : "";
 }
@@ -2242,12 +2190,7 @@ function deepScanTerminalResult(
           : { completion, reportPath: resolve(run.scanDir, "report.md") }),
         instructions,
       },
-      instructions +
-        validationCompletionText(
-          isJsonObject(completion?.validation)
-            ? completion.validation
-            : undefined,
-        ),
+      instructions + validationCompletionText(asRecord(completion?.validation)),
     );
   }
   if (run.status === "canceled") {
@@ -2283,6 +2226,11 @@ function workbench(
   return runWorkbench(workbenchArgs(command, fields), input);
 }
 
+function workbenchAction(command: string, summary: string) {
+  return async (input: WorkbenchFields) =>
+    scanActionResult(await workbench(command, input), summary);
+}
+
 function diffTargetFields(
   target: z.infer<typeof diffTargetSchema> | undefined,
 ) {
@@ -2307,11 +2255,7 @@ function securityScanTurnId(extra: unknown): string | undefined {
 
 function daybreakAccess(extra: unknown) {
   const metadata = requestMetadataFromExtra(extra);
-  const threadId =
-    typeof metadata?.threadId === "string" && metadata.threadId.trim()
-      ? metadata.threadId.trim()
-      : undefined;
-  const parsed = threadId
+  const parsed = isNonEmptyString(metadata?.threadId)
     ? daybreakEntitlementContextSchema.safeParse(
         metadata?.["openai/entitlementContext"],
       )
@@ -2351,44 +2295,29 @@ function daybreakAccess(extra: unknown) {
 }
 
 function requestMetadataFromExtra(extra: unknown): JsonObject | undefined {
-  if (!isJsonObject(extra)) return undefined;
-  const requestInfo = isJsonObject(extra.requestInfo)
-    ? extra.requestInfo
-    : undefined;
-  return isJsonObject(requestInfo?._meta)
-    ? requestInfo._meta
-    : isJsonObject(extra._meta)
-      ? extra._meta
-      : undefined;
+  const request = asRecord(extra);
+  const forwarded = asRecord(request?.requestInfo);
+  return asRecord(forwarded?._meta) ?? asRecord(request?._meta);
 }
 
 function threadIdFromExtra(extra: unknown): string | undefined {
   const metadata = requestMetadataFromExtra(extra);
-  for (const key of [
-    "openai/threadId",
-    "openai/thread_id",
-    "codexThreadId",
-    "codex_thread_id",
-    "threadId",
-    "thread_id",
-  ]) {
-    const value = metadata?.[key];
-    if (typeof value === "string" && value.trim()) return value.trim();
-  }
-  const thread = isJsonObject(metadata?.thread) ? metadata.thread : undefined;
-  if (typeof thread?.id === "string" && thread.id.trim())
-    return thread.id.trim();
-  const threadId = codexTurnMetadataFromExtra(extra)?.thread_id;
-  return typeof threadId === "string" && threadId.trim()
-    ? threadId.trim()
-    : undefined;
+  return [
+    metadata?.["openai/threadId"],
+    metadata?.["openai/thread_id"],
+    metadata?.codexThreadId,
+    metadata?.codex_thread_id,
+    metadata?.threadId,
+    metadata?.thread_id,
+    asRecord(metadata?.thread)?.id,
+    asRecord(metadata?.["x-codex-turn-metadata"])?.thread_id,
+  ]
+    .find(isNonEmptyString)
+    ?.trim();
 }
 
 function codexTurnMetadataFromExtra(extra: unknown): JsonObject | undefined {
-  const metadata = requestMetadataFromExtra(extra);
-  return isJsonObject(metadata?.["x-codex-turn-metadata"])
-    ? metadata["x-codex-turn-metadata"]
-    : undefined;
+  return asRecord(requestMetadataFromExtra(extra)?.["x-codex-turn-metadata"]);
 }
 
 function codexParentTurnFromExtra(
@@ -2411,22 +2340,16 @@ function codexModelSettingsFromExtra(extra: unknown): {
 } {
   // Codex supplies the already-resolved runtime model and effective effort on every MCP call.
   const turnMetadata = codexTurnMetadataFromExtra(extra);
-  const model =
-    typeof turnMetadata?.model === "string"
-      ? turnMetadata.model.trim()
-      : undefined;
-  const reasoningEffort =
-    typeof turnMetadata?.reasoning_effort === "string"
-      ? turnMetadata.reasoning_effort.trim()
-      : undefined;
+  const model = turnMetadata?.model;
+  const effort = turnMetadata?.reasoning_effort;
   return {
-    ...(model ? { model } : {}),
-    ...(reasoningEffort ? { reasoningEffort } : {}),
+    ...(isNonEmptyString(model) ? { model: model.trim() } : {}),
+    ...(isNonEmptyString(effort) ? { reasoningEffort: effort.trim() } : {}),
   };
 }
 
 function abortSignalFromExtra(extra: unknown): AbortSignal | undefined {
-  if (!isJsonObject(extra)) return undefined;
+  if (!isRecord(extra)) return undefined;
   return extra.signal instanceof AbortSignal ? extra.signal : undefined;
 }
 

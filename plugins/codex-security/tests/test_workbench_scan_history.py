@@ -13,6 +13,7 @@ import sys
 import uuid
 from argparse import Namespace
 from contextlib import closing
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -21,15 +22,20 @@ from test_workbench_db import HEAD_CHANGED_WARNING
 from test_workbench_deep_scan import begin_target_scan
 from test_workbench_prompt_only_scan import start_headless_standard_scan, start_prompt_only_scan
 from workbench_test_support import (
+    add_detached_worktree,
+    close_finding,
     create_workspace,
     fail_scan,
     get_scan,
+    git_in,
     initialize_git_repository,
     load_script,
     mark_deep_coordinator_succeeded,
+    register_scan,
     resume_deep_scan,
     run_workbench,
     scan_command,
+    scan_cost,
     set_triage,
     source_plugin_version,
     stable_target_id,
@@ -142,29 +148,11 @@ def mark_incomplete_coverage(scan_dir: Path) -> None:
     coverage_path.write_text(json.dumps(coverage))
 
 
-def initialize_existing_repository(repository: Path) -> str:
-    git = ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test"]
-    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
-    subprocess.run([*git, "add", "."], cwd=repository, check=True)
-    subprocess.run([*git, "commit", "-qm", "Initialize repository"], cwd=repository, check=True)
-    return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
-
-
-def clone_with_origin(repository: Path, clone: Path, *, same_origin: bool) -> None:
-    origin = "https://example.test/synthetic/project.git"
-    subprocess.run(["git", "remote", "add", "origin", origin], cwd=repository, check=True)
-    subprocess.run(["git", "clone", "-q", str(repository), str(clone)], check=True)
-    clone_origin = origin if same_origin else "https://example.test/synthetic/other.git"
-    subprocess.run(["git", "remote", "set-url", "origin", clone_origin], cwd=clone, check=True)
-
-
 def linked_checkouts(tmp_path: Path) -> tuple[Path, Path, str]:
     repository = tmp_path / "repository"
     linked = tmp_path / "linked"
     revision = initialize_git_repository(repository)
-    subprocess.run(
-        ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(linked)], check=True
-    )
+    add_detached_worktree(repository, linked)
     return repository, linked, revision
 
 
@@ -673,12 +661,7 @@ def test_cli_scan_preserves_original_revision_when_head_moves(tmp_path: Path) ->
 def test_cli_scan_history_persists_per_scan_cost(tmp_path: Path, context_reporting: str) -> None:
     state_dir, repository = empty_history_paths(tmp_path)
     cost = {
-        "model": "gpt-5.6-sol",
-        "inputTokens": 1250,
-        "cachedInputTokens": 200,
-        "cacheWriteInputTokens": 0,
-        "outputTokens": 30,
-        "estimatedUsd": 0.00488,
+        **scan_cost("gpt-5.6-sol", input_tokens=1250, cached=200, output_tokens=30, usd=0.00488),
         "cacheWriteInputTokensReported": False,
         "pricing": {
             "source": "https://developers.openai.com/api/docs/pricing",
@@ -720,14 +703,7 @@ def test_cli_scan_completion_persists_authoritative_cost_after_plugin_completion
 ) -> None:
     state_dir, repository = empty_history_paths(tmp_path)
     scan = create_cli_scan(state_dir, tmp_path / "results", repository)
-    cost = {
-        "model": "gpt-5.6-sol",
-        "inputTokens": 1250,
-        "cachedInputTokens": 200,
-        "cacheWriteInputTokens": 0,
-        "outputTokens": 30,
-        "estimatedUsd": 0.00625,
-    }
+    cost = scan_cost("gpt-5.6-sol", input_tokens=1250, cached=200, output_tokens=30, usd=0.00625)
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
         connection.execute(
             "UPDATE scans SET cost_json = ? WHERE id = ?",
@@ -763,14 +739,7 @@ def test_cli_scan_completion_persists_authoritative_cost_after_plugin_completion
 
 def test_failed_cli_scan_history_persists_measured_cost(tmp_path: Path) -> None:
     state_dir, repository = empty_history_paths(tmp_path)
-    cost = {
-        "model": "gpt-5.6-terra",
-        "inputTokens": 1250,
-        "cachedInputTokens": 200,
-        "cacheWriteInputTokens": 0,
-        "outputTokens": 30,
-        "estimatedUsd": 0.003125,
-    }
+    cost = scan_cost("gpt-5.6-terra", input_tokens=1250, cached=200, output_tokens=30, usd=0.003125)
     scan = create_cli_scan(state_dir, tmp_path / "results", repository, complete=False)
 
     failed = fail_scan(
@@ -953,7 +922,7 @@ def test_reading_empty_history_leaves_state_uninitialized(tmp_path: Path) -> Non
         args = ("list-global-findings", "--repository", target)
         assert run_workbench(state_dir, *args) == run_workbench(initialized, *args)
     for scan_id, message in (("short", "eight characters"), (str(uuid.uuid4()), "scan not found")):
-        missing = run_workbench(state_dir, "get-scan", "--scan-id", scan_id, check=False)
+        missing = get_scan(state_dir, scan_id, check=False)
         assert missing["returncode"] != 0 and message in missing["stderr"]
     assert not state_dir.exists()
 
@@ -967,10 +936,7 @@ def test_scan_list_shares_worktree_history_without_including_clones(tmp_path: Pa
     initialize_git_repository(repository)
     initialize_git_repository(clone)
     initialize_git_repository(unrelated)
-    subprocess.run(
-        ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(worktree)],
-        check=True,
-    )
+    add_detached_worktree(repository, worktree)
     for target, origin in (
         (repository, "https://user:token@GITHUB.com/example/project.git"),
         (clone, "git@github.com:example/project"),
@@ -1713,13 +1679,10 @@ def test_semantic_scan_comparison_supports_one_to_many_without_copying_triage(
             "UPDATE finding_occurrences SET severity = ? WHERE id = ?",
             (("low", current[0]["occurrenceId"]), ("critical", current[1]["occurrenceId"])),
         )
-    set_triage(
+    close_finding(
         state_dir,
         previous["occurrenceId"],
-        "closed",
-        "--close-reason",
         "false_positive",
-        "--note",
         "The reported paths are already contained.",
     )
 
@@ -1847,15 +1810,7 @@ def test_replacing_reverse_comparison_preserves_other_pairs_and_triage(
     if indirect:
         match(0, 2)
         match(2, 1)
-    set_triage(
-        state,
-        occurrences[0]["occurrenceId"],
-        "closed",
-        "--close-reason",
-        "wont_fix",
-        "--note",
-        "Accepted synthetic risk.",
-    )
+    close_finding(state, occurrences[0]["occurrenceId"], "wont_fix", "Accepted synthetic risk.")
     artifacts = {
         path: path.read_bytes()
         for scan in scans
@@ -1998,10 +1953,7 @@ def test_semantic_scan_comparison_accepts_linked_git_worktrees(tmp_path: Path) -
     repository = tmp_path / "repository"
     linked_worktree = tmp_path / "linked-worktree"
     revision = initialize_git_repository(repository)
-    subprocess.run(
-        ["git", "-C", str(repository), "worktree", "add", "-q", "--detach", str(linked_worktree)],
-        check=True,
-    )
+    add_detached_worktree(repository, linked_worktree)
     before = create_cli_scan(
         state_dir, tmp_path / "before-results", repository, target_revision=revision
     )
@@ -2156,25 +2108,8 @@ def test_cli_scan_reruns_reject_other_repository_parents(tmp_path: Path) -> None
     other.mkdir()
     scan_dir = tmp_path / "other-results"
     scan_dir.mkdir(mode=0o700)
-    rejected = run_workbench(
-        state_dir,
-        "register-cli-scan",
-        "--scan-dir",
-        str(scan_dir),
-        "--repository",
-        str(other),
-        "--recipe-json",
-        json.dumps(
-            {
-                "config": {},
-                "mode": "standard",
-                "repository": str(other),
-                "target": {"kind": "repository", "paths": []},
-            }
-        ),
-        "--parent-scan-id",
-        parent["scanId"],
-        check=False,
+    rejected = register_scan(
+        state_dir, other, scan_dir, "--parent-scan-id", parent["scanId"], check=False
     )
     assert rejected["returncode"] != 0
     assert "same repository as its parent" in rejected["stderr"]
@@ -2231,37 +2166,21 @@ def test_history_repair_keeps_triage_across_legacy_match(
     state = tmp_path / "state"
     repository = tmp_path / "repository"
     revision = initialize_git_repository(repository)
-    first = create_cli_scan(
-        state,
-        tmp_path / "results",
-        repository,
-        target_revision=revision,
-        identity_anchor="synthetic-prior-anchor",
-    )
-    second = create_cli_scan(
-        state,
-        tmp_path / "results",
-        repository,
-        target_revision=revision,
-        identity_anchor="synthetic-current-anchor",
-    )
+    record_scan = partial(create_cli_scan, state, tmp_path / "results", target_revision=revision)
+    first = record_scan(repository, identity_anchor="synthetic-prior-anchor")
+    second = record_scan(repository, identity_anchor="synthetic-current-anchor")
     clear_scan_generation(state, first)
     inputs = compare_scan_pair(state, first, second, "--include-matching-inputs")["matchingInputs"]
     prior = inputs["before"][0]["occurrenceId"]
     current = inputs["after"][0]["occurrenceId"]
     save_scan_matches(state, first, second, confirmed_match(prior, current))
-    set_triage(
+    close_finding(
         state,
         prior,
-        "closed",
-        "--close-reason",
         "false_positive",
-        "--note",
         "The synthetic finding is already prevented by its checked guard.",
     )
-    current = create_cli_scan(
-        state, tmp_path / "results", repository, target_revision=revision, finding=False
-    )
+    current = record_scan(repository, finding=False)
     feedback = run_workbench(state, "get-scan-feedback", "--scan-id", current["scanId"])
     assert len(feedback["falsePositives"]) == 1
     assert (
@@ -2282,20 +2201,9 @@ def test_history_repair_uses_completion_horizon_for_focused_matching(tmp_path: P
     state = tmp_path / "state"
     repository = tmp_path / "repository"
     revision = initialize_git_repository(repository)
-    first = create_cli_scan(
-        state,
-        tmp_path / "results",
-        repository,
-        target_revision=revision,
-        identity_anchor="synthetic-first-anchor",
-    )
-    second = create_cli_scan(
-        state,
-        tmp_path / "results",
-        repository,
-        target_revision=revision,
-        identity_anchor="synthetic-second-anchor",
-    )
+    record_scan = partial(create_cli_scan, state, tmp_path / "results", target_revision=revision)
+    first = record_scan(repository, identity_anchor="synthetic-first-anchor")
+    second = record_scan(repository, identity_anchor="synthetic-second-anchor")
     inputs = compare_scan_pair(state, first, second, "--include-matching-inputs")["matchingInputs"]
     save_scan_matches(
         state,
@@ -2303,13 +2211,7 @@ def test_history_repair_uses_completion_horizon_for_focused_matching(tmp_path: P
         second,
         confirmed_match(inputs["before"][0]["occurrenceId"], inputs["after"][0]["occurrenceId"]),
     )
-    focused = create_cli_scan(
-        state,
-        tmp_path / "results",
-        repository,
-        target_revision=revision,
-        identity_anchor="synthetic-focused-anchor",
-    )
+    focused = record_scan(repository, identity_anchor="synthetic-focused-anchor")
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         connection.execute(
             "UPDATE scans SET started_at = '2026-01-01T00:00:00Z' WHERE id = ?",
@@ -2343,7 +2245,7 @@ def test_history_repair_rebinds_only_unscanned_workspace(tmp_path: Path) -> None
             (str(repository),),
         ).fetchone()
     (repository / ".git").rename(tmp_path / "previous-git")
-    subprocess.run(["git", "init", "-q"], cwd=repository, check=True)
+    git_in(repository, "init", "-q")
     run_workbench(
         state,
         "save-workspace",
@@ -2497,20 +2399,9 @@ def test_matched_repository_confirmation_uses_all_saved_repository_buckets(
     state = tmp_path / "state"
     repository = tmp_path / "repository"
     revision = initialize_git_repository(repository)
-    before = create_cli_scan(
-        state,
-        tmp_path / "results",
-        repository,
-        target_revision=revision,
-        identity_anchor="synthetic-legacy-anchor",
-    )
-    after = create_cli_scan(
-        state,
-        tmp_path / "results",
-        repository,
-        target_revision=revision,
-        identity_anchor="synthetic-current-anchor",
-    )
+    record_scan = partial(create_cli_scan, state, tmp_path / "results", target_revision=revision)
+    before = record_scan(repository, identity_anchor="synthetic-legacy-anchor")
+    after = record_scan(repository, identity_anchor="synthetic-current-anchor")
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         connection.execute(
             "UPDATE scans SET repository_generation = NULL WHERE id = ?", (before["scanId"],)
@@ -2536,9 +2427,7 @@ def test_matched_repository_confirmation_uses_all_saved_repository_buckets(
                 inputs["before"][0]["occurrenceId"], inputs["after"][0]["occurrenceId"]
             ),
         )
-    create_cli_scan(
-        state, tmp_path / "results", repository, target_revision=revision, finding=False
-    )
+    record_scan(repository, finding=False)
     global_findings = run_workbench(state, "list-global-findings")["findings"]
     legacy = next(
         finding for finding in global_findings if before["scanId"] in finding["knownScanIds"]
@@ -2552,6 +2441,24 @@ def test_matched_repository_confirmation_uses_all_saved_repository_buckets(
         ]
         assert len(scoped) == 1
         assert scoped[0]["confirmedInLatestScan"] is False
+
+
+def initialize_existing_directory(repository: Path) -> str:
+    git_in(repository, "init", "-q")
+    git_in(
+        repository, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.test", "add", "."
+    )
+    git_in(
+        repository,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.test",
+        "commit",
+        "-qm",
+        "Initialize repository",
+    )
+    return subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=repository, text=True).strip()
 
 
 @pytest.mark.parametrize("mode", ("standard", "deep"))
@@ -2570,54 +2477,67 @@ def test_portable_identity_allows_git_initialization_after_plain_directory_histo
             ).fetchone()[0]
             == "unversioned"
         )
-    revision = initialize_existing_repository(repository)
+    revision = initialize_existing_directory(repository)
     after = create_cli_scan(
         state, tmp_path / "results", repository, mode=mode, target_revision=revision
     )
     assert compare_scan_pair(state, before, after)["afterScanId"] == after["scanId"]
 
 
+def scan_clones(tmp_path, same_origin):
+    repository = tmp_path / "repository"
+    revision = initialize_git_repository(repository)
+    git_in(repository, "remote", "add", "origin", "https://example.test/synthetic/project.git")
+    clone = tmp_path / "clone"
+    subprocess.run(["git", "clone", "-q", str(repository), str(clone)], check=True)
+    git_in(
+        clone,
+        "remote",
+        "set-url",
+        "origin",
+        "https://example.test/synthetic/project.git"
+        if same_origin
+        else "https://example.test/synthetic/other.git",
+    )
+    state = tmp_path / "state"
+    before = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
+    after = create_cli_scan(state, tmp_path / "results", clone, target_revision=revision)
+    return state, repository, clone, before, after
+
+
+def compare_clones(history, connection, before, after):
+    return history.compare_scans(
+        connection,
+        Namespace(before_scan_id=before["scanId"], after_scan_id=after["scanId"]),
+        require_scan=lambda db, id: db.execute(
+            "SELECT * FROM scans WHERE id = ?", (id,)
+        ).fetchone(),
+        read_coverage=lambda row: json.loads((Path(row["scan_dir"]) / "coverage.json").read_text()),
+    )
+
+
 @pytest.mark.parametrize("same_origin", (True, False))
 def test_portable_identity_explicit_clone_comparison_without_birth_timestamps(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, same_origin: bool
 ) -> None:
-    import argparse
 
     monkeypatch.syspath_prepend(str(SCRIPT.parent))
     import workbench_scan_history as history
     import workbench_target_state as target_state
 
-    repository = tmp_path / "repository"
-    revision = initialize_git_repository(repository)
-    clone = tmp_path / "clone"
-    clone_with_origin(repository, clone, same_origin=same_origin)
-    state = tmp_path / "state"
-    before = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
-    after = create_cli_scan(state, tmp_path / "results", clone, target_revision=revision)
+    state, _, _, before, after = scan_clones(tmp_path, same_origin)
     with sqlite3.connect(state / "workbench.sqlite3") as connection:
         connection.row_factory = sqlite3.Row
         connection.execute("UPDATE scans SET repository_generation = NULL")
         connection.execute("UPDATE security_targets SET repository_identity = NULL")
         monkeypatch.setattr(target_state, "_repository_birth_time_ns", lambda *_: None)
-        args = argparse.Namespace(before_scan_id=before["scanId"], after_scan_id=after["scanId"])
-
-        def compare():
-            return history.compare_scans(
-                connection,
-                args,
-                require_scan=lambda db, id: db.execute(
-                    "SELECT * FROM scans WHERE id = ?", (id,)
-                ).fetchone(),
-                read_coverage=lambda row: json.loads(
-                    (Path(row["scan_dir"]) / "coverage.json").read_text()
-                ),
-            )
-
         if same_origin:
-            assert compare()["afterScanId"] == after["scanId"]
+            assert (
+                compare_clones(history, connection, before, after)["afterScanId"] == after["scanId"]
+            )
         else:
             with pytest.raises(SystemExit, match="same repository"):
-                compare()
+                compare_clones(history, connection, before, after)
 
 
 @pytest.mark.parametrize(
@@ -2674,7 +2594,7 @@ def test_legacy_aliases_restore_mixed_plain_and_git_history(tmp_path: Path, mode
     (repository / "README.md").write_text("fixture\n")
     state = tmp_path / "state"
     before = create_cli_scan(state, tmp_path / "results", repository, mode=mode)
-    revision = initialize_existing_repository(repository)
+    revision = initialize_existing_directory(repository)
     after = create_cli_scan(
         state, tmp_path / "results", repository, mode=mode, target_revision=revision
     )
@@ -2693,19 +2613,12 @@ def test_legacy_aliases_restore_mixed_plain_and_git_history(tmp_path: Path, mode
 def test_legacy_aliases_explicit_comparison_with_mixed_birth_support(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing_birth: str, same_origin: bool
 ) -> None:
-    import argparse
 
     monkeypatch.syspath_prepend(str(SCRIPT.parent))
     import workbench_scan_history as history
     import workbench_target_state as target_state
 
-    repository = tmp_path / "repository"
-    revision = initialize_git_repository(repository)
-    clone = tmp_path / "clone"
-    clone_with_origin(repository, clone, same_origin=same_origin)
-    state = tmp_path / "state"
-    before = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
-    after = create_cli_scan(state, tmp_path / "results", clone, target_revision=revision)
+    state, repository, clone, before, after = scan_clones(tmp_path, same_origin)
     missing = before if missing_birth == "before" else after
     missing_path = repository if missing_birth == "before" else clone
     original_birth = target_state._repository_birth_time_ns
@@ -2725,25 +2638,13 @@ def test_legacy_aliases_explicit_comparison_with_mixed_birth_support(
             "UPDATE security_targets SET repository_identity = NULL WHERE current_path = ?",
             (str(missing_path),),
         )
-        args = argparse.Namespace(before_scan_id=before["scanId"], after_scan_id=after["scanId"])
-
-        def compare():
-            return history.compare_scans(
-                connection,
-                args,
-                require_scan=lambda db, id: db.execute(
-                    "SELECT * FROM scans WHERE id = ?", (id,)
-                ).fetchone(),
-                read_coverage=lambda row: json.loads(
-                    (Path(row["scan_dir"]) / "coverage.json").read_text()
-                ),
-            )
-
         if same_origin:
-            assert compare()["afterScanId"] == after["scanId"]
+            assert (
+                compare_clones(history, connection, before, after)["afterScanId"] == after["scanId"]
+            )
         else:
             with pytest.raises(SystemExit, match="same repository"):
-                compare()
+                compare_clones(history, connection, before, after)
 
 
 @pytest.mark.parametrize("other_checkout", ("linked", "clone", "different-scope"))
@@ -2762,13 +2663,9 @@ def test_originless_linked_comparison_without_birth_timestamps(
     linked = tmp_path / "linked"
     if other_checkout == "clone":
         subprocess.run(["git", "clone", "-q", str(repository), str(linked)], check=True)
-        subprocess.run(["git", "remote", "remove", "origin"], cwd=linked, check=True)
+        git_in(linked, "remote", "remove", "origin")
     else:
-        subprocess.run(
-            ["git", "worktree", "add", "-q", "-b", "fixture-linked", str(linked)],
-            cwd=repository,
-            check=True,
-        )
+        git_in(repository, "worktree", "add", "-q", "-b", "fixture-linked", str(linked))
     (linked / "src").mkdir(exist_ok=True)
     state = tmp_path / "state"
     before_target = repository / "src" if other_checkout == "different-scope" else repository

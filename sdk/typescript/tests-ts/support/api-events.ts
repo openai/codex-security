@@ -1,5 +1,10 @@
 import { join } from "node:path";
-import type { CodexOptions, ThreadEvent } from "@openai/codex-sdk";
+import type {
+  CodexOptions,
+  ThreadEvent,
+  TurnCompletedEvent,
+  Usage,
+} from "@openai/codex-sdk";
 import { CodexSecurity, runScanEvents } from "../../src/api.js";
 import type { ScanOptions } from "../../src/index.js";
 import { PLUGIN_ROOT, copyCompletedScan } from "../plugin-root.js";
@@ -52,18 +57,22 @@ type ScanEventOptions = Omit<
   "thread" | "events" | "signal" | "scanDir" | "pluginRoot" | "expectation"
 > & { abortController?: AbortController };
 
-export function completedTurn(): Extract<
-  ThreadEvent,
-  { type: "turn.completed" }
-> {
+export function completedTurn(
+  usage: Pick<Usage, "input_tokens" | "output_tokens"> & Partial<Usage> = {
+    input_tokens: 10,
+    output_tokens: 3,
+    cached_input_tokens: 2,
+    reasoning_output_tokens: 1,
+  },
+): TurnCompletedEvent {
   return {
     type: "turn.completed",
     usage: {
-      input_tokens: 10,
-      cached_input_tokens: 2,
-      cache_write_input_tokens: 0,
-      output_tokens: 3,
-      reasoning_output_tokens: 1,
+      input_tokens: usage.input_tokens,
+      cached_input_tokens: usage.cached_input_tokens ?? 0,
+      cache_write_input_tokens: usage.cache_write_input_tokens ?? 0,
+      output_tokens: usage.output_tokens,
+      reasoning_output_tokens: usage.reasoning_output_tokens ?? 0,
     },
   };
 }
@@ -116,10 +125,10 @@ export async function* failedEvents(
 
 export function completedCodex(root: string, threadId: string | null = null) {
   return (_options: CodexOptions) =>
-    codexFactory(async () => {
+    codexWithStream(async () => {
       await copyCompletedScan(root);
       return { events: completedEvents() };
-    }, threadId)();
+    }, threadId);
 }
 
 export function collectObserverErrors(errors: [ScanObserverName, string][]) {
@@ -128,13 +137,18 @@ export function collectObserverErrors(errors: [ScanObserverName, string][]) {
   };
 }
 
+export function codexWithStream<Run>(
+  runStreamed: Run,
+  threadId: string | null = null,
+) {
+  return { startThread: () => ({ id: threadId, runStreamed }) };
+}
+
 export function codexFactory<Run>(
   runStreamed: Run,
   threadId: string | null = null,
 ) {
-  return () => ({
-    startThread: () => ({ id: threadId, runStreamed }),
-  });
+  return () => codexWithStream(runStreamed, threadId);
 }
 
 export const failedPostScanEvents = failedEvents;

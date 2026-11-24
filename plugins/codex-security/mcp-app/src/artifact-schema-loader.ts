@@ -1,3 +1,4 @@
+import { isDeepStrictEqual } from "node:util";
 import * as z from "zod/v4";
 import { isRecord } from "./record.js";
 
@@ -5,29 +6,33 @@ import { isRecord } from "./record.js";
 export function projectArtifactToolSchema<Schema extends z.ZodType>(
   schema: Schema,
 ): Schema {
-  // Zod exports fresh JSON. Copy the root to omit its non-enumerable ~standard.
-  const declaration = { ...z.toJSONSchema(schema, { io: "input" }) };
-  hideForbiddenProperties(declaration);
-  return schema.meta(declaration);
+  const declaration = z.toJSONSchema(schema, { io: "input" });
+  hideForbiddenFields(declaration);
+  return schema.meta({ ...declaration });
 }
 
-function hideForbiddenProperties(value: unknown): void {
-  if (Array.isArray(value)) return value.forEach(hideForbiddenProperties);
+/** Keep forbidden fields out of native tool declarations without allowing them. */
+function hideForbiddenFields(value: unknown): void {
+  if (Array.isArray(value)) return value.forEach(hideForbiddenFields);
   if (!isRecord(value)) return;
   for (const [key, child] of Object.entries(value)) {
     if (!["const", "enum", "default", "examples"].includes(key))
-      hideForbiddenProperties(child);
+      hideForbiddenFields(child);
   }
-
-  // Native tool declarations treat Zod's {not:{}} as an optional unknown field.
-  // Forbid the name without advertising the property.
   const properties = value.properties;
   if (!isRecord(properties)) return;
-  const forbidden = Object.keys(properties).filter((key) =>
-    forbiddenProperty(properties[key]),
-  );
+
+  // Zod renders false properties as {not:{}}, which the native declaration
+  // projects as optional unknown fields. Exclude their names instead. This
+  // is equivalent JSON Schema; the original validator remains unchanged.
+  const forbidden: string[] = [];
+  for (const [name, property] of Object.entries(properties)) {
+    if (forbiddenProperty(property)) {
+      forbidden.push(name);
+      delete properties[name];
+    }
+  }
   if (!forbidden.length) return;
-  for (const key of forbidden) delete properties[key];
   const names = { not: { enum: forbidden } };
   value.propertyNames =
     value.propertyNames === undefined
@@ -36,11 +41,5 @@ function hideForbiddenProperties(value: unknown): void {
 }
 
 export function forbiddenProperty(value: unknown): boolean {
-  return (
-    value === false ||
-    (isRecord(value) &&
-      isRecord(value.not) &&
-      Object.keys(value).length === 1 &&
-      Object.keys(value.not).length === 0)
-  );
+  return value === false || isDeepStrictEqual(value, { not: {} });
 }

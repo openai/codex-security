@@ -3,9 +3,7 @@ import path from "node:path";
 import { importSource } from "./import-module.ts";
 
 const { CODEX_SANDBOX_STATE_META_CAPABILITY, resolveDeepWorkerParentSandbox } =
-  await importSource(
-    path.join(import.meta.dirname, "../src/deep-scan/parent-sandbox.ts"),
-  );
+  await importSource("src/deep-scan/parent-sandbox.ts");
 
 const rootRead = {
   path: { type: "special", value: { kind: "root" } },
