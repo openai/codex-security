@@ -25,6 +25,7 @@
 - define opt-in flags with a shared schema factory ([#2830](https://github.com/openai/codex-security/pull/2830))
 - simplify workbench requests and finding history projections ([#2827](https://github.com/openai/codex-security/pull/2827))
 - simplify dependency discovery, worklist queries, and trace scheduling ([#2836](https://github.com/openai/codex-security/pull/2836))
+- simplify sealed finding projections and SARIF line hashes ([#2826](https://github.com/openai/codex-security/pull/2826))
 
 </details>
 
