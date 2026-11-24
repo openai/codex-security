@@ -23,6 +23,7 @@
 - simplify session progress and usage accounting ([#2835](https://github.com/openai/codex-security/pull/2835))
 - index and reconcile Linear publication evidence once ([#2833](https://github.com/openai/codex-security/pull/2833))
 - define opt-in flags with a shared schema factory ([#2830](https://github.com/openai/codex-security/pull/2830))
+- simplify workbench requests and finding history projections ([#2827](https://github.com/openai/codex-security/pull/2827))
 
 </details>
 
