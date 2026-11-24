@@ -8,6 +8,11 @@ import {
   issueIdentity,
   readPatch,
 } from "./continuum-findings.js";
+import {
+  linkedIssueIds,
+  selectFindingValidationArtifact,
+  singleFindingValidationIssue,
+} from "./continuum-validation-evidence.js";
 import { CodexSecurityError } from "./errors.js";
 import { array, record } from "./scanner-import.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
@@ -90,7 +95,7 @@ function configuredSources(environment: Record<string, unknown>) {
   };
 }
 
-async function singleRepositorySource(
+export async function singleRepositorySource(
   environment: Record<string, unknown>,
   getIntegration: (id: string) => Promise<Record<string, unknown>>,
 ) {
@@ -111,12 +116,13 @@ async function singleRepositorySource(
       ? "https://github.com"
       : gitLabIntegration.parse(integration).providerDetails.gitlab.instanceUrl;
   return {
+    platform: type.toLowerCase(),
     url: declaredScannerRepositoryUrl(
       `${base.replace(/\/$/u, "")}/${repository}`,
       "Continuum",
     ),
     // Mixed environments do not identify the Git source by the patch's AWS source name.
-    includePatches: s3Sources.length === 0,
+    gitOnly: s3Sources.length === 0,
   };
 }
 
@@ -196,6 +202,21 @@ function requireCompleteList(response: Record<string, unknown>, name: string) {
     throw new CodexSecurityError(`Expected a complete Continuum ${name} list.`);
 }
 
+async function getFindingValidationIssue(
+  request: ContinuumRequest,
+  scope: string[],
+  issueId: string,
+  identity: ReturnType<typeof findingIdentity>,
+) {
+  const issue = await request("get-code-issue", scope, "--issue-id", issueId);
+  const selected = issueIdentity(issue);
+  if (selected.scope !== identity.scope || selected.id !== issueId)
+    throw new CodexSecurityError(
+      `Unexpected detail for Continuum issue ${issueId}.`,
+    );
+  return singleFindingValidationIssue(issue, issueId, identity);
+}
+
 export async function collectContinuumFinding(
   options: ContinuumCollectionOptions & {
     findingId: string;
@@ -234,8 +255,8 @@ export async function collectContinuumFinding(
       `Unexpected detail for Continuum finding ${findingId}.`,
     );
 
-  const linkedIssue =
-    finding["createdIssueId"] || finding["duplicateOfIssueId"];
+  const links = linkedIssueIds(finding);
+  const linkedIssue = links[0];
   if (!linkedIssue) return finding;
   const issueId = continuumId.parse(linkedIssue);
   const list = await request(
@@ -243,26 +264,46 @@ export async function collectContinuumFinding(
     scope,
     "--issue-id",
     issueId,
-    "--artifact-type",
-    "PATCH",
   );
   requireCompleteList(list, "issue artifact");
-  const artifactIds = array(list["items"], "Continuum issue artifacts")
-    .map((item) =>
-      continuumId.parse(
-        record(item, "Continuum issue artifact summary")["artifactId"],
-      ),
-    )
-    .sort();
+  const artifacts = array(list["items"], "Continuum issue artifacts")
+    .flatMap((item) => {
+      const summary = record(item, "Continuum issue artifact summary");
+      const type = summary["artifactType"];
+      if (type !== "PATCH" && type !== "VALIDATION_EVIDENCE") return [];
+      return [{ id: continuumId.parse(summary["artifactId"]), type }];
+    })
+    .sort((left, right) =>
+      left.id < right.id ? -1 : left.id > right.id ? 1 : 0,
+    );
   const patches = [];
-  for (const artifactId of artifactIds) {
+  const evidenceArtifacts = [];
+  let validationIssue:
+    ReturnType<typeof singleFindingValidationIssue> | undefined;
+  for (const { id: artifactId, type } of artifacts) {
     const artifact = await getIssueArtifact(
       request,
       scope,
       issueId,
       artifactId,
-      "PATCH",
+      type,
     );
+    if (type === "VALIDATION_EVIDENCE") {
+      const selected = selectFindingValidationArtifact(artifact, findingId);
+      if (!selected) continue;
+      if (selected.scope === "issue") {
+        if (validationIssue === undefined)
+          validationIssue = await getFindingValidationIssue(
+            request,
+            scope,
+            issueId,
+            identity,
+          );
+        if (!validationIssue) continue;
+      }
+      evidenceArtifacts.push(selected.artifact);
+      continue;
+    }
     const body = record(artifact["body"], "Continuum artifact body");
     const patch = record(
       body["patch"],
@@ -278,10 +319,25 @@ export async function collectContinuumFinding(
         );
       continue;
     }
-    patches.push(readPatch({ ...patch, artifactId }));
+    patches.push(
+      readPatch({
+        ...patch,
+        artifactId,
+        issueArn:
+          links.length > 1
+            ? `${identity.scope}/code-issues/${issueId}`
+            : undefined,
+      }),
+    );
   }
   signal?.throwIfAborted();
-  return patches.length ? { finding, patches } : finding;
+  if (!patches.length && !evidenceArtifacts.length) return finding;
+  return {
+    finding,
+    ...(patches.length && { patches }),
+    ...(validationIssue && { validationIssue }),
+    ...(evidenceArtifacts.length && { evidenceArtifacts }),
+  };
 }
 
 export async function collectContinuumIssues(
@@ -291,7 +347,7 @@ export async function collectContinuumIssues(
   const { environmentId, signal } = options;
   const request = await continuumRequests(options, runAws);
   const environmentArgs = ["--environment-id", environmentId];
-  const { url: sourceRepositoryUrl, includePatches } =
+  const { url: sourceRepositoryUrl, gitOnly: includePatches } =
     await singleRepositorySource(
       await request("get-environment", environmentArgs),
       (id) => request("get-integration", ["--integration-id", id]),

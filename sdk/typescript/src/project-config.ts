@@ -49,6 +49,7 @@ export interface ProjectConfigSource {
 }
 
 export interface ResolvedProjectConfig {
+  exploitability?: ProjectConfigInput["exploitability"];
   config: { codexOverrides: JsonObject };
   options: ResolvedScanSettings;
   sources: ConfigurationSources;
@@ -63,9 +64,11 @@ const PROJECT_SETTING_KEYS = {
   cyberAccessProgram: "scan.cyber_access_program",
   ownerSuggestions: "scan.owner_suggestions",
   target: "scan.scope",
+  excludePaths: "scan.exclude_paths",
   knowledgeBasePaths: "scan.knowledge_base",
   scanPromptFile: "scan.instructions_file",
   validationPromptFile: "scan.validation_file",
+  validationProvider: "scan.validation.provider",
   outputDir: "output.directory",
   failureSeverity: "policy.fail_on_severity",
   maxCostUsd: "limits.max_cost_usd_per_scan",
@@ -223,6 +226,7 @@ export function projectConfigStarter(
     `#   mode: ${DEFAULT_SCAN_MODE}`,
     "#   scope:",
     "#     paths: [src] # Relative to each selected repository.",
+    "#   exclude_paths: [examples] # Relative to each selected repository.",
     "#   knowledge_base: [] # Paths relative to this file.",
     "#   instructions_file: instructions.md",
     "#   validation_file: validation.md # Standard mode only.",
@@ -419,6 +423,11 @@ export function resolveScanSettings(
     mode,
     maxTimeMinutes,
     target,
+    excludePaths: choose(
+      "scan.exclude_paths",
+      file?.scan?.exclude_paths,
+      overrides.excludePaths,
+    ),
     ownerSuggestions: choose(
       "scan.owner_suggestions",
       file?.scan?.owner_suggestions,
@@ -434,6 +443,11 @@ export function resolveScanSettings(
       "scan.validation_file",
       filePath(file?.scan?.validation_file),
       cliPath(overrides.validationPromptFile),
+    ),
+    validationProvider: choose(
+      "scan.validation.provider",
+      file?.scan?.validation,
+      overrides.validationProvider,
     ),
     postScanPromptFile: cliPath(overrides.postScanPromptFile),
     outputDir: choose(
@@ -458,6 +472,9 @@ export function resolveScanSettings(
     config: { codexOverrides },
     options: settings,
     sources: resolvedSources,
+    ...(file?.exploitability === undefined
+      ? {}
+      : { exploitability: structuredClone(file.exploitability) }),
     ...(project?.path === undefined
       ? {}
       : { projectConfig: { path: project.path, sources: resolvedSources } }),
