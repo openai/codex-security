@@ -110,6 +110,7 @@ The current manifest stores additional excluded paths in `scan.review.excludedPa
 Workbench-owned Standard scans and workbench-backed diff scans submit drafts through `record_codex_security_scan_draft({ scanId, handoffClaimToken?, scope?, threatModel?, findings, reviewState })`. Bound Deep workers submit their findings and review state through the same tool. The Deep coordinator writes the aggregated parent draft. SDK-owned Standard scans write unsealed manifest and findings files in the SDK-provided scan directory.
 
 For Deep, workbench-backed diff, or explicitly requested Standard completed results, call `get_codex_security_completed_scan({ scanId, handoffClaimToken? })`.
+Its optional `validation` field returns the last supplemental assessment from host state, including individual findings in `items`. When `validation.retryable` is true and the user asks to resume validation, call `complete_codex_security_scan` with the same scan identity. Continuum reuses accepted submissions from the same host.
 
 ## Fix Finding Paths
 

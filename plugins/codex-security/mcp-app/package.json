@@ -2,6 +2,9 @@
   "name": "codex-security-mcp-app",
   "version": "0.1.161",
   "type": "module",
+  "imports": {
+    "#validation-runtime": "./src/standalone-validation.ts"
+  },
   "private": true,
   "scripts": {
     "build": "node scripts/generate-artifact-schemas.mjs && tsc --noEmit",
@@ -11,7 +14,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
-    "@openai/codex-sdk": "0.167.1",
+    "@openai/codex-sdk": "0.171.0",
     "ajv": "8.20.0",
     "fzstd": "0.1.1",
     "smol-toml": "1.9.1",
@@ -21,7 +24,7 @@
   "devDependencies": {
     "@types/node": "^26.6.6",
     "esbuild": "^0.28.2",
-    "prettier": "3.9.10",
+    "prettier": "3.10.1",
     "typescript": "^7.0.2"
   }
 }
