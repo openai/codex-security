@@ -2800,11 +2800,6 @@ and retains distinct occurrence IDs. It escapes spreadsheet-formula prefixes and
 leading apostrophes; import removes the escape. Use JSON to recover ambiguous
 apostrophes from older CSV exports.
 
-In SARIF, read the scan ID from `runs[].properties.codexSecurityScanId`.
-For older, unmodified exports, fall back to `runs[].automationDetails.id`.
-New exports leave `automationDetails` unset so GitHub's `upload-sarif` step
-can apply your workflow's `category`.
-
 For SARIF, `--source-root` adds source-line fingerprints that help tools match
 findings across scans. Before changing the scanned files or applying patches,
 run the export from the scanned repository's root:
@@ -2815,6 +2810,11 @@ codex-security export /path/to/scan-results --source-root . --output results.sar
 
 The `.` selects the current directory as the source root. Its source files must
 be unchanged since the scan. `--source-root` is supported only for SARIF.
+
+In SARIF, read the scan ID from `runs[].properties.codexSecurityScanId`.
+For older, unmodified exports, fall back to `runs[].automationDetails.id`.
+New exports leave `automationDetails` unset so GitHub's `upload-sarif` step
+can apply your workflow's `category`.
 
 If export fails, it exits with `2`. Fix the reported error and rerun the export;
 the saved scan remains available, so you don't need to run another scan.
