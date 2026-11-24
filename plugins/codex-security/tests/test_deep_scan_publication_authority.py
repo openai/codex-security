@@ -49,6 +49,27 @@ def stage_publication(scan, *, generation, result_path, title, complete=True):
     )
 
 
+def stage_accepted_aggregate(scan, workflow=None):
+    result = scan.add_worker()
+    with scan.connection:
+        if workflow is None:
+            scan.connection.execute(
+                "UPDATE deep_scan_runs SET coordinator_generation = 2 WHERE scan_id = ?",
+                (scan.scan_id,),
+            )
+        else:
+            scan.connection.execute(
+                "UPDATE deep_scan_runs SET workflow_version = ?, coordinator_generation = 2 "
+                "WHERE scan_id = ?",
+                (workflow, scan.scan_id),
+            )
+        scan.connection.execute(
+            "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' WHERE scan_id = ?",
+            (scan.scan_id,),
+        )
+    return stage_publication(scan, generation=2, result_path=result, title="Accepted aggregate")
+
+
 @pytest.mark.parametrize(
     ("stale", "complete"),
     [
@@ -227,18 +248,7 @@ def test_failed_publication_does_not_acknowledge_staged_input(
     workbench_api, workbench_db, publication_scan, monkeypatch, failure
 ):
     scan = publication_scan()
-    result = scan.add_worker()
-    with workbench_db:
-        workbench_db.execute(
-            "UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1', "
-            "coordinator_generation = 2 WHERE scan_id = ?",
-            (scan.scan_id,),
-        )
-        workbench_db.execute(
-            "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' WHERE scan_id = ?",
-            (scan.scan_id,),
-        )
-    args = stage_publication(scan, generation=2, result_path=result, title="Accepted aggregate")
+    args = stage_accepted_aggregate(scan, "deep-scan-mcp/v1")
     staged = {path: path.read_bytes() for path in (scan.scan_dir / "drafts").iterdir()}
     saved_results = workbench_api["saved_results"]
     original_write = saved_results.write_scan_local_bytes
@@ -389,22 +399,11 @@ def test_receipt_io_failure_preserves_successful_publication(
     if backend_kind == "posix" and os.name == "nt":
         pytest.skip("POSIX descriptor-relative directory errors")
     scan = publication_scan()
-    result = scan.add_worker()
-    with workbench_db:
-        workbench_db.execute(
-            "UPDATE deep_scan_runs SET workflow_version = ?, coordinator_generation = 2 "
-            "WHERE scan_id = ?",
-            (workflow, scan.scan_id),
-        )
-        workbench_db.execute(
-            "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' WHERE scan_id = ?",
-            (scan.scan_id,),
-        )
-    args = stage_publication(scan, generation=2, result_path=result, title="Accepted aggregate")
+    args = stage_accepted_aggregate(scan, workflow)
     draft = json.loads(Path(args.draft_path).read_text())
     instant = workbench_api["now"]()
     monkeypatch.setattr(workbench_api["_WORKBENCH_DB_CONTEXT"], "now", lambda: instant)
-    scan_row = workbench_db.execute("SELECT * FROM scans WHERE id = ?", (scan.scan_id,)).fetchone()
+    scan_row = scan.scan_row()
     binding = workbench_api["workbench_completion_binding"](scan_row, instant)
     saved = workbench_api["saved_results"]
     saved._populate_unsealed_manifest_envelope(
@@ -538,17 +537,7 @@ def test_windows_receipt_root_probe_classifies_storage_and_path_failures(
     failure,
 ):
     scan = publication_scan()
-    result = scan.add_worker()
-    with workbench_db:
-        workbench_db.execute(
-            "UPDATE deep_scan_runs SET coordinator_generation = 2 WHERE scan_id = ?",
-            (scan.scan_id,),
-        )
-        workbench_db.execute(
-            "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' WHERE scan_id = ?",
-            (scan.scan_id,),
-        )
-    args = stage_publication(scan, generation=2, result_path=result, title="Accepted aggregate")
+    args = stage_accepted_aggregate(scan)
     bad_root = tmp_path / "invalid-root"
     if failure == "not-directory":
         bad_root.write_text("ordinary file")
@@ -665,18 +654,7 @@ def test_receipt_contract_errors_still_reject_publication(
     workbench_api, workbench_db, publication_scan, monkeypatch, failure
 ):
     scan = publication_scan()
-    result = scan.add_worker()
-    with workbench_db:
-        workbench_db.execute(
-            "UPDATE deep_scan_runs SET workflow_version = 'deep-scan-mcp/v1', "
-            "coordinator_generation = 2 WHERE scan_id = ?",
-            (scan.scan_id,),
-        )
-        workbench_db.execute(
-            "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' WHERE scan_id = ?",
-            (scan.scan_id,),
-        )
-    args = stage_publication(scan, generation=2, result_path=result, title="Accepted aggregate")
+    args = stage_accepted_aggregate(scan, "deep-scan-mcp/v1")
     staged = {path: path.read_bytes() for path in (scan.scan_dir / "drafts").iterdir()}
     saved_results = workbench_api["saved_results"]
     original_write = saved_results.write_scan_local_bytes
@@ -709,17 +687,7 @@ def test_accepted_publication_replay_retains_original_warning_and_bytes(
     workbench_api, workbench_db, publication_scan, monkeypatch
 ):
     scan = publication_scan()
-    result = scan.add_worker()
-    with workbench_db:
-        workbench_db.execute(
-            "UPDATE deep_scan_runs SET coordinator_generation = 2 WHERE scan_id = ?",
-            (scan.scan_id,),
-        )
-        workbench_db.execute(
-            "UPDATE deep_scan_workers SET kind = 'dedup', merge_state = 'none' WHERE scan_id = ?",
-            (scan.scan_id,),
-        )
-    args = stage_publication(scan, generation=2, result_path=result, title="Accepted aggregate")
+    args = stage_accepted_aggregate(scan)
     saved = workbench_api["saved_results"]
     args.expected_draft_digest = saved._scan_draft_digest(scan.scan_dir)
     warnings = iter(["Original projection warning", "Replay must not reproject"])
