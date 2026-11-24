@@ -138,6 +138,31 @@ def empty_history_paths(tmp_path: Path) -> tuple[Path, Path]:
     return tmp_path / "state", repository
 
 
+def mark_incomplete_coverage(scan_dir: Path) -> None:
+    coverage_path = scan_dir / "coverage.json"
+    coverage = json.loads(coverage_path.read_text())
+    coverage["surfaces"][0]["disposition"] = "needs_follow_up"
+    coverage["deferred"] = [
+        {"id": "unreviewed-path", "reason": "Review incomplete", "paths": ["src/extract.py"]}
+    ]
+    coverage_path.write_text(json.dumps(coverage))
+
+
+def linked_checkouts(tmp_path: Path) -> tuple[Path, Path, str]:
+    repository = tmp_path / "repository"
+    linked = tmp_path / "linked"
+    revision = initialize_git_repository(repository)
+    add_detached_worktree(repository, linked)
+    return repository, linked, revision
+
+
+def clear_scan_generation(state: Path, scan: dict[str, Any]) -> None:
+    with sqlite3.connect(state / "workbench.sqlite3") as connection:
+        connection.execute(
+            "UPDATE scans SET repository_generation = NULL WHERE id = ?", (scan["scanId"],)
+        )
+
+
 def compare_scan_pair(
     state_dir: Path,
     before: dict[str, Any],
@@ -274,13 +299,7 @@ def create_cli_scan(
                 findings["findings"].append(additional)
         findings_path.write_text(json.dumps(findings))
     if follow_up:
-        coverage_path = scan_dir / "coverage.json"
-        coverage = json.loads(coverage_path.read_text())
-        coverage["surfaces"][0]["disposition"] = "needs_follow_up"
-        coverage["deferred"] = [
-            {"id": "unreviewed-path", "reason": "Review incomplete", "paths": ["src/extract.py"]}
-        ]
-        coverage_path.write_text(json.dumps(coverage))
+        mark_incomplete_coverage(scan_dir)
     subprocess.run([sys.executable, str(FINALIZER), "--scan-dir", str(scan_dir)], check=True)
     completion = ["complete-scan", "--scan-id", launched["scanId"]]
     if cost is not None:
@@ -2133,10 +2152,7 @@ def test_history_repair_matches_legacy_generation_in_owned_checkout(tmp_path: Pa
     revision = initialize_git_repository(repository)
     first = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
     second = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
-    with sqlite3.connect(state / "workbench.sqlite3") as connection:
-        connection.execute(
-            "UPDATE scans SET repository_generation = NULL WHERE id = ?", (first["scanId"],)
-        )
+    clear_scan_generation(state, first)
     pending = run_workbench(state, "list-unmatched-scan-pairs", "--repository", str(repository))
     assert len(pending["batches"]) == 1
     assert pending["batches"][0]["afterScanId"] == second["scanId"]
@@ -2153,10 +2169,7 @@ def test_history_repair_keeps_triage_across_legacy_match(
     record_scan = partial(create_cli_scan, state, tmp_path / "results", target_revision=revision)
     first = record_scan(repository, identity_anchor="synthetic-prior-anchor")
     second = record_scan(repository, identity_anchor="synthetic-current-anchor")
-    with sqlite3.connect(state / "workbench.sqlite3") as connection:
-        connection.execute(
-            "UPDATE scans SET repository_generation = NULL WHERE id = ?", (first["scanId"],)
-        )
+    clear_scan_generation(state, first)
     inputs = compare_scan_pair(state, first, second, "--include-matching-inputs")["matchingInputs"]
     prior = inputs["before"][0]["occurrenceId"]
     current = inputs["after"][0]["occurrenceId"]
@@ -2258,15 +2271,9 @@ def test_history_repair_rebinds_only_unscanned_workspace(tmp_path: Path) -> None
 
 def test_history_repair_counts_only_each_worktrees_legacy_findings(tmp_path: Path) -> None:
     state = tmp_path / "state"
-    repository = tmp_path / "repository"
-    linked = tmp_path / "linked"
-    revision = initialize_git_repository(repository)
-    add_detached_worktree(repository, linked)
+    repository, linked, revision = linked_checkouts(tmp_path)
     legacy = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
-    with sqlite3.connect(state / "workbench.sqlite3") as connection:
-        connection.execute(
-            "UPDATE scans SET repository_generation = NULL WHERE id = ?", (legacy["scanId"],)
-        )
+    clear_scan_generation(state, legacy)
     create_cli_scan(state, tmp_path / "results", linked, target_revision=revision, finding=False)
     counts = {
         row["targetPath"]: row["openFindingsCount"]
@@ -3019,10 +3026,7 @@ def test_repository_generation_migration_is_atomic_and_preserves_shared_history(
     assert git is not None
     # Keep Git available when the linked checkout below is temporarily absent.
     monkeypatch.setenv("CODEX_SECURITY_GIT", str(Path(git).absolute()))
-    repository = tmp_path / "repository"
-    revision = initialize_git_repository(repository)
-    linked = tmp_path / "linked"
-    add_detached_worktree(repository, linked)
+    repository, linked, revision = linked_checkouts(tmp_path)
     state = tmp_path / "state"
     first = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
     second = create_cli_scan(state, tmp_path / "results", linked, target_revision=revision)
@@ -3149,10 +3153,7 @@ def test_repository_generation_returns_after_offline_migration(
     import workbench_db as workbench
     import workbench_target_state as target_state
 
-    repository = tmp_path / "repository"
-    revision = initialize_git_repository(repository)
-    linked = tmp_path / "linked"
-    add_detached_worktree(repository, linked)
+    repository, linked, revision = linked_checkouts(tmp_path)
     state = tmp_path / "state"
     scan = create_cli_scan(state, tmp_path / "results", repository, target_revision=revision)
     if alias_binding == "legacy":

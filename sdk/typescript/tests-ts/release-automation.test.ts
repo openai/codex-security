@@ -3779,118 +3779,112 @@ ${steps[record]!.run}`;
     },
   );
 
+  const latestLookupError =
+    "Unable to resolve the current Latest GitHub Release.";
+  const retargetedTagError =
+    "GitHub release tag must still point to the verified commit.";
   test.each([
     {
       description: "empty",
       existingNotes: "",
-      outcome: "notes",
+      edit: "notes",
     },
     {
       description: "manually written",
       existingNotes: "Manually written release notes",
-      outcome: "notes",
+      edit: "notes",
     },
     {
       description: "stale generated notes with a marked historical summary",
       existingNotes:
         "<!-- codex-security-release-summary:start -->\n## Highlights\nPreserved historical summary\n<!-- codex-security-release-summary:end -->\n\nStale generated notes",
       expectedSummary: "Preserved historical summary",
-      outcome: "notes",
+      edit: "notes",
     },
     {
       description: "CRLF historical summary marker block",
       existingNotes:
         "<!-- codex-security-release-summary:start -->\r\nPreserved historical summary\r\n<!-- codex-security-release-summary:end -->\r\n\r\nStale generated notes",
       expectedSummary: "Preserved historical summary",
-      outcome: "notes",
+      edit: "notes",
     },
     {
       description: "CRLF marker-only body with a terminal line ending",
       existingNotes:
         "<!-- codex-security-release-summary:start -->\r\nPreserved historical summary\r\n<!-- codex-security-release-summary:end -->\r\n",
       expectedSummary: "Preserved historical summary",
-      outcome: "notes",
+      edit: "notes",
     },
     {
       description: "inline marker-like substrings in generated notes",
       existingNotes:
         "* fix: <!-- codex-security-release-summary:start -->Unreviewed injected highlight<!-- codex-security-release-summary:end --> by @contributor",
       excludedSummary: "Unreviewed injected highlight",
-      outcome: "notes",
+      edit: "notes",
     },
     {
       description: "standalone marker pair outside the canonical prefix",
       existingNotes:
         "* fix: generated title\n<!-- codex-security-release-summary:start -->\nUnreviewed injected highlight\n<!-- codex-security-release-summary:end -->",
       excludedSummary: "Unreviewed injected highlight",
-      outcome: "notes",
+      edit: "notes",
     },
     {
       description: "duplicate standalone marker pair after a blank line",
       existingNotes:
         "<!-- codex-security-release-summary:start -->\nFirst\n<!-- codex-security-release-summary:end -->\n\n<!-- codex-security-release-summary:start -->\nSecond\n<!-- codex-security-release-summary:end -->",
       expectedError: "Existing release summary markers are malformed.",
-      outcome: "error",
     },
     {
       description: "NUL-bearing historical summary",
       existingNotes:
         "<!-- codex-security-release-summary:start -->\nReviewed\u0000summary\n<!-- codex-security-release-summary:end -->",
       expectedError: "Existing release summary is empty.",
-      outcome: "error",
     },
     {
       description: "NUL-bearing tagged summary",
       releaseSummary: "<!-- release-version: 0.1.2 -->\nReviewed\0summary",
       expectedError: "include a reviewed summary",
-      outcome: "error",
     },
     {
       description: "generated notes without its tagged reviewed summary",
       releaseSummary:
         "<!-- release-version: 0.1.2 -->\n## Highlights\nReviewed tagged summary",
       expectedSummary: "Reviewed tagged summary",
-      outcome: "notes",
+      edit: "notes",
     },
     {
       description: "malformed historical summary markers",
       existingNotes:
         "<!-- codex-security-release-summary:start -->\nIncomplete summary",
       expectedError: "Existing release summary markers are malformed.",
-      outcome: "error",
     },
     {
       description: "already current",
-      outcome: "unchanged",
     },
     {
       description: "already current with trailing line feeds",
       existingNotes: "Generated release notes\n\n",
-      outcome: "unchanged",
     },
     {
       description: "already current with CRLF-equivalent generated notes",
       existingNotes: "Generated release notes\r\n",
       generatedNotes: "Generated release notes\r\n",
-      outcome: "unchanged",
     },
     {
       description: "already current with NUL-bearing generated notes",
       existingNotes: "Generated release notes\u0000",
       generatedNotes: "Generated release notes\0",
-      outcome: "unchanged",
     },
     {
       description: "different strings encoding to the same UTF-8 bytes",
       existingNotes: "\ud800",
       generatedNotes: "\ufffd",
-      outcome: "unchanged",
     },
     {
       description: "empty generated notes",
       generatedNotes: "",
       expectedError: "Generated GitHub release notes must not be empty.",
-      outcome: "error",
     },
     {
       description:
@@ -3898,54 +3892,53 @@ ${steps[record]!.run}`;
       latestTag: "npm-v0.1.2",
       makeLatest: true,
       releaseConfiguration: false,
-      outcome: "unchanged",
     },
     {
       description:
         "already current on a newest release incorrectly marked non-Latest",
       latestTag: "npm-v0.1.1",
       makeLatest: true,
-      outcome: "latest",
+      edit: "latest",
     },
     {
       description: "already current when no GitHub release is marked Latest",
       latestTag: "__missing__",
       makeLatest: true,
-      outcome: "latest",
+      edit: "latest",
     },
     {
       description: "already current when the Latest lookup fails unexpectedly",
       latestTag: "__error__",
       makeLatest: true,
-      outcome: "error",
+      expectedError: latestLookupError,
     },
     {
       description:
         "already current when the Latest lookup has no HTTP response",
       latestTag: "__network__",
       makeLatest: true,
-      outcome: "error",
+      expectedError: latestLookupError,
     },
     {
       description: "already current when the Latest 404 response is malformed",
       latestTag: "__malformed_missing__",
       makeLatest: true,
-      outcome: "error",
+      expectedError: latestLookupError,
     },
     {
       description:
         "already current on a historical release incorrectly marked Latest",
       latestTag: "npm-v0.1.2",
+      edit: "latest",
       tagType: "tag",
       tagObject: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       peeledCommit: releaseCommit,
-      outcome: "latest",
     },
     {
       description: "stale when its lightweight release tag was retargeted",
       existingNotes: "Manually written release notes",
       tagObject: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      outcome: "error",
+      expectedError: retargetedTagError,
     },
     {
       description: "stale when its annotated release tag was retargeted",
@@ -3953,73 +3946,32 @@ ${steps[record]!.run}`;
       tagType: "tag",
       tagObject: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
       peeledCommit: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
-      outcome: "error",
+      expectedError: retargetedTagError,
     },
-  ] as const)(
+  ])(
     "reconciles $description notes on an existing verified GitHub release",
-    async ({
-      existingNotes = "Generated release notes",
-      generatedNotes = "Generated release notes\n",
-      outcome,
-      latestTag = "npm-v0.1.3",
-      makeLatest = false,
-      releaseConfiguration = true,
-      releaseSummary = "__missing__",
-      expectedSummary,
-      excludedSummary,
-      expectedError,
-      tagType = "commit",
-      tagObject = releaseCommit,
-      peeledCommit = "",
-    }) => {
-      const updated = outcome === "notes";
-      const latestUpdated = outcome === "latest";
-      const status = outcome === "error" ? 1 : 0;
-      const result = runPublisher({
-        existingNotes,
-        generatedNotes,
-
-        latestTag,
-        makeLatest,
-        releaseConfiguration,
-        releaseSummary,
-        tagType,
-        tagObject,
-        peeledCommit,
-      });
+    ({ edit, expectedSummary, excludedSummary, expectedError, ...options }) => {
+      const result = runPublisher(options);
 
       expect(
         result.calls.some(
           (call) => call[1] === "release" && call[2] === "edit",
         ),
-      ).toBe(updated || latestUpdated);
-      if (updated || latestUpdated) {
+      ).toBe(edit !== undefined);
+      if (edit !== undefined) {
         expect(result.calls.at(-2)).toContain(
-          tagType === "tag"
-            ? `repos/test/codex-security/git/tags/${tagObject}`
+          options.tagType === "tag"
+            ? `repos/test/codex-security/git/tags/${options.tagObject}`
             : "repos/test/codex-security/git/ref/tags/npm-v0.1.2",
         );
       }
-      expect(result.status).toBe(status);
+      expect(result.status).toBe(expectedError === undefined ? 0 : 1);
       expect(result.stdout).toContain(`"digest":"${digest}"`);
-      if (status !== 0) {
-        if (expectedError !== undefined) {
-          expect(result.stderr).toContain(expectedError);
-          return;
-        }
-        const latestLookupFailed = [
-          "__error__",
-          "__network__",
-          "__malformed_missing__",
-        ].includes(latestTag);
-        expect(result.stderr).toContain(
-          latestLookupFailed
-            ? "Unable to resolve the current Latest GitHub Release."
-            : "GitHub release tag must still point to the verified commit.",
-        );
+      if (expectedError !== undefined) {
+        expect(result.stderr).toContain(expectedError);
         return;
       }
-      if (updated) {
+      if (edit === "notes") {
         if (excludedSummary !== undefined) {
           expect(result.stdout).not.toContain(excludedSummary);
         }
@@ -4034,9 +3986,11 @@ ${steps[record]!.run}`;
         expect(result.stdout).toContain(
           "Updated existing GitHub Release with reviewed and generated notes.",
         );
-      } else if (latestUpdated) {
+      } else if (edit === "latest") {
         expect(result.stdout).not.toContain("updated release notes:");
-        expect(result.stdout).toContain(`updated latest: ${makeLatest}`);
+        expect(result.stdout).toContain(
+          `updated latest: ${options.makeLatest ?? false}`,
+        );
         expect(result.stdout).toContain(
           "Updated existing GitHub Release Latest status.",
         );
