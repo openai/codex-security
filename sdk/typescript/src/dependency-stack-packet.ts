@@ -231,7 +231,12 @@ const observation = z
     }
   });
 
-const captureStatus = z.enum(["observed", "no_match", "no_coverage"]);
+const captureStatus = z.enum([
+  "observed",
+  "no_match",
+  "no_coverage",
+  "no_indexed_match",
+]);
 
 export const sampledStacksSchema = z.strictObject({
   format: z.literal("codex-security.sampled-stacks/v1"),
@@ -264,7 +269,7 @@ export const sampledStacksSchema = z.strictObject({
                 (group) =>
                   (group.status === "observed") ===
                   group.observations.length > 0,
-                "Observed groups require observations. Use an empty list for no_match or no_coverage.",
+                "Observed groups require observations. All other statuses require an empty list.",
               ),
           )
           .min(1),
@@ -279,6 +284,7 @@ const file = z.strictObject({ byteLength: z.int().nonnegative(), sha256 });
 const manifestContent = z.strictObject({
   format: z.literal("codex-security.stack-manifest/v1"),
   cve: cveId,
+  callerScope: text.optional(),
   advisory,
   ...frozenFields,
   advisoryLookupError: text.optional(),
@@ -599,7 +605,10 @@ async function resolveSnapshot(
 
 function manifestFields(
   packet: Omit<StackPacket, "manifest">,
-  toolRevision: string,
+  {
+    toolRevision,
+    callerScope,
+  }: Pick<StackManifest, "toolRevision" | "callerScope">,
   files: StackManifest["files"],
   snapshot: AdvisorySnapshot,
 ) {
@@ -607,6 +616,7 @@ function manifestFields(
   const fields = manifestContent.parse({
     format: "codex-security.stack-manifest/v1",
     cve: packet.sinks.cve,
+    ...(callerScope !== undefined && { callerScope }),
     advisory: packet.sinks.advisory,
     ...(snapshot.advisoryDetails && {
       advisoryDetails: snapshot.advisoryDetails,
@@ -632,6 +642,7 @@ function manifestFields(
 
 export async function prepareStackPacket(options: {
   cve: string;
+  callerScope?: string;
   sourcesPath: string;
   sinksPath: string;
   stacksPath: string;
@@ -673,12 +684,7 @@ export async function prepareStackCheckPacket(
   };
   // Verify that the supplied snapshot survives manifest parsing before any
   // lookup or analysis. Reopening the packet performs the same comparison.
-  let fields = manifestFields(
-    documents,
-    options.toolRevision,
-    files,
-    documents.sinks,
-  );
+  let fields = manifestFields(documents, options, files, documents.sinks);
   if (host) {
     const snapshot = await resolveSnapshot(
       documents.sinks,
@@ -686,7 +692,7 @@ export async function prepareStackCheckPacket(
       options.signal,
     );
     options.signal?.throwIfAborted();
-    fields = manifestFields(documents, options.toolRevision, files, snapshot);
+    fields = manifestFields(documents, options, files, snapshot);
   }
   const manifest = stackManifestSchema.parse({
     ...fields,
@@ -743,12 +749,7 @@ export async function readStackPacket(
     }
   }
   const documents = await decodeFiles(bytes, manifest.cve, repository, signal);
-  const fields = manifestFields(
-    documents,
-    manifest.toolRevision,
-    manifest.files,
-    manifest,
-  );
+  const fields = manifestFields(documents, manifest, manifest.files, manifest);
   if (
     manifest.inputDigest !== hash(canonicalJson(fields)) ||
     canonicalJson(manifest.target) !== canonicalJson(fields.target) ||

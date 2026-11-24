@@ -8,6 +8,7 @@ import { DependencyAttemptStore } from "../src/dependency-attempt-store.js";
 import { lookupDependencyAdvisory } from "../src/dependency-advisory.js";
 import { analyzeStackAdvisory } from "../src/dependency-stack-advisory.js";
 import { prepareStackPacket } from "../src/stack-packet.js";
+import { sqliteDatabaseOpener } from "../src/runtime.js";
 import {
   prepareStackCheckPacket,
   readStackPacket,
@@ -25,6 +26,7 @@ import {
 import { capture, dependencies } from "./cli-fixtures.js";
 import { git } from "./git-fixture.js";
 import { createCliTest } from "./support/cli-run.js";
+import { requestMetadata } from "./support/request-metadata.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
 const cve = "CVE-2099-0001";
@@ -152,6 +154,7 @@ async function sample(
 async function startProof(
   root: string,
   files: Awaited<ReturnType<typeof sample>>,
+  legacyCapture = false,
 ) {
   const inputs = join(root, "packet"),
     state = join(root, "attempt.sqlite");
@@ -163,15 +166,26 @@ async function startProof(
     toolRevision: "test",
   });
   await executeStackRun("init", { state, repo: files.repo, inputs });
+  if (legacyCapture) {
+    // Packet-backed attempts created before run next supplied captures had no
+    // protocol record; their claim receipts identify the read-stacks command.
+    const db = sqliteDatabaseOpener()(state);
+    try {
+      db.exec(
+        "DELETE FROM records WHERE kind = 'stack-protocol' AND id = 'capture-origin'",
+      );
+    } finally {
+      db.close();
+    }
+  }
   const call = (command: string, input?: unknown) =>
     executeStackRun(command, { state, input });
-  const { workItem, receiptId } = (await call("next")) as {
-    workItem: { id: string };
+  const { workItem, receiptId, rootFirstRawIndices } = (await call("next")) as {
+    workItem: { id: string; observation: { bindings?: unknown[] } };
     receiptId: string;
+    rootFirstRawIndices: number[];
   };
-  const capture = (await call("read-stacks", { workItemId: workItem.id })) as {
-    observation: { bindings?: unknown[] };
-  };
+  const capture = { ...workItem, receiptId, rootFirstRawIndices };
   const write = {
     operationId: "proof",
     claims: [
@@ -227,6 +241,43 @@ async function startProof(
   };
   return { inputs, state, call, capture, claims, write, row };
 }
+
+test("an unchanged finalized packet with a legacy read-stacks receipt retains its report bytes", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-legacy-final-");
+  const files = await sample(dir.path, true);
+  const { state, call, claims, row } = await startProof(dir.path, files, true);
+  const queried = (await call("query-claims", { ids: ["caller"] })) as {
+    claims: { evidence: { receipts: { origin: { tool: string } }[] } }[];
+  };
+  expect(queried.claims[0]!.evidence.receipts[0]!.origin.tool).toBe(
+    "read-stacks",
+  );
+  await call("record-assessments", { items: [row] });
+  const original = await call("finalize");
+  expect(original).toMatchObject({ claims });
+  expect(original).not.toHaveProperty("effectiveInputDigest");
+  const originalBytes = JSON.stringify(original);
+  const savedBytes = () => {
+    const db = sqliteDatabaseOpener()(state);
+    try {
+      const statement = db.prepare(
+        "SELECT value FROM records WHERE kind = 'report' AND id = 'final'",
+      );
+      try {
+        const [row] = statement.all() as { value: string }[];
+        return row!.value;
+      } finally {
+        statement.finalize?.();
+      }
+    } finally {
+      db.close();
+    }
+  };
+  const saved = savedBytes();
+  expect(JSON.stringify(await readFinalStackReport(state))).toBe(originalBytes);
+  expect(JSON.stringify(await call("finalize"))).toBe(originalBytes);
+  expect(savedBytes()).toBe(saved);
+});
 
 test("trigger analysis checks quotations and addresses each supplied sink", async () => {
   const quote = "The decoder must accept a caller-supplied length.";
@@ -420,6 +471,12 @@ for (const [label, bindings, sinkFrames, ruledOut] of [
   ["unattributed version", [{ version: "2.1.0" }], [0], false],
   ["empty frame list", [{ version: "2.1.0", frameIndices: [] }], [0], false],
   ["queried wrapper only", [fixedWrapper], [0], false],
+  [
+    "affected prerelease",
+    [{ ...affectedSink, version: "1.5.0-beta.1" }],
+    [0],
+    false,
+  ],
   ["conflicting sink versions", [fixedSink, affectedSink], [0], false],
   ["fixed sink and affected wrapper", [fixedSink, affectedWrapper], [0], true],
   ["partially covered sinks", [fixedSink], [0, 1], false],
@@ -483,7 +540,11 @@ for (const sourceBound of [true, false]) {
   });
 }
 
-for (const version of ["1.5.0", "2.1.0"]) {
+for (const [version, affected] of [
+  ["1.5.0", true],
+  ["1.5.0-beta.1", true],
+  ["2.1.0", false],
+] as const) {
   test("potential verdict with only a build selecting " + version, async () => {
     await using dir = await scopedTemporaryDirectory("stack-configured-");
     const source = `import { decode } from "npm:sample-codec@${version}";\nexport function request(bytes) { return decode(bytes); }\n`;
@@ -520,7 +581,7 @@ for (const version of ["1.5.0", "2.1.0"]) {
       remainingQuestions: ["Which build ran?"],
     };
     const result = call("record-assessments", { items: [item] });
-    if (version === "1.5.0") {
+    if (affected) {
       await result;
       expect(await call("finalize")).toMatchObject({ verdict });
     } else {
@@ -597,8 +658,11 @@ test("the stack process gets a private Codex home and can write only its workspa
   });
 });
 
-test("the gated check resolves the advisory once and reopens only the challenged path through two corrections", () =>
-  reviewedStackCheck("correct"));
+test("the gated check preserves configured caller scope through review and two corrections of the challenged path", () =>
+  reviewedStackCheck(
+    "correct",
+    'Assess the "import" worker.\nTreat uploaded records as caller-controlled.',
+  ));
 
 test("a third independent rejection exhausts the one-shot budget without publishing a report", () =>
   reviewedStackCheck("exhausted"));
@@ -606,7 +670,10 @@ test("a third independent rejection exhausts the one-shot budget without publish
 test("a review that repeats one decision and omits another cannot publish a report", () =>
   reviewedStackCheck("duplicate"));
 
-async function reviewedStackCheck(mode: "correct" | "duplicate" | "exhausted") {
+async function reviewedStackCheck(
+  mode: "correct" | "duplicate" | "exhausted",
+  callerScope?: string,
+) {
   await using dir = await scopedTemporaryDirectory("stack-cli-");
   const files = await sample(dir.path, false);
   const stacks = JSON.parse(await readFile(files.stacksPath, "utf8"));
@@ -645,6 +712,10 @@ async function reviewedStackCheck(mode: "correct" | "duplicate" | "exhausted") {
     async onCodex(argv, out, _env, prompt) {
       calls++;
       expect(argv[0]).toBe("exec");
+      expect(requestMetadata(argv)).toMatchObject({
+        codex_security_surface: "cli",
+        codex_security_command: "exploitability check",
+      });
       expect(argv).toContain("--ignore-user-config");
       expect(argv).toContain("mcp_servers={}");
       expect(out?.investigationServers).toEqual({});
@@ -659,9 +730,9 @@ async function reviewedStackCheck(mode: "correct" | "duplicate" | "exhausted") {
       if (out?.readOnly) {
         expect(argv).toContain('model_reasoning_effort="low"');
         expect(out.stackTarget).toBe(files.repo);
-        const { reportFile, repo, inputs } = JSON.parse(
-          prompt!.split("\n").at(-1)!,
-        );
+        const review = JSON.parse(prompt!.split("\n").at(-1)!);
+        expect(review.callerScope).toBe(callerScope);
+        const { reportFile, repo, inputs } = review;
         expect(repo).toBe(files.repo);
         const draft: StackInvestigationReport = JSON.parse(
           await readFile(reportFile, "utf8"),
@@ -694,9 +765,11 @@ async function reviewedStackCheck(mode: "correct" | "duplicate" | "exhausted") {
         out.stdout.write(JSON.stringify({ decisions }));
         return 0;
       }
-      const { state, command } = JSON.parse(
+      const investigation = JSON.parse(
         prompt!.split("\n").find((line) => line.startsWith('{"command":'))!,
       );
+      expect(investigation.callerScope).toBe(callerScope);
+      const { state, command } = investigation;
       expect(command.slice(-2)).toEqual(["exploitability", "run"]);
       async function child(verb: string, input?: unknown, error?: RegExp) {
         const io = createCliTest(main);
@@ -742,10 +815,7 @@ async function reviewedStackCheck(mode: "correct" | "duplicate" | "exhausted") {
         const previous = previousDraft?.assessments[i];
         const { workItem, receiptId, openQuestions, advisoryDetails } =
           await child("next");
-        if (previous) {
-          expect(workItem.id).toBe(previous.workItemId);
-          await child("read-stacks", { workItemId: workItem.id });
-        }
+        if (previous) expect(workItem.id).toBe(previous.workItemId);
         expect(openQuestions).toContain(condition);
         expect(openQuestions).toContain(trigger);
         expect(advisoryDetails[0].body).toBe(trigger);
@@ -826,6 +896,15 @@ async function reviewedStackCheck(mode: "correct" | "duplicate" | "exhausted") {
   );
   d.environment["CODEX_HOME"] = configHome;
   d.environment[gate] = "1";
+  const configPath = join(dir.path, "project.json");
+  if (callerScope !== undefined) {
+    await writeFile(
+      configPath,
+      JSON.stringify({
+        exploitability: { scope: { instructions: callerScope } },
+      }),
+    );
+  }
   const io = createCliTest(main);
   const code = await io.runCli(
     [
@@ -838,6 +917,7 @@ async function reviewedStackCheck(mode: "correct" | "duplicate" | "exhausted") {
       files.sinksPath,
       "--stacks",
       files.stacksPath,
+      ...(callerScope === undefined ? [] : ["--config", configPath]),
       "--report-file",
       destination,
       "--json",
@@ -846,7 +926,7 @@ async function reviewedStackCheck(mode: "correct" | "duplicate" | "exhausted") {
   );
   expect(lookup).toHaveBeenCalledTimes(1);
   if (mode !== "duplicate") {
-    expect(drafts).toHaveLength(3);
+    expect(drafts, io.stderr.text()).toHaveLength(3);
     expect(calls).toBe(7); // analysis, then three investigator/reviewer pairs
   }
   if (mode !== "correct") {
@@ -867,6 +947,7 @@ async function reviewedStackCheck(mode: "correct" | "duplicate" | "exhausted") {
   const approvedDraft = drafts[2]!;
   expect({ ...report, review: null }).toEqual(approvedDraft);
   expect(report).toMatchObject({
+    callerScope,
     verdict: "unknown",
     coverage: { assessed: 2 },
     review: {
@@ -1028,6 +1109,124 @@ test("an explicitly dated observation outside the requested window stays an unre
   });
 });
 
+test("an indexed miss stays unknown and other capture groups can be assessed", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-indexed-miss-");
+  const files = await sample(dir.path, true);
+  const stacks = JSON.parse(await readFile(files.stacksPath, "utf8"));
+  const [observed] = stacks.queries[0].groups;
+  const indexedMiss = {
+    id: "empty-index",
+    status: "no_indexed_match",
+    truncated: false,
+    observations: [],
+  };
+  stacks.queries[0].groups = [indexedMiss, observed];
+  await writeFile(files.stacksPath, JSON.stringify(stacks));
+
+  const inputs = join(dir.path, "inputs");
+  const state = join(dir.path, "run.sqlite");
+  const packet = await prepareStackPacket({
+    cve,
+    ...files,
+    repository: files.repo,
+    inputsDir: inputs,
+    toolRevision: "test",
+  });
+  const [miss, call] = stackPacketWorkItems(packet);
+  expect(miss).toMatchObject({ status: "no_indexed_match", observation: null });
+  await executeStackRun("init", { state, repo: files.repo, inputs });
+  expect(await executeStackRun("next", { state })).toMatchObject({
+    workItem: { id: miss!.id, status: "no_indexed_match" },
+  });
+
+  await expect(
+    executeStackRun("record-assessments", {
+      state,
+      input: {
+        items: [
+          {
+            workItemId: miss!.id,
+            verdict: "ruled_out",
+            reason: "The index returned no stacks.",
+          },
+        ],
+      },
+    }),
+  ).rejects.toThrow(/requires a scoped unknown assessment/);
+
+  await executeStackRun("record-assessments", {
+    state,
+    input: {
+      items: [
+        {
+          workItemId: miss!.id,
+          verdict: "unknown",
+          reason: "The index returned no stacks for this scope.",
+          remainingQuestions: ["Do profiles cover the requested window?"],
+        },
+      ],
+    },
+  });
+  const next = (await executeStackRun("next", { state })) as {
+    receiptId: string;
+    workItem: { id: string; status: string };
+  };
+  expect(next).toMatchObject({
+    workItem: { id: call!.id, status: "observed" },
+  });
+  const { claims } = (await executeStackRun("record-claims", {
+    state,
+    input: {
+      claims: [
+        {
+          id: "captured-frame",
+          scope: "sample caller",
+          payload: "The sampled frames show a call to the decoder.",
+          receiptIds: [next.receiptId],
+        },
+      ],
+    },
+  })) as { claims: DependencyClaimReference[] };
+  const question = "Was the decoder input caller-controlled?";
+  await executeStackRun("record-assessments", {
+    state,
+    input: {
+      items: [
+        {
+          workItemId: call!.id,
+          verdict: "unknown",
+          reason: "The captured call has an unverified prerequisite.",
+          supportingClaims: claims,
+          remainingQuestions: [question],
+          questionChecks: [
+            {
+              question,
+              checked: "Read the supplied stack frames.",
+              missingEvidence: "The sampled decoder argument and its origin.",
+              claims,
+            },
+          ],
+        },
+      ],
+    },
+  });
+  const report = await executeStackRun("finalize", { state });
+  expect(report).toMatchObject({
+    verdict: "unknown",
+    assessments: [
+      { status: "no_coverage", verdict: "unknown", observation: null },
+      { status: "observed", observation: { id: "call" } },
+    ],
+    coverage: {
+      assessed: 2,
+      observed: 1,
+      noMatch: [],
+      noCoverage: [miss!.id],
+    },
+  });
+  expect(report).toEqual(await readFinalStackReport(state));
+});
+
 test("claim identity and finalized reports retain every own key in opaque JSON evidence", async () => {
   await using dir = await scopedTemporaryDirectory("stack-json-");
   const files = await sample(dir.path, true);
@@ -1089,6 +1288,47 @@ test("claim identity and finalized reports retain every own key in opaque JSON e
   expect(JSON.stringify(result.claims[0]!.payload)).toEqual(
     JSON.stringify(payload),
   );
+});
+
+test("a caller scope is frozen separately from imported endpoint metadata", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-caller-scope-");
+  const files = await sample(dir.path, true);
+  const catalog = JSON.parse(await readFile(files.sinksPath, "utf8"));
+  catalog.sinks[0].callerScope = "An endpoint annotation.";
+  await writeFile(files.sinksPath, JSON.stringify(catalog));
+  const options = {
+    ...files,
+    cve,
+    repository: files.repo,
+    toolRevision: "test",
+    runId: "run",
+    attemptId: "attempt",
+  };
+  const original = join(dir.path, "original");
+  const { manifest } = await prepareStackPacket({
+    ...options,
+    inputsDir: original,
+  });
+  expect(manifest).not.toHaveProperty("callerScope");
+
+  const callerScope = "Assess ordinary accounts.\nInclude delegated jobs.";
+  const inputs = join(dir.path, "scoped");
+  const scoped = await prepareStackPacket({
+    ...options,
+    inputsDir: inputs,
+    callerScope,
+  });
+  expect(scoped.manifest.inputDigest).not.toBe(manifest.inputDigest);
+  expect(scoped.manifest.files).toEqual(manifest.files);
+  const state = join(dir.path, "run.sqlite");
+  await executeStackRun("init", { inputs, repo: files.repo, state });
+  expect(await executeStackRun("next", { state })).toMatchObject({
+    callerScope,
+    sinks: [{ callerScope: catalog.sinks[0].callerScope }],
+  });
+  await expect(
+    executeStackRun("init", { inputs: original, repo: files.repo, state }),
+  ).rejects.toThrow(/different investigation attempt/);
 });
 
 test("packet preparation and reopen preserve opaque endpoint and query metadata", async () => {

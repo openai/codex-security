@@ -25,10 +25,13 @@ import { dependencyGitCommitSchema } from "./dependency-source-identity.js";
 import {
   inventoryReceiptSelectionSchema,
   stackJsonValue,
+  type BoundDependencyInventoryReceipt,
   type DependencyExcerpt,
 } from "./dependency-stack-evidence.js";
+import { isRuntimeReceipt } from "./dependency-stack-runtime-receipts.js";
 import { CodexSecurityError } from "./errors.js";
 import { isRecord } from "./record.js";
+import { compareTimestamps } from "./timestamps.js";
 
 const text = z.string().trim().min(1);
 const digest = z.string().regex(/^[a-f0-9]{64}$/u);
@@ -103,6 +106,106 @@ function fail(message: string): never {
   throw new CodexSecurityError(message);
 }
 
+function isCaptureReceipt(
+  receipt: BoundDependencyInventoryReceipt,
+  workItemId?: string,
+): boolean {
+  const observedId = receipt.origin.arguments["workItemId"];
+  return (
+    (receipt.server === "stack-packet" ||
+      receipt.server === "stack-observation") &&
+    typeof observedId === "string" &&
+    observedId.length > 0 &&
+    (workItemId === undefined || observedId === workItemId)
+  );
+}
+
+function runtimeScopeConflict(
+  receipt: BoundDependencyInventoryReceipt,
+  work: StackWorkItem,
+): string | undefined {
+  const raw = receipt.origin.arguments["scope"];
+  if (!isRecord(raw)) return;
+  const selector = isRecord(raw["selector"]) ? raw["selector"] : {};
+  const scope = { ...selector, ...raw };
+  const expected: Record<string, unknown> = {
+    ...work.scope,
+    workItemId: work.id,
+    queryId: work.queryId,
+    groupId: work.groupId,
+  };
+  for (const key of [
+    "workItemId",
+    "queryId",
+    "groupId",
+    "environment",
+    "cluster",
+    "service",
+    "container",
+    "image_name",
+    "image_digest",
+  ]) {
+    if (
+      typeof selector[key] === "string" &&
+      typeof raw[key] === "string" &&
+      selector[key] !== raw[key]
+    )
+      return key;
+    if (
+      typeof scope[key] === "string" &&
+      typeof expected[key] === "string" &&
+      scope[key] !== expected[key]
+    )
+      return key;
+  }
+  const values = (value: Record<string, unknown>): string[] => {
+    const tags = Array.isArray(value["image_tags"])
+      ? value["image_tags"].filter(
+          (tag): tag is string => typeof tag === "string",
+        )
+      : [];
+    return typeof value["image_tag"] === "string"
+      ? [...tags, value["image_tag"]]
+      : tags;
+  };
+  const declaredTags = values(scope);
+  const assessedTags = values(expected);
+  if (
+    declaredTags.length &&
+    assessedTags.length &&
+    !declaredTags.some((tag) => assessedTags.includes(tag))
+  )
+    return "image_tag";
+  const declaredWindow = isRecord(scope["window"]) ? scope["window"] : scope;
+  const assessedWindow = expected["window"];
+  const observedAt = work.observation?.observedAt;
+  if (observedAt) {
+    const start = declaredWindow["start"];
+    const end = declaredWindow["end"];
+    if (
+      (typeof start === "string" &&
+        Number.isFinite(Date.parse(start)) &&
+        compareTimestamps(observedAt, start) < 0) ||
+      (typeof end === "string" &&
+        Number.isFinite(Date.parse(end)) &&
+        compareTimestamps(observedAt, end) > 0)
+    )
+      return "window";
+  }
+  if (isRecord(assessedWindow)) {
+    const endsBefore = (end: unknown, start: unknown) =>
+      typeof end === "string" &&
+      typeof start === "string" &&
+      compareTimestamps(end, start) <= 0;
+    if (
+      endsBefore(declaredWindow["end"], assessedWindow["start"]) ||
+      endsBefore(assessedWindow["end"], declaredWindow["start"])
+    )
+      return "window";
+  }
+  return;
+}
+
 const sourceCitation = z.strictObject({
   path: text,
   commit: dependencyGitCommitSchema,
@@ -170,12 +273,14 @@ export const stackReviewDecisionSchema = z.strictObject({
 export const stackInvestigationReportSchema = z.strictObject({
   schemaVersion: z.literal("codex-security.pipeline-stacks.report/v1"),
   cve: text,
+  callerScope: stackManifestSchema.shape.callerScope,
   advisoryDetails: stackManifestSchema.shape.advisoryDetails,
   advisoryLookupError: stackManifestSchema.shape.advisoryLookupError,
   triggerAnalysis: stackManifestSchema.shape.triggerAnalysis,
   runId: text,
   attemptId: text,
   inputDigest: digest,
+  effectiveInputDigest: digest.optional(),
   toolRevision: text,
   target: z.strictObject({ repository: text, sha: dependencyGitCommitSchema }),
   verdict,
@@ -223,11 +328,9 @@ function collectClaims(
     if (!record) fail(`Claim ${ref.id} revision ${ref.revision} is missing.`);
     if (selected.has(ref.id)) continue;
     for (const receipt of record.receipts) {
-      const args = receipt.origin.arguments;
       if (
-        receipt.server !== "stack-packet" ||
-        !isRecord(args) ||
-        args["workItemId"] !== assessment.workItemId
+        !isCaptureReceipt(receipt, assessment.workItemId) &&
+        !isRuntimeReceipt(receipt)
       )
         fail(
           `Claim ${ref.id} cites a receipt outside work item ${assessment.workItemId}.`,
@@ -309,7 +412,7 @@ function affectedVersion(
   const results = sink.affectedVersions.map((range) => {
     if (sink.versionScheme.toLowerCase() === "semver") {
       if (!semverValid(version) || !semverValidRange(range)) return;
-      return semverSatisfies(version, range);
+      return semverSatisfies(version, range, { includePrerelease: true });
     }
     if (sink.versionScheme.toLowerCase() === "pep440")
       return pythonReleaseMatches(version, range);
@@ -342,17 +445,43 @@ function assessProof(
     fail(`A ${work.status} group requires a scoped unknown assessment.`);
   const excerpts = records.flatMap((claim) => claim.excerpts);
   const sha = packet.manifest.target.sha;
+  const receipts = records.flatMap((claim) => claim.receipts);
   for (const claim of records) {
     for (const receipt of claim.receipts) {
+      if (isRuntimeReceipt(receipt)) {
+        const conflict = runtimeScopeConflict(receipt, work);
+        if (row.verdict !== "unknown" && conflict)
+          fail(
+            `Runtime import ${receipt.receiptId} conflicts with this work item's ${conflict}.`,
+          );
+        continue;
+      }
       const args = receipt.origin.arguments;
       if (
-        !isRecord(args) ||
         args["inputDigest"] !== packet.manifest.inputDigest ||
-        receipt.originalPayloadSha256 !== packet.manifest.files.stacks.sha256
+        !isCaptureReceipt(receipt) ||
+        (receipt.server === "stack-packet" &&
+          receipt.originalPayloadSha256 !==
+            packet.manifest.files.stacks.sha256) ||
+        (receipt.server === "stack-observation" &&
+          !/^[a-f0-9]{64}$/u.test(receipt.originalPayloadSha256))
       )
         fail(
           "A supporting capture receipt belongs to a different input packet.",
         );
+      if (receipt.server === "stack-observation") {
+        const sourceId = args["sourceReceiptId"];
+        if (
+          typeof sourceId !== "string" ||
+          !receipts.some(
+            (source) =>
+              source.receiptId === sourceId && isRuntimeReceipt(source),
+          )
+        )
+          fail(
+            "A supplemental observation claim must include its original runtime import receipt.",
+          );
+      }
     }
   }
   if (row.use) {
@@ -399,6 +528,10 @@ function assessProof(
       claim.receipts.some((receipt) => {
         const path = receipt.selection?.record;
         return (
+          isCaptureReceipt(receipt, work.id) &&
+          receipt.origin.arguments["inputDigest"] ===
+            packet.manifest.inputDigest &&
+          receipt.selection?.textBlock === null &&
           path?.length === 3 &&
           path[0] === "observation" &&
           path[1] === "bindings" &&
@@ -641,13 +774,13 @@ function verifyQuestionChecks(
     );
 }
 
-export async function prepareStackAssessment(
+export function prepareStackAssessment(
   input: unknown,
   work: StackWorkItem,
   packet: StackPacket,
   claims: StackClaimReader,
   signal?: AbortSignal,
-): Promise<StackAssessment> {
+): StackAssessment {
   signal?.throwIfAborted();
   const row = bindCapturedEvidence(itemInput.parse(input), work);
   if (row.workItemId !== work.id)
@@ -699,7 +832,9 @@ export function summarizeStackCoverage(
     outstanding: ids((w) => !assessed.has(w.id)),
     observed: items.filter((w) => w.status === "observed").length,
     noMatch: ids((w) => w.status === "no_match"),
-    noCoverage: ids((w) => w.status === "no_coverage"),
+    noCoverage: ids(
+      (w) => w.status === "no_coverage" || w.status === "no_indexed_match",
+    ),
     scopeConflicts: ids((w) => w.scopeConflicts.length > 0),
     truncated: ids(
       (w) => w.truncated === true || w.observation?.framesTruncated === true,
@@ -734,7 +869,7 @@ export function finalizeStackReport(
       ...saved,
       queryId: w.queryId,
       groupId: w.groupId,
-      status: w.status,
+      status: w.status === "no_indexed_match" ? "no_coverage" : w.status,
       queryScope: w.queryScope,
       scope: w.scope,
       scopeConflicts: w.scopeConflicts,
@@ -768,6 +903,9 @@ export function finalizeStackReport(
     toolRevision,
     target,
     cve,
+    ...(packet.manifest.callerScope && {
+      callerScope: packet.manifest.callerScope,
+    }),
     ...(packet.manifest.advisoryDetails && {
       advisoryDetails: packet.manifest.advisoryDetails,
     }),
