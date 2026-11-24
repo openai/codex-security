@@ -204,36 +204,23 @@ export class DeepScanCoordinator {
   ): Promise<DeepScanRunState | undefined> {
     if (this.terminal) return await this.settled();
     if (signal?.aborted) throw abortError(signal.reason);
-    return await new Promise<DeepScanRunState | undefined>(
-      (resolvePromise, rejectPromise) => {
-        const timeout =
-          timeoutMs === undefined
-            ? undefined
-            : setTimeout(() => {
-                cleanup();
-                resolvePromise(undefined);
-              }, timeoutMs);
-        const onAbort = (): void => {
-          cleanup();
-          rejectPromise(abortError(signal?.reason));
-        };
-        const cleanup = (): void => {
-          if (timeout !== undefined) clearTimeout(timeout);
-          signal?.removeEventListener("abort", onAbort);
-        };
-        signal?.addEventListener("abort", onAbort, { once: true });
-        void this.terminalResult.promise.then(
-          (state) => {
-            cleanup();
-            resolvePromise(cloneState(state));
-          },
-          (error: unknown) => {
-            cleanup();
-            rejectPromise(error);
-          },
-        );
-      },
-    );
+    const { promise, resolve, reject } = Promise.withResolvers<
+      DeepScanRunState | undefined
+    >();
+    const timeout =
+      timeoutMs === undefined
+        ? undefined
+        : setTimeout(() => resolve(undefined), timeoutMs);
+    const onAbort = () => reject(abortError(signal?.reason));
+    signal?.addEventListener("abort", onAbort, { once: true });
+    void this.terminalResult.promise.then(resolve, reject);
+    try {
+      const state = await promise;
+      return state && cloneState(state);
+    } finally {
+      clearTimeout(timeout);
+      signal?.removeEventListener("abort", onAbort);
+    }
   }
 
   cancel(reason: string): void {
