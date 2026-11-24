@@ -178,7 +178,7 @@ Put the returned receipt ID in `observations.json`. Cite it when an assessment r
 { "receiptId": "<returned receipt ID>" }
 ```
 
-`record-observations` reads a query or a `queries` array from the receipt. Any `queries` supplied separately must match exactly. A `codex-security-graph-evidence/v1` result must identify the query, scope, window and sink selectors. The CLI reverses root-first frames and remaps their index references. A runtime selector with a `line` requires a `location`.
+`record-observations` reads a query or a `queries` array from the receipt. Any `queries` supplied separately must match exactly. A `codex-security-graph-evidence/v1` result must identify the query, scope, window and sink selectors. Graph results number frames from the root. The CLI renumbers them from the leaf so package bindings and report citations refer to the same function. A runtime selector with a `line` requires a `location`.
 
 - Observed stacks and successful searches with zero matches require a receipt. Zero matches also require complete coverage. For graph evidence, this means status `empty_matches`, `coverage.result_complete: true` and `limits.truncated: false`.
 - A `no_coverage` query needs no receipt. A stack group marked `no_indexed_match` gets status `no_coverage` and verdict `unknown`. Its work item appears in `coverage.noCoverage`.

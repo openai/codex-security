@@ -7,7 +7,6 @@ import {
   initializeLive,
   liveMetadataGaps,
   livePacket,
-  normalizeRuntimeObservationQueries,
   overlayPacket,
   recordObservations,
   supplementalReceipt,
@@ -15,6 +14,7 @@ import {
 import { stackPacketWorkItems } from "../src/dependency-stack-packet.js";
 import {
   prepareRuntimeEvidence,
+  readRuntimeStackQueries,
   saveRuntimeEvidence,
 } from "../src/dependency-stack-runtime-receipts.js";
 import { git } from "./git-fixture.js";
@@ -204,7 +204,7 @@ test("supplemental observations normalize graph frame order and preserve capture
     };
     const resource = await imported(graph);
     const normalize = (receipt: { receiptId: string }) =>
-      normalizeRuntimeObservationQueries(store, receipt.receiptId, [sink])[0]!;
+      readRuntimeStackQueries(store, receipt.receiptId, [sink])[0]!;
     const observation = normalize(resource).groups[0]!.observations[0]!;
     expect(observation.frames.map((frame) => frame.name)).toEqual([
       "decode",

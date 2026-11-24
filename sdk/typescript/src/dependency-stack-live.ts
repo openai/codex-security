@@ -16,9 +16,8 @@ import {
   type StackWorkItem,
 } from "./dependency-stack-packet.js";
 import { CodexSecurityError } from "./errors.js";
-import { normalizeRuntimeObservationData } from "./dependency-stack-graph-observations.js";
 import { canonicalJson } from "./record.js";
-import { selectRuntimeReceipt } from "./dependency-stack-runtime-receipts.js";
+import { readRuntimeStackQueries } from "./dependency-stack-runtime-receipts.js";
 import { repositoryRevision } from "./targets.js";
 import { VERSION } from "./version.js";
 
@@ -369,17 +368,6 @@ function replayQueries(store: DependencyAttemptStore, base: Query[] = []) {
   );
 }
 
-export function normalizeRuntimeObservationQueries(
-  store: DependencyAttemptStore,
-  receiptId: string,
-  sinks: readonly Sink[],
-): Query[] {
-  return normalizeRuntimeObservationData(
-    selectRuntimeReceipt(store, receiptId).result,
-    sinks,
-  );
-}
-
 export function overlayPacket(
   store: DependencyAttemptStore,
   base?: StackPacket,
@@ -447,7 +435,7 @@ export function recordObservations(
   const allSinks = base?.sinks.sinks ?? live?.sinks ?? [];
   const sinkIds = new Set(allSinks.map((sink) => sink.id));
   const originalQueries = parsed.receiptId
-    ? normalizeRuntimeObservationQueries(store, parsed.receiptId, allSinks)
+    ? readRuntimeStackQueries(store, parsed.receiptId, allSinks)
     : undefined;
   const requested = parsed.queries ?? originalQueries ?? [];
   if (!requested.length)
