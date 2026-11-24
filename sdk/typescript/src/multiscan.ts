@@ -807,11 +807,15 @@ async function runCampaign(
         const receiptLine = `${JSON.stringify(receipt)}\n`;
         receiptTail = receiptTail.then(() =>
           lock.mutate(async () => {
-            await using file = await open(ledger, "a", 0o600);
-            // The owner may have changed while opening the ledger.
-            await requireOwner();
-            await file.writeFile(receiptLine, "utf8");
-            await file.sync();
+            const file = await open(ledger, "a", 0o600);
+            try {
+              // The owner may have changed while opening the ledger.
+              await requireOwner();
+              await file.writeFile(receiptLine, "utf8");
+              await file.sync();
+            } finally {
+              await file.close();
+            }
           }),
         );
         await receiptTail;
