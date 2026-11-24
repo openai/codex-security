@@ -904,11 +904,11 @@ async function testPreflightBindsExecutableAndHomeBeforeChangingCwd() {
             bundledTools,
           );
           assert.equal(invocation.bundledTool, "synthetic bundled search");
-          assert.equal(
-            preflight.gitEnvironment.PATH,
-            invocation.runtimeEnvironment.PATH,
-          );
         }
+        assert.equal(
+          preflight.gitEnvironment.PATH,
+          invocation.runtimeEnvironment.PATH,
+        );
         assert.equal(process.env.CODEX_HOME, relativeHome);
         assert.deepEqual(preflight.requests, [
           { method: "config/read", cwd: workingDirectory },
