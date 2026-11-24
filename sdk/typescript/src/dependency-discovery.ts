@@ -136,7 +136,9 @@ function javascriptCode(text: string, pkg: string): string {
   const templateChunk = /(?:\\[\s\S]|[^`\\$]|\$(?!\{))*(?:`|\$\{)?/uy;
   const templateDepth: number[] = [];
   let braces = 0;
-  let previous = "";
+  const conditions: boolean[] = [];
+  let control = false;
+  let member = false;
   let regexAllowed = true;
   let code = "";
   for (let match; (match = tokens.exec(text));) {
@@ -149,6 +151,13 @@ function javascriptCode(text: string, pkg: string): string {
       code += token;
       continue;
     }
+    // A control statement can have a regex expression as its body.
+    // Track source tokens before template boundaries are replaced.
+    if (token === "(") conditions.push(control);
+    const startsBody = token === ")" && conditions.pop();
+    // In "for await (...)" the parenthesis still belongs to "for".
+    if (token !== "await")
+      control = !member && /^(?:if|for|while|with)$/u.test(token);
     if (token === "'" || token === '"' || (token === "/" && regexAllowed)) {
       tokens.lastIndex = literalEnd(text, tokens.lastIndex, token);
       token = token === "/" ? "0" : text.slice(match.index, tokens.lastIndex);
@@ -177,16 +186,16 @@ function javascriptCode(text: string, pkg: string): string {
       regexAllowed = false;
     } else {
       // Member names can follow whitespace or comments. Spread starts a new expression.
-      if (previous === "." && (token === "require" || token === "import"))
-        token = "0";
+      if (member && (token === "require" || token === "import")) token = "0";
       code += token === "..." ? "... " : token;
       regexAllowed =
-        previous !== "." &&
-        /^(?:[=(:,;!?&|{\[~*+%/-]|=>|\.\.\.|await|case|delete|in|instanceof|new|of|return|throw|typeof|void|yield)$/u.test(
-          token,
-        );
+        startsBody ||
+        (!member &&
+          /^(?:[=(:,;!?&|{\[~*+%/-]|=>|\.\.\.|await|case|delete|do|else|in|instanceof|new|of|return|throw|typeof|void|yield)$/u.test(
+            token,
+          ));
     }
-    previous = token;
+    member = token === "." || token === "#";
   }
   return code;
 }

@@ -418,3 +418,16 @@ test("ignores member calls and regex literals while preserving later runtime imp
     bindings: ["value"],
   });
 });
+
+test("distinguishes regex statement bodies from division after a call", () => {
+  const text = [
+    'if (ok) /require("sample-codec")/.test(input);',
+    'while (check(`flag:${flag}`)) /import("sample-codec")/.test(input);',
+    'obj.if(ok) / require("sample-codec");',
+    'if (check(ok) / require("sample-codec")) proceed();',
+    'else /require("sample-codec")/.test(input);',
+    'do /import("sample-codec")/.test(input); while (false);',
+    'for await (const item of items) /require("sample-codec")/.test(item);',
+  ].join("\n");
+  expect(sourceReferences("service.js", text, pkg, []).lines).toEqual([3, 4]);
+});
