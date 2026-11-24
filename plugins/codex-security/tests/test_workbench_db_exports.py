@@ -19,6 +19,7 @@ from types import SimpleNamespace
 import pytest
 from workbench_test_support import (
     RemediationRequest,
+    close_finding,
     create_saved_git_workspace,
     create_saved_workspace,
     create_workspace,
@@ -28,7 +29,7 @@ from workbench_test_support import (
     get_scan,
     initialize_git_repository,
     mark_deep_coordinator_succeeded,
-    read_draft_documents,
+    merge_interrupted,
     read_review_state,
     resume_deep_scan,
     run_workbench,
@@ -36,7 +37,6 @@ from workbench_test_support import (
     saved_coverage,
     saved_draft,
     scan_command,
-    set_triage,
     start_saved_scan,
     start_scan_command,
     start_workspace_scan,
@@ -85,8 +85,7 @@ def test_late_parent_draft_is_retained_without_mutating_frozen_stopped_seal(
     tmp_path: Path,
 ) -> None:
     state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
-    write_completed_contract(scan_dir, scan_id, target)
-    documents = read_draft_documents(scan_dir)
+    documents = write_completed_contract(scan_dir, scan_id, target)
     fail_scan(state_dir, scan_id, "Stopped.")
     stopped = get_scan(state_dir, scan_id)["scan"]
     seal = (scan_dir / "scan-manifest.json").read_bytes()
@@ -229,13 +228,10 @@ def test_frozen_stopped_results_ignore_late_index_field_changes(tmp_path: Path) 
     write_completed_contract(scan_dir, scan_id, target)
     fail_scan(state_dir, scan_id, "Stopped.")
     original = get_scan(state_dir, scan_id)["scan"]["findings"][0]
-    set_triage(
+    close_finding(
         state_dir,
         str(original["occurrenceId"]),
-        "closed",
-        "--close-reason",
         "wont_fix",
-        "--note",
         "Retain this review decision across checkpoint refreshes.",
     )
     finding = json.loads((scan_dir / "findings.json").read_text())["findings"][0]
@@ -438,8 +434,7 @@ def test_model_only_draft_is_available_before_findings_and_survives_stop(
     saved = create_saved_workspace(state_dir, target)
     scan_id, scan_dir = start_workspace_scan(state_dir, str(saved["id"]), tmp_path / "scans")
     update_progress(state_dir, scan_id, "--phase", "threat_model")
-    write_completed_contract(scan_dir, scan_id, target)
-    documents = read_draft_documents(scan_dir)
+    documents = write_completed_contract(scan_dir, scan_id, target)
     model = {
         "format": "markdown",
         "content": "# Service Boundaries\n\nQueue producers and consumers.\n",
@@ -540,8 +535,7 @@ def test_invalid_model_or_binding_keeps_history_available_for_semantic_repair(
     state_dir, target = empty_target_paths(tmp_path)
     saved = create_saved_workspace(state_dir, target)
     scan_id, scan_dir = start_workspace_scan(state_dir, str(saved["id"]), tmp_path / "scans")
-    write_completed_contract(scan_dir, scan_id, target)
-    documents = read_draft_documents(scan_dir)
+    documents = write_completed_contract(scan_dir, scan_id, target)
     model = {"summary": "Queue boundaries.", "assets": ["Stored messages"]}
     documents["manifest"]["scan"].update(threatModel=model, complete=False)
     malformed = json.loads(json.dumps(documents["manifest"]))
@@ -753,15 +747,7 @@ def test_deep_csv_export_adds_only_candidate_id_column(
 
     completed = scan_command(state_dir, "complete-scan", scan_id)["scan"]
     closed_occurrence = completed["findings"][0]["occurrenceId"]
-    set_triage(
-        state_dir,
-        closed_occurrence,
-        "closed",
-        "--close-reason",
-        "wont_fix",
-        "--note",
-        "Accepted after review.",
-    )
+    close_finding(state_dir, closed_occurrence, "wont_fix", "Accepted after review.")
     if replace_after_finalize:
         publication = workbench_api["publication"]
         finalize = publication.finalize_scan
@@ -1223,13 +1209,12 @@ def test_parent_draft_preserves_reconciled_candidate_identity_before_publication
     target.mkdir()
     workspace = create_saved_workspace(state_dir, target, mode=mode)
     scan_id, scan_dir = start_workspace_scan(state_dir, str(workspace["id"]), tmp_path / "scans")
-    write_completed_contract(
+    documents = write_completed_contract(
         scan_dir,
         scan_id,
         target,
         coverage_mode="deep_repository" if mode == "deep" else "repository",
     )
-    documents = read_draft_documents(scan_dir)
     if mode == "deep":
         documents["manifest"]["scan"]["complete"] = False
     documents["findings"]["findings"] = []
@@ -1375,8 +1360,7 @@ def test_deep_draft_admission_survives_interrupted_projection(
     target.mkdir()
     workspace = create_saved_workspace(state_dir, target, mode="deep")
     scan_id, scan_dir = start_workspace_scan(state_dir, str(workspace["id"]), tmp_path / "scans")
-    write_completed_contract(scan_dir, scan_id, target, coverage_mode="deep_repository")
-    documents = read_draft_documents(scan_dir)
+    documents = write_completed_contract(scan_dir, scan_id, target, coverage_mode="deep_repository")
     documents["manifest"]["scan"]["complete"] = False
     raw = {
         "scanId": scan_id,
@@ -1434,28 +1418,18 @@ def test_deep_draft_admission_survives_interrupted_projection(
         expected_findings = accepted_raw["findings"] if replay_accepted else raw["findings"]
         binding = db.workbench_completion_binding(db.require_scan(connection, scan_id), db.now())
         warnings = []
-        recovered = results.merge_saved_results(
-            scan_dir,
-            scan_id,
-            binding,
-            [],
-            warnings,
-            stopped=True,
-            reason="interrupted",
-            scan_mode="deep",
+        recovered = merge_interrupted(
+            results, scan_dir, scan_id, binding, [], warnings, scan_mode="deep"
         )
         assert [row["summary"] for row in recovered[1]["findings"]] == [
             row["summary"] for row in expected_findings
         ]
         assert warnings == []
-        replayed = results.merge_saved_results(
+        replayed = merge_interrupted(
+            results,
             scan_dir,
             scan_id,
             binding,
-            [],
-            [],
-            stopped=True,
-            reason="interrupted",
             scan_mode="deep",
             frozen_source_digests=recovered[0]["scan"]["preservedSources"],
         )

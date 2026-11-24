@@ -5,11 +5,11 @@ import { CodexSecurityError } from "../src/index.js";
 import {
   FakeSignals,
   SYNTHETIC_CREDENTIALS,
-  capture,
   dependencies,
   fakePreflight,
   fakeResult,
 } from "./cli-fixtures.js";
+import { createCliTest, captureCli } from "./support/cli-run.js";
 
 const commands = [
   ["scan", ["scan", "."]],
@@ -73,17 +73,11 @@ for (const flags of [["--json"], ["--format", "jsonl", "--full-output"]]) {
     test.each(commands)(
       "formats %s execution failures consistently",
       async (_name, command) => {
-        const stdout = capture();
-        const stderr = capture();
+        const { stdout, stderr, runCli } = createCliTest(main);
         const message = `network failure ECONNRESET ${SYNTHETIC_CREDENTIALS}`;
-        expect(
-          await main(
-            [...command, ...flags],
-            stdout.stream,
-            stderr.stream,
-            failingScan(message),
-          ),
-        ).toBe(2);
+        expect(await runCli([...command, ...flags], failingScan(message))).toBe(
+          2,
+        );
         expectFailure(stdout.text(), fullOutput, "SCAN_FAILED", message);
         expect(stderr.text()).toContain(`${message}\n`);
       },
@@ -93,8 +87,7 @@ for (const flags of [["--json"], ["--format", "jsonl", "--full-output"]]) {
       ["rerun", "SCAN_REPLAY_UNAVAILABLE"],
       ["resume", "SCAN_RESUME_UNAVAILABLE"],
     ])("preserves %s preparation failure codes", async (command, code) => {
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
       const message = "This scan does not have a saved launch recipe.";
       const deps = scanDependencies();
       deps.runWorkbench = async () => ({
@@ -102,30 +95,17 @@ for (const flags of [["--json"], ["--format", "jsonl", "--full-output"]]) {
         scanDir: "/tmp/saved-scan",
       });
       expect(
-        await main(
-          ["scans", command, "saved-scan", ...flags],
-          stdout.stream,
-          stderr.stream,
-          deps,
-        ),
+        await runCli(["scans", command, "saved-scan", ...flags], deps),
       ).toBe(2);
       expectFailure(stdout.text(), fullOutput, code, message);
       expect(stderr.text()).toBe(`codex-security: ${message}\n`);
     });
 
     test("reports unavailable latest scans with the replay failure code", async () => {
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
       const deps = scanDependencies();
       deps.runWorkbench = async () => ({ scans: [] });
-      expect(
-        await main(
-          ["scans", "rerun", ...flags],
-          stdout.stream,
-          stderr.stream,
-          deps,
-        ),
-      ).toBe(2);
+      expect(await runCli(["scans", "rerun", ...flags], deps)).toBe(2);
       const message = "No completed scans found for the current repository.";
       expectFailure(
         stdout.text(),
@@ -139,8 +119,7 @@ for (const flags of [["--json"], ["--format", "jsonl", "--full-output"]]) {
     test.each(["csv", "json"])(
       "formats rerun failures independently of the %s import format",
       async (format) => {
-        const stdout = capture();
-        const stderr = capture();
+        const { stdout, stderr, runCli } = createCliTest(main);
         const message = "The saved import source is unavailable.";
         const deps = scanDependencies();
         deps.runWorkbench = async () => ({
@@ -152,12 +131,7 @@ for (const flags of [["--json"], ["--format", "jsonl", "--full-output"]]) {
           throw new CodexSecurityError(message);
         };
         expect(
-          await main(
-            ["scans", "rerun", "saved-scan", ...flags],
-            stdout.stream,
-            stderr.stream,
-            deps,
-          ),
+          await runCli(["scans", "rerun", "saved-scan", ...flags], deps),
         ).toBe(2);
         expectFailure(stdout.text(), fullOutput, "SCAN_IMPORT_FAILED", message);
         expect(stderr.text()).toBe(`codex-security: ${message}\n`);
@@ -169,15 +143,10 @@ for (const flags of [["--json"], ["--format", "jsonl", "--full-output"]]) {
 test.each(commands)(
   "preserves successful %s JSON output",
   async (_name, command) => {
-    const stdout = capture();
-    expect(
-      await main(
-        [...command, "--json"],
-        stdout.stream,
-        capture().stream,
-        scanDependencies(),
-      ),
-    ).toBe(0);
+    const stdout = captureCli(main, "stdout");
+    expect(await stdout.run([...command, "--json"], scanDependencies())).toBe(
+      0,
+    );
     expect(JSON.parse(stdout.text())).toEqual(fakeResult().toJSON());
   },
 );
@@ -186,17 +155,11 @@ test.each(commands)(
   "keeps non-JSON %s failures on stderr",
   async (_name, command) => {
     for (const flags of [[], ["--full-output"], ["--format", "yaml"]]) {
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
       const message = "The scan could not save its results.";
-      expect(
-        await main(
-          [...command, ...flags],
-          stdout.stream,
-          stderr.stream,
-          failingScan(message),
-        ),
-      ).toBe(2);
+      expect(await runCli([...command, ...flags], failingScan(message))).toBe(
+        2,
+      );
       expect(stdout.text()).toBe("");
       expect(stderr.text()).toContain(`${message}\n`);
     }
@@ -211,7 +174,7 @@ test.each(commands)(
       ["SIGTERM", 143, "Scan terminated by SIGTERM."],
     ] as const) {
       for (const fullOutput of [false, true]) {
-        const stdout = capture();
+        const stdout = captureCli(main, "stdout");
         const signals = new FakeSignals();
         const result = fakeResult();
         const deps = dependencies({
@@ -221,10 +184,8 @@ test.each(commands)(
         });
         deps.runWorkbench = scanDependencies().runWorkbench;
         expect(
-          await main(
+          await stdout.run(
             [...command, "--json", ...(fullOutput ? ["--full-output"] : [])],
-            stdout.stream,
-            capture().stream,
             deps,
           ),
         ).toBe(exitCode);
@@ -242,21 +203,13 @@ test.each(commands)(
 
 test("retains diagnostics when the latest-scan working directory is unavailable", async () => {
   for (const flags of [[], ["--json"], ["--json", "--full-output"]]) {
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
     const deps = scanDependencies();
     const message = "The working directory is unavailable.";
     deps.currentDirectory = () => {
       throw new Error(message);
     };
-    expect(
-      await main(
-        ["scans", "rerun", ...flags],
-        stdout.stream,
-        stderr.stream,
-        deps,
-      ),
-    ).toBe(2);
+    expect(await runCli(["scans", "rerun", ...flags], deps)).toBe(2);
     expect(stderr.text()).toBe(`codex-security: ${message}\n`);
     if (flags.length === 0) expect(stdout.text()).toBe("");
     else
@@ -282,14 +235,9 @@ test.each([
 ])(
   "documents failure codes in the %j output schema",
   async (command, codes) => {
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     expect(
-      await main(
-        [...command, "--schema", "--json"],
-        stdout.stream,
-        capture().stream,
-        dependencies(),
-      ),
+      await stdout.run([...command, "--schema", "--json"], dependencies()),
     ).toBe(0);
     const schema = JSON.parse(stdout.text());
     const failure = schema.output.anyOf.find(
@@ -315,12 +263,10 @@ test.each(commands.slice(1))(
         ["--token-limit", "4"],
         ["--token-offset=4", "--token-limit=4"],
       ]) {
-        const reference = capture();
+        const reference = captureCli(main, "stdout");
         expect(
-          await main(
+          await reference.run(
             [...command, ...formatArgs, ...tokens],
-            reference.stream,
-            capture().stream,
             failingScan(message),
           ),
         ).toBe(2);
@@ -330,14 +276,11 @@ test.each(commands.slice(1))(
           ["--filter-output", "findings"],
           ["--filter-output=manifest"],
         ]) {
-          const stdout = capture();
-          const stderr = capture();
+          const { stdout, stderr, runCli } = createCliTest(main);
           let runs = 0;
           expect(
-            await main(
+            await runCli(
               [...command, ...formatArgs, ...filter, ...tokens],
-              stdout.stream,
-              stderr.stream,
               failingScan(message, () => runs++),
             ),
           ).toBe(2);
@@ -353,14 +296,14 @@ test.each(commands.slice(1))(
 test.each(["rerun", "resume"])(
   "preserves filtered %s preparation failures",
   async (command) => {
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     const deps = scanDependencies();
     deps.runWorkbench = async () => ({
       scanId: "saved-scan",
       scanDir: "/tmp/saved-scan",
     });
     expect(
-      await main(
+      await stdout.run(
         [
           "scans",
           command,
@@ -369,8 +312,6 @@ test.each(["rerun", "resume"])(
           "--filter-output",
           "manifest,findings",
         ],
-        stdout.stream,
-        capture().stream,
         deps,
       ),
     ).toBe(2);
@@ -388,12 +329,10 @@ test.each(["rerun", "resume"])(
 test.each(commands.slice(1))(
   "preserves success filtering and full error envelopes for %s",
   async (_name, command) => {
-    const success = capture();
+    const success = captureCli(main, "stdout");
     expect(
-      await main(
+      await success.run(
         [...command, "--json", "--filter-output", "manifest,findings"],
-        success.stream,
-        capture().stream,
         scanDependencies(),
       ),
     ).toBe(0);
@@ -402,10 +341,10 @@ test.each(commands.slice(1))(
       manifest: original["manifest"],
       findings: original["findings"],
     });
-    const failure = capture();
+    const failure = captureCli(main, "stdout");
     const message = "Synthetic full envelope failure.";
     expect(
-      await main(
+      await failure.run(
         [
           ...command,
           "--json",
@@ -413,8 +352,6 @@ test.each(commands.slice(1))(
           "--filter-output",
           "manifest,findings",
         ],
-        failure.stream,
-        capture().stream,
         failingScan(message),
       ),
     ).toBe(2);
@@ -445,15 +382,9 @@ for (const command of ["rerun", "resume"]) {
           observed = options.ownerSuggestions;
         },
       });
-      const stdout = capture();
-      const stderr = capture();
+      const { runCli } = createCliTest(main);
       expect(
-        await main(
-          ["scans", command, "saved-scan", "--json"],
-          stdout.stream,
-          stderr.stream,
-          deps,
-        ),
+        await runCli(["scans", command, "saved-scan", "--json"], deps),
       ).toBe(0);
       expect(called).toBe(true);
       expect(observed).toBe(ownerSuggestions);
@@ -462,16 +393,8 @@ for (const command of ["rerun", "resume"]) {
 }
 
 test("scan discovery accepts caller inputs and validates the reported result variants", async () => {
-  const stdout = capture();
-  const stderr = capture();
-  expect(
-    await main(
-      ["scan", "--schema", "--json"],
-      stdout.stream,
-      stderr.stream,
-      dependencies(),
-    ),
-  ).toBe(0);
+  const { stdout, runCli } = createCliTest(main);
+  expect(await runCli(["scan", "--schema", "--json"], dependencies())).toBe(0);
   const { options, output } = JSON.parse(stdout.text());
   const ajv = new Ajv2020({ strict: false });
   const inputs = ajv.compile(options);
@@ -512,13 +435,10 @@ test.each([
   "returns a JSON error envelope for invalid scan arguments %j",
   async ({ args }) => {
     for (const flags of [["--format=jsonl"], ["--json"]]) {
-      const stdout = capture();
-      const stderr = capture();
+      const { stdout, stderr, runCli } = createCliTest(main);
       expect(
-        await main(
+        await runCli(
           ["scan", ".", "--dry-run", "--full-output", ...flags, ...args],
-          stdout.stream,
-          stderr.stream,
           dependencies(),
         ),
       ).toBe(2);

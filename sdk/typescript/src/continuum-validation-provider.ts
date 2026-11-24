@@ -11,6 +11,8 @@ import { promisify } from "node:util";
 import { setTimeout as waitFor } from "node:timers/promises";
 import { prepareContinuumAws } from "./continuum-aws.js";
 import {
+  continuumObservations,
+  type ContinuumObservation,
   linkedIssueId,
   selectFindingValidationArtifact,
 } from "./continuum-validation-evidence.js";
@@ -432,7 +434,12 @@ async function* issueArtifacts(
   }
 }
 
+type PollResult = ValidationProviderAssessment & {
+  observation?: ContinuumObservation;
+};
+
 interface SelectedValidation {
+  observation?: ContinuumObservation;
   artifact: Record<string, unknown>;
   outcome: ContinuumOutcome;
   scope: ValidationResultScope;
@@ -445,6 +452,7 @@ async function selectValidation(
   let issueFallback: SelectedValidation | undefined;
   const applicable: SelectedValidation[] = [];
   const siblings: SelectedValidation[] = [];
+  const siblingArtifacts: string[] = [];
   for await (const { artifact, tied } of artifacts) {
     const member = selectFindingValidationArtifact(artifact, findingId);
     if (member?.scope === "finding") {
@@ -466,6 +474,7 @@ async function selectValidation(
             const id = text(object(item)["findingId"]);
             return id && id !== findingId;
           });
+        if (siblingOnly) siblingArtifacts.push(String(artifact["artifactId"]));
         (siblingOnly ? siblings : applicable).push({
           artifact,
           outcome,
@@ -474,8 +483,15 @@ async function selectValidation(
       }
     }
     if (tied) continue;
-    if (applicable.length) return uniqueValidation(applicable);
-    issueFallback ??= uniqueValidation(siblings);
+    if (applicable.length)
+      return uniqueValidation(applicable, {
+        siblingOnly: false,
+        siblingArtifacts,
+      });
+    issueFallback ??= uniqueValidation(siblings, {
+      siblingOnly: true,
+      siblingArtifacts,
+    });
     siblings.length = 0;
   }
   return issueFallback;
@@ -483,14 +499,18 @@ async function selectValidation(
 
 function uniqueValidation(
   candidates: SelectedValidation[],
+  observation: ContinuumObservation,
 ): SelectedValidation | undefined {
+  const first = candidates[0];
+  if (!first) return;
   const ids = [
     ...new Set(candidates.map(({ artifact }) => text(artifact["artifactId"]))),
   ].sort();
-  if (ids.length < 2) return candidates[0];
+  if (ids.length < 2) return { ...first, observation };
   // Preserve the time so remediation can avoid selecting a superseded result.
   return {
-    artifact: { createdAt: createdAt(candidates[0]!.artifact) },
+    observation,
+    artifact: { createdAt: createdAt(first.artifact) },
     scope: "issue",
     outcome: {
       verdict: "UNKNOWN",
@@ -576,7 +596,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
         ? AbortSignal.any([context.signal, signal])
         : signal,
     };
-    const results: ValidationProviderAssessment[] = new Array(supplied.length);
+    const results: PollResult[] = new Array(supplied.length);
     const submissions: (Submission | undefined)[] = new Array(supplied.length);
     const invalid = new Set<number>();
     let pending = supplied.map((_, index) => index);
@@ -634,11 +654,15 @@ export class ContinuumValidationProvider implements ValidationProvider {
       pending = [];
     }
     // A finished verdict remains useful if its linked score misses the deadline.
-    const waiting = new Map<number, ValidationProviderAssessment>();
+    const waiting = new Map<number, PollResult>();
+    // A retry can leave and return to the same issue before polling ends.
+    const changed = new Set<number>();
+    const membership = (submission: Submission) =>
+      submission.issueUnlinked ? null : submission.issueArn;
     while (pending.length > 0 && !timedOut()) {
       await forEachPending(pending, async (index) => {
         const submission = submissions[index]!;
-        const previousIssue = submission.issueArn;
+        const previousIssue = membership(submission);
         try {
           const assessment = await this.#poll(
             supplied[index] as AnyFinding,
@@ -653,7 +677,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
             if (assessment) results[index] = assessment;
           }
         } catch (error) {
-          if (timedOut() && submission.issueArn === previousIssue) {
+          if (timedOut() && membership(submission) === previousIssue) {
             const partial = waiting.get(index);
             if (partial) {
               results[index] = partial;
@@ -661,6 +685,12 @@ export class ContinuumValidationProvider implements ValidationProvider {
             }
           }
           results[index] = unavailableAssessment(this, error);
+        } finally {
+          if (
+            previousIssue !== undefined &&
+            membership(submission) !== previousIssue
+          )
+            changed.add(index);
         }
       });
       pending = pending.filter((index) => !results[index]);
@@ -686,7 +716,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
           `timed out waiting for Continuum validation evidence for ${submissions[index]!.findingId}`,
         );
     }
-    return results.map((assessment, index) => {
+    return results.map(({ observation, ...assessment }, index) => {
       const item = supplied[index];
       const finding = typeof item === "string" ? {} : item!;
       const record = assessment.record ?? {
@@ -707,6 +737,15 @@ export class ContinuumValidationProvider implements ValidationProvider {
       const { submittedAt, ...ids } = submission;
       const issueUrl = continuumIssueUrl(this.#options, submission);
       const issue = issueUrl ? `[${ids.issueArn}](${issueUrl})` : ids.issueArn;
+      const linked = {
+        ...record,
+        ...ids,
+        issueUrl,
+        submittedAt: submittedAt.toISOString(),
+      };
+      if (changed.has(index))
+        observation = { ...observation, issueChanged: true };
+      if (observation) continuumObservations.set(linked, observation);
       return {
         ...assessment,
         report: [
@@ -714,12 +753,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
           `AWS finding: ${ids.findingArn}`,
           ...(issue ? [`AWS issue: ${issue}`] : []),
         ].join("\n\n"),
-        record: {
-          ...record,
-          ...ids,
-          issueUrl,
-          submittedAt: submittedAt.toISOString(),
-        },
+        record: linked,
         provenance: {
           ...assessment.provenance,
           referenceId: ids.issueId ?? ids.findingId,
@@ -764,11 +798,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
     submission: Submission,
     request: ContinuumRequest,
     timedOut: () => boolean,
-  ): Promise<
-    | ValidationProviderAssessment
-    | { waiting: ValidationProviderAssessment }
-    | undefined
-  > {
+  ): Promise<PollResult | { waiting: PollResult } | undefined> {
     const { findingId, findingArn, submittedAt } = submission;
     const environmentArgs = ["--environment-id", this.#options.environmentId];
     const current = await request("get-code-finding", [
@@ -839,8 +869,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
     const issueVerdict = validationOutcome(artifact).verdict;
     const details = {
       issue,
-      validationArtifact: artifact,
-      resultScope,
+      validation,
       issueFindingCount: new Set(ids).size,
       issueVerdict: resultScope === "finding" ? issueVerdict : undefined,
     };
@@ -923,24 +952,24 @@ export class ContinuumValidationProvider implements ValidationProvider {
     }: ContinuumOutcome,
     {
       issue = {},
-      validationArtifact = {},
+      validation,
       score,
       scoringPending,
       conflictingScoreTime,
-      resultScope = "finding",
       issueFindingCount,
       issueVerdict,
     }: {
       issue?: Record<string, unknown>;
-      validationArtifact?: Record<string, unknown>;
+      validation?: SelectedValidation;
       score?: Record<string, unknown>;
       scoringPending?: boolean;
       conflictingScoreTime?: string;
-      resultScope?: ValidationResultScope;
       issueFindingCount?: number;
       issueVerdict?: string;
     } = {},
-  ): ValidationProviderAssessment {
+  ): PollResult {
+    const validationArtifact = validation?.artifact ?? {};
+    const resultScope = validation?.scope ?? "finding";
     const conclusive = disposition === "reportable";
     const validationArtifactId = text(validationArtifact["artifactId"]);
     const evidenceCreatedAt = createdAt(validationArtifact) || undefined;
@@ -1035,6 +1064,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
     }
     return {
       disposition,
+      observation: validation?.observation,
       ...(unavailable && { unavailable }),
       report: report.join("\n\n"),
       record: {

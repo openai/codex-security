@@ -1,3 +1,4 @@
+import type { DeduplicationReviewError } from "../src/errors.js";
 import refusalMessages from "./fixtures/codex-refusal-messages.json" with { type: "json" };
 import { parseJsonLines } from "./support/json.js";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
@@ -129,31 +130,7 @@ const transportStatusScenarios = [408, 429, 500, 502, 503, 504, 401].flatMap(
       retryable: status !== 401,
     })),
 );
-const failureReasons: Record<string, string> = {
-  ...Object.fromEntries(
-    transportStatusScenarios.map(({ scenario, message }) => [
-      scenario,
-      message,
-    ]),
-  ),
-  "transport-null-turn": "Request flagged for possible cybersecurity risk.",
-  "transport-wording-request":
-    "Request flagged for possible cybersecurity risk.",
-  "transport-timeout-turn":
-    "Safety policy: request refused because the service timed out",
-  "service-timeout-text": "Codex did not submit a validated review",
-  "policy-turn-code": "Request blocked.",
-  "policy-bio-code": "Request blocked.",
-  "policy-request-code": "Request blocked.",
-  "policy-turn": "Request flagged for possible cybersecurity risk.",
-  "policy-accordance-turn":
-    "This request was refused in accordance with the safety policy.",
-  "policy-terse-turn": "Refused due to the safety policy",
-  "policy-request": "Request rejected: cyber_policy.",
-  ...refusalMessages,
-  "policy-reported-error":
-    "Required review check could not be completed: Request refusal due to the safety policy.",
-  "text-only": "Codex did not submit a validated review",
+const retryableProviderMessages = {
   "failed-turn": "Rate limit exceeded",
   "rate-limit-turn": "Rate limit reached",
   "server-error": "Provider temporarily unavailable",
@@ -181,6 +158,33 @@ const failureReasons: Record<string, string> = {
   "connection-error": "Provider stream disconnected",
   "overloaded-turn": "Selected model is at capacity.",
   "internal-error-turn": "Internal server error",
+};
+const failureReasons: Record<string, string> = {
+  ...Object.fromEntries(
+    transportStatusScenarios.map(({ scenario, message }) => [
+      scenario,
+      message,
+    ]),
+  ),
+  "transport-null-turn": "Request flagged for possible cybersecurity risk.",
+  "transport-wording-request":
+    "Request flagged for possible cybersecurity risk.",
+  "transport-timeout-turn":
+    "Safety policy: request refused because the service timed out",
+  "service-timeout-text": "Codex did not submit a validated review",
+  "policy-turn-code": "Request blocked.",
+  "policy-bio-code": "Request blocked.",
+  "policy-request-code": "Request blocked.",
+  "policy-turn": "Request flagged for possible cybersecurity risk.",
+  "policy-accordance-turn":
+    "This request was refused in accordance with the safety policy.",
+  "policy-terse-turn": "Refused due to the safety policy",
+  "policy-request": "Request rejected: cyber_policy.",
+  ...refusalMessages,
+  "policy-reported-error":
+    "Required review check could not be completed: Request refusal due to the safety policy.",
+  "text-only": "Codex did not submit a validated review",
+  ...retryableProviderMessages,
   "unauthorized-turn": "Authentication required",
   "bad-request-turn": "Invalid model configuration",
   "unknown-turn": "Unknown model failure",
@@ -223,23 +227,7 @@ const retriedFailures = new Set([
   "transport-timeout-turn",
   "service-timeout-text",
   "text-only",
-  "failed-turn",
-  "rate-limit-turn",
-  "server-error",
-  "service-unavailable",
-  "network-request-error",
-  "http-request-error",
-  "prefix-network-error",
-  "prefix-service-error",
-  "sentence-service-error",
-  "determiner-service-error",
-  "sentence-service-request-error",
-  "prefix-upstream-error",
-  "prefix-because-error",
-  "prefix-as-error",
-  "connection-error",
-  "overloaded-turn",
-  "internal-error-turn",
+  ...Object.keys(retryableProviderMessages),
   "invalid-json",
   "invalid-submission",
   "exit",
@@ -268,6 +256,17 @@ const recoveredScenarios: Record<string, string> = {
   "recover-invalid-submission": "invalid-submission",
   "recover-no-submission": "text-only",
 };
+const requestFailures = new Set([
+  ...transportStatusScenarios
+    .filter(({ phase }) => phase === "request")
+    .map(({ scenario }) => scenario),
+  "transport-wording-request",
+  "request-error",
+  "sentence-service-request-error",
+  "credential-error",
+  "policy-request",
+  "policy-request-code",
+]);
 const modelFailures = new Set([
   ...transportStatusScenarios
     .filter(({ phase }) => phase === "turn")
@@ -279,26 +278,36 @@ const modelFailures = new Set([
   "policy-turn",
   "policy-accordance-turn",
   "policy-terse-turn",
-  "failed-turn",
-  "rate-limit-turn",
-  "server-error",
-  "service-unavailable",
-  "network-request-error",
-  "http-request-error",
-  "prefix-network-error",
-  "prefix-service-error",
-  "sentence-service-error",
-  "determiner-service-error",
-  "prefix-upstream-error",
-  "prefix-because-error",
-  "prefix-as-error",
-  "connection-error",
-  "overloaded-turn",
-  "internal-error-turn",
+  ...Object.keys(retryableProviderMessages).filter(
+    (scenario) => !requestFailures.has(scenario),
+  ),
   "unauthorized-turn",
   "bad-request-turn",
   "unknown-turn",
 ]);
+
+const twoTurnScenarios = new Set([
+  "invalid-submission",
+  "text-only",
+  "service-timeout-text",
+  "retry-correction",
+  "text-only-correction",
+  "cancel-continuation",
+  "required-source-error-after-text",
+]);
+
+function expectedTurns(scenario: string) {
+  if (requestFailures.has(scenario)) return 0;
+  return twoTurnScenarios.has(scenario) ? 2 : 1;
+}
+
+function failedSessionValidations(scenario: string) {
+  if (scenario === "invalid-submission") return 2;
+  return modelFailures.has(scenario) ||
+    scenario === "required-source-error-after-verdict"
+    ? 1
+    : 0;
+}
 
 const transportCases: {
   scenario: string;
@@ -566,27 +575,20 @@ for (const {
           "retry-correction",
           "text-only-correction",
           "accepted-no-replay",
+          "incomplete-content",
+          "optional-lookup-failure",
         ].includes(scenario)
-      ) {
-        expect(await result).toEqual({ decision: "SAME" });
-        expect(validate).toHaveBeenCalledTimes(
-          recovery
-            ? recovery === "invalid-submission"
-              ? 3
-              : modelFailures.has(recovery)
-                ? 2
-                : 1
-            : ["text-only-correction", "accepted-no-replay"].includes(scenario)
-              ? 1
-              : 2,
-        );
-      } else if (
-        ["incomplete-content", "optional-lookup-failure"].includes(scenario)
       ) {
         expect(await result).toEqual({
           decision: scenario === "incomplete-content" ? "DISTINCT" : "SAME",
         });
-        expect(validate).toHaveBeenCalledTimes(1);
+        expect(validate).toHaveBeenCalledTimes(
+          recovery
+            ? failedSessionValidations(recovery) + 1
+            : ["correction", "retry-correction"].includes(scenario)
+              ? 2
+              : 1,
+        );
       } else if (
         ["cancel", "cancel-continuation", "cancel-backoff"].includes(scenario)
       ) {
@@ -597,69 +599,41 @@ for (const {
           name: "DeduplicationReviewError",
           message: `Codex did not complete a validated deduplication review. Findings are unchanged; retry the command. Reason: ${failureReasons[scenario]}`,
         });
-        const reviewFailure = failure as Error & {
-          cause?: unknown;
-          metadata: {
-            stage: string;
-            model: string;
-            category: string;
-            attempts: number;
-            reason: string;
-          };
-        };
+        const reviewFailure = failure as DeduplicationReviewError;
         expect(reviewFailure.cause).toBeUndefined();
+        const category = refused
+          ? "refusal"
+          : scenario === "invalid-submission"
+            ? "validation"
+            : ["text-only", "service-timeout-text"].includes(scenario)
+              ? "no-submission"
+              : modelFailures.has(scenario) || reportsBlocker
+                ? "model"
+                : "transport";
+        const reason = {
+          refusal: "The model refused the deduplication review.",
+          validation: "The submitted review failed semantic validation.",
+          "no-submission": "Codex did not submit a validated review.",
+          model: modelFailures.has(scenario)
+            ? "Codex review turn failed."
+            : "A required review check could not be completed.",
+          transport: requestFailures.has(scenario)
+            ? "Codex rejected the review request."
+            : "Codex review transport failed.",
+        }[category];
         expect(reviewFailure.metadata).toEqual({
           stage: "pair-review",
           model: "gpt-5.6-sol",
-          category: refused
-            ? "refusal"
-            : scenario === "invalid-submission"
-              ? "validation"
-              : ["text-only", "service-timeout-text"].includes(scenario)
-                ? "no-submission"
-                : modelFailures.has(scenario) || reportsBlocker
-                  ? "model"
-                  : "transport",
-          attempts:
-            ([
-              "invalid-submission",
-              "text-only",
-              "service-timeout-text",
-              "required-source-error-after-text",
-            ].includes(scenario)
-              ? 2
-              : 1) * sessions,
-          reason: refused
-            ? "The model refused the deduplication review."
-            : scenario === "invalid-submission"
-              ? "The submitted review failed semantic validation."
-              : ["text-only", "service-timeout-text"].includes(scenario)
-                ? "Codex did not submit a validated review."
-                : modelFailures.has(scenario)
-                  ? "Codex review turn failed."
-                  : reportsBlocker
-                    ? "A required review check could not be completed."
-                    : scenario.startsWith("transport-request-") ||
-                        scenario === "transport-wording-request" ||
-                        [
-                          "request-error",
-                          "credential-error",
-                          "sentence-service-request-error",
-                        ].includes(scenario)
-                      ? "Codex rejected the review request."
-                      : "Codex review transport failed.",
+          category,
+          attempts: (twoTurnScenarios.has(scenario) ? 2 : 1) * sessions,
+          reason,
         });
         const supportBundle = JSON.stringify(reviewFailure.metadata);
         expect(supportBundle).not.toContain("synthetic-review-key");
         expect(supportBundle).not.toContain(checkout);
         expect(supportBundle).not.toContain("review-thread");
         expect(validate).toHaveBeenCalledTimes(
-          scenario === "invalid-submission"
-            ? 2 * sessions
-            : modelFailures.has(scenario) ||
-                scenario === "required-source-error-after-verdict"
-              ? sessions
-              : 0,
+          failedSessionValidations(scenario) * sessions,
         );
         if (reportsBlocker || refused)
           expect(checkpoints.saved).toHaveLength(0);
@@ -720,12 +694,11 @@ for (const {
         const loginRequest = messages.find(
           (message) => message.method === "account/login/start",
         );
-        expect(
-          messages.filter((message) => message.method === "thread/start"),
-        ).toHaveLength(sessions);
-        for (const message of messages.filter(
+        const threads = messages.filter(
           (message) => message.method === "thread/start",
-        )) {
+        );
+        expect(threads).toHaveLength(sessions);
+        for (const message of threads) {
           expect(message.params?.config?.responses_api_metadata).toEqual({
             synthetic_caller: "preserved",
             codex_security_surface: surface ?? "sdk",
@@ -737,34 +710,8 @@ for (const {
           messages.filter((message) => message.method === "turn/start"),
         ).toHaveLength(
           recovery
-            ? recovery === "sentence-service-request-error"
-              ? 1
-              : ["invalid-submission", "text-only"].includes(recovery)
-                ? 3
-                : 2
-            : ([
-                "invalid-submission",
-                "text-only",
-                "service-timeout-text",
-                "retry-correction",
-                "text-only-correction",
-                "cancel-continuation",
-                "required-source-error-after-text",
-              ].includes(scenario)
-                ? 2
-                : [
-                      ...transportStatusScenarios
-                        .filter(({ phase }) => phase === "request")
-                        .map(({ scenario }) => scenario),
-                      "transport-wording-request",
-                      "request-error",
-                      "sentence-service-request-error",
-                      "credential-error",
-                      "policy-request",
-                      "policy-request-code",
-                    ].includes(scenario)
-                  ? 0
-                  : 1) * sessions,
+            ? expectedTurns(recovery) + 1
+            : expectedTurns(scenario) * sessions,
         );
         expect(loginRequest?.params?.apiKey).toBe(
           commandAuth ? undefined : "synthetic-review-key",
@@ -1084,7 +1031,7 @@ test.each([
   }
 });
 
-test.each(["cyberPolicy", "misalignmentPolicyViolation"])(
+test.each(["cyberPolicy", "bioPolicy", "misalignmentPolicyViolation"])(
   "recognizes structured policy refusal codes independently of message wording: %s",
   (code) => {
     expect(isReviewRefusal("Request blocked.", code)).toBe(true);
