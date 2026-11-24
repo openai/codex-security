@@ -65,6 +65,7 @@ import {
 } from "./provider-profile.js";
 
 import {
+  NATIVE_PROVIDER_AUTH_FAILURE_PATTERN,
   NO_CREDENTIALS_MESSAGE,
   accountStatus,
   configuredCodexHome,
@@ -7302,11 +7303,7 @@ export function classifyConnectionFailure(
   if (/\b(?:sqlite3?|database|workbench)\b/iu.test(message)) {
     return "unknown";
   }
-  if (
-    /\b(?:ExpiredTokenException|UnrecognizedClientException|IncompleteSignature)\b/iu.test(
-      message,
-    )
-  ) {
+  if (NATIVE_PROVIDER_AUTH_FAILURE_PATTERN.test(message)) {
     return "unauthorized";
   }
   if (

@@ -562,6 +562,48 @@ def test_matching_reads_each_scan_once_and_skips_cached_links(
     assert queries == []
 
 
+@pytest.mark.parametrize("compact", [False, True])
+def test_forced_batches_expose_only_their_direct_retained_links(
+    workbench_api, workbench_db, tmp_path, monkeypatch, compact
+):
+    history = workbench_api["scan_history"]
+    db = workbench_db
+    repository = tmp_path / "repository"
+    monkeypatch.setenv("CODEX_SECURITY_MATCHING_PLAN_FORMAT", "compact" if compact else "")
+    for index in range(4):
+        scan = f"scan-{index}"
+        add_scan(db, scan, repository, target_id="target", started_at=f"2026-01-01T00:00:0{index}Z")
+        add_occurrence(db, scan, scan)
+    link(db, "scan-1", "scan-0")
+    link(db, "scan-1", "scan-2")
+    link(db, "scan-2", "scan-3")
+
+    def pending(force):
+        return history.list_unmatched_scan_pairs(
+            db,
+            Namespace(repository=str(repository), force=force),
+            backfill_finding_details=lambda *_: None,
+            read_coverage=lambda _: {},
+        )
+
+    forced = pending(True)
+    retained = [
+        [scan.get("retainedFindingGroups", []) for scan in batch["beforeScans"]]
+        for batch in forced["batches"]
+    ]
+    assert retained == [
+        [[["scan-1", "scan-0"]]],
+        [[], [["scan-1", "scan-2"]]],
+        [[], [], [["scan-2", "scan-3"]]],
+    ]
+    assert all("knownFindingGroups" not in batch for batch in forced["batches"])
+    assert all(
+        "retainedFindingGroups" not in scan
+        for batch in pending(False)["batches"]
+        for scan in batch["beforeScans"]
+    )
+
+
 def test_relations_follow_confirmed_identities_and_read_a_page_in_bulk(
     workbench_api, workbench_db, tmp_path
 ):

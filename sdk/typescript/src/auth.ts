@@ -6,7 +6,7 @@ import { join, resolve } from "node:path";
 import { parse } from "smol-toml";
 import { CODEX_AUTH_CONFIG_KEYS, type JsonObject } from "./config.js";
 import {
-  CodexSecurityError,
+  ConfigurationError,
   PluginBootstrapError,
   errorMessage,
 } from "./errors.js";
@@ -21,6 +21,18 @@ import {
 } from "./runtime.js";
 
 const LOGIN_CHILD_TERMINATION_GRACE_MS = 1_000;
+
+/** @internal */
+export const NATIVE_REFRESH_RECOVERY_PATTERN =
+  /\b(?:your access token could not be refreshed because you have since logged out or signed in to another account\. Please sign in again\.|your authentication session could not be refreshed automatically\. Please log out and sign in again\.)/iu;
+
+/** @internal */
+export const NATIVE_REFRESH_FAILURE_PATTERN =
+  /\byour access token could not be refreshed(?: because your refresh token (has expired|was already used|was revoked))?\. Please log out and sign in again\./iu;
+
+/** @internal */
+export const NATIVE_PROVIDER_AUTH_FAILURE_PATTERN =
+  /\b(?:ExpiredTokenException|UnrecognizedClientException|IncompleteSignature)\b/iu;
 
 /** @internal */
 export function environmentEntry(
@@ -75,7 +87,7 @@ export async function readCodexHomeConfig(
   } catch (error) {
     signal?.throwIfAborted();
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return {};
-    throw new CodexSecurityError(
+    throw new ConfigurationError(
       `Could not read the configured Codex provider from ${path}: ${errorMessage(error)}`,
       { cause: error },
     );

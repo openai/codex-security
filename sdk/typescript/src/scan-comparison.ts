@@ -26,6 +26,9 @@ import {
   configuredCodexHome,
   environmentEntry,
   readCodexHomeConfig,
+  NATIVE_REFRESH_RECOVERY_PATTERN,
+  NATIVE_REFRESH_FAILURE_PATTERN,
+  NATIVE_PROVIDER_AUTH_FAILURE_PATTERN,
   withoutOpenAiApiKeys,
 } from "./auth.js";
 import {
@@ -46,7 +49,12 @@ import {
   type CodexSecurityConfig,
   type JsonObject,
 } from "./config.js";
-import { CodexSecurityError, ConfigurationError } from "./errors.js";
+import {
+  AuthenticationRequiredError,
+  CodexSecurityError,
+  ConfigurationError,
+  errorMessage,
+} from "./errors.js";
 import { codexSecurityRequestContext } from "./request-metadata.js";
 import {
   createProfileCodex,
@@ -102,6 +110,7 @@ export interface ScanMatchingBatch {
   beforeScans: ({
     scanId: string;
     findings?: readonly Finding[];
+    retainedFindingGroups?: readonly (readonly string[])[];
   } & SavedComparisonContext)[];
   knownFindingGroups?: readonly (readonly string[])[];
 }
@@ -405,7 +414,59 @@ export async function matchScanFindingsInternal(
   try {
     for (;;) {
       options.signal?.throwIfAborted();
-      const turn = await thread.run(prompt, turnOptions);
+      const turn = await thread
+        .run(prompt, turnOptions)
+        .catch((error: unknown) => {
+          if (!(error instanceof Error)) throw error;
+          if (error.name === "PermissionProfileFallbackError")
+            throw new ConfigurationError(error.message, { cause: error });
+          // Exec stderr can include startup warnings before its fatal diagnostic.
+          // Turn errors retain their complete provider response as one message.
+          const execPrefix =
+            /^Codex Exec exited with (?:code \d+|signal \S+): /u.exec(
+              error.message,
+            );
+          const nativeMessages = execPrefix
+            ? error.message.slice(execPrefix[0].length).split("\n")
+            : [error.message];
+          for (const message of nativeMessages) {
+            const nativeMessage = message
+              .replace(/^Error: /u, "")
+              .replace(/^Error running remote compact task: /u, "");
+            if (
+              nativeMessage.startsWith("Error loading configuration:") ||
+              nativeMessage.startsWith("Error loading rules:") ||
+              nativeMessage.startsWith("failed to load bootstrap configuration")
+            )
+              throw new ConfigurationError(error.message, { cause: error });
+            const providerMessage = nativeMessage.replace(
+              /^(?:(?:HTTP )?4\d\d |unexpected status 4\d\d [^:\n]+: )/u,
+              "",
+            );
+            if (
+              nativeMessage.startsWith("unexpected status 401 Unauthorized:") ||
+              nativeMessage.startsWith("API key login is required,") ||
+              nativeMessage.startsWith("ChatGPT login is required,") ||
+              nativeMessage.startsWith(
+                "Failed to load ChatGPT credentials while enforcing workspace restrictions:",
+              ) ||
+              nativeMessage.startsWith(
+                "Login is restricted to workspace(s) ",
+              ) ||
+              nativeMessage.match(NATIVE_REFRESH_RECOVERY_PATTERN)?.index ===
+                0 ||
+              nativeMessage.match(NATIVE_REFRESH_FAILURE_PATTERN)?.index ===
+                0 ||
+              providerMessage.match(NATIVE_PROVIDER_AUTH_FAILURE_PATTERN)
+                ?.index === 0
+            ) {
+              throw new AuthenticationRequiredError(error.message, {
+                cause: error,
+              });
+            }
+          }
+          throw error;
+        });
       let response: unknown;
       try {
         response = JSON.parse(turn.finalResponse);
@@ -831,31 +892,37 @@ export async function disabledMcpServers(
   environment: Record<string, string>,
   options: ReadOnlyCodexOptions,
 ): Promise<JsonObject> {
-  const { success, stdout, stderr } = await runCodexCommand(
-    command,
-    [
-      "-C",
-      options.workingDirectory ?? process.cwd(),
-      "-c",
-      "features.plugins=false",
-      "mcp",
-      "list",
-      "--json",
-    ],
-    environment,
-    undefined,
-    options.signal,
-  );
-  if (!success)
-    throw new CodexSecurityError(
-      `Could not read MCP configuration for a read-only helper: ${stderr.trim()}`,
+  let inheritedNames: string[];
+  try {
+    const { success, stdout, stderr } = await runCodexCommand(
+      command,
+      [
+        "-C",
+        options.workingDirectory ?? process.cwd(),
+        "-c",
+        "features.plugins=false",
+        "mcp",
+        "list",
+        "--json",
+      ],
+      environment,
+      undefined,
+      options.signal,
     );
-  const inherited = JSON.parse(stdout) as { name: string }[];
+    if (!success) throw new Error(stderr.trim());
+    inheritedNames = z
+      .array(z.object({ name: z.string() }))
+      .parse(JSON.parse(stdout))
+      .map(({ name }) => name);
+  } catch (error) {
+    options.signal?.throwIfAborted();
+    throw new ConfigurationError(
+      `Could not read MCP configuration for a read-only helper: ${errorMessage(error)}`,
+      { cause: error },
+    );
+  }
   const configured = (config?.["mcp_servers"] ?? {}) as JsonObject;
-  const names = new Set([
-    ...Object.keys(configured),
-    ...inherited.map(({ name }) => name),
-  ]);
+  const names = new Set([...Object.keys(configured), ...inheritedNames]);
   return Object.fromEntries(
     [...names].map((name) => [
       name,

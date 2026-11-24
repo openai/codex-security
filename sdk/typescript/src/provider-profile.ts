@@ -5,7 +5,11 @@ import { pathToFileURL } from "node:url";
 import type { Codex, CodexOptions } from "@openai/codex-sdk";
 import { parse } from "smol-toml";
 import { configuredCodexHome } from "./auth.js";
-import { CodexSecurityError } from "./errors.js";
+import {
+  CodexSecurityError,
+  ConfigurationError,
+  errorMessage,
+} from "./errors.js";
 import {
   resolveCodexProfile,
   deepMerge,
@@ -224,31 +228,47 @@ export async function preflightReadOnlyProfileCodex(
   const definitions = isRecord(providers)
     ? (client.preflightProviderDefinitions(providers) as JsonObject)
     : {};
+  let preflightFailure: { error: unknown } | undefined;
   await withCodexPreflightLock(env, signal, async () => {
-    await preflight.preflightDeepScanWorkerPermissionProfile({
-      codexPath: executablePathForSpawn(command),
-      cwd,
-      configOverrides: [
-        ...client.profileConfigOverrides(options.config ?? {}),
-        ...configOverrides,
-      ],
-      providerConfigOverrides: modelProviderConfigOverride({
-        model_providers: definitions,
-      }),
-      ...(env === undefined
-        ? {}
-        : {
-            env: {
-              ...env,
-              ...(options.apiKey === undefined
-                ? {}
-                : { CODEX_API_KEY: options.apiKey }),
-            },
-          }),
-      expectedProfile,
-      signal: signal ?? new AbortController().signal,
-      context: "helper",
-    });
+    await preflight
+      .preflightDeepScanWorkerPermissionProfile({
+        codexPath: executablePathForSpawn(command),
+        cwd,
+        configOverrides: [
+          ...client.profileConfigOverrides(options.config ?? {}),
+          ...configOverrides,
+        ],
+        providerConfigOverrides: modelProviderConfigOverride({
+          model_providers: definitions,
+        }),
+        ...(env === undefined
+          ? {}
+          : {
+              env: {
+                ...env,
+                ...(options.apiKey === undefined
+                  ? {}
+                  : { CODEX_API_KEY: options.apiKey }),
+              },
+            }),
+        expectedProfile,
+        signal: signal ?? new AbortController().signal,
+        context: "helper",
+      })
+      .catch((error: unknown) => {
+        preflightFailure = { error };
+        throw error;
+      });
+  }).catch((error: unknown) => {
+    if (
+      signal?.aborted ||
+      error instanceof CodexSecurityError ||
+      (preflightFailure !== undefined &&
+        preflightFailure.error === error &&
+        !(error instanceof Error && error.name === "DeepScanNonRetryableError"))
+    )
+      throw error;
+    throw new ConfigurationError(errorMessage(error), { cause: error });
   });
   return { permissionProfileId, configOverrides };
 }
