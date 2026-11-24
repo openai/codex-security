@@ -728,13 +728,14 @@ test("a positive use requires an endpoint on each explicitly bounded side", asyn
   }
 });
 
-test("a Git-only advisory starts local discovery without supplying a package version", async () => {
+test("a Git-only library gets its own discovery scope alongside a packaged wrapper", async () => {
   await using f = await fixture();
   const cve = "CVE-2099-0001";
   const advisory = {
     id: cve,
     url: "https://example.invalid/advisory",
     affected: [
+      { package: { ecosystem: "npm", name: "wrapper" } },
       {
         ranges: [
           {
@@ -756,9 +757,15 @@ test("a Git-only advisory starts local discovery without supplying a package ver
       runAgent: async ({ prompt }) => {
         const { scopes, claims } = agentInput(prompt);
         if (claims) return approvedReview(claims);
-        expect(scopes[0].component).toBe("fixture-parser");
-        expect(scopes[0].selectedVersion).toBeUndefined();
-        return proposalJson({ ...f.use, version: null, verdict: "unknown" });
+        expect(scopes[0].component).toBe("wrapper");
+        expect(scopes[1].component).toBe("fixture-parser");
+        expect(scopes[1].selectedVersion).toBeUndefined();
+        return proposalJson({
+          ...f.use,
+          scope: scopes[1].id,
+          version: null,
+          verdict: "unknown",
+        });
       },
     },
   );

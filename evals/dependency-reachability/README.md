@@ -61,7 +61,7 @@ The optional suites materialize 23 source snapshots and run ordinary reviewed CV
 
 The SHA-256 manifest pins five GitHub archives by full revision, ten selected upstream files and two published npm archives. Snapshot preparation also checks the MIME packages' lockfile SHA-512 integrity and individual file hashes. Upstream source is staged as inert evidence. The checkout's dependency installation scripts and application code are never executed by the snapshot builder. The published wheel manifests describe the exact wheel artifacts in those cases. Rollout records and application overlays are synthetic.
 
-Fetch the sources once into a local cache (about 226 MiB). This optional step uses Python 3.12 or later with HTTPS access to GitHub and npm. Snapshot assembly and verification then work offline. Live runs use the selected CLI's OSV access, OpenGrep and model credentials.
+Fetch the sources once into a local cache (about 226 MiB). This optional step uses Python 3.12 or later with HTTPS access to GitHub and npm. Snapshot assembly and verification then work offline. Live runs use the selected CLI's OSV access and model credentials. Put OpenGrep on `PATH` and use a private temporary directory visible inside the Codex sandbox. On Linux, avoid setting `TMPDIR` under `/dev/shm`. Preparation can succeed there even when the investigator cannot see the checkout.
 
 ```sh
 cache=$(mktemp -d)

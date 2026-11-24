@@ -115,7 +115,9 @@ const proposedUse = z.strictObject({
     ),
   verdict: dependencyUseSchema.shape.verdict,
   reason: text,
-  version: text.nullable(),
+  version: text
+    .nullable()
+    .describe(dependencyUseSchema.shape.version.description!),
   evidence: z.array(source).min(1),
   observations: z.array(receipt),
   receiptSelections: z.array(dependencyReceiptSelectionSchema).optional(),
