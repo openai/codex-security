@@ -12,12 +12,16 @@ from pathlib import Path
 import pytest
 from test_workbench_standard_deep_results import write_saved_parent
 from workbench_test_support import (
+    archive_finding,
+    pending_review,
+    review_surface,
     saved_binding,
     saved_discovery_worker,
     saved_draft,
     select_checkpoint,
     write_checkpoint,
     write_completed_contract,
+    write_draft_checkpoint,
     write_result_draft,
 )
 
@@ -34,10 +38,9 @@ def worker(root: Path, name: str, draft: dict):
     return saved_discovery_worker(output, name, 1)
 
 
-def recover(root, workers, *, project=False, frozen=None, warnings=None):
-    expected_warnings = warnings is not None
-    warnings = [] if warnings is None else warnings
-    result = saved.merge_saved_results(
+def merge_review(root, workers, warnings, *, project=False, frozen=None):
+    """Return the stopped review before the finalizer normalizes its coverage."""
+    return saved.merge_saved_results(
         root,
         "coverage-scan",
         saved_binding("deep_repository", repository="synthetic"),
@@ -48,11 +51,21 @@ def recover(root, workers, *, project=False, frozen=None, warnings=None):
         project_worker_coverage=project,
         frozen_source_digests=frozen,
     )
+
+
+def recover_coverage(root, coverage, warnings):
+    finalizer._recover_unsealed_coverage(
+        coverage, Path(saved.__file__).resolve().parent.parent / "schemas", root, warnings, []
+    )
+
+
+def recover(root, workers, *, project=False, frozen=None, warnings=None):
+    expected_warnings = warnings is not None
+    warnings = [] if warnings is None else warnings
+    result = merge_review(root, workers, warnings, project=project, frozen=frozen)
     assert result is not None
     finalizer._normalize_unsealed_open_questions(result[2])
-    finalizer._recover_unsealed_coverage(
-        result[2], Path(saved.__file__).resolve().parent.parent / "schemas", root, warnings, []
-    )
+    recover_coverage(root, result[2], warnings)
     if not expected_warnings:
         assert not warnings
     return result
@@ -68,14 +81,14 @@ def test_worker_projection_retains_independent_links_receipts_and_frozen_replay(
             "coverage-scan",
             complete=False,
             surfaces=[
-                {
-                    "id": "api",
-                    "label": "API" if identical_labels else name,
-                    "disposition": "no_issue_found",
-                    "receiptRefs": ["artifacts/review.md"],
-                }
+                review_surface(
+                    "api",
+                    "API" if identical_labels else name,
+                    "no_issue_found",
+                    receipts=["artifacts/review.md"],
+                )
             ],
-            deferred=[{"id": "review", "reason": "Review remains.", "surfaceIds": ["api"]}],
+            deferred=[pending_review("review", "Review remains.", "api")],
         )
         workers.append(worker(tmp_path, name, draft))
     originals = {p: p.read_bytes() for p in tmp_path.rglob("result.json")}
@@ -114,9 +127,7 @@ def test_partial_root_rejections_close_worker_local_candidates_independently(tmp
             "disposition": "rejected",
             "provenance": {"workerId": name, "attempt": 1, "candidateId": "local"},
         }
-        checkpoint = write_checkpoint(
-            tmp_path / "checkpoints", saved_draft("coverage-scan", surfaces=[rejection])
-        )
+        checkpoint = write_draft_checkpoint(tmp_path, "coverage-scan", surfaces=[rejection])
         select_checkpoint(tmp_path, checkpoint, mtime_ns=observed)
         documents = recover(tmp_path, workers, project=True)
         assert [
@@ -129,13 +140,10 @@ def test_partial_root_rejections_close_worker_local_candidates_independently(tmp
 
 
 def test_accepted_attempt_reconciles_legacy_parent_worker_projection(tmp_path):
-    surface = {
-        "id": "api",
-        "label": "Worker review",
-        "disposition": "no_issue_found",
-        "receiptRefs": ["artifacts/review.md"],
-    }
-    task = {"id": "review", "reason": "Review remains.", "surfaceIds": ["api"]}
+    surface = review_surface(
+        "api", "Worker review", "no_issue_found", receipts=["artifacts/review.md"]
+    )
+    task = pending_review("review", "Review remains.", "api")
     source = worker(
         tmp_path,
         "first",
@@ -181,11 +189,11 @@ def test_accepted_attempt_reconciles_legacy_parent_worker_projection(tmp_path):
 
 
 def test_partial_parent_without_arrays_retains_closed_worker_surface_and_frozen_replay(tmp_path):
-    surface = {"id": "api", "label": "API", "disposition": "needs_follow_up", "receiptRefs": []}
+    surface = review_surface("api", "API")
     pending = saved_draft(
         "coverage-scan",
         surfaces=[surface],
-        deferred=[{"id": "review", "reason": "Review remains.", "surfaceIds": ["api"]}],
+        deferred=[pending_review("review", "Review remains.", "api")],
     )
     closed = saved_draft(
         "coverage-scan",
@@ -226,7 +234,7 @@ def test_partial_parent_without_arrays_retains_closed_worker_surface_and_frozen_
 
 def test_finding_only_reducer_preserves_earlier_partial_root_coverage(tmp_path):
     scan_id = "coverage-scan"
-    surface = {"id": "route", "label": "Route", "disposition": "no_issue_found", "receiptRefs": []}
+    surface = review_surface("route", "Route", "no_issue_found")
     question = {"question": "Which routes are public?"}
     earlier = saved_draft(scan_id, surfaces=[surface])
     earlier["coverage"]["openQuestions"] = [question]
@@ -269,7 +277,7 @@ def test_worker_links_follow_final_ids_without_redirecting_parent_links(
             "coverage-scan",
             complete=True,
             surfaces=[surface],
-            deferred=[{"id": "review", "reason": "Review worker.", "surfaceIds": ["api"]}],
+            deferred=[pending_review("review", "Review worker.", "api")],
         ),
     )
     parent_id = "first/api" if collision else "parent-api"
@@ -309,7 +317,7 @@ def test_aggregate_copies_reconcile_once_and_later_worker_closure_removes_pendin
     surface = {"id": "api", "label": "API", "disposition": "needs_follow_up"}
     if receipt is not None:
         surface["receiptRefs"] = [receipt]
-    task = {"id": "review", "reason": "Review remains.", "surfaceIds": ["api"]}
+    task = pending_review("review", "Review remains.", "api")
     draft = saved_draft("coverage-scan", complete=True, surfaces=[surface], deferred=[task])
     source = worker(tmp_path, "first", draft)
     parent = copy.deepcopy(draft)
@@ -362,12 +370,7 @@ def test_aggregate_copies_reconcile_once_and_later_worker_closure_removes_pendin
 def test_parent_surface_fallback_uses_current_snapshot(
     tmp_path, old_label, selected_parent, complete_worker
 ):
-    current_surface = {
-        "id": "api",
-        "label": "Current review",
-        "disposition": "needs_follow_up",
-        "receiptRefs": ["artifacts/new.md"],
-    }
+    current_surface = review_surface("api", "Current review", receipts=["artifacts/new.md"])
     current = saved_draft("coverage-scan", complete=complete_worker, surfaces=[current_surface])
     source = worker(tmp_path, "first", current)
     output = Path(source["artifact_dir"])
@@ -383,22 +386,17 @@ def test_parent_surface_fallback_uses_current_snapshot(
             receiptRefs=[f"{output.relative_to(tmp_path).as_posix()}/artifacts/{name}.md"],
         )
         parent["coverage"]["deferred"] = [
-            {"id": "parent-review", "reason": "Review remains.", "surfaceIds": ["first/api"]}
+            pending_review("parent-review", "Review remains.", "first/api")
         ]
         parent_path = write_checkpoint(tmp_path / "checkpoints", parent, mtime_ns=modified + 100)
     if selected_parent:
         select_checkpoint(tmp_path, parent_path, mtime_ns=250)
     else:
         write_saved_parent(tmp_path, parent, 200)
-    template = tmp_path / "template"
-    template.mkdir()
-    write_completed_contract(template, "coverage-scan", tmp_path, target_kind="git_revision")
-    finding = json.loads((template / "findings.json").read_text())["findings"][0]
+    finding = archive_finding("src/extract.py")
     finding["provenance"].update(workerId="first", candidateId="api")
-    selected = write_checkpoint(
-        output / "checkpoints",
-        saved_draft("coverage-scan", complete=complete_worker, findings=[finding]),
-        mtime_ns=300,
+    selected = write_draft_checkpoint(
+        output, "coverage-scan", complete=complete_worker, findings=[finding], mtime_ns=300
     )
     select_checkpoint(output, selected, mtime_ns=400)
     originals = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
@@ -423,12 +421,9 @@ def test_fallback_receipts_take_precedence_over_historical_repairs(tmp_path, mod
     current_name, historical_name = (
         ("review.md", "Review.md") if reverse else ("Review.md", "review.md")
     )
-    surface = {
-        "id": "api",
-        "label": "Current review",
-        "disposition": "no_issue_found",
-        "receiptRefs": [f"artifacts/{current_name}"],
-    }
+    surface = review_surface(
+        "api", "Current review", "no_issue_found", receipts=[f"artifacts/{current_name}"]
+    )
     writer = {
         **surface,
         "id": "writer",
@@ -459,16 +454,14 @@ def test_fallback_receipts_take_precedence_over_historical_repairs(tmp_path, mod
     parent["coverage"]["deferred"] = (
         []
         if mode == "no-task"
-        else [{"id": "parent-review", "reason": "Review remains.", "surfaceIds": ["first/api"]}]
+        else [pending_review("parent-review", "Review remains.", "first/api")]
     )
     write_saved_parent(tmp_path, parent, 200)
     selected_surfaces = [writer]
     if mode == "worker-replacement":
         selected_surfaces.append({**surface, "receiptRefs": ["artifacts/replacement.md"]})
-    selected = write_checkpoint(
-        output / "checkpoints",
-        saved_draft("coverage-scan", complete=True, surfaces=selected_surfaces),
-        mtime_ns=300,
+    selected = write_draft_checkpoint(
+        output, "coverage-scan", complete=True, surfaces=selected_surfaces, mtime_ns=300
     )
     select_checkpoint(output, selected, mtime_ns=400)
     originals = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
@@ -519,7 +512,7 @@ def test_parent_only_task_keeps_link_to_recovered_anonymous_surface(
     if colliding_candidate:
         parent["coverage"]["surfaces"][0].update(id="first/api", workerId="first")
     parent["coverage"]["deferred"] = [
-        {"id": "parent-review", "reason": "Review remains.", "surfaceIds": [published_id]}
+        pending_review("parent-review", "Review remains.", published_id)
     ]
     write_saved_parent(tmp_path, parent, 200)
     originals = {p: p.read_bytes() for p in tmp_path.rglob("*.json")}
@@ -557,7 +550,7 @@ def test_parent_only_task_keeps_link_to_explicit_worker_surface(
     for index, surface in enumerate(parent["coverage"]["surfaces"]):
         surface.update(id=f"first/{surface.get('id', index)}", workerId="first")
     parent["coverage"]["deferred"] = [
-        {"id": "parent-review", "reason": "Review explicit surface.", "surfaceIds": ["first/api"]}
+        pending_review("parent-review", "Review explicit surface.", "first/api")
     ]
     write_saved_parent(tmp_path, parent, 200)
     expected_label = "Explicit"
@@ -641,7 +634,7 @@ def test_parent_task_retains_surface_omitted_by_selected_worker_checkpoint(
     ]
     if task_kind != "worker":
         parent["coverage"]["deferred"].append(
-            {"id": "parent-review", "reason": "Parent review remains.", "surfaceIds": [parent_id]}
+            pending_review("parent-review", "Parent review remains.", parent_id)
         )
     if colliding_parent:
         parent["coverage"]["surfaces"].append(
@@ -656,10 +649,8 @@ def test_parent_task_retains_surface_omitted_by_selected_worker_checkpoint(
         {**task, "reason": "Updated worker review." if updated else task["reason"]}
         for task in worker_tasks
     ]
-    selected = write_checkpoint(
-        output / "checkpoints",
-        saved_draft("coverage-scan", complete=True, deferred=selected_tasks),
-        mtime_ns=300,
+    selected = write_draft_checkpoint(
+        output, "coverage-scan", complete=True, deferred=selected_tasks, mtime_ns=300
     )
     select_checkpoint(output, selected, mtime_ns=400)
     originals = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
@@ -700,9 +691,7 @@ def test_parent_link_follows_updated_terminal_checkpoint(tmp_path, colliding_par
     select_checkpoint(output, checkpoint, mtime_ns=400)
     parent = copy.deepcopy(draft)
     parent["coverage"]["surfaces"][0].update(id="first/0", workerId="first")
-    parent["coverage"]["deferred"] = [
-        {"id": "parent-review", "reason": "Review remains.", "surfaceIds": ["first/0"]}
-    ]
+    parent["coverage"]["deferred"] = [pending_review("parent-review", "Review remains.", "first/0")]
     if colliding_parent:
         parent["coverage"]["surfaces"].append(
             {**surface, "id": "first/restored", "label": "Parent review", "workerId": "first"}
@@ -743,26 +732,16 @@ def test_parent_link_recovery_leaves_malformed_collection_for_existing_finalizer
     parent = copy.deepcopy(draft)
     parent["coverage"]["surfaces"][0].update(id="first/api", workerId="first")
     parent["coverage"]["deferred"] = [
-        {"id": "parent-review", "reason": "Review remains.", "surfaceIds": ["first/api"]}
+        pending_review("parent-review", "Review remains.", "first/api")
     ]
     write_checkpoint(tmp_path / "checkpoints", parent, mtime_ns=150)
     parent["coverage"]["surfaces"] = {"malformed": True}
     write_saved_parent(tmp_path, parent, 200)
     output = Path(source["artifact_dir"])
-    selected = write_checkpoint(
-        output / "checkpoints", saved_draft("coverage-scan", complete=True), mtime_ns=300
-    )
+    selected = write_draft_checkpoint(output, "coverage-scan", complete=True, mtime_ns=300)
     select_checkpoint(output, selected, mtime_ns=400)
 
-    result = saved.merge_saved_results(
-        tmp_path,
-        "coverage-scan",
-        saved_binding("deep_repository", repository="synthetic"),
-        [source],
-        [],
-        stopped=True,
-        reason="Source review stopped.",
-    )
+    result = merge_review(tmp_path, [source], [])
 
     assert result is not None
     assert result[2]["surfaces"] == {"malformed": True}
@@ -807,9 +786,7 @@ def test_parent_link_follows_replaced_anonymous_surface(tmp_path, repair_only):
         "coverage-scan",
         complete=True,
         surfaces=[surface],
-        deferred=[]
-        if repair_only
-        else [{"id": "review", "reason": "Review remains.", "surfaceIds": ["restored"]}],
+        deferred=[] if repair_only else [pending_review("review", "Review remains.", "restored")],
     )
     source = worker(tmp_path, "first", draft)
     output = Path(source["artifact_dir"])
@@ -825,7 +802,7 @@ def test_parent_link_follows_replaced_anonymous_surface(tmp_path, repair_only):
         ],
     )
     parent["coverage"]["deferred"] = [
-        {"id": "parent-review", "reason": "Parent review remains.", "surfaceIds": ["first/0"]}
+        pending_review("parent-review", "Parent review remains.", "first/0")
     ]
     write_saved_parent(tmp_path, parent, 200)
     replacement = saved_draft(
@@ -847,17 +824,7 @@ def test_parent_link_follows_replaced_anonymous_surface(tmp_path, repair_only):
     frozen = None
     for _ in range(2):
         warnings = []
-        result = saved.merge_saved_results(
-            tmp_path,
-            "coverage-scan",
-            saved_binding("deep_repository", repository="synthetic"),
-            [source],
-            warnings,
-            stopped=True,
-            reason="Source review stopped.",
-            project_worker_coverage=True,
-            frozen_source_digests=frozen,
-        )
+        result = merge_review(tmp_path, [source], warnings, project=True, frozen=frozen)
         assert result is not None
         frozen = result[0]["scan"]["preservedSources"]
         coverage = result[2]
@@ -885,9 +852,7 @@ def test_parent_only_task_links_to_surface_with_retained_finding_history(tmp_pat
     parent = copy.deepcopy(draft)
     parent["findings"] = [finding]
     parent["coverage"]["surfaces"][0].update(id="first/0", workerId="first")
-    parent["coverage"]["deferred"] = [
-        {"id": "parent-review", "reason": "Review remains.", "surfaceIds": ["first/0"]}
-    ]
+    parent["coverage"]["deferred"] = [pending_review("parent-review", "Review remains.", "first/0")]
     write_saved_parent(tmp_path, parent, 200)
     manifest = tmp_path / "scan-manifest.json"
     parent_manifest = json.loads((template / "scan-manifest.json").read_text())
@@ -954,9 +919,11 @@ def test_distinct_anonymous_checkpoint_tasks_survive_reconciliation_before_proje
     output = tmp_path / "artifacts/deep_discovery/workers/first/output"
     output.mkdir(parents=True)
     for index, reason in enumerate(["Review authentication.", "Review authorization."], 1):
-        checkpoint = write_checkpoint(
-            output / "checkpoints",
-            saved_draft("coverage-scan", deferred=[{"reason": reason}], complete=False),
+        checkpoint = write_draft_checkpoint(
+            output,
+            "coverage-scan",
+            deferred=[{"reason": reason}],
+            complete=False,
             mtime_ns=index * 100,
         )
     select_checkpoint(output, checkpoint, mtime_ns=250)
@@ -1008,9 +975,7 @@ def test_projection_normalizes_surface_receipts_without_rewriting_extension_meta
     draft = saved_draft(
         "coverage-scan",
         complete=True,
-        surfaces=[
-            {"id": "api", "label": "API", "disposition": "no_issue_found", "receiptRefs": [receipt]}
-        ],
+        surfaces=[review_surface("api", "API", "no_issue_found", receipts=[receipt])],
         deferred=[
             {
                 "id": "review",
@@ -1081,8 +1046,8 @@ def test_anonymous_worker_receipt_precedes_another_workers_rejection(tmp_path, e
     for receipt in (earlier_ref, ref):
         (tmp_path / receipt).write_text("Synthetic review.")
     output = Path(second["artifact_dir"])
-    checkpoint = write_checkpoint(
-        output / "checkpoints", saved_draft("coverage-scan", complete=True, surfaces=[rejection])
+    checkpoint = write_draft_checkpoint(
+        output, "coverage-scan", complete=True, surfaces=[rejection]
     )
     select_checkpoint(output, checkpoint, mtime_ns=200)
 
@@ -1108,12 +1073,7 @@ def test_current_receipt_spelling_precedes_historical_receipts(
     originals = {path: path.read_bytes() for path in directory.iterdir()}
 
     def surface(identity, disposition, receipt):
-        return {
-            "id": identity,
-            "label": identity,
-            "disposition": disposition,
-            "receiptRefs": [prefix + receipt],
-        }
+        return review_surface(identity, identity, disposition, receipts=[prefix + receipt])
 
     old = {
         "reviewState": {
@@ -1204,30 +1164,13 @@ def test_stopped_publication_recovers_unrepaired_failed_worker_receipt_collision
         "coverage-scan",
         complete=True,
         findings=[finding],
-        surfaces=[
-            {
-                "id": "reviewed",
-                "label": "Reviewed surface",
-                "disposition": "reported",
-                "receiptRefs": [],
-            }
-        ],
+        surfaces=[review_surface("reviewed", "Reviewed surface", "reported")],
     )
     accepted = worker(root, "accepted", good)
     accepted["status"] = "succeeded"
     failed_rows = [
-        {
-            "id": "reader",
-            "label": "Reader",
-            "disposition": "no_issue_found",
-            "receiptRefs": ["artifacts/review.md"],
-        },
-        {
-            "id": "writer",
-            "label": "Writer",
-            "disposition": "no_issue_found",
-            "receiptRefs": ["artifacts/Review.md"],
-        },
+        review_surface("reader", "Reader", "no_issue_found", receipts=["artifacts/review.md"]),
+        review_surface("writer", "Writer", "no_issue_found", receipts=["artifacts/Review.md"]),
     ]
     if not split_surfaces:
         failed_rows[0]["receiptRefs"].extend(failed_rows.pop()["receiptRefs"])
@@ -1342,19 +1285,9 @@ def test_historical_receipt_repair_preserves_valid_evidence(tmp_path, historical
 @pytest.mark.parametrize("projected_parent", [False, True])
 @pytest.mark.parametrize("reverse", [False, True])
 def test_superseded_surface_cannot_reserve_historical_receipt(tmp_path, projected_parent, reverse):
-    reader = {
-        "id": "reader",
-        "label": "Reader",
-        "disposition": "needs_follow_up",
-        "receiptRefs": ["artifacts/review.md"],
-    }
-    writer = {
-        "id": "writer",
-        "label": "Writer",
-        "disposition": "no_issue_found",
-        "receiptRefs": ["artifacts/Review.md"],
-    }
-    task = {"id": "review-reader", "reason": "Review reader.", "surfaceIds": ["reader"]}
+    reader = review_surface("reader", "Reader", receipts=["artifacts/review.md"])
+    writer = review_surface("writer", "Writer", "no_issue_found", receipts=["artifacts/Review.md"])
+    task = pending_review("review-reader", "Review reader.", "reader")
     surfaces = [writer, reader] if reverse else [reader, writer]
     old = saved_draft("coverage-scan", complete=True, surfaces=surfaces, deferred=[task])
     source = worker(tmp_path, "first", old)
@@ -1399,16 +1332,7 @@ def test_superseded_surface_cannot_reserve_historical_receipt(tmp_path, projecte
         write_saved_parent(tmp_path, parent, 200)
     originals = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
     warnings = []
-    documents = saved.merge_saved_results(
-        tmp_path,
-        "coverage-scan",
-        saved_binding("deep_repository", repository="synthetic"),
-        [source],
-        warnings,
-        stopped=True,
-        reason="Source review stopped.",
-        project_worker_coverage=not projected_parent,
-    )
+    documents = merge_review(tmp_path, [source], warnings, project=not projected_parent)
     assert documents is not None
     retained = documents[2]["surfaces"]
     assert [row["id"] for row in retained] == ["first/reader"]
@@ -1449,11 +1373,7 @@ def test_receipt_repair_preserves_selected_surface_metadata(tmp_path, scenario, 
                 },
             ),
         ]:
-            write_checkpoint(
-                output / "checkpoints",
-                saved_draft("coverage-scan", surfaces=[row]),
-                mtime_ns=modified,
-            )
+            write_draft_checkpoint(output, "coverage-scan", surfaces=[row], mtime_ns=modified)
         missing_path = output / "artifacts/missing.md"
     else:
         archive = output.parent / "attempts/attempt-01"
@@ -1496,16 +1416,7 @@ def test_receipt_repair_preserves_selected_surface_metadata(tmp_path, scenario, 
     if not missing:
         missing_path.write_text("Existing historical receipt.\n")
     originals = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
-    documents = saved.merge_saved_results(
-        tmp_path,
-        "coverage-scan",
-        saved_binding("deep_repository", repository="synthetic"),
-        [source],
-        [],
-        stopped=True,
-        reason="Source review stopped.",
-        project_worker_coverage=True,
-    )
+    documents = merge_review(tmp_path, [source], [], project=True)
     assert documents is not None
     surfaces = documents[2]["surfaces"]
     if scenario == "superseded-omitted":
@@ -1526,63 +1437,40 @@ def test_receipt_repair_preserves_selected_surface_metadata(tmp_path, scenario, 
 def test_receipt_repair_does_not_promote_unselected_checkpoint_evidence(
     tmp_path, accepted_receipt_exists
 ):
-    surface = {
-        "id": "api",
-        "label": "Accepted review",
-        "disposition": "no_issue_found",
-        "receiptRefs": ["artifacts/accepted.md"],
-    }
+    surface = review_surface(
+        "api", "Accepted review", "no_issue_found", receipts=["artifacts/accepted.md"]
+    )
     accepted = saved_draft("coverage-scan", complete=True, surfaces=[surface])
     source = worker(tmp_path, "first", accepted)
     output = Path(source["artifact_dir"])
     if accepted_receipt_exists:
         (output / "artifacts/accepted.md").write_text("Accepted receipt.\n")
-        write_checkpoint(
-            output / "checkpoints",
-            saved_draft(
-                "coverage-scan",
-                complete=True,
-                surfaces=[{**surface, "receiptRefs": ["artifacts/missing.md"]}],
-            ),
+        write_draft_checkpoint(
+            output,
+            "coverage-scan",
+            complete=True,
+            surfaces=[{**surface, "receiptRefs": ["artifacts/missing.md"]}],
             mtime_ns=100,
         )
     selected = write_checkpoint(output / "checkpoints", accepted, mtime_ns=200)
     select_checkpoint(output, selected, mtime_ns=250)
     os.utime(output / "result.json", ns=(300, 300))
     (output / "artifacts/unselected.md").write_text("Unselected interrupted observation.\n")
-    write_checkpoint(
-        output / "checkpoints",
-        saved_draft(
-            "coverage-scan",
-            complete=False,
-            surfaces=[{**surface, "receiptRefs": ["artifacts/unselected.md"]}],
-        ),
+    write_draft_checkpoint(
+        output,
+        "coverage-scan",
+        complete=False,
+        surfaces=[{**surface, "receiptRefs": ["artifacts/unselected.md"]}],
         mtime_ns=400,
     )
     originals = {path: path.read_bytes() for path in output.rglob("*") if path.is_file()}
     frozen = None
     for _ in range(2):
         warnings = []
-        documents = saved.merge_saved_results(
-            tmp_path,
-            "coverage-scan",
-            saved_binding("deep_repository", repository="synthetic"),
-            [source],
-            warnings,
-            stopped=True,
-            reason="Source review stopped.",
-            project_worker_coverage=True,
-            frozen_source_digests=frozen,
-        )
+        documents = merge_review(tmp_path, [source], warnings, project=True, frozen=frozen)
         assert documents is not None
         frozen = documents[0]["scan"]["preservedSources"]
-        finalizer._recover_unsealed_coverage(
-            documents[2],
-            Path(saved.__file__).resolve().parent.parent / "schemas",
-            tmp_path,
-            warnings,
-            [],
-        )
+        recover_coverage(tmp_path, documents[2], warnings)
         retained = documents[2]["surfaces"]
         assert len(retained) == 1
         assert retained[0]["disposition"] == (
@@ -1604,12 +1492,9 @@ def test_unselected_receipt_spelling_cannot_replace_accepted_evidence(
     accepted_name, unselected_name = (
         ("Review.md", "review.md") if reverse else ("review.md", "Review.md")
     )
-    surface = {
-        "id": "api",
-        "label": "Accepted review",
-        "disposition": "no_issue_found",
-        "receiptRefs": [f"artifacts/{accepted_name}"],
-    }
+    surface = review_surface(
+        "api", "Accepted review", "no_issue_found", receipts=[f"artifacts/{accepted_name}"]
+    )
     accepted = saved_draft("coverage-scan", complete=True, surfaces=[surface])
     source = worker(tmp_path, "first", accepted)
     output = Path(source["artifact_dir"])
@@ -1628,12 +1513,10 @@ def test_unselected_receipt_spelling_cannot_replace_accepted_evidence(
             "conflicting": unselected_name,
             "distinct": "distinct.md",
         }[checkpoint]
-        write_checkpoint(
-            output / "checkpoints",
-            saved_draft(
-                "coverage-scan",
-                surfaces=[{**surface, "receiptRefs": [f"artifacts/{name}"]}],
-            ),
+        write_draft_checkpoint(
+            output,
+            "coverage-scan",
+            surfaces=[{**surface, "receiptRefs": [f"artifacts/{name}"]}],
             mtime_ns=400,
         )
     originals = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
@@ -1658,12 +1541,9 @@ def test_unselected_receipt_spelling_cannot_replace_accepted_evidence(
 @pytest.mark.parametrize("unselected", [False, True])
 def test_non_emitted_repair_cannot_reserve_another_surfaces_receipt(tmp_path, unselected):
     def surface(identity, names):
-        return {
-            "id": identity,
-            "label": identity,
-            "disposition": "no_issue_found",
-            "receiptRefs": [f"artifacts/{name}" for name in names],
-        }
+        return review_surface(
+            identity, identity, "no_issue_found", receipts=[f"artifacts/{name}" for name in names]
+        )
 
     accepted = saved_draft(
         "coverage-scan",
@@ -1682,23 +1562,12 @@ def test_non_emitted_repair_cannot_reserve_another_surfaces_receipt(tmp_path, un
     select_checkpoint(output, checkpoint, mtime_ns=250)
     os.utime(output / "result.json", ns=(300, 300))
     if unselected:
-        write_checkpoint(
-            output / "checkpoints",
-            saved_draft("coverage-scan", surfaces=[surface("reader", ["review.md"])]),
-            mtime_ns=400,
+        write_draft_checkpoint(
+            output, "coverage-scan", surfaces=[surface("reader", ["review.md"])], mtime_ns=400
         )
     originals = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
     warnings = []
-    documents = saved.merge_saved_results(
-        tmp_path,
-        "coverage-scan",
-        saved_binding("deep_repository", repository="synthetic"),
-        [source],
-        warnings,
-        stopped=True,
-        reason="Source review stopped.",
-        project_worker_coverage=True,
-    )
+    documents = merge_review(tmp_path, [source], warnings, project=True)
     assert documents is not None
     surfaces = {row["id"]: row for row in documents[2]["surfaces"]}
     prefix = output.relative_to(tmp_path).as_posix() + "/artifacts/"
@@ -1730,12 +1599,12 @@ def test_only_recoverable_surface_metadata_reserves_receipt_spelling(tmp_path, r
     current_name, historical_name = (
         ("review.md", "Review.md") if reverse else ("Review.md", "review.md")
     )
-    selected = {
-        "id": "selected",
-        "label": "Current selected review",
-        "disposition": "no_issue_found",
-        "receiptRefs": [f"artifacts/{current_name}"],
-    }
+    selected = review_surface(
+        "selected",
+        "Current selected review",
+        "no_issue_found",
+        receipts=[f"artifacts/{current_name}"],
+    )
     if metadata in {"anonymous", "anonymous-candidate"}:
         selected.pop("id")
         if metadata == "anonymous-candidate":
@@ -1750,12 +1619,9 @@ def test_only_recoverable_surface_metadata_reserves_receipt_spelling(tmp_path, r
         selected["disposition"] = "unverified"
     elif metadata == "receipt":
         selected["receiptRefs"].append(7)
-    writer = {
-        "id": "writer",
-        "label": "Retained review",
-        "disposition": "no_issue_found",
-        "receiptRefs": ["artifacts/replacement.md"],
-    }
+    writer = review_surface(
+        "writer", "Retained review", "no_issue_found", receipts=["artifacts/replacement.md"]
+    )
     surfaces = [selected, writer]
     if metadata == "duplicate-id":
         surfaces.insert(
@@ -1784,24 +1650,9 @@ def test_only_recoverable_surface_metadata_reserves_receipt_spelling(tmp_path, r
     os.utime(output / "result.json", ns=(300, 300))
     originals = {p: p.read_bytes() for p in output.rglob("*") if p.is_file()}
     warnings = []
-    documents = saved.merge_saved_results(
-        tmp_path,
-        "coverage-scan",
-        saved_binding("deep_repository", repository="synthetic"),
-        [source],
-        warnings,
-        stopped=True,
-        reason="Source review stopped.",
-        project_worker_coverage=True,
-    )
+    documents = merge_review(tmp_path, [source], warnings, project=True)
     assert documents is not None
-    finalizer._recover_unsealed_coverage(
-        documents[2],
-        Path(saved.__file__).resolve().parent.parent / "schemas",
-        tmp_path,
-        warnings,
-        [],
-    )
+    recover_coverage(tmp_path, documents[2], warnings)
     rows = {row["id"]: row for row in documents[2]["surfaces"]}
     prefix = output.relative_to(tmp_path).as_posix() + "/artifacts/"
     expected = {prefix + "replacement.md"}
@@ -1816,25 +1667,15 @@ def test_only_recoverable_surface_metadata_reserves_receipt_spelling(tmp_path, r
             assert selected_row["disposition"] == "no_issue_found"
     assert set(rows["first/writer"]["receiptRefs"]) == expected
     replay_warnings = []
-    replay = saved.merge_saved_results(
+    replay = merge_review(
         tmp_path,
-        "coverage-scan",
-        saved_binding("deep_repository", repository="synthetic"),
         [source],
         replay_warnings,
-        stopped=True,
-        reason="Source review stopped.",
-        project_worker_coverage=True,
-        frozen_source_digests=documents[0]["scan"]["preservedSources"],
+        project=True,
+        frozen=documents[0]["scan"]["preservedSources"],
     )
     assert replay is not None
-    finalizer._recover_unsealed_coverage(
-        replay[2],
-        Path(saved.__file__).resolve().parent.parent / "schemas",
-        tmp_path,
-        replay_warnings,
-        [],
-    )
+    recover_coverage(tmp_path, replay[2], replay_warnings)
     assert replay[2] == documents[2]
     assert all(path.read_bytes() == content for path, content in originals.items())
 
@@ -1843,7 +1684,7 @@ def test_reducer_relinks_its_deferred_task_when_reusing_a_worker_result(tmp_path
     upstream = {"id": "route", "label": "Upstream", "disposition": "no_issue_found"}
     previous = {**upstream, "id": "upstream/route", "workerId": "upstream"}
     published = {**previous, "id": "local/upstream/route", "workerId": "local"}
-    task = {"id": "review", "reason": "Pending review", "surfaceIds": [published["id"]]}
+    task = pending_review("review", "Pending review", published["id"])
     first = worker(tmp_path, "upstream", saved_draft("coverage-scan", surfaces=[upstream]))
     local = worker(
         tmp_path,

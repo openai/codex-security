@@ -8,6 +8,7 @@ import { dependencyRecordHash } from "../src/dependency-attempt-store.js";
 import { dependencyCheckOutputSchema } from "../src/dependency-reachability.js";
 import { main, readSkillCommandOutput } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
+import { requestMetadata } from "./support/request-metadata.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
 async function* commandOutput(...events: object[]) {
@@ -143,6 +144,11 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
       async onCodex(args, output, _environment, prompt) {
         expect(args).toContain('model_provider="openrouter"');
         expect(args).toContain('model="fixture-model"');
+        expect(args[0]).toBe(output?.appServer ? "app-server" : "exec");
+        expect(requestMetadata(args)).toMatchObject({
+          codex_security_surface: "cli",
+          codex_security_command: "exploitability check",
+        });
         const payload = JSON.parse(
           (prompt ?? output?.appServer?.prompt)!.split("\n\n").at(-1)!,
         );

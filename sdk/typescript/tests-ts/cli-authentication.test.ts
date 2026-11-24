@@ -55,12 +55,19 @@ import {
   runCapturedCli,
 } from "./support/cli-run.js";
 
-const GATEWAY_CONFIGURATION = [
-  'model_provider="gateway"',
+const STORED_KEY_JSON = JSON.stringify({
+  auth_mode: "apikey",
+  OPENAI_API_KEY: "SYNTHETIC_STORED_KEY",
+});
+const GATEWAY_TABLE = [
   "[model_providers.gateway]",
   'name="Synthetic gateway"',
   'base_url="https://gateway.example.test/v1"',
   'wire_api="responses"',
+];
+const GATEWAY_CONFIGURATION = [
+  'model_provider="gateway"',
+  ...GATEWAY_TABLE,
   'env_key="GATEWAY_API_KEY"',
   "requires_openai_auth=true",
 ].join("\n");
@@ -80,14 +87,20 @@ afterEach(async () => {
   await rm(stateDirectory, { recursive: true, force: true });
 });
 
+function authEnvironment() {
+  return {
+    CODEX_HOME: join(stateDirectory, "ambient"),
+    CODEX_SECURITY_STATE_DIR: stateDirectory,
+  };
+}
+
 function dependencies(
   options: Parameters<typeof cliDependencies>[0] = {},
 ): ReturnType<typeof cliDependencies> {
   return cliDependencies({
     ...options,
     environment: {
-      CODEX_HOME: join(stateDirectory, "ambient"),
-      CODEX_SECURITY_STATE_DIR: stateDirectory,
+      ...authEnvironment(),
       ...options.environment,
     },
   });
@@ -1662,10 +1675,7 @@ describe("skill authentication", () => {
         overrides: { model_providers: { gateway: { auth: null } } },
         ambientConfig: [
           'model_provider="gateway"',
-          "[model_providers.gateway]",
-          'name="Synthetic gateway"',
-          'base_url="https://gateway.example.test/v1"',
-          'wire_api="responses"',
+          ...GATEWAY_TABLE,
           "[model_providers.gateway.auth]",
           'command="synthetic-auth"',
         ].join("\n"),
@@ -1777,10 +1787,7 @@ describe("skill authentication", () => {
         overrides: [],
         ambientConfig: [
           'model_provider="gateway"',
-          "[model_providers.gateway]",
-          'name="Synthetic gateway"',
-          'base_url="https://gateway.example.test/v1"',
-          'wire_api="responses"',
+          ...GATEWAY_TABLE,
           'env_key="GATEWAY_API_KEY"',
           "[mcp_servers.prototype]",
           'command="synthetic-mcp"',
@@ -1802,10 +1809,7 @@ describe("skill authentication", () => {
         overrides: ['model_providers.gateway.env_key="GATEWAY_API_KEY"'],
         ambientConfig: [
           'model_provider="gateway"',
-          "[model_providers.gateway]",
-          'name="Synthetic gateway"',
-          'base_url="https://gateway.example.test/v1"',
-          'wire_api="responses"',
+          ...GATEWAY_TABLE,
           'env_key="OLD_GATEWAY_API_KEY"',
         ].join("\n"),
         environment: hasSelectedKey
@@ -1848,10 +1852,7 @@ describe("skill authentication", () => {
           ...(profile ? ['profile="ambient"'] : []),
           'model_provider="gateway"',
           ...(profile ? ["[profiles.ambient]", 'model_provider="other"'] : []),
-          "[model_providers.gateway]",
-          'name="Synthetic gateway"',
-          'base_url="https://gateway.example.test/v1"',
-          'wire_api="responses"',
+          ...GATEWAY_TABLE,
           "requires_openai_auth=true",
           ...(profile
             ? [
@@ -1982,10 +1983,7 @@ describe("skill authentication", () => {
         ],
         ambientConfig: [
           'model_provider="gateway"',
-          "[model_providers.gateway]",
-          'name="Synthetic gateway"',
-          'base_url="https://gateway.example.test/v1"',
-          'wire_api="responses"',
+          ...GATEWAY_TABLE,
           'env_key="GATEWAY_API_KEY"',
           "[model_providers.gateway.http_headers]",
           'Authorization="Bearer SYNTHETIC_SELECTED_CREDENTIAL"',
@@ -2048,10 +2046,7 @@ describe("skill authentication", () => {
         overrides: ['model_provider="gateway"'],
         ambientConfig: [
           'model_provider="gateway"',
-          "[model_providers.gateway]",
-          'name="Synthetic gateway"',
-          'base_url="https://gateway.example.test/v1"',
-          'wire_api="responses"',
+          ...GATEWAY_TABLE,
           `env_key=${JSON.stringify(configuredEnvKey)}`,
           "requires_openai_auth=true",
         ].join("\n"),
@@ -2203,19 +2198,11 @@ describe("skill authentication", () => {
   );
 
   test("uses the login credential home for a skill launched with stored authentication", async () => {
-    const environment = {
-      CODEX_HOME: join(stateDirectory, "ambient"),
-      CODEX_SECURITY_STATE_DIR: stateDirectory,
-    };
+    const environment = authEnvironment();
     const credentialHome = await createCredentialHome();
-    await writeFile(
-      join(credentialHome, "auth.json"),
-      JSON.stringify({
-        auth_mode: "apikey",
-        OPENAI_API_KEY: "SYNTHETIC_STORED_KEY",
-      }),
-      { mode: 0o600 },
-    );
+    await writeFile(join(credentialHome, "auth.json"), STORED_KEY_JSON, {
+      mode: 0o600,
+    });
     const stdout = capture();
     const stderr = capture();
     const script = `console.log(JSON.stringify({type:"item.completed",item:{type:"agent_message",text:JSON.stringify({home:process.env.CODEX_HOME,state:process.env.CODEX_SECURITY_STATE_DIR})}}))`;
@@ -2295,14 +2282,13 @@ describe("skill authentication", () => {
           'env_key = "STALE_API_KEY"',
         ].join("\n"),
       );
-      const stored = JSON.stringify({
-        auth_mode: "apikey",
-        OPENAI_API_KEY: "SYNTHETIC_STORED_KEY",
-      });
-      await writeFile(join(credentialHome, "auth.json"), stored, {
+
+      await writeFile(join(credentialHome, "auth.json"), STORED_KEY_JSON, {
         mode: 0o600,
       });
-      await writeFile(join(ambientHome, "auth.json"), stored, { mode: 0o600 });
+      await writeFile(join(ambientHome, "auth.json"), STORED_KEY_JSON, {
+        mode: 0o600,
+      });
       if (auth === "chatgpt") {
         await writeFile(
           join(ambientHome, "config.toml"),
@@ -2428,10 +2414,10 @@ describe("skill authentication", () => {
           : ["command/exec", "experimentalFeature/list", "turn/start"]),
       ]);
       expect(await readFile(join(credentialHome, "auth.json"), "utf8")).toBe(
-        stored,
+        STORED_KEY_JSON,
       );
       expect(await readFile(join(ambientHome, "auth.json"), "utf8")).toBe(
-        stored,
+        STORED_KEY_JSON,
       );
       if (auth === "chatgpt") {
         expect(
@@ -2454,11 +2440,10 @@ describe("skill authentication", () => {
     };
     await mkdir(ambientHome);
     const credentialHome = join(stateDirectory, "codex-home");
-    const stored = JSON.stringify({
-      auth_mode: "apikey",
-      OPENAI_API_KEY: "SYNTHETIC_STORED_KEY",
+
+    await writeFile(join(ambientHome, "auth.json"), STORED_KEY_JSON, {
+      mode: 0o600,
     });
-    await writeFile(join(ambientHome, "auth.json"), stored, { mode: 0o600 });
     const run = () =>
       runCodexSkillCommand(
         [
@@ -2477,7 +2462,7 @@ describe("skill authentication", () => {
       );
     expect(await run()).toBe(0);
     expect(await readFile(join(credentialHome, "auth.json"), "utf8")).toBe(
-      stored,
+      STORED_KEY_JSON,
     );
     await rm(join(credentialHome, "auth.json"));
     await setCodexSecurityCredentialLogout(credentialHome, true);
@@ -2606,10 +2591,7 @@ describe("skill authentication", () => {
                 stderr: capture().stream,
               },
               { command: process.execPath },
-              {
-                CODEX_HOME: join(stateDirectory, "ambient"),
-                CODEX_SECURITY_STATE_DIR: stateDirectory,
-              },
+              authEnvironment(),
             ),
           ).rejects.toThrow(key);
         }
@@ -2644,10 +2626,7 @@ describe("skill authentication", () => {
             stderr: capture().stream,
           },
           { command: process.execPath, args: [script, calls] },
-          {
-            CODEX_HOME: join(stateDirectory, "ambient"),
-            CODEX_SECURITY_STATE_DIR: stateDirectory,
-          },
+          authEnvironment(),
         ),
       ).rejects.toThrow("No credentials were found");
       expect(await readJsonLines(calls)).toEqual([["login", "status"]]);
@@ -2657,10 +2636,7 @@ describe("skill authentication", () => {
   test.each(["ChatGPT", "an API key"])(
     "checks native login status without a credential file (%s)",
     async (credentialLabel) => {
-      const environment = {
-        CODEX_HOME: join(stateDirectory, "ambient"),
-        CODEX_SECURITY_STATE_DIR: stateDirectory,
-      };
+      const environment = authEnvironment();
       const home = join(stateDirectory, "codex-home");
       const preload = join(stateDirectory, "native-status.mjs");
       const marker = join(home, "status-home");
@@ -2734,14 +2710,9 @@ if (basename(process.argv[1] ?? "") === "login" && process.argv[2] === "status")
         alias,
         process.platform === "win32" ? "junction" : "dir",
       );
-      await writeFile(
-        join(ambientHome, "auth.json"),
-        JSON.stringify({
-          auth_mode: "apikey",
-          OPENAI_API_KEY: "SYNTHETIC_STORED_KEY",
-        }),
-        { mode: 0o600 },
-      );
+      await writeFile(join(ambientHome, "auth.json"), STORED_KEY_JSON, {
+        mode: 0o600,
+      });
       for (const target of [
         repository,
         alias,

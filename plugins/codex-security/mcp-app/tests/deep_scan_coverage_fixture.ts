@@ -1,3 +1,4 @@
+import { reviewSurface } from "./scan-draft-fixture.ts";
 import { fixturePython } from "./support/python.ts";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
@@ -250,7 +251,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
           : receiptSpelling === "scan"
             ? archivedRef
             : `${path.relative(run.scanDir, artifactDir).split(path.sep).join("/")}/artifacts/prior.txt`;
-    if (receiptOwnershipRetry) {
+    if (receiptOwnershipRetry || closeRetriedSurface) {
       await recordWorkerDraft(artifactDir, {
         complete: false,
         findings: [],
@@ -271,12 +272,12 @@ runpy.run_path(sys.argv[0], run_name="__main__")
             },
             ...(receiptOwnershipRetry === "unrelated"
               ? [
-                  {
-                    id: "closed",
-                    label: "Separate review",
-                    disposition: "needs_follow_up",
-                    receiptRefs: [receiptRef],
-                  },
+                  reviewSurface(
+                    "closed",
+                    "Separate review",
+                    "needs_follow_up",
+                    [receiptRef],
+                  ),
                 ]
               : []),
           ],
@@ -298,32 +299,6 @@ runpy.run_path(sys.argv[0], run_name="__main__")
                     ],
                   },
                 ],
-        },
-      });
-      return;
-    }
-    if (closeRetriedSurface) {
-      await recordWorkerDraft(artifactDir, {
-        complete: false,
-        findings: [],
-        reviewState: {
-          completeness: "partial",
-          surfaces: [
-            {
-              id: "current",
-              label: "Current review",
-              disposition: "needs_follow_up",
-              receiptRefs: [receiptRef],
-            },
-          ],
-          explicitExclusions: [],
-          deferred: [
-            {
-              id: "prior-gap",
-              reason: "Verify the earlier boundary.",
-              surfaceIds: ["current"],
-            },
-          ],
         },
       });
       return;
@@ -438,14 +413,12 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         reviewState: {
           completeness: status,
           surfaces: [
-            {
-              id: sameAttemptCloseout ? "first" : "later",
-              label: sameAttemptCloseout
-                ? "First checkpoint"
-                : "Later checkpoint",
-              disposition: "no_issue_found",
-              receiptRefs: [nextRef],
-            },
+            reviewSurface(
+              sameAttemptCloseout ? "first" : "later",
+              sameAttemptCloseout ? "First checkpoint" : "Later checkpoint",
+              "no_issue_found",
+              [nextRef],
+            ),
           ],
           explicitExclusions: [],
           deferred: [],
@@ -469,18 +442,15 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         { workerId: "untrusted-worker", attempt: 99, completeness: "complete" },
       ],
       surfaces: [
-        {
-          id: "shared-surface",
-          label: "Archive route",
-          disposition: pending ? "needs_follow_up" : "no_issue_found",
-          receiptRefs: ["artifacts/review.md"],
-        },
-        {
-          id: "shared-surface",
-          label: "Archive settings",
-          disposition: "no_issue_found",
-          receiptRefs: ["artifacts/review.md"],
-        },
+        reviewSurface(
+          "shared-surface",
+          "Archive route",
+          pending ? "needs_follow_up" : "no_issue_found",
+          ["artifacts/review.md"],
+        ),
+        reviewSurface("shared-surface", "Archive settings", "no_issue_found", [
+          "artifacts/review.md",
+        ]),
       ],
       explicitExclusions: [
         { pattern: "vendor/", reason: "External dependency." },
@@ -564,23 +534,16 @@ runpy.run_path(sys.argv[0], run_name="__main__")
     }
     const activeReceiptRef = closeRetriedSurface
       ? closureReceiptRef
-      : sameNamedNewSurface
+      : sameNamedNewSurface || sharedReceipt
         ? sharedRef
-        : sharedReceipt
-          ? sharedRef
-          : activeReceiptSpelling === "worker"
-            ? "artifacts/review.md"
-            : activeReceiptSpelling === "scan"
-              ? activeQualifiedRef
-              : activeQualifiedRef.replace("artifacts/", "artifacts/./");
+        : activeReceiptSpelling === "worker"
+          ? "artifacts/review.md"
+          : activeReceiptSpelling === "scan"
+            ? activeQualifiedRef
+            : activeQualifiedRef.replace("artifacts/", "artifacts/./");
     const resultPath = path.join(artifactDir, "result.json");
     if (receiptOwnershipRetry) {
-      const newRef = receiptCollision
-        ? receiptSpelling === "shared scan"
-          ? sharedRef
-          : "artifacts/prior.txt"
-        : "artifacts/review.md";
-      const local = path.join(artifactDir, newRef);
+      const local = path.join(artifactDir, closureReceiptRef);
       await writeReceipt(local, "Synthetic review evidence.\n");
       const current = {
         id: "current",
@@ -590,7 +553,7 @@ runpy.run_path(sys.argv[0], run_name="__main__")
         ...(receiptOwnershipRetry === "candidate"
           ? { candidateId: "prior-candidate" }
           : {}),
-        receiptRefs: [newRef],
+        receiptRefs: [closureReceiptRef],
       };
       if (receiptOwnershipRetry === "unrelated") {
         current.receiptRefs = [
@@ -608,12 +571,9 @@ runpy.run_path(sys.argv[0], run_name="__main__")
             current,
             ...(receiptOwnershipRetry === "unrelated"
               ? [
-                  {
-                    id: "closed",
-                    label: "Separate review",
-                    disposition: "no_issue_found",
-                    receiptRefs: [newRef],
-                  },
+                  reviewSurface("closed", "Separate review", "no_issue_found", [
+                    closureReceiptRef,
+                  ]),
                 ]
               : []),
           ],
