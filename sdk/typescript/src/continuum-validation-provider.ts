@@ -43,6 +43,8 @@ type Submission = ContinuumReceipt & {
 };
 
 class ScoreReadError extends Error {}
+const scoreTimeout =
+  "Continuum timed out waiting for an unambiguous linked issue score. Retry validation to refresh the score.";
 
 export type ContinuumAwsLauncher = (
   operation: string,
@@ -613,17 +615,33 @@ export class ContinuumValidationProvider implements ValidationProvider {
         results[index] = unavailableAssessment(this, error);
       pending = [];
     }
+    // A finished verdict remains useful if its linked score misses the deadline.
+    const waiting = new Map<number, ValidationProviderAssessment>();
     while (pending.length > 0 && !timedOut()) {
       await forEachPending(pending, async (index) => {
         const submission = submissions[index]!;
+        const previousIssue = submission.issueArn;
         try {
           const assessment = await this.#poll(
             supplied[index] as AnyFinding,
             submission,
             request,
+            timedOut,
           );
-          if (assessment) results[index] = assessment;
+          if (assessment && "waiting" in assessment)
+            waiting.set(index, assessment.waiting);
+          else {
+            waiting.delete(index);
+            if (assessment) results[index] = assessment;
+          }
         } catch (error) {
+          if (timedOut() && submission.issueArn === previousIssue) {
+            const partial = waiting.get(index);
+            if (partial) {
+              results[index] = partial;
+              return;
+            }
+          }
           results[index] = unavailableAssessment(this, error);
         }
       });
@@ -643,10 +661,12 @@ export class ContinuumValidationProvider implements ValidationProvider {
       }
     }
     for (const index of pending) {
-      results[index] = unavailableAssessment(
-        this,
-        `timed out waiting for Continuum validation evidence for ${submissions[index]!.findingId}`,
-      );
+      results[index] =
+        waiting.get(index) ??
+        unavailableAssessment(
+          this,
+          `timed out waiting for Continuum validation evidence for ${submissions[index]!.findingId}`,
+        );
     }
     return results.map((assessment, index) => {
       const item = supplied[index];
@@ -725,7 +745,12 @@ export class ContinuumValidationProvider implements ValidationProvider {
     finding: AnyFinding,
     submission: Submission,
     request: ContinuumRequest,
-  ): Promise<ValidationProviderAssessment | undefined> {
+    timedOut: () => boolean,
+  ): Promise<
+    | ValidationProviderAssessment
+    | { waiting: ValidationProviderAssessment }
+    | undefined
+  > {
     const { findingId, findingArn, submittedAt } = submission;
     const environmentArgs = ["--environment-id", this.#options.environmentId];
     const current = await request("get-code-finding", [
@@ -839,7 +864,9 @@ export class ContinuumValidationProvider implements ValidationProvider {
       }
     } catch (error) {
       if (!(error instanceof ScoreReadError)) throw error;
-      const reason = "Could not read the linked issue score.";
+      const reason = timedOut()
+        ? scoreTimeout
+        : "Could not read the linked issue score.";
       return this.#report(
         finding,
         submittedAt,
@@ -847,10 +874,12 @@ export class ContinuumValidationProvider implements ValidationProvider {
         { ...details, scoringPending: true },
       );
     }
-    return this.#report(finding, submittedAt, outcome, {
-      ...details,
-      scoringPending: true,
-    });
+    return {
+      waiting: this.#report(finding, submittedAt, outcome, {
+        ...details,
+        scoringPending: true,
+      }),
+    };
   }
 
   #report(
@@ -968,8 +997,7 @@ export class ContinuumValidationProvider implements ValidationProvider {
         ),
       );
     } else if (scoringPending) {
-      unavailable ??=
-        "No unambiguous linked issue score is available. Retry validation to refresh the score.";
+      unavailable ??= scoreTimeout;
       disposition = "deferred";
       reasons.push({ basis: "INFERRED", reason: unavailable });
       report.push(unavailable);
