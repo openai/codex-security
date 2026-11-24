@@ -88,7 +88,8 @@ export function resolveSkillAuthentication(
   }
   if (
     authentication.method === "stored_credentials" &&
-    isExternalModelProvider(provider)
+    isExternalModelProvider(provider) &&
+    (provider !== "standardcompute" || providerEnvKey !== undefined)
   ) {
     const externalProvider = EXTERNAL_CODEX_PROVIDERS[provider];
     throw new AuthenticationRequiredError(

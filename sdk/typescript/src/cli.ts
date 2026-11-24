@@ -246,7 +246,7 @@ import {
   scanModelProvider,
   scanProviderEnvKey,
   standardComputeCredentialSource,
-  standardComputeDefaults,
+  selectedProviderTable,
   writeCodexConfig,
   type CodexSecurityConfig,
   type ExternalModelProvider,
@@ -11392,7 +11392,7 @@ async function runSkill(
       : ((
           overrides["model_providers"] as Record<string, JsonObject> | undefined
         )?.[provider] ??
-        (isExternalModelProvider(provider)
+        (isExternalModelProvider(provider) && provider !== "standardcompute"
           ? EXTERNAL_CODEX_PROVIDERS[provider]
           : undefined)));
   const effectiveOverrides = resolveCommandAuthConfig(
@@ -14662,13 +14662,20 @@ export function parseCodexOverrides(
           : `--model must be a nonempty string when using --provider ${provider}`,
       );
     }
-    if (provider === "standardcompute") {
-      const preset = standardComputeDefaults(configured);
-      if (Object.keys(preset).length > 0)
-        return mergeCodexOverrides(
-          { model_providers: { [provider]: preset } },
-          result,
-        );
+    // Only an explicit preset selection may introduce its endpoint and key.
+    // Never combine either with an existing native provider table.
+    if (
+      provider === "standardcompute" &&
+      !selectedProviderTable(configured, provider)
+    ) {
+      return mergeCodexOverrides(
+        {
+          model_providers: {
+            [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
+          },
+        },
+        result,
+      );
     }
   }
   return result;

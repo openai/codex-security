@@ -6989,9 +6989,11 @@ export function scanAuthentication(
       verified: false,
     };
   }
-  const provider = isExternalModelProvider(modelProvider)
-    ? EXTERNAL_CODEX_PROVIDERS[modelProvider]
-    : undefined;
+  const provider =
+    isExternalModelProvider(modelProvider) &&
+    (modelProvider !== "standardcompute" || providerEnvKey !== undefined)
+      ? EXTERNAL_CODEX_PROVIDERS[modelProvider]
+      : undefined;
   const selectedKey = providerEnvKey ?? provider?.env_key;
   if (auth === "chatgpt" && provider === undefined) {
     if (selectedKey !== undefined)
@@ -7717,7 +7719,10 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
     if (Object.keys(sanitized).length > 0) result["profiles"] = sanitized;
   }
   const modelProvider = scanModelProvider(result);
-  if (isExternalModelProvider(modelProvider)) {
+  if (
+    isExternalModelProvider(modelProvider) &&
+    modelProvider !== "standardcompute"
+  ) {
     result["model_providers"] = {
       [modelProvider]: { ...EXTERNAL_CODEX_PROVIDERS[modelProvider] },
     };

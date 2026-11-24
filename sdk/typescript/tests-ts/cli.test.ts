@@ -3475,20 +3475,21 @@ describe("CLI", () => {
     const home = fixture.path;
     await writeFile(
       join(home, "review.config.toml"),
-      '[model_providers.standardcompute]\nbase_url="https://gateway.example.test/v1"\n[model_providers.standardcompute.env_http_headers]\nX-Gateway="SYNTHETIC_GATEWAY_KEY"\n',
+      '[model_providers.standardcompute]\nname="Native"\nbase_url="https://gateway.example.test/v1"\n[model_providers.standardcompute.env_http_headers]\nX-Gateway="SYNTHETIC_GATEWAY_KEY"\n',
     );
     const { runCli, stderr } = createCliTest(main);
-    for (const [override, environment, expectedKey] of [
-      ['profile="review"', { SYNTHETIC_GATEWAY_KEY: "synthetic" }, undefined],
+    for (const [override, environment, expectedKey, expectedUrl] of [
       [
-        'model_providers.standardcompute.http_headers.Authorization="Bearer synthetic"',
-        {},
+        'profile="review"',
+        { SYNTHETIC_GATEWAY_KEY: "synthetic" },
         undefined,
+        "https://gateway.example.test/v1",
       ],
       [
-        'model_providers.standardcompute.http_headers.X-Trace="synthetic"',
-        { STANDARDCOMPUTE_API_KEY: "synthetic" },
-        "STANDARDCOMPUTE_API_KEY",
+        'model_providers.standardcompute.env_key="OPENAI_API_KEY"',
+        { OPENAI_API_KEY: "synthetic" },
+        "OPENAI_API_KEY",
+        undefined,
       ],
     ] as const) {
       let selected: CodexSecurityConfig | undefined;
@@ -3509,11 +3510,11 @@ describe("CLI", () => {
       );
       expect(status, stderr.text()).toBe(0);
       const effective = await mergedCodexConfig(selected!, home);
-      expect(
-        (effective["model_providers"] as Record<string, JsonObject>)[
-          "standardcompute"
-        ]?.["env_key"],
-      ).toBe(expectedKey);
+      const native = (
+        effective["model_providers"] as Record<string, JsonObject>
+      )["standardcompute"];
+      expect(native?.["env_key"]).toBe(expectedKey);
+      expect(native?.["base_url"]).toBe(expectedUrl);
     }
   });
 

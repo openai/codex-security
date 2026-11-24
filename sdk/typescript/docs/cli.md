@@ -480,6 +480,12 @@ export STANDARDCOMPUTE_API_KEY="<your-standardcompute-api-key>"
 codex-security scan . --provider standardcompute --model StandardCompute
 ```
 
+The Standard Compute preset applies only to an explicit
+`--provider standardcompute` selection without an existing table of that name.
+If you configure a native table or use the SDK, supply the provider name,
+Responses endpoint and credential source together. The SDK leaves existing
+tables unchanged. Live scan completion remains unverified.
+
 For Opper, save this profile in `$CODEX_HOME/opper.config.toml`
 (default `~/.codex/opper.config.toml`). Opper requires `web_search = "disabled"`.
 

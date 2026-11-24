@@ -1900,7 +1900,7 @@ describe("semantic scan comparison", () => {
     expect(openai["OPENAI_API_KEY"]).toBe(source.OPENAI_API_KEY);
     await writeFile(
       join(home, "config.toml"),
-      'model_provider = "standardcompute"\n',
+      'model_provider = "standardcompute"\n[model_providers.standardcompute]\nenv_key = "STANDARDCOMPUTE_API_KEY"\n',
     );
     const selected = await comparisonEnvironment(source, account);
     expect(selected["STANDARDCOMPUTE_API_KEY"]).toBe(
