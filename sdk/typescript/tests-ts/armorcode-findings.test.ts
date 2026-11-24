@@ -180,128 +180,46 @@ describe("ArmorCode finding imports", () => {
     });
   });
 
-  test("normalizes repository file paths, empty location arrays, and CVE values without excluding valid rows", () => {
-    const result = normalizeArmorCodeFindings({
-      data: {
-        findings: [
-          {
-            id: 101,
-            title: "Windows SAST path and empty locations envelope",
-            severity: "MEDIUM",
-            locations: [],
-            filePath: "src\\auth\\query.ts",
-            lineNumber: 27,
-            cve: "CVE-2026-0101",
-          },
-          {
-            id: 102,
-            title: "Container runtime configuration",
-            severity: "HIGH",
-            locations: [
-              { path: "/etc/nginx/nginx.conf", line: 14 },
-              { path: "C:\\app\\web.config", line: 9 },
-              { path: "https://app.example/login", line: 1 },
-              { path: "../shared/base.yaml", line: 3 },
-              { path: "deploy/", line: 1 },
-              { path: "./deploy/nginx.yaml", line: 8 },
-            ],
-          },
-          {
-            id: 103,
-            title: "Blank and duplicate advisory entries",
-            severity: "LOW",
-            location: { file: "package.json", line: 4 },
-            cve: ["", "   ", "CVE-2026-0102", "CVE-2026-0102"],
-          },
+  test("prefers usable repository locations, retaining the original paths and CVEs", () => {
+    const rows = [
+      {
+        locations: [],
+        filePath: "src\\query.ts",
+        lineNumber: 27,
+        cve: "CVE-2026-0101",
+      },
+      {
+        locations: [
+          { path: "../outside" },
+          { path: "C:\\app\\web.config" },
+          { path: "./deploy/nginx.yaml", line: 8 },
         ],
+        filePath: "fallback.yaml",
+        cve: ["", "   ", "CVE-2026-0102", " CVE-2026-0102 "],
       },
-    });
-
-    expect(result.excluded).toEqual([]);
-    expect(result.findings).toHaveLength(3);
-    expect(result.findings[0]).toMatchObject({
-      source_finding_id: "101",
-      evidence: {
-        advisory_ids: ["CVE-2026-0101"],
-        locations: [{ path: "src/auth/query.ts", line: 27 }],
-        source_data: {
-          locations: [],
-          filePath: "src\\auth\\query.ts",
-        },
+      {
+        locations: [{ path: "/etc/service.conf" }],
+        location: { file: "src/handler.ts", startLine: 19 },
+        filePath: "fallback.ts",
       },
-    });
-    expect(result.findings[1]).toMatchObject({
-      source_finding_id: "102",
-      evidence: {
-        locations: [{ path: "deploy/nginx.yaml", line: 8 }],
+      {
+        locations: [{ path: "deploy/" }],
+        location: { path: "https://app.example/status" },
+        filePath: "src/status.ts",
       },
-    });
-    expect(result.findings[2]).toMatchObject({
-      source_finding_id: "103",
-      evidence: {
-        advisory_ids: ["CVE-2026-0102"],
-        locations: [{ path: "package.json", line: 4 }],
-      },
-    });
-  });
-
-  test("falls back to location or filePath when locations contain only non-repository paths", () => {
-    const result = normalizeArmorCodeFindings({
-      data: {
-        findings: [
-          {
-            id: 201,
-            title: "Service configuration exposure",
-            severity: "MEDIUM",
-            locations: [{ path: "/etc/service.conf" }],
-            filePath: "src/service.ts",
-            lineNumber: 11,
-          },
-          {
-            id: 202,
-            title: "Fallback through non-repository location object",
-            severity: "LOW",
-            locations: [{ path: "/var/log/app.log" }],
-            location: { path: "https://app.example/status" },
-            filePath: "src/status.ts",
-            lineNumber: 5,
-          },
-          {
-            id: 203,
-            title:
-              "Fallback to location object when locations are non-repository",
-            severity: "HIGH",
-            locations: [{ path: "/etc/service.conf" }],
-            location: { filePath: "src/handler.ts", startLine: 19 },
-          },
-        ],
-      },
-    });
-
-    expect(result.excluded).toEqual([]);
-    expect(result.findings).toHaveLength(3);
-    expect(result.findings[0]).toMatchObject({
-      source_finding_id: "201",
-      evidence: {
-        locations: [{ path: "src/service.ts", line: 11 }],
-        source_data: {
-          locations: [{ path: "/etc/service.conf" }],
-          filePath: "src/service.ts",
-          lineNumber: 11,
-        },
-      },
-    });
-    expect(result.findings[1]).toMatchObject({
-      source_finding_id: "202",
-      evidence: {
-        locations: [{ path: "src/status.ts", line: 5 }],
-      },
-    });
-    expect(result.findings[2]).toMatchObject({
-      source_finding_id: "203",
-      evidence: {
-        locations: [{ path: "src/handler.ts", line: 19 }],
-      },
-    });
+      { location: { path: "/etc/service.conf" } },
+    ].map((row, id) => ({ id, title: "Example", ...row }));
+    const { findings, excluded } = normalizeArmorCodeFindings(rows);
+    expect(excluded).toEqual([]);
+    expect(findings.map(({ evidence }) => evidence.source_data)).toEqual(rows);
+    expect(findings.map(({ evidence }) => evidence.locations)).toEqual([
+      [{ path: "src/query.ts", line: 27 }],
+      [{ path: "deploy/nginx.yaml", line: 8 }],
+      [{ path: "src/handler.ts", line: 19 }],
+      [{ path: "src/status.ts", line: null }],
+      [],
+    ]);
+    expect(findings[0]!.evidence.advisory_ids).toEqual(["CVE-2026-0101"]);
+    expect(findings[1]!.evidence.advisory_ids).toEqual(["CVE-2026-0102"]);
   });
 });

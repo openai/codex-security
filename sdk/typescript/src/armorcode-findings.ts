@@ -33,38 +33,30 @@ function stringValues(value: unknown): string[] {
   });
 }
 
-function normalizeLocations(
-  values: readonly unknown[],
-): NonNullable<ExternalFindingEvidence["locations"]> {
-  return values.flatMap((value) => {
-    if (!isRecord(value)) return [];
-    const path = repositoryFilePath(
-      value["path"] ?? value["filePath"] ?? value["file"],
-    );
-    if (!path) return [];
-    const line = value["line"] ?? value["startLine"] ?? value["lineNumber"];
-    return [
-      {
-        path,
-        line:
-          Number.isSafeInteger(line) && Number(line) > 0 ? Number(line) : null,
-      },
-    ];
-  });
-}
-
-function armorCodeLocations(
-  finding: ArmorCodeFinding,
-): NonNullable<ExternalFindingEvidence["locations"]> {
+function armorCodeLocations(finding: ArmorCodeFinding) {
   for (const candidates of [
     Array.isArray(finding["locations"]) ? finding["locations"] : [],
-    isRecord(finding["location"]) ? [finding["location"]] : [],
-    text(finding["filePath"])
-      ? [{ path: finding["filePath"], line: finding["lineNumber"] }]
-      : [],
+    [finding["location"]],
+    [{ path: finding["filePath"], line: finding["lineNumber"] }],
   ]) {
-    const locations = normalizeLocations(candidates);
-    if (locations.length > 0) return locations;
+    const locations = candidates.flatMap((value: unknown) => {
+      if (!isRecord(value)) return [];
+      const path = repositoryFilePath(
+        value["path"] ?? value["filePath"] ?? value["file"],
+      );
+      if (!path) return [];
+      const line = value["line"] ?? value["startLine"] ?? value["lineNumber"];
+      return [
+        {
+          path,
+          line:
+            Number.isSafeInteger(line) && Number(line) > 0
+              ? Number(line)
+              : null,
+        },
+      ];
+    });
+    if (locations.length) return locations;
   }
   return [];
 }
@@ -129,6 +121,8 @@ export function normalizeArmorCodeFindings(
           (value) =>
             typeof value === "string" && value.toLowerCase() === "sast",
         );
+      const cve = finding["cve"];
+      const advisories = strings(Array.isArray(cve) ? cve : [cve]);
       const ruleIds = stringValues(finding["ruleId"]);
       const weaknessIds = [
         ...stringValues(finding["cwe"]),
@@ -162,13 +156,7 @@ export function normalizeArmorCodeFindings(
         // ArmorCode's findingUrl remains available in source_data; url points
         // to the originating scanner when ArmorCode provides both links.
         url: text(finding["url"] ?? finding["findingUrl"]),
-        advisory_ids: [
-          ...new Set(
-            strings(
-              Array.isArray(finding["cve"]) ? finding["cve"] : [finding["cve"]],
-            ),
-          ),
-        ],
+        advisory_ids: [...new Set(advisories.map((id) => id.trim()))],
         locations: armorCodeLocations(finding),
         ...(typeof lastUpdated === "number" &&
           Number.isSafeInteger(lastUpdated) && {
