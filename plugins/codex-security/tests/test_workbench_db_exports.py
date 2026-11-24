@@ -638,6 +638,39 @@ def test_export_validation_checks_binding_without_writing_or_pinning_legacy_arti
     assert {path: path.read_bytes() for path in scan_dir.rglob("*") if path.is_file()} == remaining
 
 
+def test_sharing_returns_only_the_selected_sealed_finding(tmp_path: Path) -> None:
+    state_dir, target, scan_id, scan_dir = empty_target_scan(tmp_path)
+    write_completed_contract(scan_dir, scan_id, target)
+    path = scan_dir / "findings.json"
+    document = json.loads(path.read_text())
+    second = copy.deepcopy(document["findings"][0])
+    second["identity"]["anchor"] = "second-finding"
+    second["title"] = "A second finding"
+    document["findings"].append(second)
+    path.write_text(json.dumps(document))
+    scan_command(state_dir, "complete-scan", scan_id)
+    sealed = json.loads(path.read_text())
+    selected = sealed["findings"][1]
+    result = scan_command(
+        state_dir, "get-finding-for-sharing", scan_id, "--occurrence-id", selected["occurrenceId"]
+    )
+    assert result == {**sealed, "findings": [selected]}
+    missing = scan_command(
+        state_dir, "get-finding-for-sharing", scan_id, "--occurrence-id", "missing", check=False
+    )
+    assert missing["returncode"] != 0
+    path.write_text("{}")
+    tampered = scan_command(
+        state_dir,
+        "get-finding-for-sharing",
+        scan_id,
+        "--occurrence-id",
+        selected["occurrenceId"],
+        check=False,
+    )
+    assert "sealed artifact changed" in tampered["stderr"]
+
+
 def test_completed_findings_export_inside_scan_directory(tmp_path: Path) -> None:
     state_dir, target = empty_target_paths(tmp_path)
     source = target / "src/extract.py"

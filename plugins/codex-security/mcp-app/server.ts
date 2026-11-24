@@ -1869,6 +1869,23 @@ export function createCodexSecurityServer(): McpServer {
   );
 
   server.registerTool(
+    "get_codex_security_finding_for_sharing",
+    {
+      title: "Get Codex Security Finding for Sharing",
+      description:
+        "App-only. Return a single canonical finding from a verified saved scan. This does not share or upload it.",
+      inputSchema: { ...scanSchema, occurrenceId: occurrenceIdSchema },
+      annotations: writingAnnotations,
+      _meta: appMeta,
+    },
+    async ({ scanId, occurrenceId }) =>
+      scanActionResult(
+        await workbench("get-finding-for-sharing", { scanId, occurrenceId }),
+        "Loaded the selected saved finding.",
+      ),
+  );
+
+  server.registerTool(
     "export_codex_security_findings",
     {
       title: "Export Codex Security Artifacts",

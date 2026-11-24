@@ -76,6 +76,7 @@ function workbenchTimeout(args: string[]): number {
     "record-deep-scan-iteration",
     "complete-scan",
     "export-findings",
+    "get-finding-for-sharing",
     "finish-deep-scan",
     "finding-issues",
     "get-scan",

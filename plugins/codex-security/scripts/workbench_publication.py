@@ -301,6 +301,48 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
     return result
 
 
+def verified_findings(
+    db: Any, connection: sqlite3.Connection, scan: sqlite3.Row, scan_dir: Path
+) -> dict[str, Any]:
+    """Read findings using the same sealed-artifact checks for export and sharing."""
+    try:
+        manifest, document, _ = finalize_scan(
+            scan_dir, expected_coverage_mode=db.expected_coverage_mode(scan)
+        )
+    except ContractError as exc:
+        raise SystemExit(str(exc)) from exc
+    db.verify_manifest_binding(scan, manifest)
+    db.pin_legacy_manifest_digest(
+        connection, scan["id"], db.published_manifest_digest(scan_dir, manifest)
+    )
+    return document
+
+
+def get_finding_for_sharing(
+    db: Any, connection: sqlite3.Connection, args: argparse.Namespace
+) -> dict[str, Any]:
+    """Return only the selected finding from its verified, sealed scan."""
+    scan = db.require_scan(connection, args.scan_id)
+    if scan["status"] != "complete" and not (
+        scan["status"] == "failed" and scan["seal_manifest_digest"]
+    ):
+        raise SystemExit("Only completed or preserved findings can be shared.")
+    occurrence = db.require_occurrence(connection, args.occurrence_id)
+    if occurrence["scan_id"] != scan["id"]:
+        raise SystemExit("The finding does not belong to the selected scan.")
+    scan_dir = db.require_canonical_scan_directory(Path(scan["scan_dir"]))
+    db.require_recorded_manifest_digest(scan, scan_dir)
+    db.verify_manifest_binding(scan, db.read_json_object(scan_dir / db.ARTIFACTS["manifest"]))
+    document = verified_findings(db, connection, scan, scan_dir)
+    finding = next(
+        (item for item in document["findings"] if item["occurrenceId"] == args.occurrence_id),
+        None,
+    )
+    if finding is None or finding["findingId"] != occurrence["finding_id"]:
+        raise SystemExit("The finding does not match the sealed scan.")
+    return {**document, "findings": [finding]}
+
+
 def export_findings(
     db: Any,
     connection: sqlite3.Connection,
@@ -340,16 +382,7 @@ def export_findings(
             "scan": db.scan_result(connection, scan),
             "workspace": db.workspace_state(connection, scan["workspace_id"]),
         }
-    try:
-        manifest, findings_document, _ = finalize_scan(
-            scan_dir,
-            expected_coverage_mode=db.expected_coverage_mode(scan),
-        )
-    except ContractError as exc:
-        raise SystemExit(str(exc)) from exc
-    db.verify_manifest_binding(scan, manifest)
-    manifest_digest = db.published_manifest_digest(scan_dir, manifest)
-    db.pin_legacy_manifest_digest(connection, scan["id"], manifest_digest)
+    findings_document = verified_findings(db, connection, scan, scan_dir)
     if args.format == "json":
         path = db.artifact_path(scan_dir, db.ARTIFACTS["findings"], required=True)
     elif args.format == "sarif":
