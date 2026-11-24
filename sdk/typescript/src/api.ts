@@ -391,7 +391,7 @@ interface PreparedSession {
   modelProvider: unknown;
   providerEnvKey?: string;
   nativeProviderEnvironment?: Record<string, string>;
-  providerHeaderEnvironment?: Record<string, string>;
+  modelEnvironment: ProcessEnvironment;
   apiKey: string | null;
   scanEnvironment: ProcessEnvironment;
   authentication: ScanAuthentication;
@@ -1438,7 +1438,6 @@ export class CodexSecurity {
             ? {}
             : { CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase.path }),
         },
-        options.auth,
         git,
         undefined,
         [
@@ -1642,7 +1641,6 @@ export class CodexSecurity {
           CODEX_SECURITY_PLUGIN_ROOT: session.runtime.plugin.pluginRoot,
           CODEX_SECURITY_SURFACE: this.#surface,
         },
-        options.auth,
         undefined,
         undefined,
         [
@@ -2104,7 +2102,6 @@ export class CodexSecurity {
             ? {}
             : { CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase.path }),
         },
-        options.auth,
         undefined,
         policyCodexConfig(session.sessionConfig),
         [
@@ -2548,15 +2545,7 @@ export class CodexSecurity {
       checkOpen();
 
       const workerProviderEnvironment = {
-        ...session.providerHeaderEnvironment,
-        ...withoutOpenAiApiKeys(
-          selectedScanEnvironment(
-            runtime.environment,
-            options.auth,
-            modelProvider,
-            session.providerEnvKey,
-          ),
-        ),
+        ...withoutOpenAiApiKeys(session.modelEnvironment),
         ...(session.apiKey === null
           ? {}
           : {
@@ -3624,7 +3613,6 @@ export class CodexSecurity {
           session,
           { command: "scan", mode, pluginReadRoot: stagedPluginRoot },
           runtimePaths,
-          options.auth,
           git,
         );
       const threadOptions: ThreadOptions = {
@@ -4848,7 +4836,6 @@ export class CodexSecurity {
       pluginReadRoot?: string;
     },
     runtimePaths: Record<string, string>,
-    auth: ScanAuthMode = "auto",
     git?: InspectedExecutable,
     config?: JsonObject,
     configOverrides: string[] = [],
@@ -4991,30 +4978,18 @@ export class CodexSecurity {
       runtime,
       runtimeHome,
       python,
-      modelProvider,
       providerEnvKey,
       apiKey,
       sessionConfig,
     } = session;
-    const commandAuth = hasCommandAuth(sessionConfig);
     const environment: ProcessEnvironment = {
       ...environmentWithGit(
         pluginExecutionEnvironment(
           python,
-          withoutCodexHome(
-            selectedScanEnvironment(
-              commandAuth
-                ? withoutOpenAiApiKeys(runtime.environment)
-                : runtime.environment,
-              auth,
-              modelProvider,
-              providerEnvKey,
-            ),
-          ),
+          withoutCodexHome(session.modelEnvironment),
         ),
         git,
       ),
-      ...session.providerHeaderEnvironment,
       ...(providerEnvKey === undefined ? {} : { [providerEnvKey]: apiKey! }),
       CODEX_HOME: runtime.codexHome,
       ...pluginPaths,
@@ -5184,6 +5159,11 @@ export class CodexSecurity {
         preflightConfig,
         sessionConfig: preflightConfig,
         modelProvider: "host",
+        modelEnvironment: selectedScanEnvironment(
+          runtime.environment,
+          options.auth,
+          "host",
+        ),
         apiKey: null,
         scanEnvironment: environment,
         authentication: { method: "host", verified: false },
@@ -5403,6 +5383,20 @@ export class CodexSecurity {
           requestedConfig,
         ),
       );
+      // Parent and worker turns share the same credential selection. Keep
+      // explicitly mapped headers out of startup and workbench processes.
+      const modelEnvironment = {
+        ...selectedScanEnvironment(
+          commandAuth
+            ? withoutOpenAiApiKeys(runtime.environment)
+            : runtime.environment,
+          options.auth,
+          modelProvider,
+          providerEnvKey,
+        ),
+      };
+      for (const [key, value] of Object.entries(credentials))
+        if (isStandardComputeKey(key)) modelEnvironment[key] = value;
       return {
         runtime,
         safetyIdentifier: options.safetyIdentifier,
@@ -5417,13 +5411,7 @@ export class CodexSecurity {
           runtime.environment,
         ),
         providerEnvKey,
-        // Startup and workbench processes have no use for this credential.
-        // Restore an explicit header at launch even for command authentication.
-        providerHeaderEnvironment: Object.fromEntries(
-          Object.entries(credentials).filter(([key]) =>
-            isStandardComputeKey(key),
-          ),
-        ),
+        modelEnvironment,
         nativeProviderEnvironment:
           providerEnvKey !== undefined &&
           apiKey !== null &&
