@@ -8,12 +8,14 @@ from pathlib import Path
 
 import pytest
 from workbench_test_support import (
+    merge_interrupted,
     replay_saved_results,
     saved_binding,
     saved_discovery_worker,
     saved_draft,
     select_checkpoint,
     write_checkpoint,
+    write_draft_checkpoint,
 )
 
 SCAN_ID = "worker-closeout-scan"
@@ -49,18 +51,14 @@ def saved_worker(root: Path, worker_id: str, *, headed: bool = False):
 
 def parent_copy(root: Path, closures: list[dict]) -> None:
     observed(
-        write_checkpoint(
-            root / "checkpoints", saved_draft(SCAN_ID, closures=closures, complete=True)
-        ),
+        write_draft_checkpoint(root, SCAN_ID, closures=closures, complete=True),
         40,
     )
 
 
 def recover(root: Path, module, workers):
     binding = saved_binding("deep_repository", repository="synthetic")
-    documents = module.merge_saved_results(
-        root, SCAN_ID, binding, workers, [], stopped=True, reason="interrupted"
-    )
+    documents = merge_interrupted(module, root, SCAN_ID, binding, workers)
     assert documents is not None
     replay = replay_saved_results(module, documents, root, SCAN_ID, binding, workers)
     assert replay is not None
@@ -103,7 +101,7 @@ def test_worker_reopening_invalidates_its_copied_parent_closeout(
     if published:
         parent_copy(tmp_path, expected)
     reopened = {"id": "review-a", "reason": "New evidence requires another review."}
-    checkpoint = write_checkpoint(output / "checkpoints", saved_draft(SCAN_ID, deferred=[reopened]))
+    checkpoint = write_draft_checkpoint(output, SCAN_ID, deferred=[reopened])
     observed(checkpoint, reopened_at)
     head = select_checkpoint(output, checkpoint)
     observed(head, reopened_at)

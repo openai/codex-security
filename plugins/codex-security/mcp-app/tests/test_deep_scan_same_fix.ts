@@ -1,11 +1,8 @@
 import assert from "node:assert/strict";
-import { join } from "node:path";
 import { test } from "node:test";
 import { importSource } from "./import-module.ts";
 
-const { checkSameFix } = await importSource(
-  join(import.meta.dirname, "../src/deep-scan/same-fix.ts"),
-);
+const { checkSameFix } = await importSource("src/deep-scan/same-fix.ts");
 const records = [0, 1].map(() => ({
   locations: [["fixture.ts", 1, 1]],
   evidence: [["fixture.ts", "lookup(id)"]],

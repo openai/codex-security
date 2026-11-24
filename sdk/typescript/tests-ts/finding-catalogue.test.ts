@@ -1,3 +1,4 @@
+import { confirmedGroup, findingPair } from "./support/finding-matches.js";
 import { hash as cryptoHash } from "node:crypto";
 import type { TurnOptions } from "@openai/codex-sdk";
 import { describe, expect, test } from "bun:test";
@@ -30,14 +31,7 @@ const confirmedPair = (
   before: string,
   after: string,
 ): ScanComparisonResult => ({
-  matches: [
-    {
-      beforeOccurrenceIds: [before],
-      afterOccurrenceIds: [after],
-      confidence: "high",
-      reason: "The same synthetic control.",
-    },
-  ],
+  matches: [confirmedGroup([before], [after], "The same synthetic control.")],
   uncertain: [],
 });
 const finding = (
@@ -246,30 +240,29 @@ describe("finding catalogue", () => {
         matches:
           kind === "extended"
             ? [
-                {
-                  beforeOccurrenceIds: ["old"],
-                  afterOccurrenceIds: ["other"],
-                  confidence: "high",
-                  reason: "The same control was split.",
-                },
+                confirmedGroup(
+                  ["old"],
+                  ["other"],
+                  "The same control was split.",
+                ),
               ]
             : [],
         uncertain:
           kind === "omitted"
             ? [
-                {
-                  beforeOccurrenceId: "old",
-                  afterOccurrenceId: "new",
-                  reason: "The model omitted a confirmed alias.",
-                },
+                findingPair(
+                  "old",
+                  "new",
+                  "The model omitted a confirmed alias.",
+                ),
               ]
             : [],
         related: [
-          {
-            beforeOccurrenceId: "old",
-            afterOccurrenceId: kind === "omitted" ? "other" : "new",
-            reason: "A related control.",
-          },
+          findingPair(
+            "old",
+            kind === "omitted" ? "other" : "new",
+            "A related control.",
+          ),
         ],
       }));
       const result = await matchScanFindings(
@@ -298,11 +291,11 @@ describe("finding catalogue", () => {
     "reconciles known after identities with historical uncertainty set to %p",
     async (allowHistoricalUncertainty) => {
       const uncertain = [
-        {
-          beforeOccurrenceId: "other",
-          afterOccurrenceId: "new",
-          reason: "A different historical finding may share the control.",
-        },
+        findingPair(
+          "other",
+          "new",
+          "A different historical finding may share the control.",
+        ),
       ];
       const observed = conversation(() => ({ matches: [], uncertain }));
       const pending = matchScanFindings(
@@ -330,11 +323,11 @@ describe("finding catalogue", () => {
     const observed = conversation(() => ({
       matches: [],
       uncertain: [
-        {
-          beforeOccurrenceId: "old",
-          afterOccurrenceId: "other",
-          reason: "The earlier finding may instead match another result.",
-        },
+        findingPair(
+          "old",
+          "other",
+          "The earlier finding may instead match another result.",
+        ),
       ],
     }));
     await expect(
@@ -355,26 +348,24 @@ describe("finding catalogue", () => {
   test("extends semantic matches through aliases found only on the later side", async () => {
     const observed = conversation(() => ({
       matches: [
-        {
-          beforeOccurrenceIds: ["old-y"],
-          afterOccurrenceIds: ["new-b"],
-          confidence: "high",
-          reason: "The second route reaches the shared control.",
-        },
-        {
-          beforeOccurrenceIds: ["old-x"],
-          afterOccurrenceIds: ["new-a"],
-          confidence: "high",
-          reason: "The first route reaches the shared control.",
-        },
+        confirmedGroup(
+          ["old-y"],
+          ["new-b"],
+          "The second route reaches the shared control.",
+        ),
+        confirmedGroup(
+          ["old-x"],
+          ["new-a"],
+          "The first route reaches the shared control.",
+        ),
       ],
       uncertain: [],
       related: [
-        {
-          beforeOccurrenceId: "old-x",
-          afterOccurrenceId: "new-b",
-          reason: "The model did not reuse the confirmed alias.",
-        },
+        findingPair(
+          "old-x",
+          "new-b",
+          "The model did not reuse the confirmed alias.",
+        ),
       ],
     }));
     const result = await matchScanFindings(
@@ -446,14 +437,7 @@ describe("finding catalogue", () => {
         expect(prompt).toContain("CURRENT_EVIDENCE");
         expect(prompt).not.toContain("UNREQUESTED_EVIDENCE");
         return {
-          matches: [
-            {
-              beforeOccurrenceIds: ["old-b"],
-              afterOccurrenceIds: ["new"],
-              confidence: "high",
-              reason: "Same shared control.",
-            },
-          ],
+          matches: [confirmedGroup(["old-b"], ["new"], "Same shared control.")],
           uncertain: [],
         };
       });
@@ -490,12 +474,7 @@ describe("finding catalogue", () => {
     const input = { before: [finding("old")], after: [finding("new")] };
     const response = {
       matches: [
-        {
-          beforeOccurrenceIds: ["old"],
-          afterOccurrenceIds: ["new"],
-          confidence: "high" as const,
-          reason: "The same synthetic control.",
-        },
+        confirmedGroup(["old"], ["new"], "The same synthetic control."),
       ],
       uncertain: [],
     };
@@ -591,11 +570,11 @@ describe("finding catalogue", () => {
         before: [finding("old", { rootCause: "a".repeat(1_100_000) })],
         after: [finding("new", { rootCause: "b".repeat(1_100_000) })],
       };
-      const pair = {
-        beforeOccurrenceId: "old",
-        afterOccurrenceId: "new",
-        reason: "A synthetic decision made before reading the full evidence.",
-      };
+      const pair = findingPair(
+        "old",
+        "new",
+        "A synthetic decision made before reading the full evidence.",
+      );
       const proposed: ScanComparisonResult = {
         matches:
           decision === "match" ? confirmedPair("old", "new").matches : [],
@@ -605,11 +584,11 @@ describe("finding catalogue", () => {
       const revised: ScanComparisonResult = {
         ...empty,
         related: [
-          {
-            beforeOccurrenceId: "old",
-            afterOccurrenceId: "new",
-            reason: "The complete evidence identifies separate controls.",
-          },
+          findingPair(
+            "old",
+            "new",
+            "The complete evidence identifies separate controls.",
+          ),
         ],
       };
       const pieces: string[] = [];
@@ -1031,17 +1010,12 @@ describe("finding catalogue", () => {
       before: [finding("old")],
       after: [finding("same"), finding("different")],
     };
-    const match = {
-      beforeOccurrenceIds: ["old"],
-      afterOccurrenceIds: ["same"],
-      confidence: "high" as const,
-      reason: "Same control.",
-    };
-    const related = {
-      beforeOccurrenceId: "old",
-      afterOccurrenceId: "different",
-      reason: "Independent controls in the same component.",
-    };
+    const match = confirmedGroup(["old"], ["same"], "Same control.");
+    const related = findingPair(
+      "old",
+      "different",
+      "Independent controls in the same component.",
+    );
     const response = { matches: [match], uncertain: [], related: [related] };
     expect(
       await matchScanFindings(input, {
@@ -1065,25 +1039,16 @@ describe("finding catalogue", () => {
       before: ["a1", "a2", "b", "unmatched-before"].map((id) => finding(id)),
       after: ["x1", "x2", "y", "unmatched-after"].map((id) => finding(id)),
     };
-    const pair = (beforeOccurrenceId: string, afterOccurrenceId: string) => ({
-      beforeOccurrenceId,
-      afterOccurrenceId,
-      reason: "Separate synthetic controls.",
-    });
+    const pair = (beforeOccurrenceId: string, afterOccurrenceId: string) =>
+      findingPair(
+        beforeOccurrenceId,
+        afterOccurrenceId,
+        "Separate synthetic controls.",
+      );
     const response: ScanComparisonResult = {
       matches: [
-        {
-          beforeOccurrenceIds: ["a1", "a2"],
-          afterOccurrenceIds: ["x1", "x2"],
-          confidence: "high",
-          reason: "First synthetic control.",
-        },
-        {
-          beforeOccurrenceIds: ["b"],
-          afterOccurrenceIds: ["y"],
-          confidence: "high",
-          reason: "Second synthetic control.",
-        },
+        confirmedGroup(["a1", "a2"], ["x1", "x2"], "First synthetic control."),
+        confirmedGroup(["b"], ["y"], "Second synthetic control."),
       ],
       uncertain: [],
       related: [pair("a2", "y"), pair("unmatched-before", "unmatched-after")],

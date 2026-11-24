@@ -214,6 +214,59 @@ function insertSavedTarget(
   ).run(id, target, checkoutRoot);
 }
 
+function addDetachedWorktree(repository: string, linked: string) {
+  execFileSync("git", [
+    "-C",
+    repository,
+    "worktree",
+    "add",
+    "--quiet",
+    "--detach",
+    linked,
+    "HEAD",
+  ]);
+}
+
+function cloneWithMatchingOrigin(
+  repository: string,
+  clone: string,
+  origin: string,
+  cloneOrigin = origin,
+) {
+  execFileSync("git", ["clone", "--quiet", repository, clone]);
+  execFileSync("git", ["-C", repository, "remote", "add", "origin", origin]);
+  execFileSync("git", [
+    "-C",
+    clone,
+    "remote",
+    "set-url",
+    "origin",
+    cloneOrigin,
+  ]);
+}
+
+async function commitComponents(repository: string, ...dirs: string[]) {
+  for (const dir of dirs) {
+    const src = join(dir, "src");
+    await mkdir(src, { recursive: true });
+    await writeFile(join(src, "extract.py"), "# Synthetic component\n");
+  }
+  const message =
+    dirs.length === 1 ? "Synthetic component" : "Synthetic components";
+  execFileSync("git", ["-C", repository, "add", "."]);
+  execFileSync("git", [
+    "-C",
+    repository,
+    "-c",
+    "user.name=Synthetic Fixture",
+    "-c",
+    "user.email=fixture@example.test",
+    "commit",
+    "-qm",
+    message,
+  ]);
+}
+
 async function workspace(versioned = false) {
   const root = await temporaryDirectory();
   const repository = join(root, "repository");
@@ -859,17 +912,8 @@ test.skipIf(process.platform === "win32")(
       }),
     ).rejects.toThrow("PYTHON interpreter is unavailable or unusable");
     expect(existsSync(marker)).toBe(false);
-    const safe = await savedScanWorkbench("latest", {
-      ...options,
-      environment: { ...options.environment, PYTHON: f.python },
-    });
     expect(
-      (
-        await resolveCompletedScan("latest", {
-          currentDirectory: () => worktree,
-          runWorkbench: safe,
-        })
-      ).scanId,
+      await latestId(f, worktree, { ...options.environment, PYTHON: f.python }),
     ).toBe(f.second.scanId);
   },
 );
@@ -911,21 +955,14 @@ test.skipIf(process.platform === "win32")(
       pluginRoot: PLUGIN_ROOT,
       currentDirectory: caller,
     };
-    async function latest(configured?: string) {
-      const workbench = await savedScanWorkbench("latest", {
-        ...options,
-        environment: {
-          ...options.environment,
-          PYTHON: f.python,
-          CODEX_SECURITY_GIT: configured,
-        },
-      });
-      return resolveCompletedScan("latest", {
-        currentDirectory: () => caller,
-        runWorkbench: workbench,
+    function latest(configured?: string) {
+      return latestId(f, caller, {
+        ...options.environment,
+        PYTHON: f.python,
+        CODEX_SECURITY_GIT: configured,
       });
     }
-    expect((await latest()).scanId).toBe(f.second.scanId);
+    expect(await latest()).toBe(f.second.scanId);
     expect(existsSync(gitProbe)).toBe(false);
 
     async function getById() {
@@ -953,7 +990,7 @@ test.skipIf(process.platform === "win32")(
         "codex-security dedupe --scan SCAN_ID",
       );
     await expect(getById()).rejects.toThrow("absolute trusted interpreter");
-    expect((await latest(hostGit)).scanId).toBe(f.second.scanId);
+    expect(await latest(hostGit)).toBe(f.second.scanId);
     expect(existsSync(gitProbe)).toBe(false);
     expect(existsSync(pythonProbe)).toBe(false);
   },
@@ -1390,23 +1427,12 @@ test.skipIf(process.platform === "win32")(
   async () => {
     const f = await fixture(true);
     const clone = join(f.root, "other-clone");
-    execFileSync("git", ["clone", "--quiet", f.repository, clone]);
-    execFileSync("git", [
-      "-C",
+    cloneWithMatchingOrigin(
       f.repository,
-      "remote",
-      "add",
-      "origin",
-      "https://example.test/team/synthetic.git",
-    ]);
-    execFileSync("git", [
-      "-C",
       clone,
-      "remote",
-      "set-url",
-      "origin",
+      "https://example.test/team/synthetic.git",
       "git@example.test:team/synthetic.git",
-    ]);
+    );
     const executable = join(f.repository, "git");
     const marker = join(f.root, "git-probed");
     await writeFile(
@@ -1526,22 +1552,12 @@ for (const version of [1, 15]) {
     const f = await fixture();
     const state = await copyLegacyWorkbench(f, version);
     const database = join(state, "workbench.sqlite3");
-    const workbench = await savedScanWorkbench("latest", {
-      environment: {
+    expect(
+      await latestId(f, f.repository, {
         ...f.environment,
         CODEX_SECURITY_STATE_DIR: state,
         PYTHON: f.python,
-      },
-      pluginRoot: PLUGIN_ROOT,
-      currentDirectory: f.repository,
-    });
-    expect(
-      (
-        await resolveCompletedScan("latest", {
-          currentDirectory: () => f.repository,
-          runWorkbench: workbench,
-        })
-      ).scanId,
+      }),
     ).toBe(f.second.scanId);
     const db = new Database(database, { readwrite: true, create: false });
     try {
@@ -1584,27 +1600,14 @@ test("latest orders uncanceled scans by update, start time, and ID", async () =>
         scan.scanId,
       );
     }
-    async function latest() {
-      const workbench = await savedScanWorkbench("latest", {
-        environment: { ...f.environment, PYTHON: f.python },
-        pluginRoot: PLUGIN_ROOT,
-        currentDirectory: f.repository,
-      });
-      return (
-        await resolveCompletedScan("latest", {
-          currentDirectory: () => f.repository,
-          runWorkbench: workbench,
-        })
-      ).scanId;
-    }
-    expect(await latest()).toBe(newerScan.scanId);
+    expect(await latestId(f)).toBe(newerScan.scanId);
     // Either the scan or its progress may hold the latest update.
     db.query("UPDATE scans SET updated_at = ?").run(older);
     db.query("UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?").run(
       newer,
       newerScan.scanId,
     );
-    expect(await latest()).toBe(newerScan.scanId);
+    expect(await latestId(f)).toBe(newerScan.scanId);
     // Progress can outrank both the other scan's update and its later start.
     db.query(
       "UPDATE scans SET updated_at = ?, started_at = ? WHERE id = ?",
@@ -1613,11 +1616,11 @@ test("latest orders uncanceled scans by update, start time, and ID", async () =>
       "2026-08-01T01:00:00.000003Z",
       olderScan.scanId,
     );
-    expect(await latest()).toBe(olderScan.scanId);
+    expect(await latestId(f)).toBe(olderScan.scanId);
     db.query(
       "UPDATE scans SET canceled_at = '2099-01-02T00:00:00Z' WHERE id = ?",
     ).run(olderScan.scanId);
-    expect(await latest()).toBe(newerScan.scanId);
+    expect(await latestId(f)).toBe(newerScan.scanId);
     // Equal updates fall back to the scans' chronological start times.
     db.query(
       "UPDATE scans SET canceled_at = NULL, updated_at = '2099-01-01T00:00:00Z'",
@@ -1633,9 +1636,9 @@ test("latest orders uncanceled scans by update, start time, and ID", async () =>
       newer,
       newerScan.scanId,
     );
-    expect(await latest()).toBe(newerScan.scanId);
+    expect(await latestId(f)).toBe(newerScan.scanId);
     db.query("UPDATE scans SET started_at = ?").run(older);
-    expect(await latest()).toBe(olderScan.scanId);
+    expect(await latestId(f)).toBe(olderScan.scanId);
   } finally {
     db.close();
   }
@@ -1673,23 +1676,13 @@ for (const kind of ["non-Git", "symlinked"] as const) {
       } finally {
         db.close();
       }
-      const workbench = await savedScanWorkbench("latest", {
-        environment: {
+      expect(
+        await latestId(f, f.repository, {
           ...f.environment,
           PYTHON: f.python,
           PATH: other + delimiter + f.environment.PATH,
           TEST_GIT_PROBE: marker,
-        },
-        pluginRoot: PLUGIN_ROOT,
-        currentDirectory: f.repository,
-      });
-      expect(
-        (
-          await resolveCompletedScan("latest", {
-            currentDirectory: () => f.repository,
-            runWorkbench: workbench,
-          })
-        ).scanId,
+        }),
       ).toBe(f.first.scanId);
       expect(existsSync(marker)).toBe(false);
     },
@@ -1850,23 +1843,13 @@ test.skipIf(process.platform === "win32")(
     }
     await chmod(blocked, 0);
     try {
-      const workbench = await savedScanWorkbench("latest", {
-        environment: {
+      expect(
+        await latestId(f, f.repository, {
           ...f.environment,
           PYTHON: f.python,
           PATH: other + delimiter + f.environment.PATH,
           TEST_GIT_PROBE: marker,
-        },
-        pluginRoot: PLUGIN_ROOT,
-        currentDirectory: f.repository,
-      });
-      expect(
-        (
-          await resolveCompletedScan("latest", {
-            currentDirectory: () => f.repository,
-            runWorkbench: workbench,
-          })
-        ).scanId,
+        }),
       ).toBe(f.first.scanId);
       expect(existsSync(marker)).toBe(false);
     } finally {
@@ -1884,15 +1867,9 @@ test.each(["checkout", "git metadata"])(
       pluginRoot: PLUGIN_ROOT,
       currentDirectory: f.repository,
     };
-    const before = await savedScanWorkbench("latest", options);
-    expect(
-      (
-        await resolveCompletedScan("latest", {
-          currentDirectory: () => f.repository,
-          runWorkbench: before,
-        })
-      ).scanId,
-    ).toBe(f.second.scanId);
+    expect(await latestId(f, f.repository, options.environment)).toBe(
+      f.second.scanId,
+    );
     if (replacement === "checkout") {
       await rename(f.repository, join(f.root, "previous-checkout"));
       await mkdir(f.repository);
@@ -1913,107 +1890,60 @@ test.each(["checkout", "git metadata"])(
   },
 );
 
-async function latestFor(
+async function latestId(
   f: Awaited<ReturnType<typeof fixture>>,
-  directory: string,
+  directory = f.repository,
+  environment: NodeJS.ProcessEnv = { ...f.environment, PYTHON: f.python },
 ) {
   const workbench = await savedScanWorkbench("latest", {
-    environment: { ...f.environment, PYTHON: f.python },
+    environment,
     pluginRoot: PLUGIN_ROOT,
     currentDirectory: directory,
   });
-  return resolveCompletedScan("latest", {
+  const scan = await resolveCompletedScan("latest", {
     currentDirectory: () => directory,
     runWorkbench: workbench,
   });
+  return scan.scanId;
 }
 
 test.each(["checkout", "linked worktree", "same-origin clone"])(
   "latest keeps component scope when a sibling in a %s has newer history",
   async (kind) => {
     const f = await fixture(true);
-    for (const component of ["a", "b"]) {
-      await mkdir(join(f.repository, component, "src"), { recursive: true });
-      await writeFile(
-        join(f.repository, component, "src", "extract.py"),
-        "# Synthetic component\n",
-      );
-    }
-    execFileSync("git", ["-C", f.repository, "add", "."]);
-    execFileSync("git", [
-      "-C",
+    await commitComponents(
       f.repository,
-      "-c",
-      "user.name=Synthetic Fixture",
-      "-c",
-      "user.email=fixture@example.test",
-      "commit",
-      "-qm",
-      "Synthetic components",
-    ]);
+      join(f.repository, "a"),
+      join(f.repository, "b"),
+    );
     let other = f.repository;
     if (kind === "linked worktree") {
       other = join(f.root, "linked");
-      execFileSync("git", [
-        "-C",
-        f.repository,
-        "worktree",
-        "add",
-        "--quiet",
-        "--detach",
-        other,
-        "HEAD",
-      ]);
+      addDetachedWorktree(f.repository, other);
     } else if (kind === "same-origin clone") {
       other = join(f.root, "clone");
-      execFileSync("git", ["clone", "--quiet", f.repository, other]);
-      execFileSync("git", [
-        "-C",
+      cloneWithMatchingOrigin(
         f.repository,
-        "remote",
-        "add",
-        "origin",
-        "https://example.test/team/components.git",
-      ]);
-      execFileSync("git", [
-        "-C",
         other,
-        "remote",
-        "set-url",
-        "origin",
         "https://example.test/team/components.git",
-      ]);
+      );
     }
     const own = await f.scan("component-a", join(f.repository, "a"));
     await f.scan("component-b", join(other, "b"));
-    expect((await latestFor(f, join(f.repository, "a"))).scanId).toBe(
-      own.scanId,
-    );
+    expect(await latestId(f, join(f.repository, "a"))).toBe(own.scanId);
   },
 );
 
 test("latest continues to an older valid scan after rejecting a replaced same-origin clone", async () => {
   const f = await fixture(true);
   const clone = join(f.root, "clone");
-  execFileSync("git", ["clone", "--quiet", f.repository, clone]);
-  execFileSync("git", [
-    "-C",
+  cloneWithMatchingOrigin(
     f.repository,
-    "remote",
-    "add",
-    "origin",
-    "https://example.test/team/replacement.git",
-  ]);
-  execFileSync("git", [
-    "-C",
     clone,
-    "remote",
-    "set-url",
-    "origin",
     "https://example.test/team/replacement.git",
-  ]);
+  );
   const newest = await f.scan("clone-scan", clone);
-  expect((await latestFor(f, f.repository)).scanId).toBe(newest.scanId);
+  expect(await latestId(f)).toBe(newest.scanId);
   await rename(join(clone, ".git"), join(f.root, "previous-clone-metadata"));
   execFileSync("git", ["init", "--quiet", clone]);
   execFileSync("git", [
@@ -2024,7 +1954,7 @@ test("latest continues to an older valid scan after rejecting a replaced same-or
     "origin",
     "https://example.test/team/replacement.git",
   ]);
-  expect((await latestFor(f, f.repository)).scanId).toBe(f.second.scanId);
+  expect(await latestId(f)).toBe(f.second.scanId);
 });
 
 test.each(["removed", "recreated directory", "replacement Git checkout"])(
@@ -2032,16 +1962,7 @@ test.each(["removed", "recreated directory", "replacement Git checkout"])(
   async (state) => {
     const f = await fixture(true);
     const linked = join(f.root, "linked");
-    execFileSync("git", [
-      "-C",
-      f.repository,
-      "worktree",
-      "add",
-      "--quiet",
-      "--detach",
-      linked,
-      "HEAD",
-    ]);
+    addDetachedWorktree(f.repository, linked);
     const newest = await f.scan("removed-worktree-scan", linked);
     execFileSync("git", [
       "-C",
@@ -2068,7 +1989,7 @@ test.each(["removed", "recreated directory", "replacement Git checkout"])(
     } finally {
       db.close();
     }
-    expect((await latestFor(f, f.repository)).scanId).toBe(newest.scanId);
+    expect(await latestId(f)).toBe(newest.scanId);
     const hostGit = await inspectTrustedExecutable("git", f.environment, [
       f.repository,
       linked,
@@ -2103,7 +2024,7 @@ test.each([
   "latest orders sealed completion instants %s and %s",
   async (older, newer) => {
     const f = await fixture(false, { completedAt: [older, newer] });
-    expect((await latestFor(f, f.repository)).scanId).toBe(f.second.scanId);
+    expect(await latestId(f)).toBe(f.second.scanId);
   },
 );
 
@@ -2143,10 +2064,7 @@ test("latest preserves exact update ordering ahead of scan-ID ties", async () =>
     } finally {
       db.close();
     }
-    expect(
-      (await latestFor(f, f.repository)).scanId,
-      `timestamp case ${index}`,
-    ).toBe(newer!.scanId);
+    expect(await latestId(f), `timestamp case ${index}`).toBe(newer!.scanId);
   }
 });
 
@@ -2178,7 +2096,7 @@ test.each([false, true])(
     } finally {
       db.close();
     }
-    expect((await latestFor(f, f.repository)).scanId).toBe(f.first.scanId);
+    expect(await latestId(f)).toBe(f.first.scanId);
   },
 );
 
@@ -2205,7 +2123,7 @@ test.each(["not-a-timestamp", `2099-01-01T00:00:00.${"0".repeat(100_000)}1Z`])(
     } finally {
       db.close();
     }
-    expect((await latestFor(f, f.repository)).scanId).toBe(f.second.scanId);
+    expect(await latestId(f)).toBe(f.second.scanId);
   },
 );
 
@@ -2235,17 +2153,13 @@ test("latest ties equivalent instants by start time, then binary scan ID", async
           "UPDATE scan_progress SET updated_at = ? WHERE scan_id = ?",
         ).run(timestamp, scan.scanId);
       }
-      expect(
-        (await latestFor(f, f.repository)).scanId,
-        `equivalent case ${index}`,
-      ).toBe(first!.scanId);
+      expect(await latestId(f), `equivalent case ${index}`).toBe(first!.scanId);
       db.query(
         "UPDATE scans SET started_at = '2098-01-01T00:00:00.0001Z' WHERE id = ?",
       ).run(second!.scanId);
-      expect(
-        (await latestFor(f, f.repository)).scanId,
-        `start-time case ${index}`,
-      ).toBe(second!.scanId);
+      expect(await latestId(f), `start-time case ${index}`).toBe(
+        second!.scanId,
+      );
     } finally {
       db.close();
     }
@@ -2262,27 +2176,7 @@ for (const removedComponent of [false, true]) {
       const target = removedComponent
         ? join(unrelated, "component")
         : unrelated;
-      if (removedComponent) {
-        await mkdir(join(target, "src"), { recursive: true });
-        await writeFile(
-          join(target, "src", "extract.py"),
-          "# Synthetic component\n",
-        );
-      }
-      if (removedComponent) {
-        execFileSync("git", ["-C", unrelated, "add", "."]);
-        execFileSync("git", [
-          "-C",
-          unrelated,
-          "-c",
-          "user.name=Synthetic Fixture",
-          "-c",
-          "user.email=fixture@example.test",
-          "commit",
-          "-qm",
-          "Synthetic component",
-        ]);
-      }
+      if (removedComponent) await commitComponents(unrelated, target);
       await f.scan("unrelated-scan", target);
       if (removedComponent) await rm(target, { recursive: true });
       const interpreter = join(unrelated, "python");
@@ -2291,18 +2185,11 @@ for (const removedComponent of [false, true]) {
         `#!/bin/sh\nexec ${JSON.stringify(f.python)} "$@"\n`,
         { mode: 0o700 },
       );
-      const workbench = await savedScanWorkbench("latest", {
-        environment: { ...f.environment, PYTHON: interpreter },
-        pluginRoot: PLUGIN_ROOT,
-        currentDirectory: f.repository,
-      });
       expect(
-        (
-          await resolveCompletedScan("latest", {
-            currentDirectory: () => f.repository,
-            runWorkbench: workbench,
-          })
-        ).scanId,
+        await latestId(f, f.repository, {
+          ...f.environment,
+          PYTHON: interpreter,
+        }),
       ).toBe(f.second.scanId);
     },
   );
@@ -2313,34 +2200,9 @@ test.skipIf(process.platform === "win32")(
   async () => {
     const f = await fixture(true);
     const component = join(f.repository, "component");
-    await mkdir(join(component, "src"), { recursive: true });
-    await writeFile(
-      join(component, "src", "extract.py"),
-      "# Synthetic component\n",
-    );
-    execFileSync("git", ["-C", f.repository, "add", "."]);
-    execFileSync("git", [
-      "-C",
-      f.repository,
-      "-c",
-      "user.name=Synthetic Fixture",
-      "-c",
-      "user.email=fixture@example.test",
-      "commit",
-      "-qm",
-      "Synthetic component",
-    ]);
+    await commitComponents(f.repository, component);
     const linked = join(f.root, "linked");
-    execFileSync("git", [
-      "-C",
-      f.repository,
-      "worktree",
-      "add",
-      "--quiet",
-      "--detach",
-      linked,
-      "HEAD",
-    ]);
+    addDetachedWorktree(f.repository, linked);
     await f.scan("removed-component", component);
     await rm(component, { recursive: true });
     const interpreter = join(f.repository, "python");
@@ -2379,23 +2241,13 @@ test.skipIf(process.platform === "win32").each([undefined, "python3"])(
       `#!/bin/sh\nprintf probed > ${JSON.stringify(marker)}\nexec ${JSON.stringify(f.python)} "$@"\n`,
       { mode: 0o700 },
     );
-    const workbench = await savedScanWorkbench("latest", {
-      environment: {
+    expect(
+      await latestId(f, f.repository, {
         ...f.environment,
         PATH: `${unrelated}${delimiter}${f.environment.PATH ?? ""}`,
         XDG_CACHE_HOME: join(f.root, "empty-runtime-cache"),
         ...(namedPython === undefined ? {} : { PYTHON: namedPython }),
-      },
-      pluginRoot: PLUGIN_ROOT,
-      currentDirectory: f.repository,
-    });
-    expect(
-      (
-        await resolveCompletedScan("latest", {
-          currentDirectory: () => f.repository,
-          runWorkbench: workbench,
-        })
-      ).scanId,
+      }),
     ).toBe(f.second.scanId);
     expect(existsSync(marker)).toBe(false);
   },

@@ -29,3 +29,15 @@ export function runTestInSubprocess(
   expect(result.status, result.stderr || result.error?.message).toBe(0);
   return true;
 }
+
+export async function buildNodeModule(entrypoint: string, outdir: string) {
+  const built = await Bun.build({
+    entrypoints: [entrypoint],
+    outdir,
+    target: "node",
+    format: "esm",
+    packages: "external",
+  });
+  expect(built.success).toBe(true);
+  return built.outputs[0]!.path;
+}

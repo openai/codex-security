@@ -310,14 +310,14 @@ describe("CLI", () => {
       const result = scanResultAt(scanDir, ["high", "low"]);
       const knowledgePath = join(root, "synthetic-policy.md");
       await writeFile(knowledgePath, "Synthetic validation policy.");
-      const stdout = capture();
+      const stdout = captureCli(main, "stdout");
       const lifecycle: string[] = [];
       const validated: unknown[] = [];
       const documents: string[] = [];
       let knowledgeSnapshot: ScanOptions["knowledgeBaseSnapshot"];
       let scanSignal: AbortSignal | undefined;
       expect(
-        await main(
+        await stdout.run(
           [
             "scan",
             ".",
@@ -330,8 +330,6 @@ describe("CLI", () => {
             "high",
             "--json",
           ],
-          stdout.stream,
-          capture().stream,
           dependencies({
             result,
             currentDirectory: repository,
@@ -410,12 +408,10 @@ describe("CLI", () => {
       } else {
         await symlink(outsidePath, reportPath);
       }
-      const stdout = capture();
+      const stdout = captureCli(main, "stdout");
       expect(
-        await main(
+        await stdout.run(
           ["scan", ".", "--validate", "--json"],
-          stdout.stream,
-          capture().stream,
           dependencies({
             result: scanResultAt(scanDir, ["high"]),
             currentDirectory: await realpath(tmpdir()),
@@ -478,12 +474,10 @@ describe("CLI", () => {
   test("skips standalone model calls when the scan has no findings", async () => {
     const repository = await realpath(tmpdir());
     let validations = 0;
-    const stdout = capture();
+    const stdout = captureCli(main, "stdout");
     expect(
-      await main(
+      await stdout.run(
         ["scan", ".", "--validate", "--json"],
-        stdout.stream,
-        capture().stream,
         dependencies({
           currentDirectory: repository,
           onWorkbench: async (args) => {
@@ -776,9 +770,9 @@ describe("CLI", () => {
     });
     try {
       for (let attempt = 0; attempt < 2; attempt += 1) {
-        const stdout = capture();
+        const stdout = captureCli(main, "stdout");
         expect(
-          await main(
+          await stdout.run(
             [
               "scan",
               ".",
@@ -787,8 +781,6 @@ describe("CLI", () => {
               "--validate",
               "--json",
             ],
-            stdout.stream,
-            capture().stream,
             deps,
           ),
         ).toBe(0);
@@ -808,12 +800,10 @@ describe("CLI", () => {
 
   test("rejects a cost limit the standalone validator cannot enforce", async () => {
     let started = false;
-    const stderr = capture();
+    const stderr = captureCli(main, "stderr");
     expect(
-      await main(
+      await stderr.run(
         ["scan", ".", "--validate", "--max-cost", "1", "--json"],
-        capture().stream,
-        stderr.stream,
         dependencies({ onRun: () => (started = true) }),
       ),
     ).toBe(2);
@@ -1718,8 +1708,7 @@ describe("CLI", () => {
     const model = "synthetic-future-model";
     const effort = "synthetic-future-effort";
     const message = `Provider does not support reasoning effort '${effort}' for model '${model}'.`;
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
     const deps = dependencies();
     const run = mock(async () => {
       throw new CodexSecurityError(message);
@@ -1730,10 +1719,8 @@ describe("CLI", () => {
     deps.createSecurity = createSecurity;
 
     expect(
-      await main(
+      await runCli(
         ["scan", ".", "--model", model, "--effort", effort, "--json"],
-        stdout.stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(2);
@@ -4279,9 +4266,9 @@ describe("CLI", () => {
         'model_reasoning_effort = "high"\n',
       );
       for (const profile of ["review", "missing"]) {
-        const missingModel = capture();
+        const missingModel = captureCli(main, "stderr");
         expect(
-          await main(
+          await missingModel.run(
             [
               "scan",
               ".",
@@ -4291,8 +4278,6 @@ describe("CLI", () => {
               `profile="${profile}"`,
               "--json",
             ],
-            capture().stream,
-            missingModel.stream,
             dependencies({
               environment: {
                 CODEX_HOME: home,
@@ -4319,7 +4304,7 @@ describe("CLI", () => {
       );
       for (const explicit of [undefined, 4321]) {
         let selected: CodexSecurityConfig | undefined;
-        const stderr = capture();
+        const stderr = captureCli(main, "stderr");
         const args = [
           "scan",
           ".",
@@ -4336,10 +4321,8 @@ describe("CLI", () => {
               ]),
         ];
         expect(
-          await main(
+          await stderr.run(
             args,
-            capture().stream,
-            stderr.stream,
             dependencies({
               environment: { CODEX_HOME: home },
               onConfig: (config) => {
@@ -4391,9 +4374,9 @@ describe("CLI", () => {
               .join(""),
         );
         let selected: CodexSecurityConfig | undefined;
-        const stderr = capture();
+        const stderr = captureCli(main, "stderr");
         expect(
-          await main(
+          await stderr.run(
             [
               "scan",
               ".",
@@ -4403,8 +4386,6 @@ describe("CLI", () => {
               'profile="review"',
               "--json",
             ],
-            capture().stream,
-            stderr.stream,
             dependencies({
               environment: {
                 CODEX_HOME: home,
@@ -5396,14 +5377,13 @@ describe("CLI", () => {
       for (const format of ["json", "jsonl"]) {
         for (const paginated of [false, true]) {
           const result = fakeResult(["high"], completeness);
-          const stdout = capture();
-          const stderr = capture();
+          const { stdout, stderr, runCli } = createCliTest(main);
           const deps = scanDependencies(async (_repository, options) => {
             options?.onWarning?.(warning, { kind: "target_changed" });
             return result;
           });
           expect(
-            await main(
+            await runCli(
               [
                 "scan",
                 "--format",
@@ -5413,8 +5393,6 @@ describe("CLI", () => {
                 "high",
                 ...(paginated ? ["--token-limit", "1"] : []),
               ],
-              stdout.stream,
-              stderr.stream,
               deps,
             ),
           ).toBe(2);
