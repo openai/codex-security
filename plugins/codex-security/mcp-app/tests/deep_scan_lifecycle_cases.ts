@@ -6,7 +6,6 @@ import {
   coordinatorFixture,
   startCoordinator,
   DeepScanCoordinatorRegistry,
-  eventually,
   FakeExecutor,
   FakeStore,
   pausePoint,
@@ -62,28 +61,24 @@ export async function testDeepScanLifecycle(context: TestContext) {
         stopAfterNoNew: 2,
         maxDiscoveryRuns: 2,
       });
-      const second = pausePoint();
       const executor = new FakeExecutor({
         discoveryCandidateId: "saved-candidate",
-        discoveryGates: { "discovery-0002": second.pause() },
       });
       const coordinator = startCoordinator(fixture, store, executor);
-      try {
-        await eventually(() => executor.discoveryCalls === 2);
-        // A cancellation can arrive during bootstrap, before the server waits.
-        const signal = AbortSignal.abort(reason);
-        const waiter = parent
+      await store.iterationCommitted.promise;
+      // Cancellation can arrive before the server starts waiting.
+      const signal = AbortSignal.abort(reason);
+      await assert.rejects(
+        parent
           ? coordinator.waitForInitialRequest(signal)
-          : coordinator.wait(signal);
-        await assert.rejects(waiter, { name: "AbortError", cause: reason });
-      } finally {
-        second.release();
-      }
+          : coordinator.wait(signal),
+        { name: "AbortError", cause: reason },
+      );
       const stopped = await coordinator.settled();
       assert.equal(stopped.status, failed ? "failed" : "succeeded");
       assert.deepEqual(store.failureMessages, failed ? [refusal] : []);
       assert.equal(store.iterations.length, failed ? 1 : 2);
-      assert.equal(executor.discoveryCalls, 2);
+      assert.equal(executor.discoveryCalls, failed ? 1 : 2);
     }
   }
 
