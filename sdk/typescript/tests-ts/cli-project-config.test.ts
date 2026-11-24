@@ -277,20 +277,20 @@ test.each(
 test.each([
   {
     source: "project",
-    settings: { model_provider: "openrouter" },
     profile: 'model = "synthetic-file-model"\n',
     model: "synthetic-file-model",
   },
   {
     source: "native file only",
-    settings: {},
     profile: 'model_provider = "openrouter"\n',
     model: scanModel(DEFAULT_CODEX_CONFIG),
   },
 ])(
   "info and dry-run resolve the model for a provider selected by $source",
-  async ({ settings, profile, model }) => {
-    const input = await fixture({ codex: { profile: "review", ...settings } });
+  async ({ source, profile, model }) => {
+    const codex: JsonObject = { profile: "review" };
+    if (source === "project") codex["model_provider"] = "openrouter";
+    const input = await fixture({ codex });
     await writeFile(join(input.root, "review.config.toml"), profile);
     const deps = dependencies({
       currentDirectory: input.repository,
