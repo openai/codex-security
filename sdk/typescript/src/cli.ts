@@ -11052,6 +11052,18 @@ async function executeDependencyAgent(
     typeof overrides["model_provider"] === "string"
       ? overrides["model_provider"]
       : undefined;
+  // The reviewer ignores user config, including endpoint overrides for the
+  // built-in OpenAI provider. Never fall back to a different endpoint.
+  if (
+    (provider === undefined || provider === "openai") &&
+    ["openai_base_url", "chatgpt_base_url"].some(
+      (key) => selected?.[key] ?? profile[key] ?? file[key],
+    )
+  ) {
+    throw new ConfigurationError(
+      "Dependency checks cannot use custom OpenAI or ChatGPT endpoints. Configure a named provider at the top level with env_key for credentials.",
+    );
+  }
   const providers = (selected ?? file)["model_providers"];
   if (
     provider &&

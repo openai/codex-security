@@ -64,26 +64,37 @@ test("command schema exposes complete and blocked reports as direct output alter
   );
 });
 
-test.each(["project", "selected profile", "profile provider"])(
+test.each([
+  ["project", { model_provider: "openrouter" }, "--model is required"],
+  ["selected profile", { model_provider: "openrouter" }, "--model is required"],
+  [
+    "profile provider",
+    {
+      model_provider: "gateway",
+      model: "fixture-model",
+      model_providers: { gateway: { base_url: "https://profile.invalid/" } },
+    },
+    "provider definitions in a selected profile",
+  ],
+  [
+    "OpenAI gateway",
+    { model_provider: "openai", openai_base_url: "https://profile.invalid/" },
+    "custom OpenAI or ChatGPT endpoints",
+  ],
+] satisfies [string, object, string][])(
   "rejects invalid investigator settings from the %s",
-  async (source) => {
+  async (source, review, reason) => {
     await using repo = await scopedTemporaryDirectory("investigator-provider-");
     await preparePackage(repo.path);
     const config = join(repo.path, "project.json");
-    const review =
-      source === "profile provider"
-        ? {
-            model_provider: "gateway",
-            model: "fixture-model",
-            model_providers: {
-              gateway: { base_url: "https://profile.invalid/" },
-            },
-          }
-        : { model_provider: "openrouter" };
     const codex =
       source === "project"
         ? review
-        : { profile: "review", profiles: { review } };
+        : {
+            model_provider: "gateway",
+            profile: "review",
+            profiles: { review },
+          };
     await writeFile(config, JSON.stringify({ codex }));
     await writeFile(
       join(repo.path, "config.toml"),
@@ -118,11 +129,7 @@ test.each(["project", "selected profile", "profile provider"])(
     expect(status, stderr.text()).toBe(2);
     expect(JSON.parse(stdout.text())).toMatchObject({
       status: "blocked",
-      reason: expect.stringContaining(
-        source === "profile provider"
-          ? "provider definitions in a selected profile"
-          : "--model is required",
-      ),
+      reason: expect.stringContaining(reason),
     });
   },
 );
