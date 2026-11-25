@@ -509,7 +509,8 @@ describe("scan knowledge bases", () => {
       join(root, "self-closing-tab.docx"),
       docxBody(
         '<w:p><w:pPr><w:tabs><w:tab w:val="left" w:pos="1701"/></w:tabs></w:pPr>' +
-          "<w:r><w:t>User</w:t><w:tab/><w:t>Permission</w:t></w:r></w:p>",
+          "<w:r><w:t>User</w:t><w:tab/><w:t>Permission</w:t>" +
+          '<w:ptab w:relativeTo="margin" w:alignment="right" w:leader="none"/><w:t>Scope</w:t></w:r></w:p>',
       ),
     );
     await writeFile(
@@ -562,7 +563,7 @@ describe("scan knowledge bases", () => {
     expect(documents).toContain("Authorization\nReview permissions\n");
     expect(documents).toContain("Authentication\nReview sessions\n");
     expect(documents).toContain("Role\tCapability\n");
-    expect(documents).toContain("User\tPermission\n");
+    expect(documents).toContain("User\tPermission\tScope\n");
     expect(documents).toContain("X-Frame-Options\n");
     expect(documents).toContain("Admin API is internal only\n");
     expect(documents).toContain("Rotate keys. \nAudit weekly.\n");
