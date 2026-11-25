@@ -2716,6 +2716,27 @@ def test_model_artifact_worker_receipts_do_not_affect_saved_usage(
     assert measurement["coverageScope"] == ["thread:scan-parent"]
 
 
+def test_unreadable_worker_receipt_directory_is_not_reported_as_a_thread(
+    tmp_path: Path,
+) -> None:
+    fixture = _start_scan(tmp_path, mode="deep")
+    counted = fixture.started_at + timedelta(microseconds=1)
+    directory = _worker_usage_directory(fixture)
+    directory.parent.mkdir(parents=True)
+    linked = tmp_path / "linked-worker-usage"
+    linked.mkdir()
+    directory.symlink_to(linked, target_is_directory=True)
+    fixture.write_parent_rollout([_token_event(counted, 10, 2)])
+    measurement = fixture.fail()["scan"]["usage"]
+    assert measurement["coverage"] == "partial"
+    assert measurement["coverageScope"] == ["thread:scan-parent", "worker-receipts"]
+    assert measurement["missingThreadCount"] == 1
+    assert measurement["warnings"] == [
+        "worker_usage_receipt_unavailable",
+        "worker_usage_unavailable",
+    ]
+
+
 def test_deep_worker_receipt_storage_is_isolated_between_scans(tmp_path: Path) -> None:
     fixture = _start_scan(tmp_path, mode="deep")
     counted = fixture.started_at + timedelta(microseconds=1)
