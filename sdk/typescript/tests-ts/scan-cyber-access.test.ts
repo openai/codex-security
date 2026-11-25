@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { readFile, symlink, unlink, writeFile } from "node:fs/promises";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, beforeEach, expect, spyOn, test } from "bun:test";
 import { scanPreflightCodexConfig } from "../src/api.js";
@@ -14,6 +14,7 @@ import {
 import { restoreProviderProfile } from "../src/provider-profile.js";
 import { resolveScanCyberAccessProgram } from "../src/scan-cyber-access.js";
 import * as runtime from "../src/runtime.js";
+import { withProtectedExecutableRoots } from "../src/trusted-executable.js";
 import catalogFixture from "./fixtures/native-skill-model-catalog.json" with { type: "json" };
 import { TestClient } from "./support/api-client.js";
 import {
@@ -397,6 +398,29 @@ test("custom executables and launch arguments skip discovery", async () => {
   ]) {
     expect(await select("red", {}, { command })).toBeUndefined();
   }
+});
+
+test("bulk catalog reads stay bound to bundled Codex when a source alias changes", async () => {
+  const source = await temporaryDirectory();
+  const alias = join(source, "bin");
+  const bundled = resolveBundledCodexExecutable();
+  await symlink(dirname(bundled), alias, "junction");
+  const prepare = runtime.prepareOutputDir;
+  using removeAlias = spyOn(runtime, "prepareOutputDir").mockImplementationOnce(
+    async (...args) => {
+      await unlink(alias);
+      return prepare(...args);
+    },
+  );
+  const program = await withProtectedExecutableRoots([source], () =>
+    select(
+      "gpt-test",
+      {},
+      { command: { command: join(alias, basename(bundled)) } },
+    ),
+  );
+  expect(removeAlias).toHaveBeenCalled();
+  expect(program).toBe("daybreak_blue");
 });
 
 test("automatically selected Blue reaches fresh and resumed direct workers", async () => {

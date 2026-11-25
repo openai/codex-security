@@ -14,7 +14,8 @@ import {
   type AppServerRequest,
 } from "./cli-daybreak.js";
 import {
-  bundledCodexSdkEnvironment,
+  nativeCodexLaunch,
+  resolveBundledCodexExecutable,
   isBundledExecutable,
 } from "./codex-sdk-environment.js";
 import {
@@ -291,10 +292,12 @@ export async function resolveScanCyberAccessProgram({
     return undefined;
 
   const apiKey = environmentEntry(environment, "CODEX_API_KEY");
-  const env = bundledCodexSdkEnvironment(
-    command.command,
+  const launch = await nativeCodexLaunch(
+    resolveBundledCodexExecutable(),
     withoutOpenAiApiKeys(environment),
   );
+  command = { command: launch.command };
+  const env = launch.environment!;
   if (!environmentEntry(env, "CODEX_INTERNAL_ORIGINATOR_OVERRIDE"))
     env["CODEX_INTERNAL_ORIGINATOR_OVERRIDE"] = "codex_sdk_ts";
   const projected = catalogConfig({ ...resolved, model }, nativeProfile);
