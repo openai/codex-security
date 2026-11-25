@@ -179,4 +179,47 @@ describe("ArmorCode finding imports", () => {
       },
     });
   });
+
+  test("prefers usable repository locations, retaining the original paths and CVEs", () => {
+    const rows = [
+      {
+        locations: [],
+        filePath: "src\\query.ts",
+        lineNumber: 27,
+        cve: "CVE-2026-0101",
+      },
+      {
+        locations: [
+          { path: "../outside" },
+          { path: "C:\\app\\web.config" },
+          { path: "./deploy/nginx.yaml", line: 8 },
+        ],
+        filePath: "fallback.yaml",
+        cve: ["", "   ", "CVE-2026-0102", " CVE-2026-0102 "],
+      },
+      {
+        locations: [{ path: "/etc/service.conf" }],
+        location: { file: "src/handler.ts", startLine: 19 },
+        filePath: "fallback.ts",
+      },
+      {
+        locations: [{ path: "deploy/" }],
+        location: { path: "https://app.example/status" },
+        filePath: "src/status.ts",
+      },
+      { location: { path: "/etc/service.conf" } },
+    ].map((row, id) => ({ id, title: "Example", ...row }));
+    const { findings, excluded } = normalizeArmorCodeFindings(rows);
+    expect(excluded).toEqual([]);
+    expect(findings.map(({ evidence }) => evidence.source_data)).toEqual(rows);
+    expect(findings.map(({ evidence }) => evidence.locations)).toEqual([
+      [{ path: "src/query.ts", line: 27 }],
+      [{ path: "deploy/nginx.yaml", line: 8 }],
+      [{ path: "src/handler.ts", line: 19 }],
+      [{ path: "src/status.ts", line: null }],
+      [],
+    ]);
+    expect(findings[0]!.evidence.advisory_ids).toEqual(["CVE-2026-0101"]);
+    expect(findings[1]!.evidence.advisory_ids).toEqual(["CVE-2026-0102"]);
+  });
 });

@@ -4,10 +4,14 @@ import type { ExternalFindings } from "./external-findings.js";
 import type { ExternalFindingEvidence } from "./external-import-models.js";
 import { declaredScannerRepositoryUrl } from "./scanner-repository-url.js";
 import { isRecord } from "./record.js";
+import { isSafeNonNegativeInteger } from "./value.js";
 import {
   normalizeRecords,
   record,
+  repositoryFilePath,
   requiredText,
+  scannerSeverity,
+  strings,
   text,
 } from "./scanner-import.js";
 
@@ -29,6 +33,31 @@ function stringValues(value: unknown): string[] {
       return [String(item)];
     return [];
   });
+}
+
+function armorCodeLocations(finding: ArmorCodeFinding) {
+  for (const candidates of [
+    Array.isArray(finding["locations"]) ? finding["locations"] : [],
+    [finding["location"]],
+    [{ path: finding["filePath"], line: finding["lineNumber"] }],
+  ]) {
+    const locations = candidates.flatMap((value: unknown) => {
+      if (!isRecord(value)) return [];
+      const path = repositoryFilePath(
+        value["path"] ?? value["filePath"] ?? value["file"],
+      );
+      if (!path) return [];
+      const line = value["line"] ?? value["startLine"] ?? value["lineNumber"];
+      return [
+        {
+          path,
+          line: isSafeNonNegativeInteger(line) && line > 0 ? line : null,
+        },
+      ];
+    });
+    if (locations.length) return locations;
+  }
+  return [];
 }
 
 /** Recover the source repository independently of the finding's scan type. */
@@ -77,14 +106,6 @@ export function normalizeArmorCodeFindings(
   return normalizeRecords(
     raw as ArmorCodeFinding[],
     (finding) => {
-      const severity = (text(finding["severity"]) ?? "unknown").toLowerCase();
-      const locations = Array.isArray(finding["locations"])
-        ? finding["locations"]
-        : finding["location"]
-          ? [finding["location"]]
-          : text(finding["filePath"])
-            ? [{ path: finding["filePath"], line: finding["lineNumber"] }]
-            : [];
       const description = text(
         finding["description"] ??
           finding["details"] ??
@@ -98,6 +119,8 @@ export function normalizeArmorCodeFindings(
           (value) =>
             typeof value === "string" && value.toLowerCase() === "sast",
         );
+      const cve = finding["cve"];
+      const advisories = strings(Array.isArray(cve) ? cve : [cve]);
       const ruleIds = stringValues(finding["ruleId"]);
       const weaknessIds = [
         ...stringValues(finding["cwe"]),
@@ -114,15 +137,7 @@ export function normalizeArmorCodeFindings(
           finding["title"] ?? finding["name"] ?? finding["findingName"],
           "ArmorCode finding title",
         ),
-        severity: ([
-          "critical",
-          "high",
-          "medium",
-          "low",
-          "informational",
-        ].includes(severity)
-          ? severity
-          : "unknown") as ExternalFindingEvidence["severity"],
+        severity: scannerSeverity(text(finding["severity"])?.toLowerCase()),
         description: isSast
           ? description
           : description && mitigation
@@ -131,29 +146,8 @@ export function normalizeArmorCodeFindings(
         // ArmorCode's findingUrl remains available in source_data; url points
         // to the originating scanner when ArmorCode provides both links.
         url: text(finding["url"] ?? finding["findingUrl"]),
-        ...(Array.isArray(finding["cve"]) && {
-          advisory_ids: finding["cve"].filter(
-            (value): value is string => typeof value === "string",
-          ),
-        }),
-        locations: locations.flatMap((value) => {
-          if (!isRecord(value)) return [];
-          const path = text(
-            value["path"] ?? value["filePath"] ?? value["file"],
-          );
-          if (!path) return [];
-          const line =
-            value["line"] ?? value["startLine"] ?? value["lineNumber"];
-          return [
-            {
-              path,
-              line:
-                Number.isSafeInteger(line) && Number(line) > 0
-                  ? Number(line)
-                  : null,
-            },
-          ];
-        }),
+        advisory_ids: [...new Set(advisories.map((id) => id.trim()))],
+        locations: armorCodeLocations(finding),
         ...(typeof lastUpdated === "number" &&
           Number.isSafeInteger(lastUpdated) && {
             source_updated_at: Math.floor(lastUpdated / 1000),
