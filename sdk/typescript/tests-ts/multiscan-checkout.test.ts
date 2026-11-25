@@ -15,6 +15,7 @@ import {
   utimes,
   writeFile,
 } from "node:fs/promises";
+import { renameSync } from "node:fs";
 import * as filesystem from "node:fs/promises";
 import { hostname } from "node:os";
 import { delimiter, dirname, join } from "node:path";
@@ -45,6 +46,12 @@ const { temporaryDirectory, fixture, repositoryFixture, cleanup } =
 const testPosix = process.platform === "win32" ? test.skip : test;
 
 afterEach(cleanup);
+
+function saveInterruptedAttempt(paths: Parameters<typeof options>[0]) {
+  return runMultiscan(
+    options(paths, client(rejecting("Interrupted scan")), { maxAttempts: 1 }),
+  );
+}
 
 test("keeps literal CSV scopes at the checked out repository", async () => {
   const name = "keeps literal CSV scopes at the checked out repository";
@@ -303,9 +310,7 @@ describe("multiscan", () => {
       "stubborn",
     );
     await appendFile(paths.input, `next,${source.path},${source.revision}\n`);
-    await runMultiscan(
-      options(paths, client(rejecting("Interrupted scan")), { maxAttempts: 1 }),
-    );
+    await saveInterruptedAttempt(paths);
     const checkout = join(
       paths.output,
       "recovery-checkouts",
@@ -414,9 +419,7 @@ describe("multiscan", () => {
 
   test("reuses recovered completion saved before checkout removal", async () => {
     const { paths } = await repositoryFixture("cleanup-interruption", "done");
-    await runMultiscan(
-      options(paths, client(rejecting("Interrupted scan")), { maxAttempts: 1 }),
-    );
+    await saveInterruptedAttempt(paths);
     const checkout = join(
       paths.output,
       "recovery-checkouts",
@@ -955,45 +958,146 @@ describe("multiscan", () => {
     ).toHaveLength(1);
   });
 
-  test("never removes a replacement owner's lock during interrupted cleanup", async () => {
-    const { paths } = await repositoryFixture(
-      "replacement-owner",
-      "replacement",
-    );
-    const running = Promise.withResolvers<void>();
-    const finish = Promise.withResolvers<void>();
-    const first = runMultiscan(
-      options(
+  test.each([false, true])(
+    "preserves the replacement lock and checkout without writing a receipt (recover: %p)",
+    async (recover) => {
+      const { paths } = await repositoryFixture("replacement");
+      const ledger = join(paths.output, "results.jsonl");
+      if (recover) await saveInterruptedAttempt(paths);
+      const before = recover ? await readFile(ledger, "utf8") : undefined;
+      const lock = join(paths.output, ".lock");
+      const owner = join(lock, "owner.json");
+      const takeOver = async () => {
+        await rename(lock, join(paths.output, ".stale"));
+        await mkdir(lock, { mode: 0o700 });
+        await writeFile(owner, "replacement", { mode: 0o600 });
+      };
+      const open = filesystem.open;
+      using _open = spyOn(filesystem, "open").mockImplementation(
+        async (...args) => {
+          if (recover && args[0] === ledger) await takeOver();
+          return open(...args);
+        },
+      );
+      const settings = options(
         paths,
-        client(async (_repository, scanOptions = {}) => {
-          running.resolve();
-          await finish.promise;
-          return completedScan(scanOptions.outputDir!);
+        client(async (...args) => {
+          if (!recover) await takeOver();
+          return completeRun(...args);
         }),
-      ),
-    );
-    await running.promise;
-    const lock = join(paths.output, ".lock");
-    const abandoned = join(paths.output, ".lock.stale-interrupted");
-    await rename(lock, abandoned);
-    await mkdir(lock, { mode: 0o700 });
-    const replacement = {
-      pid: process.pid,
-      ownerId: "replacement-supervisor",
-      hostname: hostname(),
-      processStartedAt: performance.timeOrigin,
-    };
-    await writeFile(join(lock, "owner.json"), JSON.stringify(replacement), {
-      mode: 0o600,
-    });
+        recover ? { recoverScan: async () => undefined } : {},
+      );
+      await expect(runMultiscan(settings)).rejects.toThrow(
+        "no longer holds the output lock",
+      );
+      if (before !== undefined)
+        expect(await readFile(ledger, "utf8")).toBe(before);
+      else
+        await expect(lstat(ledger)).rejects.toMatchObject({ code: "ENOENT" });
+      const checkout = recover
+        ? join(paths.output, "recovery-checkouts", "replacement", "attempt-2")
+        : join(paths.output, "checkouts", "replacement");
+      expect((await lstat(checkout)).isDirectory()).toBe(true);
+      expect(await readFile(owner, "utf8")).toBe("replacement");
+    },
+  );
 
-    finish.resolve();
-    await first;
-
-    expect(
-      JSON.parse(await readFile(join(lock, "owner.json"), "utf8")),
-    ).toEqual(replacement);
+  test("preserves unrelated lock files and SQLite journals", async () => {
+    const { paths } = await repositoryFixture("occupied");
+    await mkdir(paths.output, { mode: 0o700 });
+    for (const suffix of ["", "-journal"]) {
+      const file = join(paths.output, ".lock.sqlite3" + suffix);
+      await writeFile(file, "keep");
+      await expect(
+        runMultiscan(options(paths, client(completeRun))),
+      ).rejects.toThrow("Invalid multiscan lock file");
+      expect(await readFile(file, "utf8")).toBe("keep");
+      await rm(file);
+    }
   });
+
+  test("defers expired lease takeover during checkout removal and receipt writes", async () => {
+    const { paths } = await repositoryFixture("busy");
+    const settings = options(paths, client(completeRun));
+    const owner = join(paths.output, ".lock", "owner.json");
+    const checked: string[] = [];
+    let contending = false;
+    const contend = async (operation: string) => {
+      if (contending) return;
+      contending = true;
+      const current = await readFile(owner, "utf8");
+      // Present a stale lease from another process while this write is pending.
+      await writeFile(
+        owner,
+        JSON.stringify({ ...JSON.parse(current), hostname: "expired" }),
+      );
+      await utimes(owner, 1, 1);
+      try {
+        await expect(runMultiscan(settings)).rejects.toThrow(
+          "A multiscan supervisor is already running.",
+        );
+        checked.push(operation);
+      } finally {
+        contending = false;
+        await writeFile(owner, current);
+      }
+    };
+    const remove = filesystem.rm;
+    using _remove = spyOn(filesystem, "rm").mockImplementation(
+      async (...args) => {
+        if (args[0] === join(paths.output, "checkouts", "busy"))
+          await contend("remove");
+        return remove(...args);
+      },
+    );
+    const open = filesystem.open;
+    using _open = spyOn(filesystem, "open").mockImplementation(
+      async (...args) => {
+        const file = await open(...args);
+        if (args[0] === join(paths.output, "results.jsonl")) {
+          const write = file.writeFile.bind(file);
+          file.writeFile = async (...args) => {
+            await contend("write");
+            return write(...args);
+          };
+        }
+        return file;
+      },
+    );
+    expect(await runMultiscan(settings)).toMatchObject({ completed: 1 });
+    expect(checked).toEqual(["remove", "write"]);
+  });
+
+  test.each(["before", "during"])(
+    "does not reserve another attempt when the lock is lost %s recovery",
+    async (when) => {
+      const { paths } = await repositoryFixture("abandoned");
+      await saveInterruptedAttempt(paths);
+      const artifacts = join(paths.output, "artifacts", "abandoned");
+      await mkdir(join(artifacts, "attempt-1"), {
+        recursive: true,
+        mode: 0o700,
+      });
+      const lock = join(paths.output, ".lock");
+      const loseLock = () => renameSync(lock, lock + ".stale");
+      const recoverScan = mock(async () => {
+        if (when === "during") loseLock();
+        return undefined;
+      });
+      const settings = options(paths, client(completeRun), {
+        recoverScan,
+        onProgress: ({ status, attempt }) => {
+          if (when === "before" && status === "started" && attempt === 1)
+            loseLock();
+        },
+      });
+      await expect(runMultiscan(settings)).rejects.toThrow(
+        "no longer holds the output lock",
+      );
+      expect(recoverScan).toHaveBeenCalledTimes(when === "during" ? 1 : 0);
+      expect(await readdir(artifacts)).toEqual(["attempt-1"]);
+    },
+  );
 
   test("removes an empty supervisor lock when owner creation fails", async () => {
     const { paths } = await repositoryFixture(

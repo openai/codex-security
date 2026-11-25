@@ -1352,7 +1352,7 @@ export function sqliteDatabaseOpener(
   };
 }
 
-function sqliteBusy(error: unknown): boolean {
+export function sqliteBusy(error: unknown): boolean {
   return (
     isRecord(error) &&
     (error["errcode"] === 5 || error["code"] === "SQLITE_BUSY")

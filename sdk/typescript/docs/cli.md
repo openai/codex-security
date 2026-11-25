@@ -1819,6 +1819,9 @@ existing checkout before an ordinary retry.
 If checkout cleanup previously failed, the next invocation removes it only when
 its marker still identifies the same directory and scan attempt. Older or
 replacement checkouts without a matching marker are preserved.
+Bulk scans keep a `.lock.sqlite3` file in the output directory. The filesystem
+must support SQLite locks. A supervisor can take over an expired lease between
+writes. Leave this file in place while any supervisor is running.
 Completed results are skipped only when their saved contract and seal are valid
 and the manifest records a completed scan. Damaged or unsuccessful results get a
 new attempt, including with `--recover`, while the old artifacts remain available.
