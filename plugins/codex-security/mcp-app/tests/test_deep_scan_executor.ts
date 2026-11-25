@@ -1,3 +1,4 @@
+import { providerHeaderNames } from "./support/fake-codex-source.ts";
 import {
   CodexSdkWorkerExecutor,
   resolveCodexPath,
@@ -1399,12 +1400,7 @@ function expectedProviderHeaders(environment?: NodeJS.ProcessEnv) {
   return Object.fromEntries(
     Object.entries(environment ?? {}).filter(
       ([name, value]) =>
-        value !== undefined &&
-        [
-          "SYNTHETIC_HEADER_VALUE",
-          "OPENROUTER_API_KEY",
-          "FIREWORKS_API_KEY",
-        ].includes(name),
+        value !== undefined && providerHeaderNames.includes(name),
     ),
   );
 }
@@ -2830,6 +2826,8 @@ async function testExternalProviderCredentialsReachWorker() {
   for (const [provider, key, headerKey] of [
     ["openrouter", "OPENROUTER_API_KEY"],
     ["fireworks", "FIREWORKS_API_KEY"],
+    ["standardcompute", "STANDARD_COMPUTE_API_KEY"],
+    ["account-gateway", "CODEX_API_KEY", "OPENAI_API_KEY"],
     ["synthetic", "SYNTHETIC_GATEWAY_KEY", "CODEX_API_KEY"],
     ["synthetic", "SYNTHETIC_GATEWAY_KEY", "OPENAI_API_KEY"],
   ] as const) {
@@ -2841,6 +2839,10 @@ async function testExternalProviderCredentialsReachWorker() {
       const configPath = path.join(fixture.root, "provider.toml");
       const deepPath = path.join(fixture.root, "workers.toml");
       const profile = `scan-${provider}`;
+      const parentProvider =
+        provider === "openrouter" || provider === "account-gateway"
+          ? "standardcompute"
+          : provider;
       const selectedKey = `synthetic-${provider}-scan-key`;
       const accountHeaders = headerKey
         ? { [headerKey]: "private-scan-header" }
@@ -2850,13 +2852,26 @@ async function testExternalProviderCredentialsReachWorker() {
         native_profile: profile,
         environment: { [key]: selectedKey, ...accountHeaders },
       };
-      await writeFile(configPath, stringifyToml({ model_provider: provider }));
+      await writeFile(
+        configPath,
+        stringifyToml({ model_provider: parentProvider }),
+      );
       await writeFile(deepPath, stringifyToml({ worker_runtime: settings }));
       await writeFile(
         path.join(fixture.root, `${profile}.config.toml`),
         stringifyToml({
-          model_provider: provider,
+          model_provider: parentProvider,
           model_providers: {
+            ...(parentProvider !== provider
+              ? {
+                  [parentProvider]: {
+                    name: parentProvider,
+                    base_url: "https://parent.example.test/v1",
+                    wire_api: "responses",
+                    env_key: "STANDARD_COMPUTE_API_KEY",
+                  },
+                }
+              : {}),
             [provider]: {
               name: provider,
               base_url: `https://${provider}.example.test/v1`,
@@ -2882,6 +2897,7 @@ async function testExternalProviderCredentialsReachWorker() {
         CODEX_API_KEY: undefined,
         OPENROUTER_API_KEY: undefined,
         FIREWORKS_API_KEY: undefined,
+        STANDARD_COMPUTE_API_KEY: undefined,
         SYNTHETIC_GATEWAY_KEY: undefined,
       };
       const saved = Object.keys(environment).map(
@@ -2894,6 +2910,7 @@ async function testExternalProviderCredentialsReachWorker() {
           parentSandbox: trustedParentSandbox,
         });
         for (const turn of ["fresh", "resume", "compare"]) {
+          process.env.STANDARD_COMPUTE_API_KEY = "changed-ambient-key";
           process.env[key] = "changed-ambient-key";
           if (headerKey) process.env[headerKey] = "changed-ambient-header";
           if (turn === "compare") {
@@ -2912,11 +2929,13 @@ async function testExternalProviderCredentialsReachWorker() {
             );
           }
           const invocation = await readJson(fixture.markerPath);
-          assert.equal(
-            invocation.providerKey ?? invocation.providerHeaders[key],
-            selectedKey,
-          );
-          assert.deepEqual(invocation.openaiAuthentication, accountHeaders);
+          const credentials = {
+            ...invocation.providerHeaders,
+            ...invocation.openaiAuthentication,
+          };
+          if (invocation.providerKey !== undefined)
+            credentials.SYNTHETIC_GATEWAY_KEY = invocation.providerKey;
+          assert.deepEqual(credentials, settings.environment);
           assertFlagPair(invocation.argv, "--profile", profile);
           assertConfigOverrides(invocation.argv, {
             model_provider: provider,

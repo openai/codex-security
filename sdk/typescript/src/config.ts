@@ -44,11 +44,34 @@ export const CHEAPERINFERENCE_CODEX_PROVIDER = {
   wire_api: "responses",
 } as const satisfies JsonObject;
 
+// A CLI-only preset. Registering it as an implicit SDK default could attach
+// a credential to an existing provider with the same ID but a different URL.
+export const STANDARD_COMPUTE_CODEX_PROVIDER = {
+  name: "Standard Compute",
+  base_url: "https://api.stdcmpt.com/v1",
+  env_key: "STANDARD_COMPUTE_API_KEY",
+  wire_api: "responses",
+} as const satisfies JsonObject;
+
 export const EXTERNAL_CODEX_PROVIDERS = {
   openrouter: OPENROUTER_CODEX_PROVIDER,
   fireworks: FIREWORKS_CODEX_PROVIDER,
   cheaperinference: CHEAPERINFERENCE_CODEX_PROVIDER,
 } as const;
+
+export function selectedProviderTable(
+  config: Readonly<JsonObject>,
+  selected = scanModelProvider(config),
+): JsonObject | undefined {
+  if (typeof selected !== "string") return undefined;
+  const providers = resolveCodexProfile(config)["model_providers"];
+  const table = isObject(providers) ? providers[selected] : undefined;
+  return isObject(table) ? table : undefined;
+}
+
+export function isStandardComputeKey(name?: string): boolean {
+  return name?.toUpperCase() === STANDARD_COMPUTE_CODEX_PROVIDER.env_key;
+}
 
 export type ExternalModelProvider = keyof typeof EXTERNAL_CODEX_PROVIDERS;
 
@@ -240,9 +263,8 @@ export function scanProviderEnvKey(
     ["openai", "ollama", "lmstudio", "amazon-bedrock"].includes(selected)
   )
     return undefined;
-  const providers = resolveCodexProfile(config)["model_providers"];
-  const provider = isObject(providers) ? providers[selected] : undefined;
-  return isObject(provider) && typeof provider["env_key"] === "string"
+  const provider = selectedProviderTable(config, selected);
+  return typeof provider?.["env_key"] === "string"
     ? provider["env_key"]
     : isExternalModelProvider(selected)
       ? EXTERNAL_CODEX_PROVIDERS[selected].env_key
@@ -251,13 +273,7 @@ export function scanProviderEnvKey(
 
 /** @internal Native Codex validates the auth table, including invalid selections. */
 export function hasCommandAuth(config: Readonly<JsonObject>): boolean {
-  const selected = scanModelProvider(config);
-  const providers = resolveCodexProfile(config)["model_providers"];
-  const provider =
-    typeof selected === "string" && isObject(providers)
-      ? providers[selected]
-      : undefined;
-  return isObject(provider) && provider["auth"] != null;
+  return selectedProviderTable(config)?.["auth"] != null;
 }
 
 /** @internal Keep host-side helpers independent of the source checkout. */

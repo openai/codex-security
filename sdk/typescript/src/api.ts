@@ -85,6 +85,9 @@ import {
   CODEX_AUTH_CONFIG_KEYS,
   DEFAULT_CODEX_CONFIG,
   EXTERNAL_CODEX_PROVIDERS,
+  isStandardComputeKey,
+  selectedProviderTable,
+  STANDARD_COMPUTE_CODEX_PROVIDER,
   inlineToml,
   isExternalModelProvider,
   hasCommandAuth,
@@ -389,6 +392,7 @@ interface PreparedSession {
   modelProvider: unknown;
   providerEnvKey?: string;
   nativeProviderEnvironment?: Record<string, string>;
+  modelEnvironment: ProcessEnvironment;
   apiKey: string | null;
   scanEnvironment: ProcessEnvironment;
   authentication: ScanAuthentication;
@@ -1435,7 +1439,6 @@ export class CodexSecurity {
             ? {}
             : { CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase.path }),
         },
-        options.auth,
         git,
         undefined,
         [
@@ -1639,7 +1642,6 @@ export class CodexSecurity {
           CODEX_SECURITY_PLUGIN_ROOT: session.runtime.plugin.pluginRoot,
           CODEX_SECURITY_SURFACE: this.#surface,
         },
-        options.auth,
         undefined,
         undefined,
         [
@@ -2101,7 +2103,6 @@ export class CodexSecurity {
             ? {}
             : { CODEX_SECURITY_KNOWLEDGE_BASE: knowledgeBase.path }),
         },
-        options.auth,
         undefined,
         policyCodexConfig(session.sessionConfig),
         [
@@ -2545,14 +2546,7 @@ export class CodexSecurity {
       checkOpen();
 
       const workerProviderEnvironment = {
-        ...withoutOpenAiApiKeys(
-          selectedScanEnvironment(
-            runtime.environment,
-            options.auth,
-            modelProvider,
-            session.providerEnvKey,
-          ),
-        ),
+        ...withoutOpenAiApiKeys(session.modelEnvironment),
         ...(session.apiKey === null
           ? {}
           : {
@@ -3624,7 +3618,6 @@ export class CodexSecurity {
           session,
           { command: "scan", mode, pluginReadRoot: stagedPluginRoot },
           runtimePaths,
-          options.auth,
           git,
         );
       const threadOptions: ThreadOptions = {
@@ -4848,7 +4841,6 @@ export class CodexSecurity {
       pluginReadRoot?: string;
     },
     runtimePaths: Record<string, string>,
-    auth: ScanAuthMode = "auto",
     git?: InspectedExecutable,
     config?: JsonObject,
     configOverrides: string[] = [],
@@ -4991,26 +4983,15 @@ export class CodexSecurity {
       runtime,
       runtimeHome,
       python,
-      modelProvider,
       providerEnvKey,
       apiKey,
       sessionConfig,
     } = session;
-    const commandAuth = hasCommandAuth(sessionConfig);
     const environment: ProcessEnvironment = {
       ...environmentWithGit(
         pluginExecutionEnvironment(
           python,
-          withoutCodexHome(
-            selectedScanEnvironment(
-              commandAuth
-                ? withoutOpenAiApiKeys(runtime.environment)
-                : runtime.environment,
-              auth,
-              modelProvider,
-              providerEnvKey,
-            ),
-          ),
+          withoutCodexHome(session.modelEnvironment),
         ),
         git,
       ),
@@ -5183,6 +5164,11 @@ export class CodexSecurity {
         preflightConfig,
         sessionConfig: preflightConfig,
         modelProvider: "host",
+        modelEnvironment: selectedScanEnvironment(
+          runtime.environment,
+          options.auth,
+          "host",
+        ),
         apiKey: null,
         scanEnvironment: environment,
         authentication: { method: "host", verified: false },
@@ -5389,6 +5375,33 @@ export class CodexSecurity {
         signal,
       });
       checkOpen();
+      const credentials = declaredProviderEnvironment(
+        providers,
+        selectedScanEnvironment(
+          {
+            ...this.#dependencies.environment,
+            ...withoutOpenAiApiKeys(runtime.environment),
+          },
+          options.auth,
+          modelProvider,
+          providerEnvKey,
+          requestedConfig,
+        ),
+      );
+      // Parent and worker turns share the same credential selection. Keep
+      // explicitly mapped headers out of startup and workbench processes.
+      const modelEnvironment = {
+        ...selectedScanEnvironment(
+          commandAuth
+            ? withoutOpenAiApiKeys(runtime.environment)
+            : runtime.environment,
+          options.auth,
+          modelProvider,
+          providerEnvKey,
+        ),
+      };
+      for (const [key, value] of Object.entries(credentials))
+        if (isStandardComputeKey(key)) modelEnvironment[key] = value;
       return {
         runtime,
         safetyIdentifier: options.safetyIdentifier,
@@ -5403,19 +5416,12 @@ export class CodexSecurity {
           runtime.environment,
         ),
         providerEnvKey,
+        modelEnvironment,
         nativeProviderEnvironment:
           providerEnvKey !== undefined &&
           apiKey !== null &&
           !isExternalModelProvider(modelProvider)
-            ? {
-                ...declaredProviderEnvironment(providers, {
-                  ...(options.auth === "chatgpt"
-                    ? withoutOpenAiApiKeys(this.#dependencies.environment)
-                    : this.#dependencies.environment),
-                  ...withoutOpenAiApiKeys(runtime.environment),
-                }),
-                [providerEnvKey]: apiKey,
-              }
+            ? { ...credentials, [providerEnvKey]: apiKey }
             : undefined,
         apiKey,
         scanEnvironment: helperEnvironment,
@@ -7047,16 +7053,39 @@ export async function runtimeScanAuthentication(
 }
 
 /** Local helpers do not authenticate model requests. */
-function withoutProviderKey(
-  environment: ProcessEnvironment,
+function withoutProviderKey<Value>(
+  environment: Record<string, Value>,
   key: string | undefined,
-): ProcessEnvironment {
+): Record<string, Value> {
   if (key === undefined) return environment;
   const child = { ...environment };
   for (const name of Object.keys(child)) {
     if (name.toUpperCase() === key.toUpperCase()) delete child[name];
   }
   return child;
+}
+
+/** Only a selected native table can request the opt-in credential. */
+export function standardComputeEnvironment<Value>(
+  environment: Record<string, Value>,
+  config?: JsonObject,
+  provider = config && scanModelProvider(config),
+): Record<string, Value> {
+  if (!Object.keys(environment).some(isStandardComputeKey)) return environment;
+  // Codex ignores provider tables for the built-in OpenAI and local providers.
+  if (
+    config &&
+    typeof provider === "string" &&
+    !["openai", "ollama", "lmstudio"].includes(provider) &&
+    providerCredentialNames(selectedProviderTable(config, provider)).some(
+      isStandardComputeKey,
+    )
+  )
+    return environment;
+  return withoutProviderKey(
+    environment,
+    STANDARD_COMPUTE_CODEX_PROVIDER.env_key,
+  );
 }
 
 /** @internal */
@@ -7067,6 +7096,7 @@ export function selectedScanEnvironment(
   providerEnvKey?: string,
   config?: JsonObject,
 ): ProcessEnvironment {
+  environment = standardComputeEnvironment(environment, config, modelProvider);
   const standardProviderKey = isExternalModelProvider(modelProvider)
     ? EXTERNAL_CODEX_PROVIDERS[modelProvider].env_key
     : null;
@@ -7108,7 +7138,10 @@ export function selectedScanEnvironment(
     Object.assign(
       selected,
       declaredProviderEnvironment(
-        resolveCodexProfile(config)["model_providers"],
+        // A preset must not import account keys from unrelated provider tables.
+        isStandardComputeKey(providerEnvKey)
+          ? { selected: selectedProviderTable(config, modelProvider) }
+          : resolveCodexProfile(config)["model_providers"],
         auth === "chatgpt" ? withoutOpenAiApiKeys(environment) : environment,
       ),
     );
@@ -7729,23 +7762,21 @@ async function requireCurrentDeepScanPlugin(
   }
 }
 
+function providerCredentialNames(table: unknown): string[] {
+  if (!isRecord(table)) return [];
+  const headers = table["env_http_headers"];
+  return [
+    table["env_key"],
+    ...(isRecord(headers) ? Object.values(headers) : []),
+  ].filter((name): name is string => typeof name === "string");
+}
+
 function declaredProviderEnvironment(
   providers: unknown,
   environment: ProcessEnvironment,
 ): Record<string, string> {
   const names = isRecord(providers)
-    ? Object.values(providers)
-        .flatMap((providerConfig) =>
-          isRecord(providerConfig)
-            ? [
-                providerConfig["env_key"],
-                ...(isRecord(providerConfig["env_http_headers"])
-                  ? Object.values(providerConfig["env_http_headers"])
-                  : []),
-              ]
-            : [],
-        )
-        .filter((name): name is string => typeof name === "string")
+    ? Object.values(providers).flatMap(providerCredentialNames)
     : [];
   return Object.fromEntries(
     names.flatMap((name) => {

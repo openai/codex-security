@@ -3,8 +3,9 @@ import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, test } from "bun:test";
 import { parse } from "smol-toml";
-import { scanRuntimeCodexConfig } from "../src/api.js";
+import { selectedScanEnvironment, scanRuntimeCodexConfig } from "../src/api.js";
 import {
+  scanProviderEnvKey,
   type JsonObject,
   inlineToml,
   quoteTomlString,
@@ -1680,4 +1681,34 @@ describe("Codex configuration", () => {
     await writeCodexConfig(path, { hooks });
     expect(parse(await readFile(path, "utf8"))).toEqual({ hooks });
   });
+});
+
+test("native standardcompute tables never acquire a preset endpoint or credential", async () => {
+  const environment = { STANDARD_COMPUTE_API_KEY: "synthetic-unused-key" };
+  const tables: Record<string, string>[] = [
+    { name: "Native", env_key: "OPENAI_API_KEY" },
+    { name: "Local", base_url: "http://localhost:1234/v1" },
+  ];
+  for (const table of tables) {
+    const config = await mergedCodexConfig({
+      codexOverrides: {
+        model_provider: "standardcompute",
+        model_providers: { standardcompute: table },
+      },
+    });
+    expect(config["model_providers"]).toEqual({ standardcompute: table });
+    expect(scanProviderEnvKey(config)).toBe(table["env_key"]);
+    expect(
+      selectedScanEnvironment(
+        environment,
+        "auto",
+        "standardcompute",
+        table["env_key"],
+        config,
+      ),
+    ).not.toHaveProperty("STANDARD_COMPUTE_API_KEY");
+  }
+  expect(
+    scanProviderEnvKey({ model_provider: "standardcompute" }),
+  ).toBeUndefined();
 });

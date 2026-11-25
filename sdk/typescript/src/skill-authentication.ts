@@ -9,6 +9,7 @@ import { environmentEntry } from "./auth.js";
 import {
   deepMerge,
   EXTERNAL_CODEX_PROVIDERS,
+  isStandardComputeKey,
   isExternalModelProvider,
   modelProviderConfigOverride,
   scanModelProvider,
@@ -59,7 +60,16 @@ export function resolveSkillAuthentication(
       (explicitChatgpt && providerKeyConfigured));
   let authentication: ScanAuthentication;
   let configOverrides: string[] = [];
-  if (providerEnvKey !== undefined && !commandAuth && !explicitChatgpt) {
+  const requiredKey =
+    provider === "standardcompute" && isStandardComputeKey(providerEnvKey)
+      ? providerEnvKey
+      : undefined;
+  if (
+    !requiredKey &&
+    providerEnvKey !== undefined &&
+    !commandAuth &&
+    !explicitChatgpt
+  ) {
     const key = environmentEntry(processEnvironment, providerEnvKey)?.trim();
     if (!key && options.auth === "api-key") {
       throw new AuthenticationRequiredError(
@@ -75,6 +85,8 @@ export function resolveSkillAuthentication(
       options.auth,
       provider,
       commandAuth,
+      false,
+      requiredKey,
     );
   }
   if (
@@ -90,6 +102,8 @@ export function resolveSkillAuthentication(
     processEnvironment,
     authentication.method === "command" ? "chatgpt" : options.auth,
     provider,
+    requiredKey,
+    config,
   );
   if (
     explicitChatgpt &&

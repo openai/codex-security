@@ -1868,6 +1868,56 @@ describe("semantic scan comparison", () => {
     expect(account).not.toHaveBeenCalled();
   });
 
+  test("read-only helpers use only the selected Standard Compute key", async () => {
+    const home = await temporaryDirectory();
+    const state = join(home, "state");
+    await mkdir(join(state, "codex-home"), { recursive: true });
+    const account = mock(async () => ({
+      authenticated: true,
+      details: "managed",
+    }));
+    const source = {
+      CODEX_HOME: home,
+      CODEX_SECURITY_STATE_DIR: state,
+      STANDARD_COMPUTE_API_KEY: "synthetic-standardcompute-key",
+      OPENAI_API_KEY: "synthetic-openai-key",
+    };
+    const key = "STANDARD_COMPUTE_API_KEY";
+    const openai = await comparisonEnvironment(source, account);
+    expect(openai).not.toHaveProperty(key);
+    expect(openai["OPENAI_API_KEY"]).toBe(source.OPENAI_API_KEY);
+    await writeFile(
+      join(home, "config.toml"),
+      'model_provider = "standardcompute"\n[model_providers.standardcompute]\nenv_key = "STANDARD_COMPUTE_API_KEY"\n',
+    );
+    for (const OPENAI_API_KEY of [source.OPENAI_API_KEY, undefined]) {
+      const selected = await comparisonEnvironment(
+        { ...source, OPENAI_API_KEY },
+        account,
+      );
+      expect(selected[key]).toBe(source[key]);
+      expect(selected["CODEX_HOME"]).toBe(home);
+      expect(selected).not.toHaveProperty("OPENAI_API_KEY");
+    }
+    const gateway = await comparisonEnvironment(
+      source,
+      account,
+      undefined,
+      undefined,
+      {
+        model_provider: "gateway",
+        model_providers: {
+          gateway: {
+            auth: { command: "synthetic-command" },
+            env_http_headers: { "X-Provider-Key": key },
+          },
+        },
+      },
+    );
+    expect(gateway[key]).toBe(source[key]);
+    expect(account).not.toHaveBeenCalled();
+  });
+
   test.skipIf(process.platform !== "win32")(
     "recognizes provider scan variables regardless of Windows casing",
     async () => {

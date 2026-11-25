@@ -112,7 +112,6 @@ import {
   SCAN_AUTH_MODES,
   scanAuthentication,
   runtimeScanAuthentication,
-  selectedScanEnvironment,
   type DeepScanOptions,
   type ScanAuthMode,
   type ScanAuthentication,
@@ -247,8 +246,9 @@ import {
   scanModelProvider,
   scanProviderEnvKey,
   writeCodexConfig,
+  STANDARD_COMPUTE_CODEX_PROVIDER,
+  selectedProviderTable,
   type CodexSecurityConfig,
-  type ExternalModelProvider,
   type JsonObject,
   type JsonValue,
 } from "./config.js";
@@ -597,6 +597,7 @@ const PROVIDER_OPTION = z
     "openrouter",
     "fireworks",
     "cheaperinference",
+    "standardcompute",
     "amazon-bedrock",
   ])
   .default("openai")
@@ -2045,7 +2046,7 @@ async function runCodexSkillProcess(
         apiKey = environmentValue(selected, authentication.source)?.trim();
         // Match the SDK's key selection for native and nested plugin workers.
         selected = {
-          ...selectedScanEnvironment(selected, "chatgpt"),
+          ...withoutOpenAiApiKeys(selected),
           CODEX_API_KEY: apiKey,
         };
         if (output.appServer !== undefined) {
@@ -7987,9 +7988,8 @@ export async function main(
               dependencies.environment,
             ).filter(
               (name) =>
-                ["OPENAI_API_KEY", "CODEX_API_KEY"].includes(
-                  name.toUpperCase(),
-                ) && dependencies.environment[name]?.trim(),
+                isAccountApiKey(name.toUpperCase()) &&
+                dependencies.environment[name]?.trim(),
             );
             const loginWarning = options.withAccessToken
               ? `Access-token login succeeded, but noninteractive scans will use ${authentication.source}.\n`
@@ -12789,9 +12789,10 @@ async function executeScan(
           progress?.stage(
             `Authentication: API key from ${authentication.source}.`,
           );
-          progress?.stage(
-            "To use your ChatGPT sign-in, retry with --auth chatgpt.",
-          );
+          if (isAccountApiKey(authentication.source))
+            progress?.stage(
+              "To use your ChatGPT sign-in, retry with --auth chatgpt.",
+            );
         } else if (authentication.method === "aws_credentials") {
           progress?.stage(
             `Authentication: AWS credentials from ${authentication.source}.`,
@@ -13619,6 +13620,10 @@ function classifyScanFailure(error: unknown) {
   return classification;
 }
 
+function isAccountApiKey(name: string): boolean {
+  return name === "OPENAI_API_KEY" || name === "CODEX_API_KEY";
+}
+
 function authenticationFailureMessage(
   authentication: ScanAuthentication | null,
 ): string {
@@ -13643,8 +13648,7 @@ function authenticationFailureMessage(
   if (authentication?.method === "api_key") {
     return (
       `Authentication failed using ${authentication.source}. ` +
-      (authentication.source === "OPENAI_API_KEY" ||
-      authentication.source === "CODEX_API_KEY"
+      (isAccountApiKey(authentication.source)
         ? "Retry with '--auth chatgpt' or provide a valid API key."
         : `Provide a valid ${authentication.source} for the selected provider.`)
     );
@@ -13743,7 +13747,9 @@ function scanFailureMessage(
         return `${detail}The stored API key cannot access the configured model. Use an API key with model access.`;
       return authentication?.method === "api_key"
         ? `${detail}The API key from ${authentication.source} cannot access the configured model. ` +
-            "Retry with '--auth chatgpt' or use an API key with model access."
+            (isAccountApiKey(authentication.source)
+              ? "Retry with '--auth chatgpt' or use an API key with model access."
+              : "Use a provider API key with model access.")
         : `${detail}The stored ChatGPT credentials cannot access the configured model. ` +
             "Use an account or API key with model access.";
     case "rate_limited":
@@ -14293,7 +14299,7 @@ async function parseScanCodexOverrides(
 ): Promise<JsonObject> {
   const { codex: values, model, effort, provider } = options;
   const profileHome = scanCodexHome(environment);
-  if (!isExternalModelProvider(provider) && provider !== "amazon-bedrock") {
+  if (provider === "openai") {
     return parseCodexOverrides(values, model, effort, provider, defaults);
   }
   const explicit = parseCodexOverrides(values, model, effort);
@@ -14335,19 +14341,18 @@ export function parseCodexOverrides(
   values: readonly string[],
   model?: string,
   effort?: ModelCliOptions["effort"],
-  provider?: "openai" | "amazon-bedrock" | ExternalModelProvider,
+  provider?: z.infer<typeof PROVIDER_OPTION>,
   defaults?: JsonObject,
 ): JsonObject {
   const result = Object.create(null) as JsonObject;
   if (model !== undefined) result["model"] = model;
   if (effort !== undefined) result["model_reasoning_effort"] = effort;
+  const hasProviderOverride = provider !== undefined && provider !== "openai";
+  if (hasProviderOverride) result["model_provider"] = provider;
   if (isExternalModelProvider(provider)) {
-    result["model_provider"] = provider;
     result["model_providers"] = {
       [provider]: { ...EXTERNAL_CODEX_PROVIDERS[provider] },
     };
-  } else if (provider === "amazon-bedrock") {
-    result["model_provider"] = provider;
   }
   for (const value of values) {
     const separator = value.indexOf("=");
@@ -14397,10 +14402,7 @@ export function parseCodexOverrides(
           "--effort conflicts with --codex model_reasoning_effort",
         );
       }
-      if (
-        (isExternalModelProvider(provider) || provider === "amazon-bedrock") &&
-        key === "model_provider"
-      ) {
+      if (hasProviderOverride && key === "model_provider") {
         throw new CodexSecurityError(
           "--provider conflicts with --codex model_provider",
         );
@@ -14409,15 +14411,25 @@ export function parseCodexOverrides(
     }
     cursor[final] = parsed;
   }
-  if (isExternalModelProvider(provider) || provider === "amazon-bedrock") {
-    const selectedModel = scanModel(
-      mergeCodexOverrides(defaults ?? {}, result),
-    );
+  if (hasProviderOverride) {
+    const configured = mergeCodexOverrides(defaults ?? {}, result);
+    const selectedModel = scanModel(configured);
     if (typeof selectedModel !== "string" || !selectedModel.trim()) {
       throw new CodexSecurityError(
         selectedModel === undefined
           ? `--model is required when using --provider ${provider}`
           : `--model must be a nonempty string when using --provider ${provider}`,
+      );
+    }
+    // Only an explicit preset selection may introduce its endpoint and key.
+    // Never combine either with an existing native provider table.
+    if (
+      provider === "standardcompute" &&
+      !selectedProviderTable(configured, provider)
+    ) {
+      return mergeCodexOverrides(
+        { model_providers: { [provider]: STANDARD_COMPUTE_CODEX_PROVIDER } },
+        result,
       );
     }
   }

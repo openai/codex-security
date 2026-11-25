@@ -475,6 +475,37 @@ codex-security scan . --provider fireworks --model accounts/fireworks/models/qwe
 
 export CHEAPER_INFERENCE_API_KEY="<your-cheaper-inference-api-key>"
 codex-security scan . --provider cheaperinference --model gpt-5.4
+
+export STANDARD_COMPUTE_API_KEY="<your-standardcompute-api-key>"
+codex-security scan . --provider standardcompute --model standardcompute --codex 'web_search="disabled"'
+```
+
+The Standard Compute preset applies only to an explicit
+`--provider standardcompute` selection without an existing table of that name.
+The preset requires its API key. It cannot use ChatGPT authentication.
+The examples disable web search to match the [vendor's Codex launcher](https://docs.standardcompute.com/agents/codex).
+The preset leaves that setting to you. Use `standardcompute` for
+[smart routing](https://docs.standardcompute.com/models) or select an exact
+model ID. Live scan completion remains unverified.
+
+Existing native tables keep their endpoint and authentication settings.
+To configure the equivalent provider in the SDK, set the same environment
+variable and pass these `codexOverrides` to `CodexSecurity`.
+
+```json
+{
+  "model": "standardcompute",
+  "web_search": "disabled",
+  "model_provider": "standardcompute",
+  "model_providers": {
+    "standardcompute": {
+      "name": "Standard Compute",
+      "base_url": "https://api.stdcmpt.com/v1",
+      "wire_api": "responses",
+      "env_key": "STANDARD_COMPUTE_API_KEY"
+    }
+  }
+}
 ```
 
 For Opper, save this profile in `$CODEX_HOME/opper.config.toml`

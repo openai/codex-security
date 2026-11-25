@@ -66,6 +66,7 @@ function providerFamily(provider: unknown): string {
     case "cheaperinference":
     case "openrouter":
     case "fireworks":
+    case "standardcompute":
     case "ollama":
     case "lmstudio":
       return provider;

@@ -63,6 +63,8 @@ import {
   DEFAULT_CODEX_CONFIG,
   FIREWORKS_CODEX_PROVIDER,
   OPENROUTER_CODEX_PROVIDER,
+  STANDARD_COMPUTE_CODEX_PROVIDER,
+  writeCodexConfig,
   scanModelConfiguration,
   mergedCodexConfig,
 } from "../src/config.js";
@@ -863,6 +865,7 @@ describe("CLI", () => {
               "openrouter",
               "fireworks",
               "cheaperinference",
+              "standardcompute",
               "amazon-bedrock",
             ],
           },
@@ -3414,6 +3417,13 @@ describe("CLI", () => {
       "claude-sonnet-5",
       CHEAPERINFERENCE_CODEX_PROVIDER,
     ],
+    [
+      "Standard Compute",
+      "standardcompute",
+      "standardcompute",
+      "anthropic/claude-sonnet-5",
+      STANDARD_COMPUTE_CODEX_PROVIDER,
+    ],
   ] as const)(
     "routes scans through %s",
     async (_name, provider, selectedModel, codexModel, providerConfig) => {
@@ -3445,6 +3455,56 @@ describe("CLI", () => {
       }
     },
   );
+
+  test("preserves native Standard Compute credentials from a profile or CLI table", async () => {
+    await using fixture = await scopedTemporaryDirectory(
+      "codex-security-standardcompute-profile-",
+    );
+    const home = fixture.path;
+    const gateway = {
+      name: "Native",
+      base_url: "https://gateway.example.test/v1",
+      env_http_headers: { "X-Gateway": "SYNTHETIC_GATEWAY_KEY" },
+    };
+    await writeCodexConfig(join(home, "review.config.toml"), {
+      model_providers: { standardcompute: gateway },
+    });
+    const { runCli, stderr } = createCliTest(main);
+    for (const [override, expected] of [
+      ['profile="review"', gateway],
+      [
+        'model_providers.standardcompute.env_key="OPENAI_API_KEY"',
+        { env_key: "OPENAI_API_KEY" },
+      ],
+    ] as const) {
+      let selected: CodexSecurityConfig | undefined;
+      const status = await runCli(
+        [
+          "scan",
+          ".",
+          "--provider=standardcompute",
+          "--model=synthetic",
+          "--auth=api-key",
+          "--codex",
+          override,
+        ],
+        dependencies({
+          environment: {
+            CODEX_HOME: home,
+            SYNTHETIC_GATEWAY_KEY: "synthetic-header",
+            OPENAI_API_KEY: "synthetic-account",
+            STANDARD_COMPUTE_API_KEY: "unused-credential",
+          },
+          onConfig: (config) => (selected = config),
+        }),
+      );
+      expect(status, stderr.text()).toBe(0);
+      const effective = await mergedCodexConfig(selected!, home);
+      expect(effective["model_providers"]).toEqual({
+        standardcompute: expected,
+      });
+    }
+  });
 
   test("routes scans through the built-in Amazon Bedrock provider", async () => {
     for (const options of [

@@ -69,6 +69,37 @@ function providerSettings(
 }
 
 describe("skill authentication configuration", () => {
+  test("scopes the Standard Compute key to the selected skill credential", () => {
+    const key = "STANDARD_COMPUTE_API_KEY";
+    const resolve = (
+      provider: string,
+      auth: "auto" | "chatgpt",
+      table: JsonObject = { env_key: key },
+    ) =>
+      resolveSkillAuthentication(
+        { command: "patch", modelProvider: provider, auth },
+        { [key]: "synthetic", OPENAI_API_KEY: "account" },
+        { model_providers: { [provider]: table } },
+      );
+    const credential = { [key]: "synthetic" };
+    const preset = resolve("standardcompute", "auto");
+    expect(preset.requiresOpenAiAuth).toBe(false);
+    expect(preset.environment).toEqual(credential);
+    expect(() => resolve("standardcompute", "chatgpt")).toThrow(/ChatGPT/);
+    expect(resolve("openai", "auto").environment).toEqual({
+      OPENAI_API_KEY: "account",
+    });
+    const primary = resolve("gateway", "chatgpt");
+    expect(primary.requiresOpenAiAuth).toBe(true);
+    expect(primary.environment).toEqual({});
+    const header = resolve("gateway", "chatgpt", {
+      requires_openai_auth: true,
+      env_http_headers: { "X-Synthetic": key },
+    });
+    expect(header.requiresOpenAiAuth).toBe(true);
+    expect(header.environment).toEqual(credential);
+  });
+
   test.each(
     (["override", "ambient", "profile"] as const).flatMap((source) =>
       [true, false, undefined].flatMap((requiresOpenAiAuth) =>

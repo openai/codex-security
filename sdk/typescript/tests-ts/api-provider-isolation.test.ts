@@ -6,6 +6,7 @@ import {
   resolveCodexProfile,
   type JsonObject,
 } from "../src/config.js";
+import { selectedScanEnvironment } from "../src/api.js";
 import { main } from "../src/cli.js";
 import { dependencies } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
@@ -158,6 +159,20 @@ async function effectiveProvider(
   );
   return config.model_providers?.[config.model_provider];
 }
+
+test("OpenAI scans omit ambient Standard Compute credentials", () => {
+  const environment = {
+    OPENAI_API_KEY: "synthetic-account-key",
+    Standard_Compute_API_Key: "synthetic-provider-key",
+  };
+  for (const auth of ["auto", "api-key", "chatgpt"] as const) {
+    for (const provider of [undefined, "openai"]) {
+      expect(
+        selectedScanEnvironment(environment, auth, provider),
+      ).not.toHaveProperty("Standard_Compute_API_Key");
+    }
+  }
+});
 
 test("native worker override tables retain inherited features and MCP servers", async () => {
   const root = await temporaryDirectory();
@@ -714,6 +729,8 @@ const fileProviderKeyCases = [
   ["gateway", "declared OpenAI account header", "SYNTHETIC_GATEWAY_TOKEN"],
   ["gateway", "missing custom primary", "SYNTHETIC_GATEWAY_TOKEN"],
   ["openrouter", "default", "OPENROUTER_API_KEY"],
+  ["openrouter", "Standard Compute header", "OPENROUTER_API_KEY"],
+  ["standardcompute", "default", "STANDARD_COMPUTE_API_KEY"],
   ["openrouter", "custom only", "SYNTHETIC_CUSTOM_API_KEY"],
   ["openrouter", "canonical header", "SYNTHETIC_CUSTOM_API_KEY"],
   ["openrouter", "missing custom primary", "SYNTHETIC_CUSTOM_API_KEY"],
@@ -780,7 +797,11 @@ for (const mode of ["standard", "deep"] as const) {
       const gatewayHeader = gatewayHeaders.get(_selection);
       const headerKey =
         gatewayHeader ??
-        (_selection === "canonical header" ? canonicalKey : undefined);
+        (_selection === "Standard Compute header"
+          ? "STANDARD_COMPUTE_API_KEY"
+          : _selection === "canonical header"
+            ? canonicalKey
+            : undefined);
       const headerEnvironment =
         headerKey || _selection === "missing custom primary"
           ? { [headerKey ?? canonicalKey]: " synthetic-header-key " }
@@ -792,7 +813,8 @@ for (const mode of ["standard", "deep"] as const) {
         ? { [inactiveKey]: "synthetic-inactive-key" }
         : {};
       const inheritedEnvironment: Record<string, string> = {
-        ...(_selection === "custom Codex key" ||
+        ...(providerId === "standardcompute" ||
+        _selection === "custom Codex key" ||
         _selection === "other external key" ||
         gatewayHeader
           ? Object.fromEntries(
@@ -837,7 +859,11 @@ for (const mode of ["standard", "deep"] as const) {
         model_provider: providerId,
         model_providers: {
           [providerId]: provider,
-          inactive: { ...provider, env_key: inactiveKey },
+          inactive: {
+            ...provider,
+            env_key:
+              providerId === "standardcompute" ? "CODEX_API_KEY" : inactiveKey,
+          },
         },
         features: { shell_tool: false, unified_exec: false },
       });
@@ -857,6 +883,9 @@ for (const mode of ["standard", "deep"] as const) {
           runWorkbench: async (options, args, input) => {
             if (args[0] === "register-cli-scan") {
               expect(options.environment).not.toHaveProperty(providerKey);
+              expect(options.environment).not.toHaveProperty(
+                "STANDARD_COMPUTE_API_KEY",
+              );
               if (gatewayHeader) {
                 expect(options.environment).not.toHaveProperty(gatewayHeader);
                 expect(options.environment).not.toHaveProperty(inactiveKey);
@@ -879,6 +908,7 @@ for (const mode of ["standard", "deep"] as const) {
                     "OPENROUTER_API_KEY",
                     "FIREWORKS_API_KEY",
                     "CHEAPER_INFERENCE_API_KEY",
+                    "STANDARD_COMPUTE_API_KEY",
                   ]) {
                     expect(environment[name]).toBe(
                       name === providerKey ||
@@ -955,12 +985,13 @@ for (const mode of ["standard", "deep"] as const) {
         });
         expect(preflight.modelProvider).toBe(providerId);
         if (
-          providerId === "gateway" &&
-          (_selection === "custom only" ||
-            _selection === "account-named primary")
+          providerId === "standardcompute" ||
+          (providerId === "gateway" &&
+            (_selection === "custom only" ||
+              _selection === "account-named primary"))
         ) {
           const request = { mode, auth: "chatgpt" as const };
-          const guidance = `ChatGPT authentication cannot use the gateway provider's required ${providerKey}`;
+          const guidance = `ChatGPT authentication cannot use the ${providerId} provider's required ${providerKey}`;
           await expect(client.preflight(repository, request)).rejects.toThrow(
             guidance,
           );
@@ -1285,7 +1316,7 @@ for await (const line of createInterface({ input: process.stdin })) {
     await writeFile(process.argv[2], JSON.stringify({
       inherited: Object.fromEntries([
         "SYNTHETIC_CUSTOM_API_KEY", "SYNTHETIC_CUSTOM_HEADER",
-        "SYNTHETIC_REQUIRED_KEY", "SYNTHETIC_UNUSED_KEY",
+        "SYNTHETIC_REQUIRED_KEY", "SYNTHETIC_UNUSED_KEY", "STANDARD_COMPUTE_API_KEY",
       ].map((name) => [name, process.env[name] ?? null])),
       recovered: settings.environment,
     }));
@@ -1318,6 +1349,7 @@ test.each([
   "CODEX_API_KEY",
   "OPENROUTER_API_KEY",
   "FIREWORKS_API_KEY",
+  "STANDARD_COMPUTE_API_KEY",
 ])(
   "native plugin workers recover the selected %s and other provider variables",
   async (providerKey) => {
@@ -1333,9 +1365,16 @@ test.each([
     const external = ["OPENROUTER_API_KEY", "FIREWORKS_API_KEY"].includes(
       providerKey,
     );
-    const providerId = external
-      ? providerKey.split("_")[0]!.toLowerCase()
-      : "synthetic.gateway";
+    const providerId =
+      providerKey === "STANDARD_COMPUTE_API_KEY"
+        ? "standardcompute"
+        : external
+          ? providerKey.split("_")[0]!.toLowerCase()
+          : "synthetic.gateway";
+    const declaredKey =
+      process.platform === "win32" && providerId === "standardcompute"
+        ? providerKey.toLowerCase()
+        : providerKey;
     const headerKey =
       process.platform === "win32"
         ? "synthetic_custom_header"
@@ -1357,10 +1396,10 @@ test.each([
               name: "Synthetic gateway",
               wire_api: "responses",
               base_url: "https://provider.example.test/v1",
-              env_key: providerKey,
+              env_key: declaredKey,
               env_http_headers: {
                 "X-Synthetic-Token": headerKey,
-                ...(!external ? { "X-Synthetic-Primary": providerKey } : {}),
+                ...(!external ? { "X-Synthetic-Primary": declaredKey } : {}),
                 "X-Synthetic-Missing": "SYNTHETIC_UNSET_KEY",
               },
             },
@@ -1395,7 +1434,7 @@ test.each([
               const selectedKey = external
                 ? "synthetic-custom-key"
                 : providerEnvironment[providerKey];
-              expect(options.env![providerKey]).toBe(selectedKey);
+              expect(options.env![declaredKey]).toBe(selectedKey);
               const status = await nativeRequest(
                 options.env!,
                 repository,
@@ -1416,13 +1455,16 @@ test.each([
                   SYNTHETIC_CUSTOM_HEADER: null,
                   SYNTHETIC_REQUIRED_KEY: null,
                   SYNTHETIC_UNUSED_KEY: null,
+                  STANDARD_COMPUTE_API_KEY: null,
                 },
                 recovered: {
-                  ...providerEnvironment,
-                  ...(process.platform === "win32"
-                    ? { [headerKey]: " synthetic-child-header " }
-                    : {}),
-                  [providerKey]: selectedKey,
+                  [declaredKey]: selectedKey,
+                  [headerKey]:
+                    process.platform === "win32"
+                      ? " synthetic-child-header "
+                      : providerEnvironment[headerKey],
+                  SYNTHETIC_REQUIRED_KEY:
+                    providerEnvironment.SYNTHETIC_REQUIRED_KEY,
                 },
               });
               for (const text of [

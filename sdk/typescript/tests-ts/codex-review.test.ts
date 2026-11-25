@@ -30,13 +30,32 @@ const fixture = fileURLToPath(
   new URL("fixtures/codex-review.mjs", import.meta.url),
 );
 
-test.each(["defaults", "configured", "luna-model", "legacy-profile"] as const)(
+test.each([
+  "defaults",
+  "configured",
+  "luna-model",
+  "legacy-profile",
+  "standardcompute",
+] as const)(
   "dedupe respects %s configuration and keeps review policy attached to stage",
   async (selection) => {
     await using f = await workflowFixture();
     await mkdir(f.environment.CODEX_HOME);
     const config = {
       mcp_servers: { synthetic: { command: "synthetic-unused-command" } },
+      ...(selection === "standardcompute"
+        ? {
+            model_provider: "standardcompute",
+            model_providers: {
+              standardcompute: {
+                name: "Synthetic",
+                base_url: "https://provider.example.test/v1",
+                env_key: "STANDARD_COMPUTE_API_KEY",
+                env_http_headers: { "X-Billing": "OPENAI_API_KEY" },
+              },
+            },
+          }
+        : {}),
       ...(selection === "defaults"
         ? {}
         : {
@@ -67,13 +86,20 @@ test.each(["defaults", "configured", "luna-model", "legacy-profile"] as const)(
     for (const stage of ["screening", "pair-review"] as const) {
       const transcript = join(f.root, `${stage}.jsonl`);
       const runner = new CodexReviewRunner(
-        environment,
-        (_command, _args, options) =>
-          spawn(
+        { ...environment, STANDARD_COMPUTE_API_KEY: "fixture" },
+        (_command, _args, options) => {
+          expect(options.env?.["STANDARD_COMPUTE_API_KEY"]).toBe(
+            selection === "standardcompute" ? "fixture" : undefined,
+          );
+          expect(options.env?.["OPENAI_API_KEY"]).toBe(
+            environment.OPENAI_API_KEY,
+          );
+          return spawn(
             process.execPath,
             [fixture, "configured-model", transcript, f.repository, stage],
             options,
-          ),
+          );
+        },
         undefined,
         f.repository,
       );
@@ -94,6 +120,9 @@ test.each(["defaults", "configured", "luna-model", "legacy-profile"] as const)(
         method?: string;
         params?: Record<string, unknown>;
       }>(await readFile(transcript, "utf8"));
+      expect(messages.some((m) => m.method === "account/login/start")).toBe(
+        selection !== "standardcompute",
+      );
       const model =
         selection === "defaults"
           ? stage === "screening"
