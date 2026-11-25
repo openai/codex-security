@@ -33,6 +33,7 @@ import { promisify } from "node:util";
 import { pathToFileURL } from "node:url";
 
 import { applicationRoot as mcpAppRoot, buildServer } from "./build-server.ts";
+import { startMcpClient } from "./support/mcp-client.ts";
 import { startRpcServer } from "./support/rpc-server.ts";
 
 const execFileAsync = promisify(execFile);
@@ -42,6 +43,8 @@ const pluginRoot = await realpath(
 );
 const workbenchPath = path.join(pluginRoot, "scripts", "workbench_db.py");
 let parentSandboxState: unknown = readOnlyParentSandboxState(pluginRoot);
+const policyRefusal =
+  "This request has been flagged for possible cybersecurity risk.";
 const startDeepScan = toolCall.bind(null, "start_codex_security_deep_scan");
 
 if (process.platform === "win32") {
@@ -435,7 +438,7 @@ service_tier = "ultrafast"
     // Stopping the original model response detaches only that long-poll waiter.
     server.notify("notifications/cancelled", {
       requestId: 10,
-      reason: "detach the first Deep Scan waiter",
+      reason: "MCP request cancelled by caller",
     });
     await delay(150);
 
@@ -887,9 +890,10 @@ service_tier = "ultrafast"
             .some(scanEvent(resumedScanId, "coordinator_started")),
         "the resumed coordinator to start before detaching its waiter",
       );
+      // A lease takeover is still a rejoin, even if its caller forwards a refusal.
       restartedServer.notify("notifications/cancelled", {
         requestId: 2,
-        reason: "the owning response ended before coordinator completion",
+        reason: policyRefusal,
       });
       await waitFor(async () => {
         const run = await getDeepScan(resumedOwner);
@@ -1155,6 +1159,11 @@ service_tier = "ultrafast"
       await restartedServer.stop();
     }
     await testDetachedTargetReplay(serverBundlePath, environment, targetPath);
+    await testExplicitRefusalFailsScan(
+      serverBundlePath,
+      environment,
+      targetPath,
+    );
     await testCliDeepScanEngine({
       fixtureRoot,
       environment,
@@ -1231,6 +1240,49 @@ async function testDetachedTargetReplay(
     assert.notEqual(fresh.result.structuredContent.scanId, scanId);
   } finally {
     await server.stop();
+  }
+}
+
+async function testExplicitRefusalFailsScan(
+  serverBundlePath: string,
+  environment: NodeJS.ProcessEnv,
+  targetPath: string,
+) {
+  const threadId = "deep-scan-stdio-refusal-thread";
+  const logPath = environment.FAKE_CODEX_START_LOG!;
+  const launches = (await readLogLines(logPath)).length;
+  const client = await startMcpClient(
+    {
+      command: process.execPath,
+      args: [serverBundlePath, "--stdio"],
+      cwd: pluginRoot,
+      // Keep the fixture worker running until the coordinator stops it.
+      env: { ...environment, FAKE_CODEX_RESTART_CONTROL: "" },
+    },
+    "parent-turn-refusal",
+  );
+  try {
+    const parent = new AbortController();
+    const pending = client.callTool(
+      startDeepScan({ targetPath }, threadId),
+      undefined,
+      { signal: parent.signal },
+    );
+    const worker = (await waitForJsonLines(logPath, launches + 1))[launches];
+    const { scanId } = discoveryPromptContext(worker.stdin);
+    parent.abort(policyRefusal);
+    await assert.rejects(pending);
+    const joined = await client.callTool(startDeepScan({ scanId }, threadId));
+    assert.equal(joined.isError, true);
+    assert.ok(JSON.stringify(joined.content).includes(policyRefusal));
+    const state = await getDeepScan({ environment, scanId, threadId });
+    assert.equal(state.status, "failed");
+    assert.equal(state.error, policyRefusal);
+    assert.equal(state.workers.length, 1);
+    assert.ok(!["queued", "running"].includes(state.workers[0].status));
+    assert.throws(() => process.kill(worker.pid, 0), { code: "ESRCH" });
+  } finally {
+    await client.close();
   }
 }
 

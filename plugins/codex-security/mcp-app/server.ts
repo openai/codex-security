@@ -1124,7 +1124,12 @@ export function createCodexSecurityServer(): McpServer {
               scanId: begun.scanId,
             });
           }
-          if (begun.validationNotice && projectConfigPath !== undefined) {
+          const signal = abortSignalFromExtra(extra);
+          if (
+            begun.validationNotice &&
+            projectConfigPath !== undefined &&
+            !signal?.aborted
+          ) {
             const instructions = `The local Deep Scan continues. Call start_codex_security_deep_scan with only scanId ${begun.scanId} to await the result.`;
             return scanActionResult(
               {
@@ -1136,7 +1141,11 @@ export function createCodexSecurityServer(): McpServer {
               begun.scanId,
             );
           }
-          const terminal = await coordinator.wait(abortSignalFromExtra(extra));
+          // Rejoining an expired lease starts a new coordinator for an existing scan.
+          const terminal =
+            begun.created && !joined
+              ? await coordinator.waitForInitialRequest(signal)
+              : await coordinator.wait(signal);
           result = preparation.completion.result
             ? await preparation.completion.result
             : await completeDeepScan(terminal);

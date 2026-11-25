@@ -144,7 +144,9 @@ export class WorkbenchDeepScanStore {
     threadId: string;
     modelThreadId?: string;
     scanRoot: string;
-  }): Promise<DeepScanRunState & { validationNotice?: string }> {
+  }): Promise<
+    DeepScanRunState & { created?: boolean; validationNotice?: string }
+  > {
     const userContext = input.userContext;
     const args = {
       threadId: input.threadId,
@@ -194,11 +196,12 @@ export class WorkbenchDeepScanStore {
         "Codex Security workbench returned an invalid Deep Scan start disposition.",
       );
     }
+    const created = startDisposition === "created";
     if (result.validationProviderConfiguration !== undefined) {
       const validationNotice = await bindValidationProviderConfiguration(
         run.scanId,
         result.validationProviderConfiguration as ValidationProviderConfiguration,
-        startDisposition === "created",
+        created,
         input.projectConfigPath === undefined
           ? undefined
           : {
@@ -207,9 +210,9 @@ export class WorkbenchDeepScanStore {
               mode: "deep",
             },
       );
-      if (validationNotice) return { ...run, validationNotice };
+      if (validationNotice) return { ...run, created, validationNotice };
     }
-    return run;
+    return { ...run, created };
   }
 
   async get(scanId: string, threadId: string): Promise<DeepScanRunState> {

@@ -2,6 +2,7 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, dirname, join, relative, sep } from "node:path";
+import { CYBERSECURITY_POLICY_REFUSAL_MESSAGES } from "../native-policy-refusals.js";
 import {
   writeWorkerUsageReceipt,
   type WorkerUsageReceipt,
@@ -187,6 +188,28 @@ export class DeepScanCoordinator {
 
   settled(): Promise<DeepScanRunState> {
     return this.terminalResult.promise.then(cloneState);
+  }
+
+  // An MCP caller can supply an exact refusal as its cancellation reason.
+  // Apply it synchronously so queued publication cannot race past the abort.
+  async waitForInitialRequest(
+    signal: AbortSignal | undefined,
+  ): Promise<DeepScanRunState> {
+    if (!signal) return this.wait(signal);
+    const onAbort = () => {
+      const { reason } = signal;
+      if (this.terminal || !CYBERSECURITY_POLICY_REFUSAL_MESSAGES.has(reason))
+        return;
+      this.abortController.abort(new DeepScanNonRetryableError(reason));
+      this.publicationAbortController.abort(reason);
+    };
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+    try {
+      return await this.wait(signal);
+    } finally {
+      signal.removeEventListener("abort", onAbort);
+    }
   }
 
   async wait(signal: AbortSignal | undefined): Promise<DeepScanRunState>;
@@ -385,6 +408,7 @@ export class DeepScanCoordinator {
         },
       );
       if (this.canceled || this.externallyFailed) return;
+      this.abortController.signal.throwIfAborted();
       const completed = await this.options.store.finish({
         scanId: this.state.scanId,
         reason: loopResult.reason,

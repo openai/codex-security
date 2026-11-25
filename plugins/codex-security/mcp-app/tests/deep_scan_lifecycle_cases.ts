@@ -31,6 +31,8 @@ export async function testDeepScanLifecycle(context: TestContext) {
   for (const check of [
     lateCancellationWaitsForPersistence,
     failedParentCancellationStopsActiveWorker,
+    onlyTheInitiatingRequestCanFailDiscovery,
+    refusalStopsPublicationButPreservesCommittedSuccess,
     canceledPublicationWaitsForHeartbeat,
     delayedIterationDoesNotReplaceStoppedState,
     replacementWaitsForTerminalResult,
@@ -44,6 +46,73 @@ export async function testDeepScanLifecycle(context: TestContext) {
     ancestorNamesDoNotChooseWorkerSequence,
   ]) {
     await context.test(check.name, check);
+  }
+
+  async function onlyTheInitiatingRequestCanFailDiscovery() {
+    const refusal = "This content was flagged for possible cybersecurity risk.";
+    for (const [parent, reason, failed] of [
+      [true, refusal, true],
+      [true, "MCP request cancelled by caller", false],
+      [true, `Command failed: ${refusal}`, false],
+      [false, refusal, false],
+    ] as const) {
+      const { fixture, store } = await coordinatorFixture({
+        ...config,
+        stopAfterNoNew: 2,
+        maxDiscoveryRuns: 2,
+      });
+      const executor = new FakeExecutor({
+        discoveryCandidateId: "saved-candidate",
+      });
+      const coordinator = startCoordinator(fixture, store, executor);
+      await store.iterationCommitted.promise;
+      // Cancellation can arrive before the server starts waiting.
+      const signal = AbortSignal.abort(reason);
+      await assert.rejects(
+        parent
+          ? coordinator.waitForInitialRequest(signal)
+          : coordinator.wait(signal),
+        { name: "AbortError", cause: reason },
+      );
+      const stopped = await coordinator.settled();
+      assert.equal(stopped.status, failed ? "failed" : "succeeded");
+      assert.deepEqual(store.failureMessages, failed ? [refusal] : []);
+      assert.equal(store.iterations.length, failed ? 1 : 2);
+      assert.equal(executor.discoveryCalls, failed ? 1 : 2);
+    }
+  }
+
+  async function refusalStopsPublicationButPreservesCommittedSuccess() {
+    const refusal = "Request blocked by cyberPolicy.";
+    for (const during of ["publication", "committed", "lost-response"]) {
+      const { fixture, store } = await coordinatorFixture(config);
+      const gate = pausePoint();
+      const finish = store.finish.bind(store);
+      store.finish = async (input) => {
+        const committed = await finish(input);
+        await gate.pause();
+        if (during === "lost-response") throw new Error("Finish response lost");
+        return committed;
+      };
+      const coordinator = startCoordinator(fixture, store, new FakeExecutor(), {
+        threadId: "fixture-owner",
+        onComplete: () =>
+          during === "publication" ? gate.pause() : Promise.resolve(),
+      });
+      const caller = new AbortController();
+      const waiter = coordinator.waitForInitialRequest(caller.signal);
+      await gate.entered;
+      // Queue publication's continuation, then cancel before it can start finish.
+      gate.release();
+      caller.abort(refusal);
+      await assert.rejects(waiter, { name: "AbortError", cause: refusal });
+      const stopped = await coordinator.settled();
+      const failed = during === "publication";
+      assert.equal(stopped.status, failed ? "failed" : "succeeded");
+      assert.equal(stopped.status, store.run.status);
+      assert.equal(stopped.manifestPath, store.run.manifestPath);
+      assert.deepEqual(store.failureMessages, failed ? [refusal] : []);
+    }
   }
 
   async function failedParentCancellationStopsActiveWorker() {

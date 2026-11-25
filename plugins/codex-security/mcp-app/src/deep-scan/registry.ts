@@ -196,10 +196,10 @@ export class DeepScanRemoteCoordinator {
 
 export async function startOrJoinDeepScanCoordinator(
   input: ConstructorParameters<typeof DeepScanRemoteCoordinator>[0],
-): Promise<{
-  coordinator: DeepScanCoordinator | DeepScanRemoteCoordinator;
-  joined: boolean;
-}> {
+): Promise<
+  | { joined: boolean; coordinator: DeepScanCoordinator }
+  | { joined: true; coordinator: DeepScanRemoteCoordinator }
+> {
   const existing = input.registry.get(input.run.scanId);
   if (existing) return { coordinator: existing, joined: true };
   const threadId = input.options.threadId;
