@@ -97593,23 +97593,46 @@ function resultSummary(result, inputs, target, artifactUrl) {
     ...inputs.maxCost !== void 0 ? [`**Stop threshold:** $${inputs.maxCost} (estimated; in-flight requests can exceed it)`] : [],
     "Applicable root and nested SECURITY.md policy is discovered by the scanner."
   ];
-  if (result.scopeLimitations?.length) {
-    parts.push("**Scope limitations**\n\n" + result.scopeLimitations.map((note) => `- ${esc(note)}`).join("\n"));
-  }
-  if (result.reportStatus === "partial") parts.push("SARIF report is unavailable; scan results and other reports are still available.");
-  if (result.scanStatus !== "completed") parts.push("**Scan execution failed. Retained findings are shown below; absence of findings is inconclusive.**");
-  for (const error2 of result.errors.slice(0, 10)) parts.push(`<pre>${esc(error2)}</pre>`);
-  for (const finding of result.findings.slice(0, 30)) {
-    parts.push(`<h3>${finding.severity.toUpperCase()}: ${esc(finding.title, 200)}</h3>
+  const statusNotes = [];
+  if (result.reportStatus === "partial") statusNotes.push("SARIF report is unavailable; scan results and other reports are still available.");
+  if (result.scanStatus !== "completed") statusNotes.push("**Scan execution failed. Retained findings are shown below; absence of findings is inconclusive.**");
+  const ready = result.reportStatus === "ready";
+  const footer = (ready ? "Use the action outputs for full JSON and SARIF." : "Check the action outputs for available reports.") + " Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.";
+  const omittedFindings = (count) => `${count} additional ${count === 1 ? "finding is" : "findings are"} ${ready ? "available in the JSON/SARIF reports" : "omitted from this summary"}.`;
+  const findingCount = result.findings.length;
+  const maxBytes = 58e3;
+  const render = (reserved) => {
+    let remaining = maxBytes - reserved - Buffer.byteLength([...statusNotes, footer].join("\n\n"));
+    const fits = (block, separatorBytes = 2) => {
+      const bytes = Buffer.byteLength(block) + separatorBytes;
+      if (bytes > remaining) return false;
+      remaining -= bytes;
+      return true;
+    };
+    function take(items, format, separatorBytes = 2) {
+      const kept = [];
+      for (const item of items) {
+        const block = format(item, kept.length);
+        if (!fits(block, kept.length ? separatorBytes : 2)) break;
+        kept.push(block);
+      }
+      return kept;
+    }
+    const blocks2 = parts.filter((part) => fits(part));
+    const errors = take(result.errors.slice(0, 10), (error2) => `<pre>${esc(error2)}</pre>`);
+    const notes = take(result.scopeLimitations ?? [], (note, index) => (index ? "" : "**Scope limitations**\n\n") + `- ${esc(note)}`, 1);
+    const findings = take(result.findings.slice(0, 30), (finding) => `<h3>${finding.severity.toUpperCase()}: ${esc(finding.title, 200)}</h3>
 
 <code>${esc(finding.path ?? "No source location")}:${finding.startLine ?? "?"}</code>
 
 <pre>${esc(finding.summary, 1200)}</pre>`);
-  }
-  const additional = result.findings.length - 30;
-  if (additional > 0) parts.push(`${additional} additional ${additional === 1 ? "finding is" : "findings are"} available in the JSON/SARIF reports.`);
-  parts.push("Use the action outputs for full JSON and SARIF. Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.");
-  return Buffer.from(parts.join("\n\n")).subarray(0, 58e3).toString("utf8").replace(/\uFFFD$/, "");
+    if (notes.length) blocks2.push(notes.join("\n"));
+    blocks2.push(...statusNotes, ...errors, ...findings);
+    if (findings.length < findingCount) blocks2.push(omittedFindings(findingCount - findings.length));
+    return [...blocks2, footer].join("\n\n");
+  };
+  const summary2 = render(0);
+  return Buffer.byteLength(summary2) <= maxBytes ? summary2 : render(Buffer.byteLength(omittedFindings(findingCount)) + 2);
 }
 function emitAnnotations(result) {
   for (const finding of result.findings.slice(0, 50)) {

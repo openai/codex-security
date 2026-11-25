@@ -43,20 +43,52 @@ export function resultSummary(result: ScanResults, inputs: Inputs, target: Targe
     ...(inputs.maxCost !== undefined ? [`**Stop threshold:** $${inputs.maxCost} (estimated; in-flight requests can exceed it)`] : []),
     'Applicable root and nested SECURITY.md policy is discovered by the scanner.',
   ];
-  if (result.scopeLimitations?.length) {
-    parts.push('**Scope limitations**\n\n' + result.scopeLimitations.map(note => `- ${esc(note)}`).join('\n'));
-  }
-  if (result.reportStatus === 'partial') parts.push('SARIF report is unavailable; scan results and other reports are still available.');
-  if (result.scanStatus !== 'completed') parts.push('**Scan execution failed. Retained findings are shown below; absence of findings is inconclusive.**');
-  for (const error of result.errors.slice(0, 10)) parts.push(`<pre>${esc(error)}</pre>`);
-  for (const finding of result.findings.slice(0, 30)) {
-    parts.push(`<h3>${finding.severity.toUpperCase()}: ${esc(finding.title, 200)}</h3>\n\n<code>${esc(finding.path ?? 'No source location')}:${finding.startLine ?? '?'}</code>\n\n<pre>${esc(finding.summary, 1200)}</pre>`);
-  }
-  const additional = result.findings.length - 30;
-  if (additional > 0) parts.push(`${additional} additional ${additional === 1 ? 'finding is' : 'findings are'} available in the JSON/SARIF reports.`);
-  parts.push('Use the action outputs for full JSON and SARIF. Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.');
-  // GitHub check output is byte bounded. Truncate at UTF-8 boundaries.
-  return Buffer.from(parts.join('\n\n')).subarray(0, 58_000).toString('utf8').replace(/\uFFFD$/, '');
+  const statusNotes: string[] = [];
+  if (result.reportStatus === 'partial') statusNotes.push('SARIF report is unavailable; scan results and other reports are still available.');
+  if (result.scanStatus !== 'completed') statusNotes.push('**Scan execution failed. Retained findings are shown below; absence of findings is inconclusive.**');
+  const ready = result.reportStatus === 'ready';
+  const footer = (ready ? 'Use the action outputs for full JSON and SARIF.' : 'Check the action outputs for available reports.') +
+    ' Upload SARIF only when sarif-upload-ready is true. Reports can contain source code and vulnerability details.';
+  const omittedFindings = (count: number) =>
+    `${count} additional ${count === 1 ? 'finding is' : 'findings are'} ${ready ? 'available in the JSON/SARIF reports' : 'omitted from this summary'}.`;
+  const findingCount = result.findings.length;
+  const maxBytes = 58_000;
+
+  const render = (reserved: number) => {
+    let remaining = maxBytes - reserved - Buffer.byteLength([...statusNotes, footer].join('\n\n'));
+    // Each block precedes a separator, including the one before the footer.
+    const fits = (block: string, separatorBytes = 2): boolean => {
+      const bytes = Buffer.byteLength(block) + separatorBytes;
+      if (bytes > remaining) return false;
+      remaining -= bytes;
+      return true;
+    };
+    // Keep a prefix of complete items. Lines within one list use a single newline.
+    function take<T>(items: T[], format: (item: T, index: number) => string, separatorBytes = 2): string[] {
+      const kept: string[] = [];
+      for (const item of items) {
+        const block = format(item, kept.length);
+        if (!fits(block, kept.length ? separatorBytes : 2)) break;
+        kept.push(block);
+      }
+      return kept;
+    }
+    const blocks = parts.filter(part => fits(part));
+    // Budget diagnostics before scope notes without changing the display order.
+    const errors = take(result.errors.slice(0, 10), error => `<pre>${esc(error)}</pre>`);
+    const notes = take(result.scopeLimitations ?? [], (note, index) =>
+      (index ? '' : '**Scope limitations**\n\n') + `- ${esc(note)}`, 1);
+    const findings = take(result.findings.slice(0, 30), finding =>
+      `<h3>${finding.severity.toUpperCase()}: ${esc(finding.title, 200)}</h3>\n\n<code>${esc(finding.path ?? 'No source location')}:${finding.startLine ?? '?'}</code>\n\n<pre>${esc(finding.summary, 1200)}</pre>`);
+    if (notes.length) blocks.push(notes.join('\n'));
+    blocks.push(...statusNotes, ...errors, ...findings);
+    if (findings.length < findingCount) blocks.push(omittedFindings(findingCount - findings.length));
+    return [...blocks, footer].join('\n\n');
+  };
+
+  // Reserve space for the largest omission notice only if the summary actually overflows.
+  const summary = render(0);
+  return Buffer.byteLength(summary) <= maxBytes ? summary : render(Buffer.byteLength(omittedFindings(findingCount)) + 2);
 }
 
 export function emitAnnotations(result: ScanResults): void {
