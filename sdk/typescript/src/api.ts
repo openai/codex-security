@@ -2996,7 +2996,7 @@ export class CodexSecurity {
       } else if (
         cyberAccessProgram === undefined &&
         this.#dependencies.resolveScanCyberAccessProgram !== undefined &&
-        (modelProvider === undefined || modelProvider === "openai")
+        (modelProvider ?? "openai") === "openai"
       ) {
         // An empty sibling inherits the replacement output's project layers.
         const archiveWorkspace =

@@ -440,6 +440,7 @@ test("automatically selected Blue reaches fresh and resumed direct workers", asy
         model: "gpt-test",
         model_catalog_json: catalog,
         "features.api_key_model_discovery": false,
+        model_provider: null,
       },
     },
     {
