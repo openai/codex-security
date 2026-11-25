@@ -18,6 +18,7 @@ import {
   type ScanActivity,
   type ScanProgress,
   type ScanTrustedAccessStatus,
+  type ScanWorkerSpawnEvent,
   type ScanWorkerStatus,
 } from "../src/index.js";
 import {
@@ -32,6 +33,20 @@ import { throwing } from "./support/errors.js";
 import { runScanEvents } from "../src/api.js";
 
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
+
+async function nativeEvents(records: readonly object[]) {
+  const thread = new Codex({
+    codexPathOverride: process.execPath,
+  }).startThread();
+  const executable = thread as unknown as {
+    _exec: { run(): AsyncGenerator<string> };
+  };
+  executable._exec.run = async function* () {
+    for (const record of records) yield JSON.stringify(record);
+  };
+  const { events } = await thread.runStreamed("Scan the repository.");
+  return events;
+}
 
 afterEach(cleanup);
 
@@ -114,26 +129,18 @@ describe("one-shot scan events", () => {
     "preserves completed scans when the real Codex SDK receives %p token usage",
     async (usage) => {
       const scanDir = await copyCompletedScan(await temporaryDirectory());
-      const thread = new Codex({
-        codexPathOverride: process.execPath,
-      }).startThread();
-      const executable = thread as unknown as {
-        _exec: { run(): AsyncGenerator<string> };
-      };
-      executable._exec.run = async function* () {
-        yield JSON.stringify({ type: "thread.started", thread_id: "thread-1" });
-        yield JSON.stringify({
+      const events = await nativeEvents([
+        { type: "thread.started", thread_id: "thread-1" },
+        {
           type: "item.completed",
           item: {
             id: "message-1",
             type: "agent_message",
             text: "scan complete",
           },
-        });
-        yield JSON.stringify({ type: "turn.completed", usage });
-      };
-
-      const { events } = await thread.runStreamed("Scan the repository.");
+        },
+        { type: "turn.completed", usage },
+      ]);
       const result = await runEvents(scanDir, events);
 
       expect(result.threadId).toBe("thread-1");
@@ -824,6 +831,7 @@ describe("one-shot scan events", () => {
   test("forwards worker dispatch updates while the scan runs", async () => {
     const scanDir = await copyCompletedScan(await temporaryDirectory());
     const statuses: ScanWorkerStatus[] = [];
+    const onWorkerSpawn = mock();
     async function* workerEvents(): AsyncGenerator<ThreadEvent> {
       yield completedMessage(
         "message-1",
@@ -833,12 +841,90 @@ describe("one-shot scan events", () => {
 
     await expect(
       runEvents(scanDir, completedEvents("thread-1", workerEvents()), {
+        onWorkerSpawn,
         onWorkerStatus: (status) => statuses.push(status),
       }),
     ).resolves.toBeDefined();
+    expect(onWorkerSpawn).not.toHaveBeenCalled();
     expect(statuses).toEqual([
       { kind: "dispatch", phase: "ranking", planned: 6, started: 3 },
     ]);
+  });
+
+  test("reports native spawn attempts once, including missed starts and later failures", async () => {
+    const scanDir = await copyCompletedScan(await temporaryDirectory());
+    const events: ScanWorkerSpawnEvent[] = [];
+    const observerErrors: ScanObserverName[] = [];
+    const statuses: ScanWorkerStatus[] = [];
+    // Exercise the real SDK parser, whose ThreadItem type omits collab_tool_call.
+    const spawn = {
+      type: "collab_tool_call",
+      tool: "spawn_agent",
+      sender_thread_id: "parent",
+      receiver_thread_ids: [],
+      agents_states: {},
+      prompt: "Review a fixture.",
+    };
+    const start = (id: string, fields = {}) => ({
+      type: "item.started",
+      item: { ...spawn, id, status: "in_progress", ...fields },
+    });
+    const complete = (id: string) => ({
+      type: "item.completed",
+      item: {
+        ...spawn,
+        id,
+        status: "completed",
+        receiver_thread_ids: ["child"],
+        agents_states: { child: { status: "pending_init", message: null } },
+      },
+    });
+    const fail = (id: string, fields = {}) => ({
+      type: "item.completed",
+      item: { ...spawn, id, status: "failed", ...fields },
+    });
+    const stream = await nativeEvents([
+      start("ignored", { tool: "wait_agent" }),
+      start("mcp", { type: "mcp_tool_call", server: "fixture", arguments: {} }),
+      start("a"),
+      start("b"),
+      start("a"),
+      complete("b"),
+      complete("missed"),
+      complete("missed"),
+      fail("a", { error: { message: "thread spawn rejected" } }),
+      fail("unseen", { error: "capacity exhausted" }),
+      fail("unseen", { error: "capacity exhausted" }),
+      fail("child-error", {
+        receiver_thread_ids: ["child"],
+        agents_states: { child: { status: "errored", message: "init failed" } },
+      }),
+      fail("unknown"),
+    ]);
+    await runEvents(scanDir, completedEvents("parent", stream), {
+      onWorkerSpawn(event) {
+        events.push(event);
+        if (event.kind === "failed" && event.attempt === 1)
+          throw new Error("optional observer failed");
+      },
+      onObserverError: (observer) => observerErrors.push(observer),
+      onWorkerStatus: (status) => statuses.push(status),
+    });
+    expect(events).toEqual([
+      { kind: "dispatch", attempt: 1 },
+      { kind: "dispatch", attempt: 2 },
+      { kind: "dispatch", attempt: 3 },
+      { kind: "failed", attempt: 1, reason: "thread spawn rejected" },
+      { kind: "failed", attempt: 4, reason: "capacity exhausted" },
+      { kind: "failed", attempt: 5, reason: "init failed" },
+      {
+        kind: "failed",
+        attempt: 6,
+        reason: "Delegated worker failed to start.",
+      },
+    ]);
+    expect(observerErrors).toEqual(["onWorkerSpawn"]);
+    expect(statuses).toEqual([]);
   });
 
   test("forwards real file activity as commands start and complete", async () => {

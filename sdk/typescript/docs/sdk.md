@@ -468,9 +468,39 @@ or planned counts, and cannot act as a pre-dispatch gate. Use `maxCostUsd` or
 `signal` for cancellation. Observer failures go to `onObserverError` without
 stopping the scan.
 
+Use the optional `onWorkerSpawn` callback to track native `spawn_agent`
+attempts visible on the parent scan's event stream. Each distinct call gets an
+`attempt` number in the order the SDK first sees it. The number identifies the
+call across its notifications.
+
+```ts
+await security.run(repository, {
+  onWorkerSpawn(event) {
+    if (event.kind === "failed") {
+      console.error(`Spawn attempt ${event.attempt} failed: ${event.reason}`);
+    } else {
+      console.log(`Spawn attempt ${event.attempt} dispatched`);
+    }
+  },
+});
+```
+
+A start item produces `dispatch`. If the SDK first sees the successful
+completion, it reports `dispatch` at completion. A failed completion produces
+`failed`, even when the start was missed. The observer runs asynchronously.
+A dispatch establishes that a call was attempted. It carries no guarantee of
+child acceptance, review phase, planned worker count, or delivery before a
+worker begins review.
+
+The bundled runtime exposes these parent-stream items in multi-agent v1.
+Multi-agent v2 can start a child or reject a spawn without emitting an item on
+that stream. A silent callback therefore cannot establish zero delegation.
+A CI guard that must stop review before it starts needs a blocking decision.
+This callback has no veto or upper bound on delivery latency.
+
 `onWorkerStatus` reports **best-effort** phase dispatch counts from model-emitted
-text markers. A missing dispatch status does not mean delegation was skipped.
-For retired progress hooks, see [older progress integrations](#older-progress-integrations).
+text markers. A missing `onWorkerStatus` dispatch does not mean delegation was
+skipped. For retired progress hooks, see [older progress integrations](#older-progress-integrations).
 
 `onSessionEvent` receives saved events with thread IDs and worker numbers and can
 contain source code or credentials. Deep scans additionally expose durable
