@@ -131,10 +131,45 @@ Each attempt's top-level `usage` includes delegated
 workers, even when completion or grading fails. Missing usage stays unknown,
 cached input is a subset of input tokens, and no dollar cost is inferred.
 
+## Release baselines
+
+Export a portable baseline from a saved run directory or compare two runs
+or exported baselines offline. Both commands print JSON unless the last
+argument names a new output file. Existing files are preserved.
+
+```sh
+node --experimental-strip-types evals/standard-time-budget/baseline.mts export evals/standard-time-budget/reports/run-baseline baseline.json
+node --experimental-strip-types evals/standard-time-budget/baseline.mts compare baseline.json evals/standard-time-budget/reports/run-candidate
+```
+
+The export records the experiment settings, source and tool digests, case
+definitions, and outcomes of each attempt. It omits the fixture source and
+structured host paths. **Review exports and comparisons before sharing.**
+Failure messages are preserved verbatim and may contain local paths, command
+output, or secrets.
+
+Use `comparableRecall` to compare discovery across corpus revisions. A case
+is comparable when its ID, relative path, line span, accepted CWE set, and
+source-file hash are unchanged. Check the separate lists of added, removed,
+and changed cases and files. A change to a shared context file can affect a
+case even if its own source file is unchanged.
+
+Check each arm's `flags.graderChanged` before interpreting a change in
+recall. It is `null` if either snapshot lacks the `grade.mts` hash. A changed
+grader can score identical findings differently. The comparison keeps the
+original scores. To isolate a discovery change, grade both sets of saved
+findings with the same grader.
+
+Compare completion rates alongside recall. Failed and unattempted runs do not
+contribute to recall. Token totals stay unknown when usage is missing.
+Review unmatched findings and safe-control overlaps by hand. A lower observed
+recall flags a case for investigation and can reflect variation across runs.
+
 ## Interpretation and checks
 
 Use the `fixtures.mts` hash in `experiment.json` to identify the corpus revision.
-If two runs have different revisions, compare their results on the shared case IDs.
+If two runs have different revisions, compare their results on `comparable` cases
+with the baseline comparison tool above.
 
 Review findings
 without variant labels and compare grounded recall, adjudicated false
