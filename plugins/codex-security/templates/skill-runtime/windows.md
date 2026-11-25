@@ -85,10 +85,10 @@ Supply the scope relative to the repository or as an absolute path. The helper a
 
 ## recover-scan-results
 
-Recover retained checkpoints for the selected stopped scan. Use the host-selected interpreter when supplied. The command uses the configured `PYTHON` executable, falling back to `python`.
+Recover retained checkpoints for the selected stopped scan. Use `CODEX_SECURITY_PYTHON_COMMAND` when set, then `PYTHON`, then `python`.
 
 ```powershell
-$recoveryPython = if ($env:PYTHON) { $env:PYTHON } else { 'python' }
+$recoveryPython = if ($env:CODEX_SECURITY_PYTHON_COMMAND) { $env:CODEX_SECURITY_PYTHON_COMMAND } elseif ($env:PYTHON) { $env:PYTHON } else { 'python' }
 & $recoveryPython '<plugin_dir>\scripts\workbench_db.py' recover-scan-results --scan-id '<scan_id>'
 ```
 

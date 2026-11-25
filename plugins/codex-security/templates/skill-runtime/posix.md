@@ -60,10 +60,10 @@ Use `-` for standard output. The helper expands a leading tilde in the repositor
 
 ## recover-scan-results
 
-Recover retained checkpoints for the selected stopped scan. Use the host-selected interpreter when supplied. The command uses the configured `PYTHON` executable, falling back to `python3`.
+Recover retained checkpoints for the selected stopped scan. Use `CODEX_SECURITY_PYTHON_COMMAND` when set, then `PYTHON`, then `python3`.
 
 ```sh
-"${PYTHON:-python3}" '<plugin_dir>/scripts/workbench_db.py' recover-scan-results --scan-id '<scan_id>'
+"${CODEX_SECURITY_PYTHON_COMMAND:-${PYTHON:-python3}}" '<plugin_dir>/scripts/workbench_db.py' recover-scan-results --scan-id '<scan_id>'
 ```
 
 ## scope-binding

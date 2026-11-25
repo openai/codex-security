@@ -4,6 +4,7 @@ import { rm, symlink } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { test } from "node:test";
 import { assertNoError } from "./assertions.ts";
+import { fixturePython } from "./support/python.ts";
 import { startRpcServer } from "./support/rpc-server.ts";
 import { temporaryDirectory } from "./support/temporary-directories.ts";
 
@@ -77,6 +78,30 @@ test("packaged MCP and standalone reader select runtime instructions", async (t)
   assert.match(text, /--helper bind-repo-scopes/);
   assert.equal(text.includes("cmd.exe"), process.platform === "win32");
   assert.doesNotMatch(text, /::code-comment/);
+
+  const recovery = await instructions("recover-scan-results");
+  assertNoError(recovery);
+  const block = /```\w+\r?\n([\s\S]*?)\r?\n```/.exec(
+    recovery.result.content[0].text,
+  );
+  assert.ok(block);
+  const script = block[1].replace("<plugin_dir>", "linked plugin") + " --help";
+  const windows = process.platform === "win32";
+  const help = execFileSync(
+    windows ? "powershell.exe" : "sh",
+    windows ? ["-NoProfile", "-Command", script] : ["-c", script],
+    {
+      cwd: root,
+      encoding: "utf8",
+      env: {
+        ...process.env,
+        CODEX_SECURITY_PYTHON_COMMAND: fixturePython,
+        PYTHON: join(root, "missing-python"),
+        PYTHONDONTWRITEBYTECODE: "1",
+      },
+    },
+  );
+  assert.match(help, /retained checkpoints/);
 
   const invalid = await instructions("../plugin-files");
   assert.ok(invalid.result?.isError || invalid.error);
