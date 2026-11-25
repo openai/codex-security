@@ -196,9 +196,21 @@ export async function readPythonRequirements(
   for (const path of paths.filter((p) =>
     /^requirements[^/]*\.(?:txt|lock|in)$/iu.test(posix.basename(p)),
   )) {
-    const lines = (await read(path))
-      .split(/\r?\n/u)
-      .map((line) => line.replace(/(?:^|\s+)#.*$/u, "").trim());
+    // pip joins continued lines before stripping comments. Keep the first
+    // physical line number so the selected pin points back to the source.
+    const physical = (await read(path)).split(/\r?\n/u);
+    for (let index = physical.length - 1; index >= 0; index--) {
+      const line = physical[index]!;
+      if (/^\s*#/u.test(line)) {
+        physical[index] = "";
+      } else if (line.endsWith("\\")) {
+        physical[index] = line.slice(0, -1) + (physical[index + 1] ?? "");
+        physical[index + 1] = "";
+      }
+    }
+    const lines = physical.map((line) =>
+      line.replace(/(?:^|\s+)#.*$/u, "").trim(),
+    );
     const matches = lines.flatMap((line, index) => {
       const match = /^([A-Za-z0-9][A-Za-z0-9_.-]*)(.*)$/u.exec(line);
       return match &&
