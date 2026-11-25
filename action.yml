@@ -21,12 +21,12 @@ inputs:
     description: "Providers supported by the Action: openai, openrouter, fireworks, or amazon-bedrock. Pass the selected provider's credentials to the scan step."
     default: openai
   model:
-    description: Model to scan with, passed to scan --model. Defaults to gpt-5.6-sol for OpenAI; other providers require an explicit model ID. Cost limits require CLI pricing support for the model.
+    description: Model to scan with, passed to scan --model. Defaults to gpt-6.1-sol for OpenAI; other providers require an explicit model ID. Cost limits require CLI pricing support for the model.
   cyber-access-program:
     description: 'Optional Cyber access program: standard, daybreak_blue, or daybreak_red. Unset preserves CLI defaults. Daybreak selections require approved organization and enabled API project access; model access is checked separately.'
   effort:
     description: 'Reasoning effort passed to Codex; supported values depend on the model and provider.'
-    default: xhigh
+    default: high
   max-cost:
     description: Positive estimated USD stop threshold per invocation. In-flight requests can exceed it; unset means no cost limit.
   max-time-hours:
