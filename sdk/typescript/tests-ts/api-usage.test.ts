@@ -18,6 +18,7 @@ import {
   scanRuntimeDependencies,
 } from "./support/api-events.js";
 import {
+  BUDGET_TEST_CONFIG,
   measuredScanUsage,
   mockWorkbench,
   TestClient,
@@ -107,7 +108,7 @@ test.each([false, true])(
     const costs = mock();
     const usages = mock();
     const approaching = mock(() => 0.008);
-    const client = TestClient.withDependencies({
+    const client = new TestClient(BUDGET_TEST_CONFIG, {
       ...scanRuntimeDependencies(codexHome, scanDir),
       runWorkbench: async (_options, args, input) => {
         if (args[0] === "read-scan-usage") {
