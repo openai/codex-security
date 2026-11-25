@@ -189,6 +189,13 @@ async function run() {
       complete,
       resumed: args.includes("resume"),
       scanId: env.CODEX_SECURITY_SCAN_ID,
+      target: {
+        targetId: process.env.CODEX_SECURITY_TARGET_ID,
+        displayName: process.env.CODEX_SECURITY_TARGET_DISPLAY_NAME,
+        kind: process.env.CODEX_SECURITY_TARGET_KIND,
+        revision: process.env.CODEX_SECURITY_TARGET_REVISION,
+        snapshotDigest: process.env.CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST,
+      },
       home: process.env.CODEX_HOME,
       hasApiKey: process.env.CODEX_API_KEY === "synthetic-package-deep-key",
       root,

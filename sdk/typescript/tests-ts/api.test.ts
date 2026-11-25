@@ -3407,7 +3407,12 @@ if __name__ == "__main__":
     expect(prompt).toContain("record_codex_security_scan_draft");
     expect(prompt).toContain("scan-results.md");
     expect(prompt).not.toContain("bind-repo-scopes");
-    expect(prompt).not.toContain("CODEX_SECURITY_TARGET_REVISION");
+    expect(codexEnvironment?.["CODEX_SECURITY_TARGET_REVISION"]).toBe(
+      "deadbeef",
+    );
+    expect(prompt).toContain(
+      `Use exactly ${shellEnvironmentReference("CODEX_SECURITY_TARGET_REVISION")} as scan.target.revision.`,
+    );
     expect(prompt).toContain("CODEX_SECURITY_SCAN_PROGRESS");
     expect(prompt).toContain(
       `Repository root: ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")}`,
@@ -3667,23 +3672,43 @@ if __name__ == "__main__":
     },
   );
 
-  test("passes the workbench snapshot contract to dirty Git scans", async () => {
+  test.each([
+    ["git_revision", "cafebabe", undefined],
+    ["git_worktree", "cafebabe", TEST_SNAPSHOT_DIGEST],
+    ["directory_snapshot", "unversioned", TEST_SNAPSHOT_DIGEST],
+  ] as const)("binds %s metadata", async (kind, revision, digest) => {
     const { repository, codexHome, scanDir } = await scanDirectories();
+    let prompt = "";
     const createCodex = mock((_options: CodexOptions) => {
-      return codexWithStream(async () => fail("target contract captured"));
+      return codexWithStream(async (input: string) => {
+        prompt = input;
+        return fail("target contract captured");
+      });
     });
 
-    const client = TestClient.withDependencies({
+    await using client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
+      prepareRuntime: async () => ({
+        ...preparedRuntime(codexHome),
+        environment: {
+          CODEX_SECURITY_TARGET_REVISION: "stale-revision",
+          CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST: "stale-digest",
+          ...(process.platform === "win32"
+            ? { Codex_Security_Target_Snapshot_Digest: "stale-digest" }
+            : {}),
+        },
+      }),
       runWorkbench: async (_options, args, input): Promise<JsonObject> => {
         if (args[0] === "register-cli-scan") {
           return {
             ...mockScanRegistration(args, input),
-            targetRevision: "cafebabe",
+            targetRevision: revision,
             contract: {
               target: {
-                allowedKinds: ["git_worktree"],
-                requiredSnapshotDigest: TEST_SNAPSHOT_DIGEST,
+                allowedKinds: [kind],
+                ...(digest === undefined
+                  ? {}
+                  : { requiredSnapshotDigest: digest }),
               },
             },
           };
@@ -3696,12 +3721,24 @@ if __name__ == "__main__":
     await expect(client.run(repository)).rejects.toThrow(
       "target contract captured",
     );
-    expect(createCodex.mock.lastCall?.[0]?.env).toMatchObject({
-      CODEX_SECURITY_TARGET_KIND: "git_worktree",
-      CODEX_SECURITY_TARGET_REVISION: "cafebabe",
-      CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST: TEST_SNAPSHOT_DIGEST,
-    });
-    await client.close();
+    const env = createCodex.mock.lastCall?.[0]?.env;
+    expect(env?.["CODEX_SECURITY_TARGET_KIND"]).toBe(kind);
+    expect(env?.["CODEX_SECURITY_TARGET_REVISION"]).toBe(
+      revision === "unversioned" ? undefined : revision,
+    );
+    expect(env?.["CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST"]).toBe(digest);
+    expect(env).not.toHaveProperty("Codex_Security_Target_Snapshot_Digest");
+    expect(
+      prompt.includes(
+        shellEnvironmentReference("CODEX_SECURITY_TARGET_REVISION"),
+      ),
+    ).toBe(revision !== "unversioned");
+    expect(
+      prompt.includes(
+        shellEnvironmentReference("CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST"),
+      ),
+    ).toBe(digest !== undefined);
+    expect(prompt).not.toContain(TEST_SNAPSHOT_DIGEST);
   });
 
   test("resolves deep settings before runtime preparation and records the snapshot", async () => {
@@ -16156,15 +16193,17 @@ if __name__ == "__main__":
       expect(windowsCommand).toBeDefined();
       expect(prompt).toContain(windowsCommand!.replaceAll("\r\n", "\n"));
     }
-    const fileInstructions = await readFile(
-      join(PLUGIN_ROOT, "skills/security-scan/references/sdk-files.md"),
-      "utf8",
-    );
     const commandFence =
       process.platform === "win32"
         ? /^`{3}powershell\r?\n([\s\S]*?)\r?\n`{3}/m
         : /^`{3}sh\r?\n([\s\S]*?)\r?\n`{3}/m;
-    const bindScopeCommand = fileInstructions.match(commandFence)![1]!;
+    const scopeCommand = (topic: string) =>
+      execFileSync(
+        Bun.which("node")!,
+        [join(PLUGIN_ROOT, "scripts", "skill_runtime.mjs"), topic],
+        { encoding: "utf8" },
+      ).match(commandFence)![1]!;
+    const bindScopeCommand = scopeCommand("scope-binding");
     expect(prompt).toContain("references/scoped-paths.md");
     expect(prompt).toContain("resolve-security-md");
     expect(prompt).not.toContain(policyDirectory);
@@ -16233,11 +16272,7 @@ if __name__ == "__main__":
       );
     };
     expect(existsSync(scopedSourceInput)).toBe(false);
-    const scopedInstructions = await readFile(
-      join(PLUGIN_ROOT, "skills/security-scan/references/scoped-paths.md"),
-      "utf8",
-    );
-    const makeScopeCommand = scopedInstructions.match(commandFence)![1]!;
+    const makeScopeCommand = scopeCommand("scope-inventory");
     runScopedHelper(makeScopeCommand);
     const scopedSourceInputContents = await readFile(scopedSourceInput, "utf8");
     expect(
@@ -16487,6 +16522,7 @@ if __name__ == "__main__":
       }),
     ).rejects.toThrow("prompt captured");
     expect(prompt()).toContain("do not finalize or seal them");
+    expect(prompt()).toMatch(/scan\.mode[^.]*"branch_diff"/u);
     expect(prompt()).not.toContain("complete_codex_security_scan");
 
     await expect(
