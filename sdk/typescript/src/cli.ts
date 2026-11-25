@@ -237,6 +237,7 @@ import {
   modelProviderConfigOverride,
   resolveCommandAuthConfig,
   resolveCodexProfile,
+  selectedScanProfile,
   mergedCodexConfig,
   readCodexAuthConfig,
   readCodexFileProfile,
@@ -9166,11 +9167,41 @@ async function prepareScanArgumentsFromRecipe(
       "This scan used additional instructions. The --scan-prompt-file must not be empty.",
     );
   }
-  const replayConfig = await restoreProviderProfile(
-    config,
-    recipe["providerProfile"],
-    environment,
-  );
+  const replayConfig = {
+    ...(await restoreProviderProfile(
+      config,
+      recipe["providerProfile"],
+      environment,
+    )),
+  };
+  // File profiles reload on resume. Keep the original default rates for
+  // cumulative usage without restoring settings since removed from the file.
+  if (
+    operation === "resume" &&
+    typeof replayConfig["profile"] === "string" &&
+    !selectedScanProfile(replayConfig)
+  ) {
+    const profile = await readCodexFileProfile(
+      replayConfig,
+      scanCodexHome(environment),
+    );
+    // All file-profile recipes before modelDefaults used these scanner defaults.
+    const defaults = z
+      .object({ model: z.string(), reasoningEffort: z.string() })
+      .parse(
+        recipe["modelDefaults"] ?? {
+          model: "gpt-5.6-sol",
+          reasoningEffort: "xhigh",
+        },
+      );
+    if (!("model" in profile) && !("model" in replayConfig))
+      replayConfig["model"] = defaults.model;
+    if (
+      !("model_reasoning_effort" in profile) &&
+      !("model_reasoning_effort" in replayConfig)
+    )
+      replayConfig["model_reasoning_effort"] = defaults.reasoningEffort;
+  }
   return {
     repository,
     auth: auth ?? DEFAULT_SCAN_AUTH,
