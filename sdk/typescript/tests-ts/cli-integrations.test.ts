@@ -154,10 +154,34 @@ describe("integration command dispatch", () => {
       [["cs", "exploitability", "check", "--format", "ht"], "html"],
       [["codex-security", "mcp", "add", "--ag"], "--agent"],
       [["cs", "skills", "list", "--format", "ya"], "yaml"],
+      [["cs", "info", "--config", "scan", "--format", "m"], "md"],
     ] as const) {
       const result = await run("--", ...args);
       expect(result.status).toBe(0);
       expect(result.stdout).toContain(flag);
+    }
+    for (const args of [
+      ["cs", "scan", "."],
+      ["codex-security", "scan", "import", "sample.json"],
+      ["cs", "scans", "rerun", "sample-id"],
+      [
+        "cs",
+        "--token-limit",
+        "10",
+        "scans",
+        "--full-output",
+        "resume",
+        "sample-id",
+      ],
+    ]) {
+      const result = await run("--", ...args, "--format", "");
+      expect(result.status).toBe(0);
+      expect(result.stdout.trimEnd().split("\v")).toEqual([
+        "toon",
+        "json",
+        "yaml",
+        "jsonl",
+      ]);
     }
     expect(await readdir(home)).toEqual([]);
     expect(await readdir(project)).toEqual([]);
