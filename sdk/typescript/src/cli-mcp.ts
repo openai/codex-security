@@ -53,7 +53,7 @@ function mcpServerConfig(
   if (arg.length) throw new Error("Use --arg with --exec or --package.");
   const value = (command ?? defaultCommand).trim();
   if (!value) throw new Error("--command requires a launcher.");
-  if (/^https?:\/\//u.test(value)) return { url: value, type: "http" };
+  if (/^https?:\/\//i.test(value)) return { url: value, type: "http" };
   // Preserve an existing literal path with spaces. Otherwise a path starts
   // a command line and can be followed by positional arguments or flags.
   const isPath = /^(?:\/|~(?:\/|$)|\.{1,2}\/|[A-Za-z]:[\\/]|\\\\)/u.test(value);
