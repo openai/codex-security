@@ -4313,22 +4313,6 @@ export class CodexSecurity {
           activeScan = null;
           notifyScanLifecycle(options, completion["scan"]);
           runPostScan = null;
-          const result = await collectResult(
-            {
-              status: "completed",
-              model: budgetRecovery.model,
-              ...turnPricingMetadata(budgetRecovery.pricingContext),
-              usage: snapshot.usage,
-            },
-            budgetRecovery.threadId,
-            scanDir,
-            budgetRecovery.pluginRoot,
-            budgetRecovery.expectation,
-            callerSignal,
-            true,
-            budgetRecovery.pythonPath,
-            budgetRecovery.protectedRoot,
-          );
           const completedScan = completion["scan"];
           const targetWarnings = new Set(
             Array.isArray(completion["targetWarnings"])
@@ -4353,7 +4337,22 @@ export class CodexSecurity {
                 : undefined,
             );
           }
-          return result;
+          return await collectResult(
+            {
+              status: "completed",
+              model: budgetRecovery.model,
+              ...turnPricingMetadata(budgetRecovery.pricingContext),
+              usage: snapshot.usage,
+            },
+            budgetRecovery.threadId,
+            scanDir,
+            budgetRecovery.pluginRoot,
+            budgetRecovery.expectation,
+            callerSignal,
+            true,
+            budgetRecovery.pythonPath,
+            budgetRecovery.protectedRoot,
+          );
         } catch {}
       }
       if (activeScan !== null && scanTurnStatus !== null) {

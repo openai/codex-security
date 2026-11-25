@@ -14,6 +14,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from textwrap import dedent
 from typing import Any
 
 import pytest
@@ -34,6 +35,7 @@ from workbench_test_support import (
     initialize_git_repository,
     load_script,
     mark_handoff_delivered,
+    read_draft_documents,
     read_review_state,
     register_scan,
     repository_recipe,
@@ -42,8 +44,10 @@ from workbench_test_support import (
     run_workbench,
     save_commit_diff,
     save_workspace,
+    saved_draft,
     scan_claim_command,
     scan_command,
+    select_checkpoint,
     set_triage,
     stable_target_id,
     start_delivered_scan,
@@ -52,6 +56,7 @@ from workbench_test_support import (
     start_workspace_scan,
     update_progress,
     workspace_command,
+    write_checkpoint,
     write_completed_contract,
     write_deep_contract,
     write_remediation_patch,
@@ -223,7 +228,7 @@ def test_cost_limit_increases_are_saved_without_replacing_the_scan_recipe(
         scan_command(state_dir, "set-scan-cost-limit", scan_id, "--max-cost-usd", str(limit))
     saved = scan_command(state_dir, "get-scan-recipe", scan_id)["recipe"]
     assert saved == {**original, "maxCostUsd": 0.006}
-    assert complete_budget_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "complete"
+    assert complete_budget_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "failed"
     stopped = scan_command(
         state_dir, "set-scan-cost-limit", scan_id, "--max-cost-usd", "1", check=False
     )
@@ -260,13 +265,15 @@ def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
 
     completed = complete_budget_scan(state_dir, scan_id, warning=warning)["scan"]
 
-    assert completed["progress"]["status"] == "complete"
+    assert completed["progress"]["status"] == "failed"
     assert completed["findings"] == []
     assert completed["cost"] == BUDGET_COST
     assert completed["warnings"] == [warning]
+    assert completed["resultsRecoveryNeeded"] is False
     assert get_scan(state_dir, scan_id)["scan"]["warnings"] == [warning]
     assert ledger.read_bytes() == original_ledger
     manifest = json.loads((scan_dir / "scan-manifest.json").read_text())
+    assert manifest["scan"]["status"] == "failed"
     assert manifest["scan"]["target"]["displayName"] == target.name
     assert manifest["scan"]["target"]["targetId"] == stable_target_id(target)
     assert manifest["scan"]["sealedAt"]
@@ -280,23 +287,34 @@ def test_budget_exhaustion_preserves_unvalidated_discovery_as_deferred_work(
     assert "User input reaches a SQL statement" in coverage["deferred"][0]["reason"]
     assert coverage["surfaces"][0]["disposition"] == "needs_follow_up"
     report = (scan_dir / "report.md").read_text()
-    assert "No findings were reported." in report
+    assert "No vulnerability conclusion can be drawn." in report
     assert "Validation was deferred because the scan reached its cost limit." in report
 
 
-def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path) -> None:
+@pytest.mark.parametrize("partial", [False, True], ids=["authored", "explicitly-incomplete"])
+def test_budget_exhaustion_preserves_authored_validated_findings(
+    tmp_path: Path, partial: bool
+) -> None:
     state_dir, target, scan_dir, scan_id, _ = budget_scan_fixture(tmp_path)
     write_deep_contract(scan_dir, scan_id, target, relative_path="app.py")
 
     manifest_path = scan_dir / "scan-manifest.json"
     draft = json.loads(manifest_path.read_text())
+    if partial:
+        draft["scan"]["complete"] = False
     draft["scan"]["scope"]["limitations"] = ["The deployment configuration was unavailable."]
     manifest_path.write_text(json.dumps(draft))
 
+    previous = write_checkpoint(
+        scan_dir / "checkpoints",
+        {"scanId": scan_id, "complete": False, "findings": [], "reviewState": {"deferred": []}},
+    )
+    head = select_checkpoint(scan_dir, previous)
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
-    assert completed["progress"]["status"] == "complete"
+    assert completed["progress"]["status"] == "failed"
     assert completed["findingCount"] == 1
+    assert completed["resultsRecoveryNeeded"] is False
     assert "Unsafe archive extraction" in completed["findings"][0]["title"]
     coverage = read_review_state(state_dir, scan_dir)
 
@@ -307,6 +325,375 @@ def test_budget_exhaustion_preserves_authored_validated_findings(tmp_path: Path)
         limitation,
     ]
     assert limitation in (scan_dir / "report.md").read_text()
+
+    checkpoint = scan_dir / "checkpoints" / json.loads(head.read_text())["checkpoint"]
+    assert checkpoint != previous
+    assert json.loads(checkpoint.read_text())["reviewState"]["deferred"][0]["id"] == "candidate-1"
+    sealed = manifest_path.read_bytes()
+    scan_command(state_dir, "preserve-scan-results", scan_id)
+    assert manifest_path.read_bytes() == sealed
+
+
+@pytest.fixture
+def authored_budget_scan(tmp_path: Path) -> tuple[Path, Path, str]:
+    state_dir, target, scan_dir, scan_id, _ = budget_scan_fixture(tmp_path)
+    scan_command(state_dir, "set-scan-thread", scan_id, "--thread-id", "sdk-thread")
+    write_completed_contract(
+        scan_dir, scan_id, target, relative_path="app.py", coverage_mode="deep_repository"
+    )
+    return state_dir, scan_dir, scan_id
+
+
+@pytest.mark.parametrize("command", ["preserve-scan-results", "recover-scan-results"])
+@pytest.mark.parametrize("projection_warning", [False, True])
+def test_budget_exhaustion_keeps_published_results_stable(
+    authored_budget_scan: tuple[Path, Path, str], command: str, projection_warning: bool
+) -> None:
+    state_dir, scan_dir, scan_id = authored_budget_scan
+    manifest_path = scan_dir / "scan-manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["scan"]["threatModel"] = {
+        "summary": "Queue producers and consumers cross a service boundary."
+    }
+    manifest_path.write_text(json.dumps(manifest))
+    complete_budget_scan(state_dir, scan_id)
+    artifacts = {
+        path: (scan_dir / path).read_bytes()
+        for path in ("scan-manifest.json", "findings.json", "report.md", "exports/results.sarif")
+    }
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        baseline = connection.execute(
+            "SELECT retained_source_digests_json, retained_checkpoint_heads_json "
+            "FROM scans WHERE id = ?",
+            (scan_id,),
+        ).fetchone()
+    if projection_warning:
+        document = scan_dir / "threatmodel.md"
+        document.unlink()
+        document.mkdir()
+
+    saved = scan_command(state_dir, command, scan_id)["scan"]
+
+    assert saved["resultsRecoveryNeeded"] is False
+    assert saved["progress"]["status"] == "failed"
+    assert saved["findingCount"] == 1
+    assert saved["cost"] == BUDGET_COST
+    assert (
+        any(
+            warning.startswith("Automatic threat model save failed:")
+            for warning in saved["warnings"]
+        )
+        is projection_warning
+    )
+    assert get_scan(state_dir, scan_id)["scan"]["warnings"] == saved["warnings"]
+    repeated = scan_command(state_dir, "preserve-scan-results", scan_id)["scan"]
+    assert repeated["warnings"] == saved["warnings"]
+    assert repeated["resultsRecoveryNeeded"] is False
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        assert (
+            connection.execute(
+                "SELECT retained_source_digests_json, retained_checkpoint_heads_json "
+                "FROM scans WHERE id = ?",
+                (scan_id,),
+            ).fetchone()
+            == baseline
+        )
+    assert all((scan_dir / path).read_bytes() == contents for path, contents in artifacts.items())
+
+
+def test_budget_exhaustion_rejects_changed_checkpoint_after_terminal_commit(
+    authored_budget_scan: tuple[Path, Path, str],
+) -> None:
+    state_dir, scan_dir, scan_id = authored_budget_scan
+    complete_budget_scan(state_dir, scan_id)
+    artifacts = {
+        path: (scan_dir / path).read_bytes()
+        for path in ("scan-manifest.json", "findings.json", "report.md", "exports/results.sarif")
+    }
+    head = json.loads((scan_dir / "checkpoint-head.json").read_text())
+    checkpoint = scan_dir / "checkpoints" / head["checkpoint"]
+    draft = json.loads(checkpoint.read_text())
+    draft["findings"][0]["title"] = "Changed accepted checkpoint"
+    checkpoint.write_text(json.dumps(draft))
+
+    rejected = scan_command(state_dir, "recover-scan-results", scan_id, check=False)
+
+    assert rejected["returncode"] != 0
+    assert "checkpoint changed after the scan stopped" in rejected["stderr"]
+    assert all((scan_dir / path).read_bytes() == contents for path, contents in artifacts.items())
+    saved = get_scan(state_dir, scan_id)["scan"]
+    assert saved["cost"] == BUDGET_COST
+    assert "Unsafe archive extraction" in saved["findings"][0]["title"]
+
+
+@pytest.mark.parametrize("removed_before_stop", [True, False])
+def test_budget_exhaustion_recovery_preserves_parent_replacement(
+    authored_budget_scan: tuple[Path, Path, str], removed_before_stop: bool
+) -> None:
+    state_dir, scan_dir, scan_id = authored_budget_scan
+    documents = read_draft_documents(scan_dir)
+    original = documents["findings"]["findings"][0]
+    documents["manifest"]["scan"]["complete"] = True
+    drafts = scan_dir / "drafts"
+    drafts.mkdir()
+    staged = drafts / f"{uuid.uuid4()}.json"
+    checkpoint = staged.with_suffix(".checkpoint.json")
+
+    def publish(findings: list[dict[str, Any]]) -> dict[str, str]:
+        documents["findings"]["findings"] = findings
+        if not findings:
+            documents["coverage"]["surfaces"] = []
+        staged.write_text(json.dumps(documents))
+        checkpoint.write_text(json.dumps(saved_draft(scan_id, findings=findings, complete=True)))
+        written = scan_command(
+            state_dir,
+            "write-scan-draft",
+            scan_id,
+            "--draft-path",
+            str(staged),
+            "--checkpoint-path",
+            str(checkpoint),
+        )
+        assert written["status"] == "draft_written"
+        return json.loads((scan_dir / "checkpoint-head.json").read_text())
+
+    first_head = publish([original])
+    if removed_before_stop:
+        removed_head = publish([])
+        accepted = json.loads(
+            (scan_dir / "checkpoints" / removed_head["inputCheckpoint"]).read_text()
+        )
+        assert accepted["complete"] is True
+        assert accepted["findings"] == []
+        assert accepted["publication"] == {
+            "previousCheckpoint": first_head["checkpoint"],
+            "previousInputCheckpoint": first_head["inputCheckpoint"],
+        }
+
+    stopped = complete_budget_scan(state_dir, scan_id)["scan"]
+    assert stopped["progress"]["status"] == "failed"
+    assert stopped["findingCount"] == (0 if removed_before_stop else 1)
+    assert stopped["resultsRecoveryNeeded"] is False
+    manifest = json.loads((scan_dir / "scan-manifest.json").read_text())["scan"]
+    assert "preservedSources" not in manifest
+    with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:
+        baseline = connection.execute(
+            "SELECT retained_source_digests_json FROM scans WHERE id = ?", (scan_id,)
+        ).fetchone()[0]
+    assert json.loads(baseline)
+
+    later = {
+        **original,
+        "identity": {"anchor": "later-budget-result"},
+        "ruleId": "later.budget.result",
+        "title": "Later saved result",
+    }
+    write_checkpoint(
+        scan_dir / "checkpoints",
+        saved_draft(scan_id, findings=[later], complete=not removed_before_stop),
+    )
+    assert get_scan(state_dir, scan_id)["scan"]["resultsRecoveryNeeded"] is True
+
+    recovered = scan_command(state_dir, "recover-scan-results", scan_id)["scan"]
+
+    assert [finding["title"] for finding in recovered["findings"]] == [later["title"]]
+    assert recovered["findingCount"] == 1
+    assert recovered["progress"]["status"] == "failed"
+    assert recovered["cost"] == BUDGET_COST
+    assert BUDGET_WARNING in recovered["warnings"]
+    assert recovered["resultsRecoveryNeeded"] is False
+    canonical = (scan_dir / "findings.json").read_bytes()
+    repeated = scan_command(state_dir, "recover-scan-results", scan_id)["scan"]
+    assert repeated["findingCount"] == 1
+    assert repeated["resultsRecoveryNeeded"] is False
+    assert (scan_dir / "findings.json").read_bytes() == canonical
+
+
+@pytest.mark.parametrize("retry", ["preserve-scan-results", "recover-scan-results"])
+def test_budget_exhaustion_replays_pending_checkpoint_recovery(
+    authored_budget_scan: tuple[Path, Path, str], retry: str
+) -> None:
+    state_dir, scan_dir, scan_id = authored_budget_scan
+    complete_budget_scan(state_dir, scan_id)
+    artifacts = {
+        path: (scan_dir / path).read_bytes()
+        for path in ("scan-manifest.json", "findings.json", "report.md", "exports/results.sarif")
+    }
+    head = json.loads((scan_dir / "checkpoint-head.json").read_text())
+    draft = json.loads((scan_dir / "checkpoints" / head["checkpoint"]).read_text())
+    draft["findings"][0]["occurrenceId"] = "occ_111111111111111111111111"
+    draft["findings"][0]["identity"]["anchor"] = "late-budget-checkpoint"
+    draft["findings"][0]["ruleId"] = "late.budget.checkpoint"
+    draft["findings"][0]["title"] = "Later saved checkpoint"
+    select_checkpoint(scan_dir, write_checkpoint(scan_dir / "checkpoints", draft))
+    assert get_scan(state_dir, scan_id)["scan"]["resultsRecoveryNeeded"] is True
+    database = state_dir / "workbench.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER reject_recovery_seal BEFORE UPDATE OF seal_manifest_digest ON scans
+            WHEN OLD.status = 'failed'
+            BEGIN SELECT RAISE(ABORT, 'synthetic recovery publication failure'); END
+            """
+        )
+
+    rejected = scan_command(state_dir, "recover-scan-results", scan_id, check=False)
+
+    assert rejected["returncode"] != 0
+    assert "synthetic recovery publication failure" in rejected["stderr"]
+    assert all((scan_dir / path).read_bytes() == contents for path, contents in artifacts.items())
+    assert get_scan(state_dir, scan_id)["scan"]["resultsRecoveryNeeded"] is True
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER reject_recovery_seal")
+    saved = scan_command(state_dir, retry, scan_id)["scan"]
+    assert saved["resultsRecoveryNeeded"] is False
+    assert saved["progress"]["status"] == "failed"
+    assert saved["cost"] == BUDGET_COST
+    assert saved["findingCount"] == 2
+    assert "Later saved checkpoint" in {finding["title"] for finding in saved["findings"]}
+
+
+@pytest.fixture
+def interrupted_budget_stop(authored_budget_scan: tuple[Path, Path, str]) -> tuple[Path, Path, str]:
+    state_dir, scan_dir, scan_id = authored_budget_scan
+    database = state_dir / "workbench.sqlite3"
+    with sqlite3.connect(database) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER reject_terminal_write BEFORE UPDATE OF status ON scans
+            WHEN NEW.status = 'failed'
+            BEGIN SELECT RAISE(ABORT, 'synthetic terminal write failure'); END
+            """
+        )
+    rejected = complete_budget_scan(state_dir, scan_id, check=False)
+    assert rejected["returncode"] != 0
+    assert "synthetic terminal write failure" in rejected["stderr"]
+    with sqlite3.connect(database) as connection:
+        connection.execute("DROP TRIGGER reject_terminal_write")
+
+    assert json.loads((scan_dir / "scan-manifest.json").read_bytes())["scan"]["sealedAt"]
+    return state_dir, scan_dir, scan_id
+
+
+def test_budget_exhaustion_recovers_only_the_prepared_seal_after_process_exit(
+    authored_budget_scan: tuple[Path, Path, str], tmp_path: Path
+) -> None:
+    state_dir, scan_dir, scan_id = authored_budget_scan
+    expected = tmp_path / "prepared-seal.json"
+    # Exit the actual workbench process at its final canonical output write.
+    hook = dedent(
+        """
+        import os
+        import finalize_scan_contract as writer
+        import workbench_db
+
+        publish = writer.write_scan_local_bytes
+        def interrupt(scan_dir, path, data, **options):
+            if path == "scan-manifest.json":
+                (scan_dir.parent / "prepared-seal.json").write_bytes(data)
+                os._exit(91)
+            return publish(scan_dir, path, data, **options)
+        writer.write_scan_local_bytes = interrupt
+        workbench_db.main()
+        """
+    )
+    interrupted = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            hook,
+            "complete-budget-exhausted-scan",
+            "--scan-id",
+            scan_id,
+            "--cost-json",
+            json.dumps(BUDGET_COST),
+            "--message",
+            BUDGET_WARNING,
+        ],
+        cwd=SCRIPT.parent,
+        env={**os.environ, "CODEX_SECURITY_STATE_DIR": str(state_dir)},
+        capture_output=True,
+    )
+    assert interrupted.returncode == 91, interrupted.stderr
+    manifest = scan_dir / "scan-manifest.json"
+    draft = manifest.read_bytes()
+    assert not json.loads(draft)["scan"].get("sealedAt")
+    assert json.loads(expected.read_bytes())["scan"]["sealedAt"]
+
+    substituted = json.loads(draft)
+    substituted["scan"]["scope"]["limitations"].append("Substituted draft")
+    changed = json.dumps(substituted).encode()
+    manifest.write_bytes(changed)
+    rejected = complete_budget_scan(state_dir, scan_id, check=False)
+    assert rejected["returncode"] != 0
+    assert "manifest changed" in rejected["stderr"]
+    assert manifest.read_bytes() == changed
+    assert get_scan(state_dir, scan_id)["scan"]["progress"]["status"] == "running"
+
+    manifest.write_bytes(draft)
+    assert scan_command(state_dir, "get-cli-scan-resume", scan_id)["scanId"] == scan_id
+    result = complete_budget_scan(state_dir, scan_id)["scan"]
+    assert result["progress"]["status"] == "failed"
+    assert result["findingCount"] == 1
+    assert manifest.read_bytes() == expected.read_bytes()
+
+
+@pytest.mark.parametrize("fresh", [True, False], ids=["fresh-fallback", "resumed-retry"])
+def test_budget_exhaustion_recovers_after_terminal_database_error(
+    interrupted_budget_stop: tuple[Path, Path, str], fresh: bool
+) -> None:
+    state_dir, scan_dir, scan_id = interrupted_budget_stop
+    manifest = scan_dir / "scan-manifest.json"
+    sarif = scan_dir / "exports" / "results.sarif"
+    sealed_artifacts = {
+        path: path.read_bytes()
+        for path in (manifest, scan_dir / "findings.json", scan_dir / "report.md", sarif)
+    }
+
+    if fresh:
+        fail_scan(state_dir, scan_id, BUDGET_WARNING, "--cost-json", json.dumps(BUDGET_COST))
+    else:
+        assert scan_command(state_dir, "get-cli-scan-resume", scan_id)["scanId"] == scan_id
+        complete_budget_scan(state_dir, scan_id)
+
+    saved = get_scan(state_dir, scan_id)["scan"]
+    assert saved["progress"]["status"] == "failed"
+    assert saved["findingCount"] == 1
+    finding = json.loads((scan_dir / "findings.json").read_bytes())["findings"][0]
+    assert saved["findings"][0]["occurrenceId"] == finding["occurrenceId"]
+    assert saved["cost"] == BUDGET_COST
+    assert json.loads(manifest.read_bytes())["scan"]["status"] == "failed"
+    run = json.loads(sarif.read_bytes())["runs"][0]
+    assert run["invocations"][0]["executionSuccessful"] is False
+    assert len(run["results"]) == 1
+    assert "candidate-1" in {
+        item["id"] for item in read_review_state(state_dir, scan_dir)["deferred"]
+    }
+    for path, original in sealed_artifacts.items():
+        assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("artifact", ["manifest", "checkpoint"])
+def test_budget_exhaustion_rejects_changed_results_after_terminal_database_error(
+    interrupted_budget_stop: tuple[Path, Path, str], artifact: str
+) -> None:
+    state_dir, scan_dir, scan_id = interrupted_budget_stop
+    if artifact == "manifest":
+        path = scan_dir / "scan-manifest.json"
+    else:
+        head = json.loads((scan_dir / "checkpoint-head.json").read_bytes())
+        path = scan_dir / "checkpoints" / head["checkpoint"]
+    altered = path.read_bytes() + b"\n"
+    path.write_bytes(altered)
+
+    retry = complete_budget_scan(state_dir, scan_id, check=False)
+
+    assert retry["returncode"] != 0
+    assert artifact in retry["stderr"]
+    assert path.read_bytes() == altered
+    saved = get_scan(state_dir, scan_id)["scan"]
+    assert saved["progress"]["status"] == "running"
+    assert saved["findingCount"] == 0
 
 
 @pytest.mark.parametrize(
@@ -341,7 +728,7 @@ def test_budget_exhaustion_preserves_existing_candidate_decisions(
 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
-    assert completed["progress"]["status"] == "complete"
+    assert completed["progress"]["status"] == "failed"
     assert completed["findings"] == []
     coverage = read_review_state(state_dir, scan_dir)
 
@@ -402,7 +789,7 @@ def test_budget_exhaustion_preserves_existing_deferred_work_with_one_trusted_mar
 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
-    assert completed["progress"]["status"] == "complete"
+    assert completed["progress"]["status"] == "failed"
     preserved = read_review_state(state_dir, scan_dir)
     assert preserved["deferred"][0] == existing
     assert len(preserved["deferred"]) == 1 + marker_added
@@ -411,7 +798,7 @@ def test_budget_exhaustion_preserves_existing_deferred_work_with_one_trusted_mar
             "id": "scan-cost-limit",
             "reason": "Validation was deferred because the scan reached its cost limit.",
         }
-    assert "No findings were reported." in (scan_dir / "report.md").read_text()
+    assert "No vulnerability conclusion can be drawn." in (scan_dir / "report.md").read_text()
 
 
 def test_budget_exhaustion_preserves_capped_discovery(tmp_path: Path) -> None:
@@ -419,7 +806,7 @@ def test_budget_exhaustion_preserves_capped_discovery(tmp_path: Path) -> None:
 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
-    assert completed["progress"]["status"] == "complete"
+    assert completed["progress"]["status"] == "failed"
     assert read_review_state(state_dir, scan_dir)["deferred"][0]["id"] == "candidate-1"
 
 
@@ -428,7 +815,7 @@ def test_budget_exhaustion_with_no_candidates_is_honestly_partial(tmp_path: Path
 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
-    assert completed["progress"]["status"] == "complete"
+    assert completed["progress"]["status"] == "failed"
     assert completed["findings"] == []
     coverage = read_review_state(state_dir, scan_dir)
 
@@ -445,7 +832,7 @@ def test_budget_exhaustion_preserves_scoped_path_inventory(tmp_path: Path) -> No
 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
-    assert completed["progress"]["status"] == "complete"
+    assert completed["progress"]["status"] == "failed"
     coverage = read_review_state(state_dir, scan_dir)
     assert coverage["mode"] == "scoped_path"
     assert coverage["inventoryStrategy"] == "scoped_path"
@@ -525,7 +912,7 @@ def test_budget_exhaustion_preserves_out_of_scope_supporting_evidence(tmp_path: 
 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
-    assert completed["progress"]["status"] == "complete"
+    assert completed["progress"]["status"] == "failed"
     coverage = read_review_state(state_dir, scan_dir)
     assert coverage["deferred"][0]["paths"] == ["app.py", "shared/control.py"]
 
@@ -544,7 +931,7 @@ def test_budget_exhaustion_preserves_unicode_line_separator_inventory(tmp_path: 
 
     completed = complete_budget_scan(state_dir, scan_id)["scan"]
 
-    assert completed["progress"]["status"] == "complete"
+    assert completed["progress"]["status"] == "failed"
     coverage = read_review_state(state_dir, scan_dir)
     assert coverage["deferred"][0]["paths"] == ["dir\u2028name.py"]
 

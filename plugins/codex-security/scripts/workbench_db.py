@@ -17,7 +17,7 @@ import tempfile
 import time
 import uuid
 from collections.abc import Callable
-from contextlib import ExitStack, closing, contextmanager, nullcontext
+from contextlib import ExitStack, closing, contextmanager, nullcontext, suppress
 from datetime import datetime, timedelta, timezone
 from functools import partial
 from pathlib import Path, PurePosixPath
@@ -1205,7 +1205,7 @@ def finalize_scan_usage(connection: sqlite3.Connection, args: argparse.Namespace
 def complete_budget_exhausted_scan(
     connection: sqlite3.Connection, args: argparse.Namespace
 ) -> dict[str, Any]:
-    """Complete a running CLI Deep Scan using the measured cost and saved results after its budget is exhausted."""
+    """Stop a budget-exhausted Deep Scan."""
     scan_id = require_uuid(args.scan_id, "scan-id")
     cost_json = parse_scan_cost(args.cost_json)
     if cost_json is None:
@@ -1242,6 +1242,8 @@ def complete_budget_exhausted_scan(
                 "discovery."
             )
         scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
+        if saved_results.budget_stop_receipt(_WORKBENCH_DB_CONTEXT, scan_id).exists():
+            return complete_scan_locked(connection, scan_id, None, cost_json)
         candidates = (
             []
             if run["manifest_path"] == str(scan_dir / "scan-manifest.json")
@@ -1261,7 +1263,7 @@ def complete_budget_exhausted_scan(
                 (json.dumps([*warnings, warning]), scan_id),
             )
             connection.commit()
-        return complete_scan_locked(connection, scan_id, None, cost_json)
+        return complete_scan_locked(connection, scan_id, None, cost_json, cost_stop=warning)
 
 
 def budget_exhausted_draft(
@@ -1276,6 +1278,7 @@ def complete_scan_locked(
     claim_token: str | None,
     cost_json: str | None,
     *,
+    cost_stop: str | None = None,
     prepare_only: bool = False,
     thread_id: str | None = None,
     turn_id: str | None = None,
@@ -1306,6 +1309,13 @@ def complete_scan_locked(
 
     add_warning()
     scan_dir = require_canonical_scan_directory(Path(scan["scan_dir"]))
+    intent = saved_results.pending_budget_stop(
+        _WORKBENCH_DB_CONTEXT, scan, scan_dir, restore=not prepare_only
+    )
+    if intent is not None:
+        if prepare_only:
+            raise SystemExit("This scan already stopped at its cost limit.")
+        cost_json, cost_stop = intent["cost"], intent["warning"]
     completion_timestamp = now()
     current_manifest_path = artifact_path(scan_dir, ARTIFACTS["manifest"], required=False)
     current_manifest = None
@@ -1317,6 +1327,8 @@ def complete_scan_locked(
         and manifest_is_sealed(current_manifest["scan"])
     )
     completion_binding = workbench_completion_binding(scan, completion_timestamp, current_manifest)
+    if cost_stop is not None:
+        completion_binding["status"] = "failed"
     if scan["recipe_json"] is not None:
         missing_drafts = []
         for file_name in (
@@ -1377,6 +1389,8 @@ def complete_scan_locked(
                 draft_documents=draft_documents,
                 finding_scope=requested_finding_scope(scan) if scan["mode"] == "deep" else None,
             )
+        if intent is not None and prepared.manifest != json.loads(intent["seal"]):
+            raise SystemExit("The pending cost-stop manifest changed after preparation.")
         warnings.extend(warning for warning in prepared.warnings if warning not in warnings)
         add_warning()
         with connection:
@@ -1398,19 +1412,32 @@ def complete_scan_locked(
                     (len(prepared.coverage["surfaces"]), scan_id),
                 )
         wrote = True
+        before_seal = None
+        if cost_stop is not None and intent is None:
+            before_seal = partial(
+                saved_results.record_budget_stop,
+                _WORKBENCH_DB_CONTEXT,
+                scan_id,
+                published_manifest_digest(scan_dir, current_manifest),
+                cost_json,
+                cost_stop,
+            )
         manifest, findings, _ = _write_prepared_scan_finalization(
-            prepared, projection_warnings=warnings
+            prepared, projection_warnings=warnings, before_cost_stop_seal=before_seal
         )
     except ContractError as exc:
         # Only a coordinator-selected parent is fenced for output-write replay.
         selected_deep_parent = scan["mode"] == "deep" and deep_scan.require_deep_scan_run(
             connection, scan_id
         )["manifest_path"] == str(scan_dir / ARTIFACTS["manifest"])
-        if (wrote and not selected_deep_parent) or (
-            scan["mode"] == "deep"
-            and not wrote
-            and not already_sealed
-            and not isinstance(exc, RecoverableContractError)
+        if intent is None and (
+            (wrote and not selected_deep_parent)
+            or (
+                scan["mode"] == "deep"
+                and not wrote
+                and not already_sealed
+                and not isinstance(exc, RecoverableContractError)
+            )
         ):
             args = argparse.Namespace(claim_token=claim_token, cost_json=cost_json)
             args.message, args.scan_id = str(exc), scan_id
@@ -1420,7 +1447,11 @@ def complete_scan_locked(
         kind: artifact_path(scan_dir, filename, required=True)
         for kind, filename in ARTIFACTS.items()
     }
-    manifest_digest = published_manifest_digest(scan_dir, manifest)
+    manifest_digest = (
+        intent["manifestDigest"]
+        if intent is not None
+        else published_manifest_digest(scan_dir, manifest)
+    )
     reported_count = progress.reported_scope_file_count(_WORKBENCH_DB_CONTEXT, scan)
     if prepare_only:
         connection.execute("BEGIN IMMEDIATE")
@@ -1491,6 +1522,8 @@ def complete_scan_locked(
         deep_scan.require_deep_scan_ready_for_parent_completion(connection, scan)
         if scan["scan_dir"] != str(scan_dir):
             reported_count = None
+        if intent is not None and published_manifest_digest(scan_dir, manifest) != manifest_digest:
+            raise SystemExit("The pending cost-stop manifest changed after preparation.")
         connection.execute("DELETE FROM scan_artifacts WHERE scan_id = ?", (scan["id"],))
         for kind, path in artifacts.items():
             if path is not None:
@@ -1500,6 +1533,8 @@ def complete_scan_locked(
                 )
         connection.execute("DELETE FROM finding_occurrences WHERE scan_id = ?", (scan["id"],))
         index_findings(connection, scan["id"], findings, timestamp)
+        if cost_stop is not None:
+            saved_results.retain_budget_stop_sources(_WORKBENCH_DB_CONTEXT, connection, scan)
         finding_count = len(findings.get("findings", []))
         connection.execute(
             """
@@ -1521,12 +1556,14 @@ def complete_scan_locked(
         updated = connection.execute(
             """
             UPDATE scans
-            SET status = 'complete', phase = 'reporting', completed_at = ?, updated_at = ?,
+            SET status = ?, failure_message = ?, phase = 'reporting', completed_at = ?, updated_at = ?,
                 log_completed_at = ?, seal_manifest_digest = ?, cost_json = ?,
                 completion_warnings_json = ?
             WHERE id = ? AND status = 'running'
             """,
             (
+                "failed" if cost_stop is not None else "complete",
+                cost_stop,
                 timestamp,
                 timestamp,
                 now(),
@@ -1538,6 +1575,10 @@ def complete_scan_locked(
         )
         if updated.rowcount != 1:
             raise SystemExit("Only a running scan can be completed.")
+    if cost_stop is not None:
+        # A committed terminal row makes the temporary receipt inert.
+        with suppress(OSError):
+            saved_results.budget_stop_receipt(_WORKBENCH_DB_CONTEXT, scan_id).unlink()
     context = scan_context(connection, scan["id"])
     context["targetWarnings"] = target_warnings
     return context
