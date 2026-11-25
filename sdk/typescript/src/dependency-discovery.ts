@@ -48,53 +48,222 @@ function knownDependencyFile(path: string) {
   );
 }
 
-function sourceReferences(
+// Keep source lines intact when excluding comments and literal text.
+function newlinesIn(value: string): string {
+  return value.replace(/[^\n]+/gu, "");
+}
+
+// Consume even truncated literals once. Restarting at each slash or escaped
+// quote in an unfinished literal can rescan the same long suffix.
+function literalEnd(text: string, start: number, delimiter: string): number {
+  const regex = delimiter === "/";
+  let inClass = false;
+  for (let i = start; i < text.length; i++) {
+    const char = text[i];
+    if (char === "\n" && delimiter !== "`") return i;
+    if (delimiter === "`" && char === "$" && text[i + 1] === "{") return i + 2;
+    if (char === "\\" && (!regex || text[i + 1] !== "\n")) i++;
+    else if (regex && char === "[") inClass = true;
+    else if (regex && char === "]") inClass = false;
+    else if (char === delimiter && !inClass) return i + 1;
+  }
+  return text.length;
+}
+
+// Only package string literals survive as "@". Template expressions stay
+// visible, since they can contain real calls to require() or import().
+function javascriptCode(text: string, pkg: string): string {
+  const tokens =
+    /\/\/[^\n]*|\/\*[\s\S]*?(?:\*\/|$)|[\w$]+|=>|\+\+|--|\.\.\.|\s+|[^\s]/gu;
+  const templateDepth: number[] = [];
+  let braces = 0;
+  const conditions: boolean[] = [];
+  let control = false;
+  let member = false;
+  let regexAllowed = true;
+  let code = "";
+  for (let match; (match = tokens.exec(text));) {
+    let token = match[0];
+    if (token.startsWith("//") || token.startsWith("/*")) {
+      code += " " + newlinesIn(token);
+      continue;
+    }
+    if (!token.trim()) {
+      code += token;
+      continue;
+    }
+    // A control statement can have a regex expression as its body.
+    // Track source tokens before template boundaries are replaced.
+    if (token === "(") conditions.push(control);
+    const startsBody = token === ")" && conditions.pop();
+    // In "for await (...)" the parenthesis still belongs to "for".
+    if (token !== "await")
+      control = !member && /^(?:if|for|while|with)$/u.test(token);
+    const resumes = token === "}" && braces === templateDepth.at(-1);
+    if (token === "/" && regexAllowed) {
+      tokens.lastIndex = literalEnd(text, tokens.lastIndex, "/");
+      token = "0";
+    } else if (resumes || token === "`" || token === "'" || token === '"') {
+      const delimiter = resumes ? "`" : token;
+      tokens.lastIndex = literalEnd(text, tokens.lastIndex, delimiter);
+      const chunk = text.slice(match.index + 1, tokens.lastIndex);
+      code += newlinesIn(chunk);
+      if (resumes) templateDepth.pop();
+      if (delimiter === "`" && chunk.endsWith("${")) {
+        templateDepth.push(braces);
+        token = ";";
+      } else if (resumes) token = ")";
+      else {
+        const value = chunk.slice(0, -1);
+        const matches = value === pkg || value.startsWith(pkg + "/");
+        token = matches && chunk.endsWith(delimiter) ? '"@"' : '""';
+      }
+    } else if (token === "{") braces++;
+    else if (token === "}") braces--;
+
+    // Member names can follow whitespace or comments. Spread starts a new expression.
+    if (member && (token === "require" || token === "import")) token = "0";
+    code += token === "..." ? "... " : token;
+    regexAllowed =
+      startsBody ||
+      (!member &&
+        /^(?:[=(:,;!?&|{\[~*+%/-]|=>|\.\.\.|await|case|delete|do|else|in|instanceof|new|of|return|throw|typeof|void|yield)$/u.test(
+          token,
+        ));
+    member = token === "." || token === "#";
+  }
+  return code;
+}
+
+function pythonCode(text: string): string {
+  const code = text.replace(
+    /#[^\n]*|'''(?:\\[\s\S]|(?!''')[^\\])*(?:''')?|"""(?:\\[\s\S]|(?!""")[^\\])*(?:""")?|'(?:\\[\s\S]|[^'\\\n])*'?|"(?:\\[\s\S]|[^"\\\n])*"?/gu,
+    (token) => " " + newlinesIn(token),
+  );
+  if (!/\b(?:from|import)[ \t]+typing(?:_extensions)?\b/u.test(code))
+    return code;
+  let guardIndent = Infinity;
+  return code
+    .split("\n")
+    .map((line) => {
+      const indent = line.search(/\S/u);
+      if (indent < 0 || indent > guardIndent) return "";
+      guardIndent =
+        /^\s*(?:if|elif)\s+(?:typing\.)?TYPE_CHECKING\s*:\s*$/u.test(line)
+          ? indent
+          : Infinity;
+      return line;
+    })
+    .join("\n");
+}
+
+// ES imports and destructured require() calls share the same local bindings.
+// Return null for erased clauses, [] for an import with no bindings.
+function javascriptBindings(clause?: string, target?: string) {
+  if (clause && /^type(?:\s+[\w$]|\s*[{*])/u.test(clause)) return null;
+  const names = (clause ?? target ?? "")
+    .replace(/[{}]/gu, "")
+    .split(",")
+    .map((name) => name.trim())
+    .filter(Boolean);
+  // "type Foo" is erased, but "type as foo" imports a value named type.
+  const values = clause
+    ? names.filter(
+        (name) => !/^type\s/u.test(name) || /^type\s+as\s+[\w$]+$/u.test(name),
+      )
+    : names;
+  if (names.length && !values.length) return null;
+  return values.flatMap((name) => {
+    const binding = name.split("=", 1)[0]!.trim();
+    const local = /(?:^|\bas\s+|:\s*|\.\.\.\s*)([A-Za-z_$][\w$]*)$/u.exec(
+      binding,
+    );
+    return local ? [local[1]!] : [];
+  });
+}
+
+/** @internal */
+export function sourceReferences(
   path: string,
   text: string,
   pkg: DependencyPackage,
   symbols: readonly string[],
 ) {
-  const bindings = new Set<string>();
-  const lines: number[] = [];
   const python = path.endsWith(".py") && pkg.ecosystem === "PyPI";
-  const javascript = /\.[cm]?[jt]sx?$/iu.test(path) && pkg.ecosystem === "npm";
-  if (!python && !javascript) return { lines, bindings: [] };
-  const roots = new Set([
-    pkg.name.replace(/-/gu, "_"),
-    ...symbols
-      .map((symbol) => symbol.split(".")[0]!)
-      .filter((s) => /^[A-Za-z_]\w*$/u.test(s)),
-  ]);
-  const pattern = python
-    ? new RegExp(
-        `^\\s*(?:from|import)\\s+(?:${[...roots].map(regexEscape).join("|")})(?:[.\\s,]|$)`,
-        "iu",
-      )
-    : new RegExp(
-        `(?:\\bfrom\\s*|\\b(?:import|require)\\s*\\(\\s*|\\bimport\\s*)["']${regexEscape(pkg.name)}(?:/[^"']*)?["']`,
-        "u",
+  const javascript =
+    pkg.ecosystem === "npm" &&
+    /\.[cm]?[jt]sx?$/iu.test(path) &&
+    !/\.d\.[cm]?ts$/iu.test(path);
+  if (!python && !javascript) return { lines: [], bindings: [] };
+
+  text = text.replace(/\r\n/gu, "\n");
+  const code = python ? pythonCode(text) : javascriptCode(text, pkg.name);
+  const lines = new Set<number>();
+  const bindings = new Set<string>();
+  let offset = 0;
+  let line = 1;
+  function record(start: number, names: string[]) {
+    while (offset < start) if (code[offset++] === "\n") line++;
+    lines.add(line);
+    for (const name of names) bindings.add(name);
+  }
+
+  if (python) {
+    const roots = [
+      pkg.name.replace(/-/gu, "_"),
+      ...symbols.map((symbol) => symbol.split(".")[0]!).filter(Boolean),
+    ].map((root) => root.toLowerCase());
+    const matchesRoot = (name: string) => {
+      const lower = name.toLowerCase();
+      return roots.some(
+        (root) => lower === root || lower.startsWith(root + "."),
       );
-  for (const [index, line] of text.split(/\r?\n/u).entries()) {
-    if (!pattern.test(line)) continue;
-    lines.push(index + 1);
-    const local = python
-      ? line.match(/\bimport\s+(\w+)(?:\s+as\s+(\w+))?/u)
-      : line.match(
-          /\bimport\s+(?:\*\s+as\s+)?([\w$]+)|\b(?:const|let|var)\s+([\w$]+)\s*=\s*require\b/u,
-        );
-    if (local) bindings.add(local[2] ?? local[1]!);
-    if (!python) {
-      const names = /\bimport\s*\{([^}]*)\}/u.exec(line)?.[1];
-      for (const name of names?.split(",") ?? []) {
-        const localName = name
-          .trim()
-          .split(/\s+as\s+/u)
-          .at(-1);
-        if (localName) bindings.add(localName);
-      }
+    };
+
+    for (const match of code.matchAll(
+      /(?:^|;)[ \t]*(?:from(?:[ \t]|\\\n)+([\w.]+)(?:[ \t]|\\\n)+)?import\b(?:[ \t]|\\\n)*(\([^();]*\)|(?:\\\n|[^\n;])+)/gmu,
+    )) {
+      const from = match[1];
+      if (from && !matchesRoot(from)) continue;
+      const names = match[2]!.replace(/^\(|\)$/gu, "").replace(/\\\n/gu, " ");
+      const bindings = names.split(",").flatMap((name) => {
+        const parsed = /^([\w.]+)(?:\s+as\s+(\w+))?$/u.exec(name.trim());
+        if (!parsed || (!from && !matchesRoot(parsed[1]!))) return [];
+        return [parsed[2] ?? parsed[1]!.split(".")[0]!];
+      });
+      if (from || bindings.length) record(match.index, bindings);
+    }
+  } else {
+    const statement =
+      /(?<![.$\w])(import|export)\b\s*(?:((?:type\s*)?(?:[\w$]+\s*,\s*)?(?:[\w$]+|\*(?:\s*as\s+[\w$]+)?|\{[^{};()]*\}))\s*from\s*)?"@"/u;
+    const declaration =
+      /((?<![.$\w])(?:import\s+type|type|const|let|var|import)\b|,)\s*([\w$]+|\{[^{};()]*\})\s*=\s*(?:\(\s*)?(?:(await|typeof)\s+)?/u;
+    const call =
+      /(?<![.$\w])(require|import)\s*\(\s*"@"\s*(?:(?:,\s*)?\)(?:\s*\))?(?:\s*\.\s*[\w$]+)?|,)/u;
+    // Visit declarations and calls in source order so offsets need only one pass.
+    const imports = new RegExp(
+      `${statement.source}|(?:${declaration.source})?${call.source}`,
+      "gu",
+    );
+    const chained = /\s*[.(\[]/uy;
+    for (const match of code.matchAll(imports)) {
+      const [, statementKind, clause, kind, target, operator, load] = match;
+      if (kind?.endsWith("type")) continue;
+      const names = javascriptBindings(clause, target);
+      if (!names) continue;
+      chained.lastIndex = match.index + match[0].length;
+      const binds =
+        statementKind === "import" ||
+        (target &&
+          operator !== "typeof" &&
+          (load === "require" || operator === "await") &&
+          !chained.test(code));
+      const start =
+        kind === "," ? match.index + match[0].indexOf(target!) : match.index;
+      record(start, binds ? names : []);
     }
   }
-  return { lines, bindings: [...bindings] };
+  return { lines: [...lines], bindings: [...bindings] };
 }
 
 /** Discover candidates at a single commit. An import, version pin or scanner hit alone proves no deployment or reachability. */
