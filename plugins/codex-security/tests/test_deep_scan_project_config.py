@@ -26,6 +26,10 @@ def test_native_setup_snapshots_limits_before_first_coordinator(tmp_path, monkey
     monkeypatch.setenv("CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH", str(legacy))
     project = {
         "path": str(target / "security.yaml"),
+        "validation": {
+            "provider": "continuum",
+            "continuum": {"environment_id": "synthetic-environment"},
+        },
         "settings": {
             "workers": 2,
             "subagents": 1,
@@ -57,7 +61,10 @@ def test_native_setup_snapshots_limits_before_first_coordinator(tmp_path, monkey
     # The original settings survive changes even before the coordinator starts.
     legacy.write_text("invalid TOML")
     scan_id, _ = start_workspace_scan(state, workspace_id, tmp_path / "scans")
-    initial = resume_deep_scan(state, scan_id, "project-owner")["deepScan"]
+    started = resume_deep_scan(state, scan_id, "project-owner")
+    initial = started["deepScan"]
+    assert started["validationProviderConfiguration"] == project["validation"]
+    assert preview["validation"] == project["validation"]
     assert initial["config"] == preview["settings"]
     assert (
         resume_deep_scan(state, scan_id, "project-owner")["deepScan"]["config"] == initial["config"]
@@ -89,7 +96,14 @@ def test_headless_project_limits_are_isolated_from_unrelated_scans(tmp_path, mon
         "newScanTarget": str(target.resolve())
     }
     second = begin_deep_scan(
-        state, "other-owner", "--target-path", str(target), "--scan-root", str(tmp_path / "scans")
+        state,
+        "other-owner",
+        "--target-path",
+        str(target),
+        "--scan-root",
+        str(tmp_path / "scans"),
+        "--confirmed-concurrent-scan-id",
+        first["scanId"],
     )["deepScan"]
     assert first["config"]["workers"] == 2
     assert first["config"]["maxTimeHours"] == 0.5

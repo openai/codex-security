@@ -1,4 +1,6 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { appendFile, mkdir, writeFile } from "node:fs/promises";
+import type { ScanProgress } from "../../src/worker-progress.js";
+import { jsonLines } from "./json.js";
 import { runNodePython } from "./python-probe.js";
 import { join } from "node:path";
 import type { ThreadEvent } from "@openai/codex-sdk";
@@ -26,6 +28,86 @@ export const ownedPythonUsage = {
   totalTokens: 110,
 };
 
+export function appendRecord(path: string, row: unknown) {
+  return appendFile(path, JSON.stringify(row) + "\n");
+}
+
+export function appendRecords(path: string, rows: readonly unknown[]) {
+  return appendFile(path, jsonLines(rows) + "\n");
+}
+
+export function customToolOutput(output: string, callId?: string) {
+  return {
+    type: "response_item",
+    payload: {
+      type: "custom_tool_call_output",
+      ...(callId === undefined ? {} : { call_id: callId }),
+      output,
+    },
+  };
+}
+
+export function nativeMessage(
+  content: string | readonly string[],
+  id?: string,
+) {
+  const parts = typeof content === "string" ? [content] : content;
+  return {
+    type: "event_msg",
+    payload: {
+      type: "item_completed",
+      item: {
+        type: "AgentMessage",
+        ...(id === undefined ? {} : { id }),
+        content: parts.map((text) => ({ type: "Text", text })),
+      },
+    },
+  };
+}
+
+export function responseMessage(
+  content: string | readonly string[],
+  id?: string,
+) {
+  const parts = typeof content === "string" ? [content] : content;
+  return {
+    type: "response_item",
+    payload: {
+      type: "message",
+      ...(id === undefined ? {} : { id }),
+      role: "assistant",
+      content: parts.map((text) => ({ type: "output_text", text })),
+    },
+  };
+}
+
+export function legacyMessage(message: string) {
+  return { type: "event_msg", payload: { type: "agent_message", message } };
+}
+
+export function completedMessage(id: string, text: string): ThreadEvent {
+  return { type: "item.completed", item: { type: "agent_message", id, text } };
+}
+
+export function scanProgress(
+  phase: ScanProgress["phase"],
+  filesCompleted: number,
+  filesTotal: number,
+): ScanProgress {
+  return { phase, filesCompleted, filesTotal };
+}
+
+export function basicUsage(input_tokens: number, output_tokens: number) {
+  return { input_tokens, output_tokens };
+}
+
+export function legacyUsageRecord(usage: Record<string, number>) {
+  return {
+    type: "event_msg",
+    payload: { type: "token_count", info: { total_token_usage: usage } },
+  };
+}
+
 export function progressMarker(
   phase: string,
   filesCompleted: number,
@@ -33,6 +115,13 @@ export function progressMarker(
 ): string {
   return `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({ phase, filesCompleted, filesTotal })}`;
 }
+
+// Exact ASCII fixture for the pinned native 64 KiB persistence representation.
+export const commandHead = "h".repeat(32_743);
+export const commandTail = "t".repeat(32_743);
+export const persistedCommandOutput = `${commandHead}\n... command output truncated for persistence ...\n${commandTail}`;
+export const commandOutput = (middle: string) =>
+  `${commandHead}\n${middle}\n${commandTail}`;
 
 export function nativeCommand(
   command: string | readonly string[],
@@ -223,13 +312,7 @@ export async function writeSession(
           ...(parent === undefined ? {} : parentMetadata(parent, parentField)),
         },
       }),
-      JSON.stringify({
-        type: "event_msg",
-        payload: {
-          type: "token_count",
-          info: { total_token_usage: usage },
-        },
-      }),
+      JSON.stringify(legacyUsageRecord(usage)),
       "",
     ].join("\n"),
   );

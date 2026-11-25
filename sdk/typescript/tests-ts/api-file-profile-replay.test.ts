@@ -7,6 +7,7 @@ import {
   readFile,
   readdir,
   stat,
+  symlink,
   writeFile,
 } from "node:fs/promises";
 import { createServer, type Socket } from "node:net";
@@ -25,6 +26,7 @@ import {
   restoreProviderProfile,
 } from "../src/provider-profile.js";
 import { codexSecurityCredentialHome, runWorkbench } from "../src/runtime.js";
+import { scanSkillConfig } from "../src/scan-skill-paths.js";
 import { dependencies, capture } from "./cli-fixtures.js";
 import { PLUGIN_ROOT } from "./plugin-root.js";
 import { TestClient, mockWorkbench } from "./support/api-client.js";
@@ -271,6 +273,10 @@ test.serial.each([
         scanId,
       ]);
       expect(recipe).toEqual(submitted!);
+      expect(submitted!["modelDefaults"]).toEqual({
+        model: "gpt-6.1-sol",
+        reasoningEffort: "high",
+      });
       expect(JSON.stringify(recipe)).not.toContain("synthetic-private-value");
       await writeFile(profilePath, stringify(fileProfile("reloaded")));
       let replay: JsonObject | undefined;
@@ -466,9 +472,8 @@ test.each(
         }),
       );
       expect(status, out.text() + err.text()).toBe(0);
-      const restored = resolveCodexProfile(
-        await mergedCodexConfig({ codexOverrides: replay }, home),
-      );
+      const merged = await mergedCodexConfig({ codexOverrides: replay }, home);
+      const restored = resolveCodexProfile(merged);
       expect(restored).toMatchObject({
         ...ambientAuth,
         ...authOverrides,
@@ -491,7 +496,7 @@ test.each(
         model_catalog_json: resolve(scanDir, "../caller-catalog.json"),
         features: { view_image: false, shell_tool: false },
       });
-      expect(restored["skills"]).toEqual(
+      const expectedSkills =
         skills === "inherited"
           ? { config: [{ path: join(home, "file-skill"), enabled: false }] }
           : skills === "explicit"
@@ -502,9 +507,28 @@ test.each(
               }
             : skills === "empty"
               ? { config: [] }
-              : undefined,
-      );
+              : undefined;
+      expect(restored["skills"]).toEqual(expectedSkills);
       expect(restored).not.toHaveProperty("model_instructions_file");
+      const alias = join(root, "home-alias");
+      await symlink(
+        home,
+        alias,
+        process.platform === "win32" ? "junction" : "dir",
+      );
+      const pluginRoot = join(home, "plugin");
+      const installedRoot = join(alias, "plugin");
+      const skill = join(pluginRoot, "skills", "deep-security-scan");
+      await mkdir(skill, { recursive: true });
+      const worker = resolveCodexProfile(
+        await scanSkillConfig(merged, { pluginRoot, installedRoot }, home),
+      );
+      expect(worker["skills"]).toEqual({
+        config: [
+          ...(expectedSkills?.config ?? []),
+          { path: join(skill, "SKILL.md"), enabled: false },
+        ],
+      });
       const workerResult = execFileSync(
         Bun.which("node")!,
         [
@@ -514,7 +538,7 @@ test.each(
           ),
           root,
         ],
-        { input: JSON.stringify(restored), encoding: "utf8" },
+        { input: JSON.stringify(worker), encoding: "utf8" },
       );
       expect(JSON.parse(workerResult)).toEqual({ launches: 3 });
       const profile = recipe!["providerProfile"] as JsonObject;
@@ -587,3 +611,53 @@ test("private replay preserves explicit clears over projected defaults and empty
     });
   }
 });
+
+test.each([
+  ["resume", undefined, "", "gpt-5.6-sol", "xhigh"],
+  ["resume", undefined, 'model = "gpt-6-sol"', "gpt-6-sol", "xhigh"],
+  [
+    "resume",
+    { model: "gpt-6-sol", reasoningEffort: "high" },
+    'model_reasoning_effort = "low"',
+    "gpt-6-sol",
+    "low",
+  ],
+  ["rerun", undefined, "", "gpt-6.1-sol", "high"],
+] as const)(
+  "%s a file profile with saved defaults %p and current settings %p",
+  async (operation, modelDefaults, profile, model, effort) => {
+    const home = await temporaryDirectory();
+    const repository = await temporaryDirectory();
+    const scanDir = await temporaryDirectory();
+    const environment = { CODEX_HOME: home, CODEX_SECURITY_STATE_DIR: home };
+    await writeFile(join(home, "review.config.toml"), profile);
+    const recipe = {
+      repository,
+      target: { kind: "repository", paths: [] },
+      mode: "deep",
+      config: { profile: "review" },
+      maxCostUsd: 3,
+      ...(modelDefaults && { modelDefaults }),
+    };
+    let replay: JsonObject | undefined;
+    const status = await main(
+      ["scans", operation, "saved", "--json"],
+      capture().stream,
+      capture().stream,
+      dependencies({
+        environment,
+        onWorkbench: () => ({ scanId: "saved", scanDir, recipe }),
+        onConfig: (config) => {
+          replay = config.codexOverrides;
+        },
+      }),
+    );
+    expect(status).toBe(0);
+    expect(
+      await mergedCodexConfig({ codexOverrides: replay }, home),
+    ).toMatchObject({
+      model,
+      model_reasoning_effort: effort,
+    });
+  },
+);

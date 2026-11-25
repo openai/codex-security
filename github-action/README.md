@@ -21,9 +21,10 @@ distribution commit contains the Action bundles and CLI dependency lock.
 When updating the SHA, review the new release and run the workflow manually
 before relying on its scheduled runs. For a fork, use its owner and release.
 
-The [repository workflow](examples/repository.yml) below uses `gpt-5.6-sol` and
-an estimated $5 cost limit. Change `max-cost` to adjust the budget, or remove it
-for no estimated cost limit. Requests already in progress can exceed the limit.
+The [repository workflow](examples/repository.yml) below uses the default OpenAI
+model and effort with an estimated $5 cost limit. Adjust `max-cost` to change
+the budget, or remove it for no estimated cost limit. In-flight requests can
+exceed the limit.
 Daybreak is optional; see [Daybreak access and refusals](#daybreak-access-and-refusals).
 
 <!-- action-workflow:repository:start -->
@@ -52,8 +53,6 @@ jobs:
         uses: openai/codex-security@REPLACE_WITH_REVIEWED_COMMIT
         with:
           scope: repository
-          model: gpt-5.6-sol
-          effort: high
           max-cost: "5"
           fail-on-severity: none
         env:
@@ -131,7 +130,7 @@ you select. The pinned CLI configures the provider and validates the model.
 
 OpenAI scans in the Action require an API key in the step environment. The
 standalone CLI can also use a saved ChatGPT login. The Action supplies
-`gpt-5.6-sol` when you omit the OpenAI model. For other providers, pass a model
+`gpt-6.1-sol` when you omit the OpenAI model. For other providers, pass a model
 ID your credentials can access. For example, replace the quick-start scan step
 with:
 
@@ -358,8 +357,6 @@ jobs:
         uses: openai/codex-security@REPLACE_WITH_REVIEWED_COMMIT
         with:
           scope: diff
-          model: gpt-5.6-sol
-          effort: high
           max-cost: "5"
           fail-on-severity: high
         env:
@@ -658,9 +655,9 @@ Inputs are strings. Quote booleans and use newline-separated literal paths for l
 | `diff-base` | Unset | Diff base revision. Defaults to the PR merge base; required outside PRs when scope is diff. |
 | `mode` | `standard` | standard or deep. Deep supports repository scans, including selected paths; not diff scans. |
 | `provider` | `openai` | Providers supported by the Action: openai, openrouter, fireworks, or amazon-bedrock. Pass the selected provider's credentials to the scan step. |
-| `model` | Unset | Model to scan with, passed to scan --model. Defaults to gpt-5.6-sol for OpenAI; other providers require an explicit model ID. Cost limits require CLI pricing support for the model. |
+| `model` | Unset | Model to scan with, passed to scan --model. Defaults to gpt-6.1-sol for OpenAI; other providers require an explicit model ID. Cost limits require CLI pricing support for the model. |
 | `cyber-access-program` | Unset | Optional Cyber access program: standard, daybreak_blue, or daybreak_red. Unset preserves CLI defaults. Daybreak selections require approved organization and enabled API project access; model access is checked separately. |
-| `effort` | `xhigh` | Reasoning effort passed to Codex; supported values depend on the model and provider. |
+| `effort` | `high` | Reasoning effort passed to Codex; supported values depend on the model and provider. |
 | `max-cost` | Unset | Positive estimated USD stop threshold per invocation. In-flight requests can exceed it; unset means no cost limit. |
 | `max-time-hours` | Unset | Positive Deep discovery duration in hours, up to 96. Unset uses the CLI default. Finalization and job timeout are separate. |
 | `fail-on-severity` | `none` | none, low, medium, high, or critical. Fails on reported findings at or above the selected severity. Scanner and required reporting errors also fail. |

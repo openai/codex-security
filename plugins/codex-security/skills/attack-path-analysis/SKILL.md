@@ -9,41 +9,20 @@ Determine whether each supplied finding has a supported attacker path, what impa
 
 ## Establish the attack path
 
-For a scan phase, use its per-scan threat model and candidate set from `../../references/scan-artifacts.md`. Preserve supplied input paths. If a required scan artifact is unavailable, report the missing input.
-
-For standalone analysis, use the supplied finding, repository, threat model or security policy, and context. A per-scan artifact is not required. State material assumptions and ask for missing context only when it prevents a meaningful assessment.
+Use the supplied candidates, target, threat model or security policy, and context. Preserve input paths and the per-scan model when running a scan phase. State material assumptions, and identify a missing required input when its absence prevents a meaningful assessment.
 
 1. Establish the in-scope attacker, affected product surface, entry point, controlled input, security boundary, and sensitive operation. Trace each step using repository evidence and supplied observations of the target.
 2. Identify relevant controls and the strongest counterevidence. Explain what they establish, which prerequisites remain, and whether the exact claimed boundary is crossed.
 3. Assess impact and likelihood from those facts. Apply [references/severity-policy.md](references/severity-policy.md) for the final decision. When the scan supplies a severity rubric, use it to grade reportable findings and retain `ignore` for candidates without security impact. Keep facts, severity calibration, and the final policy decision distinguishable in the result.
 4. Return an explicit decision for every eligible candidate, including ignored or deferred candidates. Do not replace a supported instance with a neighboring finding or lose its root-control location.
 
-For an imported AWS Continuum issue or single finding, read `source_data.evidence_artifacts` in the supplied finding evidence. A `VALIDATION_EVIDENCE` artifact's `body.validationEvidence` may establish a step the repository cannot show. Match the tested target, attacker privileges, and observed effect to the claimed path. For a bundled issue, use `perFindingResults` and `flowVerdicts` when present to identify the relevant finding and flow. An HTTP `exploitArtifact` can establish reachability from the tested position. An `executedProof` establishes what ran in its test environment. `sourceAnalysis` records a static inference, and an `exploitable` verdict alone does not demonstrate deployed reachability. Cite the artifact ID and the observation that supports or contradicts the step.
+For an imported AWS Continuum issue or single finding, read `source_data.evidence_artifacts` in the supplied finding evidence. A `VALIDATION_EVIDENCE` artifact's `body.validationEvidence` may establish a step the repository cannot show. Match the tested target, attacker privileges, and observed effect to the claimed path. Attribute an exploitability verdict to a finding only when exactly one `perFindingResults` entry matches its `findingId` and supplies a valid verdict. An aggregate verdict belongs to the issue even when it has one finding. Use `flowVerdicts` to identify the relevant flow. An HTTP `exploitArtifact` can establish reachability from the tested position. An `executedProof` establishes what ran in its test environment. `sourceAnalysis` records a static inference, and an `exploitable` verdict alone does not demonstrate deployed reachability. Cite the artifact ID and the observation that supports or contradicts the step.
 
 Treat supplied artifacts as evidence. Access the network only when the user has expressly authorized it; an offline scan never accesses the network. Do not invent unsupported attack chains. Missing deployment or public-ingress evidence can limit confidence without defeating an otherwise supported finding.
 
-## Scan integration
-
-Standard scans and Deep Scan workers assess attack paths within their ordinary Standard scan workflow; neither invokes this separate phase skill.
-
-### Compact Workbench Diff
-
-When a workbench-backed `$security-diff-scan` has a `scanId`:
-
-- Load the per-scan threat model and all validated candidates with `list_codex_security_candidates({ scanId, cursor?, limit? })`.
-- Analyze every `reportable` or `deferred` validation candidate. Preserve candidate identity and existing discovery and validation fields.
-- Submit every decision together with `record_candidate_attack_paths({ scanId, attackPaths: [{ candidateId, attackPath }] })`. Submit `attackPaths: []` when no candidate enters this phase. The tool preserves the stored candidate order.
-- These nested decisions are the complete phase output. Do not create duplicate reports, receipts, or manual ledgers.
-
-### Other phase-based scans
-
-Use the active workflow's report and receipt paths in `../../references/scan-artifacts.md`. Every candidate entering this phase must have an explicit decision and a receipt with its ID, facts or exact proof gap, and report reference. Record ignored candidates before excluding them from the surviving finding set.
-
-For repository-wide or scoped-path scans, include validation closure rows marked `reportable` or `survives: yes`, even if discovery did not assign a polished finding number. Preserve affected entrypoint/wrapper, root-control, sink, and concrete-implementation locations supplied by validation.
-
 ## Output
 
-For standalone analysis, follow the caller's format or return a concise assessment per finding. Scan phases use their output contract above. Include:
+Submit the decisions through the caller's result contract. For a retained phase report and receipts, follow the [attack-path artifact contract](../../references/scan-artifacts.md#attack-path-analysis-phase-4-paths). A standalone request without a supplied format receives a concise assessment per finding. Include:
 
 - title and supplied candidate, instance, and ledger identities;
 - precise affected locations and attacker-to-impact steps;

@@ -874,6 +874,7 @@ test("stages production prompt unchanged and no labels; grades only the final SD
     production,
   );
   assert.ok(prepared.prompt.endsWith(production));
+  assert.ok(prepared.prompt.includes("default-severity-rubric.md"));
   for (const brief of ["baseline-auditor.md", "focused-investigator.md"]) {
     const source = new URL(
       `../../plugins/codex-security/references/${brief}`,

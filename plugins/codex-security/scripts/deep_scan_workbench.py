@@ -5,16 +5,18 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import uuid
 from datetime import datetime, timedelta
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import workbench_saved_results as saved_results
 from deep_scan_config import resolve_deep_scan_setup
+from finalize_scan_contract import ContractError, open_scan_local_file_descriptor
 from workbench.handoff import require_current_continuation, require_tokenless_scan_owner
 from workbench.storage import (
     archived_deep_path,
@@ -26,7 +28,12 @@ from workbench_constants import PHASES
 from workbench_source_scopes import capture_source_scopes
 from workbench_target import directory_snapshot_regular_file_count
 from workbench_target_state import require_scan_checkout_owner
-from workbench_validation import optional_text, require_uuid, user_context_argument
+from workbench_validation import (
+    optional_text,
+    reject_non_finite_json,
+    require_uuid,
+    user_context_argument,
+)
 
 DEEP_SCAN_COORDINATOR_LEASE_SECONDS = 30
 DEEP_SCAN_LEGACY_COORDINATOR_GRACE_SECONDS = 120
@@ -298,6 +305,78 @@ def canonical_discovery_artifacts(scan: sqlite3.Row) -> dict[str, str]:
     }
 
 
+def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[str, Any]]:
+    artifacts = canonical_discovery_artifacts(scan)
+    ledger = Path(artifacts["candidateLedgerPath"])
+    try:
+        inventory = Path(artifacts["inScopeFilesPath"])
+        inventory_descriptor = open_scan_local_file_descriptor(
+            scan_dir,
+            inventory.relative_to(scan_dir).as_posix(),
+            "Canonical Deep Scan in-scope inventory",
+        )
+        with os.fdopen(inventory_descriptor, "rb") as source:
+            lines = re.split(r"\r?\n", source.read().decode("utf-8"))
+            in_scope = {re.sub(r"^(?:\./)+", "", line) for line in lines if line}
+        descriptor = open_scan_local_file_descriptor(
+            scan_dir,
+            ledger.relative_to(scan_dir).as_posix(),
+            "Canonical Deep Scan candidate ledger",
+        )
+        with os.fdopen(descriptor, "r", encoding="utf-8") as source:
+            candidates = [
+                json.loads(line, parse_constant=reject_non_finite_json)
+                for line in source
+                if line.strip()
+            ]
+    except (ContractError, OSError, UnicodeError, ValueError) as exc:
+        raise SystemExit(f"Canonical Deep Scan candidate ledger is invalid: {exc}") from exc
+
+    candidate_ids: set[str] = set()
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            raise SystemExit("Canonical Deep Scan candidate ledger rows must be objects.")
+        candidate_id = candidate.get("candidate_id")
+        locations = candidate.get("locations")
+        if (
+            not isinstance(candidate_id, str)
+            or not candidate_id.strip()
+            or candidate_id in {".", ".."}
+            or "/" in candidate_id
+            or "\\" in candidate_id
+            or candidate_id in candidate_ids
+            or not isinstance(candidate.get("summary"), str)
+            or not candidate["summary"].strip()
+            or not isinstance(candidate.get("evidence"), str)
+            or not candidate["evidence"].strip()
+            or not isinstance(locations, list)
+            or not locations
+        ):
+            raise SystemExit("Canonical Deep Scan candidate ledger contains an invalid candidate.")
+        candidate_ids.add(candidate_id)
+        for location in locations:
+            if not isinstance(location, dict):
+                raise SystemExit("Canonical Deep Scan candidate location must be an object.")
+            path = location.get("path")
+            if (
+                not isinstance(path, str)
+                or not path
+                or "\\" in path
+                or "\x00" in path
+                or re.match(r"^[A-Za-z]:", path)
+                or PurePosixPath(path).is_absolute()
+                or any(part in {".", "..", ""} for part in path.split("/"))
+            ):
+                raise SystemExit(
+                    "Canonical Deep Scan candidate location must be repository-relative."
+                )
+        if not any(location["path"] in in_scope for location in locations):
+            raise SystemExit(
+                "Canonical Deep Scan candidate must include a location in its in-scope inventory."
+            )
+    return candidates
+
+
 def deep_scan_state(connection: sqlite3.Connection, scan_id: str) -> dict[str, Any]:
     """Return persisted orchestration state including settings, workers, artifacts, and deduplication inputs.
 
@@ -458,6 +537,16 @@ def deep_scan_result(
     result: dict[str, Any] = {"deepScan": deep_scan_state(connection, scan_id)}
     if start_disposition is not None:
         result["startDisposition"] = start_disposition
+        scan = dependencies().require_scan(connection, scan_id)
+        workspace = dependencies().require_workspace(connection, scan["workspace_id"])
+        # Setup is immutable while this scan owns the workspace.
+        if (
+            workspace["active_scan_id"] == scan_id
+            and workspace["deep_scan_config_json"] is not None
+        ):
+            configuration = json.loads(workspace["deep_scan_config_json"])
+            if "validation" in configuration:
+                result["validationProviderConfiguration"] = configuration["validation"]
     return result
 
 
@@ -726,6 +815,11 @@ def begin_deep_scan_for_target(
     dependencies().require_scannable_target(target)
     scope = dependencies().require_scope(args.scope, "deep", target)
     target_path = str(target)
+    pending = (
+        None
+        if args.join_only
+        else concurrent_launch_confirmation(connection, args.confirmed_concurrent_scan_id)
+    )
     existing = existing_deep_scan_for_target(connection, thread_id, target_path, scope)
     if existing is not None:
         return begin_deep_scan_for_scan(connection, existing["id"], thread_id, args)
@@ -733,10 +827,9 @@ def begin_deep_scan_for_target(
     # Keep the requested spelling so a continuation can match a removed file or symlink.
     # NULL means no result is pending. The empty string denotes a launch with no project file.
     project_path = args.project_config_path or ""
-    # Avoid hashing the checkout during this probe when a fresh scan needs its configuration.
-    if (
-        args.join_only
-        and not connection.execute(
+    # Only a possible terminal rejoin needs a digest before configuration or consent.
+    if args.join_only or pending:
+        candidate = connection.execute(
             """
             SELECT 1 FROM scans JOIN deep_scan_runs ON deep_scan_runs.scan_id = scans.id
             WHERE scans.target_path = ? AND scans.scope = ?
@@ -753,8 +846,8 @@ def begin_deep_scan_for_target(
             """,
             (target_path, scope, project_path, json.dumps(user_context)),
         ).fetchone()
-    ):
-        return {"newScanTarget": target_path}
+        if candidate is None:
+            return pending or {"newScanTarget": target_path}
     target_metadata = target.stat()
     target_identity = dependencies().scan_target_identity(target, None, metadata=target_metadata)
     revision, target_snapshot_digest, target_device, target_inode = target_identity
@@ -799,6 +892,10 @@ def begin_deep_scan_for_target(
             )
         if args.join_only:
             return {"newScanTarget": target_path}
+        # Serialize admission with registration, after checking for an existing run to rejoin.
+        pending = concurrent_launch_confirmation(connection, args.confirmed_concurrent_scan_id)
+        if pending:
+            return pending
         source_scopes = capture_source_scopes(
             target,
             (revision, target_snapshot_digest, target_device, target_inode),
@@ -878,7 +975,12 @@ def begin_deep_scan(connection: sqlite3.Connection, args: argparse.Namespace) ->
     if thread_id is None:
         raise SystemExit("thread-id is required.")
     if args.scan_id:
-        if args.user_context is not None or args.user_context_stdin or args.scope != ".":
+        if (
+            args.user_context is not None
+            or args.user_context_stdin
+            or args.scope != "."
+            or args.confirmed_concurrent_scan_id
+        ):
             raise SystemExit("scan-id cannot be combined with target setup fields.")
         return begin_deep_scan_for_scan(connection, args.scan_id, thread_id, args)
     if args.claim_token is not None:
@@ -1827,15 +1929,24 @@ def cancel_active_workers(connection: sqlite3.Connection, scan_id: str, timestam
     )
 
 
+def concurrent_launch_confirmation(
+    connection: sqlite3.Connection, confirmed_scan_ids: list[str]
+) -> dict[str, Any] | None:
+    active = other_running_deep_scans(connection)
+    if any(scan["scanId"] not in confirmed_scan_ids for scan in active):
+        return {"confirmationRequired": True, "otherRunningDeepScans": active}
+    return None
+
+
 def other_running_deep_scans(
-    connection: sqlite3.Connection, current_scan_id: str
+    connection: sqlite3.Connection, current_scan_id: str | None = None
 ) -> list[dict[str, str]]:
     """List other running Deep Scans ordered by most recent update, with target paths and phases."""
     rows = connection.execute(
         """
         SELECT id, target_path, phase, started_at, updated_at
         FROM scans
-        WHERE mode = 'deep' AND status = 'running' AND id != ?
+        WHERE mode = 'deep' AND status = 'running' AND id IS NOT ?
         ORDER BY updated_at DESC, started_at DESC, id
         """,
         (current_scan_id,),

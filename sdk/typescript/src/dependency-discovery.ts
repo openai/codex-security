@@ -1,11 +1,12 @@
-import { createHash } from "node:crypto";
 import { posix } from "node:path";
-import { z } from "zod";
+import {
+  dependencyPathExcluded,
+  type DependencyDiscoveryBoundary,
+} from "./dependency-caller-scope.js";
 import type { DependencyPackage } from "./dependency-advisory.js";
 import {
   readNpmManifests,
   readPythonRequirements,
-  pythonDistributionName,
   type DependencyManifest,
 } from "./dependency-manifests.js";
 import {
@@ -15,36 +16,6 @@ import {
 } from "./dependency-source-trace.js";
 import { gitOutput } from "./targets.js";
 import { isRecord } from "./record.js";
-
-const runtimeObservation = z.strictObject({
-  service: z.string().min(1),
-  package: z.strictObject({
-    ecosystem: z.string().min(1),
-    name: z.string().min(1),
-    version: z.string().min(1),
-  }),
-  revision: z
-    .string()
-    .regex(/^(?:[a-f0-9]{40}|[a-f0-9]{64})$/u)
-    .optional(),
-  coverage: z.enum(["complete", "partial", "unknown"]),
-  evidence: z.string().trim().min(1),
-  access: z
-    .strictObject({
-      caller: z.string().trim().min(1),
-      evidence: z.string().trim().min(1),
-    })
-    .optional(),
-});
-
-export interface RuntimeReceiptInput {
-  source: string;
-  payload: string;
-}
-export interface RuntimeReceipt extends RuntimeReceiptInput {
-  sha256: string;
-  observation?: z.infer<typeof runtimeObservation>;
-}
 
 export interface DependencyCaller {
   path: string;
@@ -62,39 +33,13 @@ export interface RepositoryDiscovery {
   sourceLeads?: string[];
   buildFiles: string[];
   traces: DependencyTrace[];
-  runtime: RuntimeReceipt[];
+  // Static discovery contributes this empty list to the investigation context hash.
+  runtime: [];
   coverage: { status: "partial" | "unknown"; gaps: string[] };
 }
 
 function regexEscape(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
-}
-function samePackage(left: DependencyPackage, right: DependencyPackage) {
-  const normalize = (pkg: DependencyPackage) =>
-    pkg.ecosystem === "PyPI" ? pythonDistributionName(pkg.name) : pkg.name;
-  return (
-    left.ecosystem === right.ecosystem && normalize(left) === normalize(right)
-  );
-}
-function readReceipt(
-  input: RuntimeReceiptInput,
-  pkg: DependencyPackage,
-): RuntimeReceipt {
-  const receipt = {
-    source: input.source,
-    payload: input.payload,
-    sha256: createHash("sha256").update(input.payload).digest("hex"),
-  };
-  let value: unknown;
-  try {
-    value = JSON.parse(input.payload);
-  } catch {
-    return receipt;
-  }
-  const result = runtimeObservation.safeParse(value);
-  return result.success && samePackage(result.data.package, pkg)
-    ? { ...receipt, observation: result.data }
-    : receipt;
 }
 
 function knownDependencyFile(path: string) {
@@ -158,7 +103,7 @@ export async function discoverDependencyRepository(options: {
   revision?: string;
   package: DependencyPackage;
   symbols?: readonly string[];
-  runtimeReceipts?: readonly RuntimeReceiptInput[];
+  callerBoundary?: DependencyDiscoveryBoundary;
   environment?: NodeJS.ProcessEnv;
   signal?: AbortSignal;
 }): Promise<RepositoryDiscovery> {
@@ -196,12 +141,21 @@ export async function discoverDependencyRepository(options: {
     localGit,
   );
   const blobs = new Map<string, string>();
+  const policyPaths = new Set<string>();
   for (const record of tree.split("\0")) {
+    const policy =
+      /^(?:100(?:644|755)|120000) blob [a-f0-9]+\t((?:[\s\S]*\/)?SECURITY\.md)$/u.exec(
+        record,
+      );
+    if (policy) policyPaths.add(policy[1]!);
     const entry = /^100(?:644|755) blob ([a-f0-9]+)\t([\s\S]+)$/u.exec(record);
     if (entry && !entry[2]!.split("/").includes("node_modules"))
       blobs.set(entry[2]!, entry[1]!);
   }
   const paths = new Set(blobs.keys());
+  const inBoundary = (path: string) =>
+    !options.callerBoundary ||
+    !dependencyPathExcluded(path, policyPaths, options.callerBoundary);
   const read = async (path: string) =>
     gitOutput(
       repository,
@@ -250,7 +204,7 @@ export async function discoverDependencyRepository(options: {
       .split("\0")
       .filter((p) => p.startsWith(revision + ":"))
       .map((p) => p.slice(revision.length + 1))
-      .filter((p) => paths.has(p));
+      .filter((p) => paths.has(p) && inBoundary(p));
   } catch (error) {
     signal?.throwIfAborted();
     if (!isRecord(error) || error["code"] !== 1) throw error;
@@ -304,7 +258,7 @@ export async function discoverDependencyRepository(options: {
       if (pkg.ecosystem === "PyPI") {
         const primary = ["requirements.txt", "requirements.lock"]
           .map((base) => posix.join(directory, base))
-          .filter((p) => paths.has(p));
+          .filter((p) => paths.has(p) && inBoundary(p));
         if (
           primary.length ||
           paths.has(posix.join(directory, "pyproject.toml"))
@@ -352,15 +306,18 @@ export async function discoverDependencyRepository(options: {
     ...callers.map((c) => c.path),
     ...sourceLeads,
   ];
+  const matchedPaths = new Set(matches);
   const buildFiles = [...paths]
+    .filter(inBoundary)
     .filter((p) =>
-      /^(?:Dockerfile(?:\..+)?|Containerfile(?:\..+)?|(?:docker-)?compose(?:\..+)?\.ya?ml)$/iu.test(
+      /^(?:Dockerfile(?:\..+)?|Containerfile(?:\..+)?|.+\.(?:Dockerfile|Containerfile)|(?:docker-)?compose(?:\..+)?\.ya?ml)$/iu.test(
         posix.basename(p),
       ),
     )
     .filter((p) => {
       const directory = posix.dirname(p);
       return (
+        matchedPaths.has(p) ||
         directory === "." ||
         evidencePaths.some((source) => source.startsWith(directory + "/"))
       );
@@ -372,22 +329,9 @@ export async function discoverDependencyRepository(options: {
     options.environment ?? process.env,
     signal,
   );
-  gaps.push(...traceGaps);
-  const runtime = (options.runtimeReceipts ?? []).map((input) =>
-    readReceipt(input, pkg),
-  );
-  if (!runtime.length) gaps.push("No runtime observations were supplied.");
-  for (const receipt of runtime) {
-    if (receipt.observation?.coverage !== "complete")
-      gaps.push(
-        `Runtime coverage from ${receipt.source} is ${receipt.observation?.coverage ?? "unknown"}.`,
-      );
-    if (receipt.observation && receipt.observation.revision !== revision)
-      gaps.push(
-        `The runtime observation from ${receipt.source} is not bound to this source revision.`,
-      );
-  }
   gaps.push(
+    ...traceGaps,
+    "No runtime observations were supplied.",
     "Static import and call candidates do not establish dynamic callers, argument flow or deployment.",
   );
   return {
@@ -399,12 +343,9 @@ export async function discoverDependencyRepository(options: {
     ...(sourceLeads.length && { sourceLeads }),
     buildFiles,
     traces,
-    runtime,
+    runtime: [],
     coverage: {
-      status:
-        callers.length || manifests.length || runtime.some((r) => r.observation)
-          ? "partial"
-          : "unknown",
+      status: callers.length || manifests.length ? "partial" : "unknown",
       gaps,
     },
   };

@@ -1,11 +1,22 @@
 import { workbenchArgs } from "../workbench-arguments.js";
 import { readDeepScanProjectConfig } from "./project-config.js";
+import { bindValidationProviderConfiguration } from "../validation-provider.js";
+import {
+  validationProviderFromConfiguration,
+  type ValidationProviderConfiguration,
+} from "#validation-runtime";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { writeJsonAtomic } from "./artifacts.js";
 import { parseDeepScan, parseWorker } from "./response.js";
 
 export { parseDeepScan };
+
+export class ConcurrentDeepScanConfirmation extends Error {
+  constructor(readonly activeScans: unknown[]) {
+    super("Confirm before starting another Deep Scan.");
+  }
+}
 import {
   deepScanErrorMessage,
   DeepScanNonRetryableError,
@@ -130,6 +141,7 @@ export class WorkbenchDeepScanStore {
     scanId?: string;
     targetPath?: string;
     scope?: string;
+    confirmedConcurrentScanIds?: string[];
     userContext?: string;
     projectConfigPath?: string;
     handoffClaimToken?: string;
@@ -139,7 +151,7 @@ export class WorkbenchDeepScanStore {
     threadId: string;
     modelThreadId?: string;
     scanRoot: string;
-  }): Promise<DeepScanRunState> {
+  }): Promise<DeepScanRunState & { validationNotice?: string }> {
     const userContext = input.userContext;
     const args = {
       threadId: input.threadId,
@@ -148,6 +160,7 @@ export class WorkbenchDeepScanStore {
       targetPath: input.targetPath || undefined,
       projectConfigPath: input.projectConfigPath,
       scope: input.scope || undefined,
+      confirmedConcurrentScanId: input.confirmedConcurrentScanIds,
       userContextStdin: Boolean(userContext),
       claimToken: input.handoffClaimToken || undefined,
       model: input.model || undefined,
@@ -171,6 +184,8 @@ export class WorkbenchDeepScanStore {
         input.projectConfigPath,
         result.newScanTarget,
       );
+      if (project?.validation)
+        validationProviderFromConfiguration(project.validation);
       result = await this.enqueueWrite(
         workbenchArgs("begin-deep-scan", {
           ...args,
@@ -180,12 +195,32 @@ export class WorkbenchDeepScanStore {
         userContext,
       );
     }
+    if (
+      result.confirmationRequired === true &&
+      Array.isArray(result.otherRunningDeepScans)
+    )
+      throw new ConcurrentDeepScanConfirmation(result.otherRunningDeepScans);
     const run = parseDeepScan(result);
     const startDisposition = result.startDisposition;
     if (startDisposition !== "created" && startDisposition !== "joined") {
       throw new Error(
         "Codex Security workbench returned an invalid Deep Scan start disposition.",
       );
+    }
+    if (result.validationProviderConfiguration !== undefined) {
+      const validationNotice = await bindValidationProviderConfiguration(
+        run.scanId,
+        result.validationProviderConfiguration as ValidationProviderConfiguration,
+        startDisposition === "created",
+        input.projectConfigPath === undefined
+          ? undefined
+          : {
+              file: input.projectConfigPath,
+              target: run.targetPath,
+              mode: "deep",
+            },
+      );
+      if (validationNotice) return { ...run, validationNotice };
     }
     return run;
   }

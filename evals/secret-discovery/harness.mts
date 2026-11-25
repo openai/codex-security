@@ -167,6 +167,7 @@ export async function prepareEval(
     `Plugin reference directory: ${runtime}. Bare reference filenames are relative to ${join(runtime, "references")}.`,
     `For this generated read-only fixture, the caller handles policy discovery. It checked the root and every nested directory. Apply inherited policy using this complete list of repository-relative SECURITY.md files: ${JSON.stringify(policyFiles)}. The fixture has no plugin helper.`,
     "User security context: none. Supplied threat model: none. Knowledge base: none.",
+    "Use default-severity-rubric.md to grade each finding.",
     "Subagent allowance: 0. Perform the core workflow sequentially, including its baseline audit and final validation.",
     "This caller has no scan tools. Return the final semantic result as JSON matching the provided output schema; do not write artifacts.",
     "Follow the production core workflow below. Inspect source with offline read-only tools; do not execute application code or contact services.",
@@ -307,9 +308,11 @@ function environmentEntry(environment: NodeJS.ProcessEnv, requested: string) {
   )?.[1];
 }
 
-export async function runPreparedEval(
-  prepared: PreparedEval,
+export async function runStructuredTurn(
+  prepared: Pick<PreparedEval, "repo" | "runtime">,
   codex: EvalCodex,
+  prompt: string,
+  schema: unknown,
   { model, signal }: { model?: string; signal?: AbortSignal } = {},
 ) {
   const thread = codex.startThread(threadSettings(prepared, model));
@@ -317,14 +320,15 @@ export async function runPreparedEval(
   const combinedSignal = signal
     ? AbortSignal.any([signal, controller.signal])
     : controller.signal;
-  const { events } = await thread.runStreamed(prepared.prompt, {
-    outputSchema,
+  const { events } = await thread.runStreamed(prompt, {
+    outputSchema: schema,
     signal: combinedSignal,
   });
   let finalResponse = "";
   let usage;
   let completed = false;
   let failure;
+  let streamError;
   try {
     for await (const event of events) {
       const warning =
@@ -350,6 +354,9 @@ export async function runPreparedEval(
         usage = event.usage;
       } else if (event.type === "turn.failed") {
         failure = new Error(event.error!.message);
+      } else if (event.type === "error") {
+        // Transport retries also emit errors. Retain the diagnostic if the turn never completes.
+        streamError = new Error(event.message);
       }
     }
   } catch (error) {
@@ -357,7 +364,24 @@ export async function runPreparedEval(
   }
   if (failure) throw failure;
   combinedSignal.throwIfAborted();
-  if (!completed) throw new Error("Eval stream ended before turn.completed");
+  if (!completed)
+    throw streamError ?? new Error("Eval stream ended before turn.completed");
+  if (!finalResponse) throw new Error("Eval turn completed without an answer");
+  return { finalResponse, usage };
+}
+
+export async function runPreparedEval(
+  prepared: PreparedEval,
+  codex: EvalCodex,
+  { model, signal }: { model?: string; signal?: AbortSignal } = {},
+) {
+  const { finalResponse, usage } = await runStructuredTurn(
+    prepared,
+    codex,
+    prepared.prompt,
+    outputSchema,
+    { model, signal },
+  );
   const semanticResult = JSON.parse(finalResponse);
   const report = {
     requestedModel: model ?? null,

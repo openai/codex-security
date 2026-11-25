@@ -1,9 +1,8 @@
 import { afterEach, expect, mock, test } from "bun:test";
-import { once } from "node:events";
-import { appendFile, mkdir } from "node:fs/promises";
+import { mkdir } from "node:fs/promises";
 import { join } from "node:path";
-import { setImmediate } from "node:timers/promises";
-import type { ThreadEvent } from "@openai/codex-sdk";
+import { setImmediate, setTimeout as delay } from "node:timers/promises";
+import type { ThreadEvent, TurnOptions } from "@openai/codex-sdk";
 import {
   readScanBudgetUsage,
   ScanCostTracker,
@@ -12,18 +11,23 @@ import {
 import { ScanCostLimitExceededError } from "../src/errors.js";
 import { copyCompletedScan } from "./plugin-root.js";
 import {
+  codexFactory,
   completedCodex,
   completedEvents,
   runEvents,
   scanRuntimeDependencies,
 } from "./support/api-events.js";
 import {
+  BUDGET_TEST_CONFIG,
   measuredScanUsage,
   mockWorkbench,
   TestClient,
 } from "./support/api-client.js";
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import {
+  basicUsage,
+  legacyUsageRecord,
+  appendRecord,
   ownedPythonUsage,
   ownedSdkUsage,
   writeSession,
@@ -95,15 +99,16 @@ test.each([false, true])(
       },
     );
     let measured = raiseLimit ? 900 : 3_000;
-    const parent = await writeSession(codexHome, "scan-thread", {
-      input_tokens: measured,
-      output_tokens: 0,
-    });
+    const parent = await writeSession(
+      codexHome,
+      "scan-thread",
+      basicUsage(measured, 0),
+    );
     const limitSaved = Promise.withResolvers<void>();
     const costs = mock();
     const usages = mock();
     const approaching = mock(() => 0.008);
-    const client = TestClient.withDependencies({
+    const client = new TestClient(BUDGET_TEST_CONFIG, {
       ...scanRuntimeDependencies(codexHome, scanDir),
       runWorkbench: async (_options, args, input) => {
         if (args[0] === "read-scan-usage") {
@@ -112,46 +117,35 @@ test.each([false, true])(
         if (args[0] === "set-scan-cost-limit") limitSaved.resolve();
         return mockWorkbench(args, input);
       },
-      createCodex: () => ({
-        startThread: () => ({
-          id: null,
-          runStreamed: async (_input, { signal }) => ({
-            events: (async function* (): AsyncGenerator<ThreadEvent> {
-              yield { type: "thread.started", thread_id: "scan-thread" };
-              if (raiseLimit) {
-                await limitSaved.promise;
-                // Resume after the caller adopts the saved limit.
-                await setImmediate();
-                measured = 3_000;
-                await appendFile(
-                  parent,
-                  JSON.stringify({
-                    type: "event_msg",
-                    payload: {
-                      type: "token_count",
-                      info: {
-                        total_token_usage: {
-                          input_tokens: 3_000,
-                          output_tokens: 0,
-                        },
-                      },
-                    },
-                  }) + "\n",
-                );
-              }
-              if (!signal?.aborted) await once(signal!, "abort");
-              throw new DOMException("aborted", "AbortError");
-            })(),
-          }),
+      createCodex: codexFactory(
+        async (_input: string, { signal }: TurnOptions) => ({
+          events: (async function* (): AsyncGenerator<ThreadEvent> {
+            yield { type: "thread.started", thread_id: "scan-thread" };
+            // The tracker starts on thread.started. Bound only the live stream wait.
+            const budgetAbort = delay(15_000, undefined, { signal }).then(
+              () => {
+                throw new Error("The scan did not stop at its spending limit.");
+              },
+            );
+            if (raiseLimit) {
+              await Promise.race([limitSaved.promise, budgetAbort]);
+              // Resume after the caller adopts the saved limit.
+              await setImmediate();
+              measured = 3_000;
+              await appendRecord(
+                parent,
+                legacyUsageRecord(basicUsage(3_000, 0)),
+              );
+            }
+            await budgetAbort;
+          })(),
         }),
-      }),
+      ),
     });
-    const keepAlive = setTimeout(() => {}, 10_000);
     try {
       await expect(
         client.run(repository, {
           maxCostUsd: 0.004,
-          signal: AbortSignal.timeout(5_000),
           onCost: costs,
           onUsage: usages,
           ...(raiseLimit ? { onBudgetApproaching: approaching } : {}),
@@ -165,7 +159,6 @@ test.each([false, true])(
       expect(usages).not.toHaveBeenCalled();
       expect(approaching).toHaveBeenCalledTimes(raiseLimit ? 1 : 0);
     } finally {
-      clearTimeout(keepAlive);
       await client.close();
     }
   },
@@ -180,10 +173,7 @@ test.each([false, true])(
     const scanDir = join(root, "scan");
     await mkdir(repository);
     await mkdir(scanDir, { mode: 0o700 });
-    await writeSession(codexHome, "scan-thread", {
-      input_tokens: 100,
-      output_tokens: 5,
-    });
+    await writeSession(codexHome, "scan-thread", basicUsage(100, 5));
     const observed: Readonly<ScanUsageMeasurement>[] = [];
     const observerErrors = mock();
     const observerFailure = new Error("Synthetic measurement observer failure");
@@ -200,26 +190,20 @@ test.each([false, true])(
           }
           return mockWorkbench(args, input);
         },
-        createCodex: () => ({
-          startThread: () => ({
-            id: null,
-            runStreamed: async () => ({
-              events: (async function* (): AsyncGenerator<ThreadEvent> {
-                yield { type: "thread.started", thread_id: "scan-thread" };
-                await complete.promise;
-                await writeSession(
-                  codexHome,
-                  "missing-worker",
-                  {},
-                  { parent: "scan-thread" },
-                );
-                if (cancel)
-                  controller.abort(new Error("Synthetic cancellation"));
-                throw new Error("Synthetic execution failure");
-              })(),
-            }),
-          }),
-        }),
+        createCodex: codexFactory(async () => ({
+          events: (async function* (): AsyncGenerator<ThreadEvent> {
+            yield { type: "thread.started", thread_id: "scan-thread" };
+            await complete.promise;
+            await writeSession(
+              codexHome,
+              "missing-worker",
+              {},
+              { parent: "scan-thread" },
+            );
+            if (cancel) controller.abort(new Error("Synthetic cancellation"));
+            throw new Error("Synthetic execution failure");
+          })(),
+        })),
       },
     );
     try {
@@ -341,31 +325,21 @@ test("a worker-shaped directory alone cannot exhaust a scan budget", async () =>
   const scanDir = join(root, "scan");
   const codexHome = join(root, "codex-home");
   await mkdir(repository);
-  await writeSession(
-    codexHome,
-    "thread-1",
-    { input_tokens: 10, output_tokens: 3 },
-    {
-      cwd: scanDir,
-      timestamp: "2026-07-26T10:00:00Z",
-    },
-  );
-  await writeSession(
-    codexHome,
-    "unrelated",
-    { input_tokens: 1_000_000, output_tokens: 0 },
-    {
-      cwd: join(
-        scanDir,
-        "artifacts",
-        "deep_discovery",
-        "workers",
-        "other",
-        "output",
-      ),
-      timestamp: "2026-07-26T10:00:01Z",
-    },
-  );
+  await writeSession(codexHome, "thread-1", basicUsage(10, 3), {
+    cwd: scanDir,
+    timestamp: "2026-07-26T10:00:00Z",
+  });
+  await writeSession(codexHome, "unrelated", basicUsage(1_000_000, 0), {
+    cwd: join(
+      scanDir,
+      "artifacts",
+      "deep_discovery",
+      "workers",
+      "other",
+      "output",
+    ),
+    timestamp: "2026-07-26T10:00:01Z",
+  });
   const client = TestClient.withDependencies({
     ...scanRuntimeDependencies(codexHome, scanDir),
     createCodex: completedCodex(root),

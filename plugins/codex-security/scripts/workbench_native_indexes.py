@@ -19,11 +19,7 @@ from workbench_constants import (
     FINDINGS_PAGE_MAX,
     PRIMARY_FINDING_LOCATION_SQL,
 )
-from workbench_target_state import (
-    RepositoryIdentityCache,
-    RepositoryScanScope,
-    scan_repository_group,
-)
+from workbench_target_state import RepositoryIdentityCache, RepositoryScanScope
 from workbench_validation import bounded_output_text, timestamp_key
 
 
@@ -137,31 +133,28 @@ def _indexed_findings(
     if legacy_generations is None:
         legacy_generations = _legacy_generations(connection, identities)
 
-    def repository_group(scan: sqlite3.Row | dict) -> tuple[str, str]:
-        identity = scan_repository_group(scan)
-        generation = legacy_generations.get(scan["target_id"])
-        return (
-            ("repository", generation)
-            if identity[0] == "target" and generation is not None
-            else identity
-        )
+    def repository_group(
+        row: sqlite3.Row, prefix: str = "", *, infer_legacy: bool = True
+    ) -> tuple[str, str]:
+        target_id = row[prefix + "target_id"]
+        generation = row[prefix + "repository_generation"]
+        if generation is None and infer_legacy:
+            generation = legacy_generations.get(target_id)
+        return ("repository", generation) if generation is not None else ("target", target_id)
 
     target_filter, target_values = scope_sql("scans")
     before_filter, before_values = scope_sql("before_scans")
     after_filter, after_values = scope_sql("after_scans")
-    parents: dict[tuple[tuple[str, str], str], tuple[tuple[str, str], str]] = {}
-
-    def group(identity: tuple[tuple[str, str], str]) -> tuple[tuple[str, str], str]:
-        while identity in parents:
-            identity = parents[identity]
-        return identity
-
-    for match in connection.execute(
+    before_generation = generation_sql("before_scans")
+    after_generation = generation_sql("after_scans")
+    # Check the saved generations before inferring groups for legacy scans.
+    # If either generation is missing, only the same target can share a match.
+    matches = connection.execute(
         f"""
         SELECT before_scans.target_id AS before_target_id,
             after_scans.target_id AS after_target_id,
-            {generation_sql("before_scans")} AS before_generation,
-            {generation_sql("after_scans")} AS after_generation,
+            {before_generation} AS before_repository_generation,
+            {after_generation} AS after_repository_generation,
             before.finding_id AS before_finding_id,
             after.finding_id AS after_finding_id
         FROM scan_comparison_matches AS matches
@@ -172,46 +165,19 @@ def _indexed_findings(
         JOIN scans AS after_scans ON after_scans.id = after.scan_id
         JOIN security_targets AS after_targets ON after_targets.id = after_scans.target_id
         WHERE {before_filter} AND {after_filter}
+            AND COALESCE({before_generation} = {after_generation},
+                         before_scans.target_id = after_scans.target_id)
         """,
         (*before_values, *after_values),
-    ):
-        if match["before_target_id"] != match["after_target_id"] and (
-            match["before_generation"] is None or match["after_generation"] is None
-        ):
-            continue
-        before_repository = repository_group(
-            {
-                "target_id": match["before_target_id"],
-                "repository_generation": match["before_generation"],
-            }
-        )
-        after_repository = repository_group(
-            {
-                "target_id": match["after_target_id"],
-                "repository_generation": match["after_generation"],
-            }
-        )
-        if before_repository != after_repository and (
-            match["before_target_id"] != match["after_target_id"]
-            or match["before_generation"] is not None
-            and match["after_generation"] is not None
-        ):
-            continue
-        before = group(
-            (
-                before_repository,
-                match["before_finding_id"],
-            )
-        )
-        after = group(
-            (
-                after_repository,
-                match["after_finding_id"],
-            )
-        )
-        if before != after:
-            parents[after] = before
+    )
 
+    aliases = scan_history._finding_aliases(
+        (
+            (repository_group(match, "before_"), match["before_finding_id"]),
+            (repository_group(match, "after_"), match["after_finding_id"]),
+        )
+        for match in matches
+    )
     completion_column = (
         "scans.completion_sequence" if "completion_sequence" in identities.scan_columns else "NULL"
     )
@@ -265,35 +231,26 @@ def _indexed_findings(
         """,
         target_values,
     ):
-        grouped.setdefault(
-            group(
-                (
-                    repository_group(row),
-                    row["finding_id"],
-                )
-            ),
-            [],
-        ).append(row)
+        key = (repository_group(row), row["finding_id"])
+        grouped.setdefault(aliases.get(key, key), []).append(row)
 
-    # Global comparisons do not bind legacy history across current targets. A scoped
-    # projection already admits only its own target's legacy rows and decisions.
-    for identity, occurrences in list(grouped.items()):
+    # When a match group spans current targets, keep decisions within each verified
+    # generation or legacy target in that group. Scoped queries already select their history.
+    finding_groups = []
+    for occurrences in grouped.values():
         current_targets = {
             row["target_id"] for row in occurrences if row["repository_generation"] is not None
         }
         if len(current_targets) <= 1 or scan_scope is not None:
+            finding_groups.append(occurrences)
             continue
-        current = []
+        partitions: dict[tuple[str, str], list[sqlite3.Row]] = {}
         for row in occurrences:
-            if row["repository_generation"] is None:
-                legacy_identity = (scan_repository_group(row), identity[1])
-                grouped.setdefault(legacy_identity, []).append(row)
-            else:
-                current.append(row)
-        grouped[identity] = current
+            partitions.setdefault(repository_group(row, infer_legacy=False), []).append(row)
+        finding_groups.extend(partitions.values())
 
     findings = []
-    for occurrences in grouped.values():
+    for occurrences in finding_groups:
         latest = max(
             occurrences,
             key=lambda row: (timestamp_key(row["created_at"]), row["occurrence_id"]),

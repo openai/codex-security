@@ -6,15 +6,12 @@ import { join, toNamespacedPath, win32 } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { fileURLToPath } from "node:url";
 import { after, test } from "node:test";
-import { importModule, importSource } from "./import-module.ts";
+import { bundledMcpUrl, importModule, importSource } from "./import-module.ts";
 import { createTemporaryDirectories } from "./support/temporary-directories.ts";
 import { registerWorkerExecutableFirstLaunchTests } from "./windows_executable_first_launch_cases.ts";
 import { registerWorkerExecutableCancellationTests } from "./windows_executable_cancellation_cases.ts";
 
-const packagedHelper = new URL(
-  "../../../../sdk/typescript/_bundled_plugin/mcp/helpers.mjs",
-  import.meta.url,
-);
+const packagedHelper = bundledMcpUrl("helpers");
 const { resolvedPathText, isMissingPathError } = (await importSource(
   "src/helpers/helper-files.ts",
   {
@@ -36,16 +33,42 @@ const directories = createTemporaryDirectories(true);
 after(() => directories.cleanup());
 
 const { replaceArtifactText } = (await importSource(
-  join(import.meta.dirname, "../src/artifact-io.ts"),
+  "src/artifact-io.ts",
 )) as typeof import("../src/artifact-io.js");
 
+const { writeJsonAtomic } = (await importSource(
+  "src/deep-scan/artifacts.ts",
+)) as typeof import("../src/deep-scan/artifacts.js");
+
+test("a failed Deep Scan JSON rename preserves the diagnostic and cleans its staging file", async (t) => {
+  const directory = await directories.create("deep-scan-json-");
+  const destination = join(directory, "heartbeat.json");
+  await fs.writeFile(destination, "old");
+  const failure = Object.assign(new Error("synthetic rename failure"), {
+    code: "EIO",
+  });
+  const rename = t.mock.method(fs, "rename", async () => {
+    throw failure;
+  });
+  await assert.rejects(
+    writeJsonAtomic(destination, { beat: 2 }),
+    (error) => error === failure,
+  );
+  assert.equal(rename.mock.callCount(), 1);
+  assert.equal(await fs.readFile(destination, "utf8"), "old");
+  assert.deepEqual(await fs.readdir(directory), ["heartbeat.json"]);
+});
+
 test(
-  "Windows publishes the staged artifact after a reader releases the old file",
+  "Windows publishes the Deep Scan heartbeat after a reader releases the old file",
   { skip: process.platform !== "win32" },
   async (t) => {
-    const directory = await directories.create("held-artifact-");
-    const destination = join(directory, "result.jsonl");
-    await fs.writeFile(destination, "old");
+    const directory = join(
+      await directories.create("held-artifact-"),
+      "nested",
+    );
+    const destination = join(directory, "heartbeat.json");
+    await writeJsonAtomic(destination, { beat: 1 });
     const reader = await fs.open(destination, "r");
     t.after(() => reader.close());
     const rename = fs.rename.bind(fs);
@@ -59,17 +82,20 @@ test(
         } catch (error) {
           if (args[1] === destination && conflicts === 0) {
             conflicts++;
-            assert.equal(await fs.readFile(destination, "utf8"), "old");
+            assert.deepEqual(
+              JSON.parse(await fs.readFile(destination, "utf8")),
+              { beat: 1 },
+            );
             await reader.close();
           }
           throw error;
         }
       },
     );
-    await replaceArtifactText(destination, "new");
+    await writeJsonAtomic(destination, { beat: 2 });
     assert.equal(conflicts, 1);
-    assert.equal(await fs.readFile(destination, "utf8"), "new");
-    assert.deepEqual(await fs.readdir(directory), ["result.jsonl"]);
+    assert.equal(await fs.readFile(destination, "utf8"), '{\n  "beat": 2\n}\n');
+    assert.deepEqual(await fs.readdir(directory), ["heartbeat.json"]);
   },
 );
 

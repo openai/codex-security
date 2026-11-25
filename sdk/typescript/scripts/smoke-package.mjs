@@ -320,6 +320,7 @@ try {
     [
       ...npm.args,
       "install",
+      "--engine-strict",
       "--prefer-online",
       "--include=optional",
       "--ignore-scripts",
@@ -597,32 +598,24 @@ try {
   assert.equal(failed.stdout, "");
   assert.equal(failed.stderr, "working directory is unavailable\n");
 
-  const policyHelp = run(process.execPath, [launcher, "policy", "--help"], {
-    cwd: consumer,
-    capture: true,
-  });
+  function runLauncher(args, env) {
+    return run(process.execPath, [launcher, ...args], {
+      cwd: consumer,
+      capture: true,
+      env,
+    });
+  }
+
+  const policyHelp = runLauncher(["policy", "--help"]);
   assert.match(policyHelp, /SECURITY\.md/u);
   const policyTarget = join(consumer, "policy-target");
   await mkdir(policyTarget);
   const policyPreflight = JSON.parse(
-    run(
-      process.execPath,
-      [
-        launcher,
-        "policy",
-        policyTarget,
-        "--auth",
-        "chatgpt",
-        "--dry-run",
-        "--json",
-      ],
+    runLauncher(
+      ["policy", policyTarget, "--auth", "chatgpt", "--dry-run", "--json"],
       {
-        cwd: consumer,
-        capture: true,
-        env: {
-          ...process.env,
-          CODEX_SECURITY_STATE_DIR: join(consumer, "policy-state"),
-        },
+        ...process.env,
+        CODEX_SECURITY_STATE_DIR: join(consumer, "policy-state"),
       },
     ),
   );
@@ -634,21 +627,15 @@ try {
   assert.deepEqual(await readdir(policyTarget), []);
 
   const starterPath = join(consumer, "codex-security.yaml");
-  const starter = JSON.parse(
-    run(process.execPath, [launcher, "init", "--json"], {
-      cwd: consumer,
-      capture: true,
-    }),
-  );
+  const starter = JSON.parse(runLauncher(["init", "--json"]));
   // Compare file identities across symlink aliases and Windows short names.
   const canonicalStarterPath = await realpath(starterPath);
   assert.equal(await realpath(starter.path), canonicalStarterPath);
   for (const args of [["-c", starterPath], []]) {
     const info = JSON.parse(
-      run(process.execPath, [launcher, "info", ...args, "--json"], {
-        cwd: consumer,
-        capture: true,
-        env: { ...process.env, CODEX_SECURITY_PROJECT_CONFIG: starterPath },
+      runLauncher(["info", ...args, "--json"], {
+        ...process.env,
+        CODEX_SECURITY_PROJECT_CONFIG: starterPath,
       }),
     );
     assert.equal(await realpath(info.configuration.path), canonicalStarterPath);
@@ -659,10 +646,7 @@ try {
   const nestedDirectory = join(consumer, "settings");
   await mkdir(nestedDirectory);
   const nestedPath = join(nestedDirectory, "security.json");
-  run(process.execPath, [launcher, "init", nestedPath, "--json"], {
-    cwd: consumer,
-    capture: true,
-  });
+  runLauncher(["init", nestedPath, "--json"]);
   const nestedConfig = JSON.parse(await readFile(nestedPath, "utf8"));
   assert.equal(
     await realpath(resolve(nestedDirectory, nestedConfig.$schema)),
@@ -697,10 +681,8 @@ try {
   );
   assert.equal(trackingIds, "csf_852f90d6e1177502ff113d4a\n");
   const publication = JSON.parse(
-    run(
-      process.execPath,
+    runLauncher(
       [
-        launcher,
         "publish",
         "scan",
         publicationScan,
@@ -712,13 +694,9 @@ try {
         "--json",
       ],
       {
-        cwd: consumer,
-        capture: true,
-        env: {
-          ...process.env,
-          CODEX_SECURITY_LINEAR_PROJECT: "",
-          CODEX_SECURITY_STATE_DIR: join(consumer, "publication-state"),
-        },
+        ...process.env,
+        CODEX_SECURITY_LINEAR_PROJECT: "",
+        CODEX_SECURITY_STATE_DIR: join(consumer, "publication-state"),
       },
     ),
   );
@@ -732,13 +710,7 @@ try {
   assert.equal(publication.counts.findings, 1);
   assert.equal(publication.counts.created, 0);
   assert.match(publication.issues[0].title, /^\[Codex Security\]\[HIGH\] /u);
-  assert.match(
-    run(process.execPath, [launcher, "publish", "scan", "--help"], {
-      cwd: consumer,
-      capture: true,
-    }),
-    /--skip-existing/u,
-  );
+  assert.match(runLauncher(["publish", "scan", "--help"]), /--skip-existing/u);
   const missingHistory = spawnSync(
     process.execPath,
     [
@@ -817,6 +789,13 @@ try {
     /lin_api_|security@example\.test/u,
   );
 
+  function runSmokeScript(script, args, options) {
+    run(process.execPath, [join(packageRoot, "scripts", script), ...args], {
+      cwd: consumer,
+      ...options,
+    });
+  }
+
   let credentialLockState = join(consumer, "credential-lock-state");
   if (process.platform === "win32" && !process.versions.bun) {
     // Exercise a long SQLite guard while the canonical home fits the ACL tools' path limit.
@@ -824,38 +803,14 @@ try {
     const padding = Math.max(0, 240 - join(state, "codex-home").length - 1);
     credentialLockState = join(state, "x".repeat(padding));
   }
-  run(
-    process.execPath,
-    [
-      join(packageRoot, "scripts", "fixtures", "credential-lock.mjs"),
-      pathToFileURL(join(installedRoot, "dist", "runtime.js")).href,
-      credentialLockState,
-    ],
-    { cwd: consumer },
-  );
+  runSmokeScript("fixtures/credential-lock.mjs", [
+    pathToFileURL(join(installedRoot, "dist", "runtime.js")).href,
+    credentialLockState,
+  ]);
 
-  run(
-    process.execPath,
-    [
-      join(packageRoot, "scripts", "fixtures", "package-behavior.mjs"),
-      installedRoot,
-      consumer,
-    ],
-    { cwd: consumer },
-  );
-  run(
-    process.execPath,
-    [join(packageRoot, "scripts", "smoke-hosted-package.mjs"), installedRoot],
-    { cwd: consumer },
-  );
-  run(
-    process.execPath,
-    [
-      join(packageRoot, "scripts", "smoke-hosted-remediation.mjs"),
-      installedRoot,
-    ],
-    { cwd: consumer },
-  );
+  runSmokeScript("fixtures/package-behavior.mjs", [installedRoot, consumer]);
+  runSmokeScript("smoke-hosted-package.mjs", [installedRoot]);
+  runSmokeScript("smoke-hosted-remediation.mjs", [installedRoot]);
   const selectedPlugin = join(consumer, "compatibility-selected-plugin");
   await cp(join(installedRoot, "_bundled_plugin"), selectedPlugin, {
     recursive: true,
@@ -869,46 +824,23 @@ try {
   );
   assert.notEqual(olderLoader, loader);
   await writeFile(selectedHelper, olderLoader);
-  run(
-    process.execPath,
-    [
-      join(
-        packageRoot,
-        "scripts",
-        "fixtures",
-        "package-plugin-compatibility.mjs",
-      ),
-      installedRoot,
-      consumer,
-      selectedPlugin,
-    ],
-    { cwd: consumer },
-  );
+  runSmokeScript("fixtures/package-plugin-compatibility.mjs", [
+    installedRoot,
+    consumer,
+    selectedPlugin,
+  ]);
   await smokeStackRun({ installedRoot, launcher, consumer, run });
   await smokeNestedDeepScanWorker(installedRoot, consumer);
 
   if (process.platform === "darwin" && process.arch === "arm64") {
-    run(
-      process.execPath,
-      [
-        join(packageRoot, "scripts", "fixtures", "package-review-items.mjs"),
-        installedRoot,
-      ],
-      {
-        cwd: consumer,
-        env: { ...process.env, CODEX_MCP_NODE_PATH: process.execPath },
-      },
-    );
+    runSmokeScript("fixtures/package-review-items.mjs", [installedRoot], {
+      env: { ...process.env, CODEX_MCP_NODE_PATH: process.execPath },
+    });
   }
 
-  run(
-    process.execPath,
-    [
-      join(packageRoot, "scripts", "fixtures", "package-deep-scan.mjs"),
-      installedRoot,
-    ],
-    { cwd: consumer, timeout: PACKAGE_SMOKE_DEEP_SCAN_TIMEOUT_MS },
-  );
+  runSmokeScript("fixtures/package-deep-scan.mjs", [installedRoot], {
+    timeout: PACKAGE_SMOKE_DEEP_SCAN_TIMEOUT_MS,
+  });
 
   console.log(
     `Validated installed ${packageManifest.name}@${packageManifest.version}: public import, NodeNext types, CLI, SDK lifecycle, credential locking, hosted scans, ${expectedPluginFiles.length} bundled plugin files, MCP initialization, bundled Codex version, and a nested worker without global codex.`,

@@ -1,8 +1,10 @@
 import { z } from "zod";
+import { dependencyBoundarySchema } from "./dependency-caller-scope.js";
 import {
   DeepScanSettingsSchema,
   FailureSeveritySchema,
   ScanSettingsSchema,
+  ValidationProviderSettingsSchema,
 } from "./scan-settings.js";
 
 const nonempty = z.string().min(1);
@@ -57,6 +59,9 @@ export const ProjectConfigInputSchema = z.strictObject({
       validation_file: ScanSettingsSchema.shape.validationPromptFile.describe(
         "Custom validation instructions, relative to this file; not supported in active deep scans.",
       ),
+      validation: ValidationProviderSettingsSchema.optional().describe(
+        "Optional host-side follow-up validation provider. Omit to use Codex static validation.",
+      ),
       deep: z
         .strictObject({
           workers: DeepScanSettingsSchema.shape.workers,
@@ -75,13 +80,7 @@ export const ProjectConfigInputSchema = z.strictObject({
     .optional(),
   exploitability: z
     .strictObject({
-      scope: z
-        .strictObject({
-          instructions: nonempty.describe(
-            "Caller-provided investigation boundaries and assumptions.",
-          ),
-        })
-        .optional(),
+      ...dependencyBoundarySchema.shape,
       evidence_sources: z
         .array(
           z.strictObject({

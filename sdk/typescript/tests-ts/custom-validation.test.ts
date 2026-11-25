@@ -3,7 +3,6 @@ import { resolveCodexProfile } from "../src/config.js";
 import { createHash, randomUUID } from "node:crypto";
 import { mkdirSync, renameSync, writeFileSync } from "node:fs";
 import {
-  appendFile,
   chmod,
   cp,
   mkdir,
@@ -18,7 +17,17 @@ import type { ScanReadFile } from "../../../plugins/codex-security/native/scan-r
 import type { ThreadEvent } from "@openai/codex-sdk";
 import type { ScanActivity } from "../src/scan-activity.js";
 import type { ScanSessionEvent } from "../src/cost.js";
-import { progressMarker, writeSession } from "./support/usage-rollout.js";
+import {
+  appendRecord,
+  appendRecords,
+  basicUsage,
+  completedMessage,
+  legacyMessage,
+  legacyUsageRecord,
+  progressMarker,
+  responseMessage,
+  writeSession,
+} from "./support/usage-rollout.js";
 import Ajv2020 from "ajv/dist/2020.js";
 import { afterEach, describe, expect, mock, spyOn, test } from "bun:test";
 import {
@@ -793,24 +802,10 @@ describe("custom validation", () => {
       let validationStarted = false;
       let parentRollout = "";
       const parentSeen = Promise.withResolvers<void>();
-      const parentMessage = (
-        id: string,
-        phase: ScanProgress["phase"],
-        filesCompleted: number,
-      ) => ({
-        type: "response_item",
-        payload: {
-          type: "message",
-          id,
-          role: "assistant",
-          content: [
-            {
-              type: "output_text",
-              text: progressMarker(phase, filesCompleted, 1),
-            },
-          ],
-        },
-      });
+      const parentFinal = {
+        id: "parent-final",
+        text: progressMarker("reporting", 1, 1),
+      };
       const progress: ScanProgress[] = [];
       const validationActivity = "Synthetic validation activity.";
       const profileDisabledTools =
@@ -938,27 +933,26 @@ describe("custom validation", () => {
                           { input_tokens: 10, output_tokens: 3 },
                         );
                         const messages = [
-                          parentMessage("inventory", "discovery", 0),
-                          parentMessage("review", "discovery", 1),
+                          {
+                            id: "inventory",
+                            text: progressMarker("discovery", 0, 1),
+                          },
+                          {
+                            id: "review",
+                            text: progressMarker("discovery", 1, 1),
+                          },
                         ];
                         if (scenario === "live-progress")
-                          messages.push(
-                            parentMessage("parent-final", "reporting", 1),
-                          );
-                        await appendFile(
+                          messages.push(parentFinal);
+                        await appendRecords(
                           parentRollout,
-                          jsonLines(messages) + "\n",
+                          messages.map(({ id, text }) =>
+                            responseMessage(text, id),
+                          ),
                         );
                         async function* progressEvents(): AsyncGenerator<ThreadEvent> {
-                          for (const message of messages)
-                            yield {
-                              type: "item.completed",
-                              item: {
-                                id: message.payload.id,
-                                type: "agent_message",
-                                text: message.payload.content[0]!.text,
-                              },
-                            };
+                          for (const { id, text } of messages)
+                            yield completedMessage(id, text);
                         }
                         return {
                           events: completedEvents("thread-1", progressEvents()),
@@ -968,14 +962,10 @@ describe("custom validation", () => {
                         return {
                           events:
                             (async function* (): AsyncGenerator<ThreadEvent> {
-                              yield {
-                                type: "item.completed",
-                                item: {
-                                  id: "primary-reporting",
-                                  type: "agent_message",
-                                  text: 'CODEX_SECURITY_SCAN_PROGRESS {"phase":"reporting","filesCompleted":1,"filesTotal":1}',
-                                },
-                              };
+                              yield completedMessage(
+                                "primary-reporting",
+                                progressMarker("reporting", 1, 1),
+                              );
                               yield* completedEvents();
                             })(),
                         };
@@ -1044,28 +1034,9 @@ describe("custom validation", () => {
                               timestamp: "2026-08-21T00:00:00Z",
                             },
                           },
-                          {
-                            type: "event_msg",
-                            payload: {
-                              type: "token_count",
-                              info: {
-                                total_token_usage: {
-                                  input_tokens: 10,
-                                  output_tokens: 3,
-                                },
-                              },
-                            },
-                          },
+                          legacyUsageRecord(basicUsage(10, 3)),
                           ...(id === "validation-thread"
-                            ? [
-                                {
-                                  type: "event_msg",
-                                  payload: {
-                                    type: "agent_message",
-                                    message: validationActivity,
-                                  },
-                                },
-                              ]
+                            ? [legacyMessage(validationActivity)]
                             : []),
                         ];
                         await writeFile(
@@ -1077,11 +1048,9 @@ describe("custom validation", () => {
                     if (progressScenario) {
                       validationStarted = true;
                       if (scenario !== "live-progress") {
-                        await appendFile(
+                        await appendRecord(
                           parentRollout,
-                          JSON.stringify(
-                            parentMessage("parent-final", "reporting", 1),
-                          ) + "\n",
+                          responseMessage(parentFinal.text, parentFinal.id),
                         );
                         // The observer fires during the same synchronous batch that
                         // processes progress, so this awaits the actual saved receipt.
@@ -1294,13 +1263,16 @@ describe("custom validation", () => {
     expect(standard).not.toContain("validate-scan-findings.md");
     expect(standard).not.toContain("security-scan/SKILL.md");
     expect(diff).toContain("<plugin_dir>/references/scan-runtime.md");
+    expect(diff).toContain(
+      "<plugin_dir>/skills/security-diff-scan/references/compact-phases.md",
+    );
     expect(standard).not.toContain("undefined");
     expect(standard).not.toContain(
       "Independently validate each unique finding",
     );
     expect(diff).toContain("Run `$finding-discovery`");
     expect(diff).toContain(
-      "Immediately save a `complete: false` semantic draft",
+      "Immediately checkpoint the model and empty findings",
     );
     expect(diff).toContain('"format": "markdown", "content": "<model text>"');
     expect(diff).not.toContain("run `$validation` once");

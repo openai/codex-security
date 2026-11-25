@@ -130,7 +130,8 @@ describe("bundled plugin build", () => {
     const plugin = fileURLToPath(
       new URL("../../../plugins/codex-security/", import.meta.url),
     );
-    const ordinarySource = join(root, "plugin");
+    const sourceRepository = join(root, "repository");
+    const ordinarySource = join(sourceRepository, "plugins", "codex-security");
     const manifestLength = join(
       ordinarySource,
       "mcp-app",
@@ -140,6 +141,25 @@ describe("bundled plugin build", () => {
       process.platform === "win32"
         ? ordinarySource + "p".repeat(Math.max(0, 263 - manifestLength))
         : ordinarySource;
+    // The source build shares the host validation adapters with the SDK;
+    // the installed plugin still contains only self-contained runtime bundles.
+    const sdk = fileURLToPath(new URL("../", import.meta.url));
+    const sharedSdk = join(sourceRepository, "sdk", "typescript");
+    for (const directory of ["src", "schemas"]) {
+      await cp(join(sdk, directory), join(sharedSdk, directory), {
+        recursive: true,
+      });
+    }
+    await writeFixture(
+      sharedSdk,
+      "package.json",
+      await readFile(join(sdk, "package.json"), "utf8"),
+    );
+    await symlink(
+      join(sdk, "node_modules"),
+      join(sharedSdk, "node_modules"),
+      "junction",
+    );
     await cp(join(plugin, "mcp-app"), join(source, "mcp-app"), {
       recursive: true,
       filter: (path) => !["node_modules", ".preview"].includes(basename(path)),
@@ -155,6 +175,8 @@ describe("bundled plugin build", () => {
       "codex_profile.d.mts",
       "codex_session.mjs",
       "codex_session.d.mts",
+      "skill_instructions.mjs",
+      "skill_instructions.d.mts",
     ]) {
       await writeFixture(
         source,

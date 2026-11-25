@@ -49,7 +49,8 @@ export const DeepScanSettingsSchema = z.strictObject({
   }),
   stopAfterNoNew: positiveInteger.optional().meta({
     default: DEFAULT_DEEP_SCAN_SETTINGS.stopAfterNoNew,
-    description: "Stop after this many runs find no new issues.",
+    description:
+      "Stop after this many consecutive discovery runs find no new issues.",
   }),
   stopAfterConsecutiveErrors: positiveInteger.optional().meta({
     default: DEFAULT_DEEP_SCAN_SETTINGS.stopAfterConsecutiveErrors,
@@ -76,6 +77,24 @@ export type DeepScanOptions = z.infer<typeof DeepScanSettingsSchema>;
 
 const inputPath = z.string().min(1);
 
+export const ValidationProviderSettingsSchema = z.strictObject({
+  provider: z.string().min(1),
+  continuum: z
+    .strictObject({
+      environment_id: z.string().min(1),
+      aws_profile: z.string().min(1).optional(),
+      aws_region: z.string().min(1).optional(),
+      include_local_validation: z.boolean().optional(),
+      wait_minutes: z.number().positive().max(240).optional(),
+      console_base_url: z.string().min(1).optional(),
+    })
+    .optional(),
+});
+
+export type ValidationProviderSettings = z.infer<
+  typeof ValidationProviderSettingsSchema
+>;
+
 export const ScanSettingsSchema = DeepScanSettingsSchema.extend({
   auth: z.enum(SCAN_AUTH_MODES).optional().meta({ default: DEFAULT_SCAN_AUTH }),
   cyberAccessProgram: z
@@ -98,6 +117,7 @@ export const ScanSettingsSchema = DeepScanSettingsSchema.extend({
   scanPromptFile: inputPath.optional(),
   validationPrompt: z.string().optional(),
   validationPromptFile: inputPath.optional(),
+  validationProvider: ValidationProviderSettingsSchema.optional(),
   postScanPrompt: z.string().optional(),
   postScanPromptFile: inputPath.optional(),
   outputDir: inputPath.optional(),

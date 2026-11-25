@@ -4,24 +4,68 @@ import {
   copyFile,
   cp,
   mkdir,
-  mkdtemp,
   readFile,
-  realpath,
   rm,
   writeFile,
 } from "node:fs/promises";
-import { tmpdir } from "node:os";
 import { dirname, join, parse } from "node:path";
 import { expect, test } from "bun:test";
 import { PLUGIN_ROOT } from "./plugin-root.js";
-import { removeTemporaryDirectory } from "./support/temporary-directories.js";
+import {
+  removeTemporaryDirectory,
+  temporaryDirectory,
+} from "./support/temporary-directories.js";
+
+async function launcherFixture(prefix: string) {
+  const node = Bun.which("node");
+  if (node === null) throw new Error("Node is required for the launcher test.");
+  return { node, root: await temporaryDirectory(prefix) };
+}
+
+function nodeCaches(root: string) {
+  const runtime = join(
+    "codex-runtimes",
+    "codex-primary-runtime",
+    "dependencies",
+    "node",
+    "bin",
+    "node.exe",
+  );
+  return {
+    LOCALAPPDATA: join(
+      root,
+      "OpenAI",
+      "Codex",
+      "runtimes",
+      "cua_node",
+      "fixture",
+      "bin",
+      "node.exe",
+    ),
+    XDG_CACHE_HOME: join(root, runtime),
+    USERPROFILE: join(root, ".cache", runtime),
+  };
+}
+
+async function installHelper(plugin: string, source: string) {
+  const scripts = join(plugin, "scripts");
+  const mcp = join(plugin, "mcp");
+  await mkdir(scripts, { recursive: true });
+  await mkdir(mcp);
+  const launcher = join(scripts, "launch_codex_security_mcp");
+  await copyFile(
+    join(PLUGIN_ROOT, "scripts", "launch_codex_security_mcp"),
+    launcher,
+  );
+  await chmod(launcher, 0o700);
+  await writeFile(join(mcp, "helpers.mjs"), source);
+  return launcher;
+}
 
 test.skipIf(process.platform !== "win32")(
   "runs the documented policy command with long and literal paths and preserves exit codes with inherited ERRORLEVEL",
   async () => {
-    const root = await realpath(
-      await mkdtemp(join(tmpdir(), "policy-launch-")),
-    );
+    const root = await temporaryDirectory("policy-launch-");
     try {
       const reference = await readFile(
         join(PLUGIN_ROOT, "references", "security-guidance.md"),
@@ -155,12 +199,7 @@ test.skipIf(process.platform !== "win32")(
 test.skipIf(process.platform !== "win32")(
   "launches the PATH Node executable independently of command extensions and the caller directory",
   async () => {
-    const node = Bun.which("node");
-    if (node === null)
-      throw new Error("Node is required for the launcher test.");
-    const root = await realpath(
-      await mkdtemp(join(tmpdir(), "codex-security-launch-")),
-    );
+    const { node, root } = await launcherFixture("codex-security-launch-");
     try {
       const caller = join(root, "caller");
       const launcherEnv = {
@@ -262,11 +301,8 @@ test.skipIf(process.platform !== "win32")(
 test.skipIf(process.platform !== "win32")(
   "explicit Windows Node selection precedes every relocated runtime cache",
   async () => {
-    const node = Bun.which("node");
-    if (node === null)
-      throw new Error("Node is required for the launcher test.");
-    const root = await realpath(
-      await mkdtemp(join(tmpdir(), "codex-security-runtime-precedence-")),
+    const { node, root } = await launcherFixture(
+      "codex-security-runtime-precedence-",
     );
     try {
       const scripts = join(root, "plugin", "scripts");
@@ -288,39 +324,8 @@ test.skipIf(process.platform !== "win32")(
           join(mcp, script),
           `import { readFileSync } from "node:fs";\nconsole.log(JSON.stringify({ executable: process.execPath, cwd: process.cwd(), args: process.argv.slice(2), input: readFileSync(0, "utf8") }));\nprocess.exitCode = 23;\n`,
         );
-      const caches = {
-        LOCALAPPDATA: join(
-          root,
-          "OpenAI",
-          "Codex",
-          "runtimes",
-          "cua_node",
-          "fixture",
-          "bin",
-          "node.exe",
-        ),
-        XDG_CACHE_HOME: join(
-          root,
-          "codex-runtimes",
-          "codex-primary-runtime",
-          "dependencies",
-          "node",
-          "bin",
-          "node.exe",
-        ),
-        USERPROFILE: join(
-          root,
-          ".cache",
-          "codex-runtimes",
-          "codex-primary-runtime",
-          "dependencies",
-          "node",
-          "bin",
-          "node.exe",
-        ),
-      };
       const argument = "argument with spaces %RUNTIME% !RUNTIME!";
-      for (const [name, cached] of Object.entries(caches)) {
+      for (const [name, cached] of Object.entries(nodeCaches(root))) {
         await mkdir(dirname(cached), { recursive: true });
         await copyFile(node, cached);
         for (const helper of [false, true]) {
@@ -374,25 +379,10 @@ test.skipIf(process.platform !== "win32")(
 test.skipIf(process.platform === "win32")(
   "preserves helper argument bytes, stdin, and exit status",
   async () => {
-    const node = Bun.which("node");
-    if (node === null)
-      throw new Error("Node is required for the launcher test.");
-    const root = await realpath(
-      await mkdtemp(join(tmpdir(), "codex-security-helper-pipe-")),
-    );
+    const { node, root } = await launcherFixture("codex-security-helper-pipe-");
     try {
-      const scripts = join(root, "plugin with spaces", "scripts");
-      const mcp = join(root, "plugin with spaces", "mcp");
-      await mkdir(scripts, { recursive: true });
-      await mkdir(mcp);
-      const launcher = join(scripts, "launch_codex_security_mcp");
-      await copyFile(
-        join(PLUGIN_ROOT, "scripts", "launch_codex_security_mcp"),
-        launcher,
-      );
-      await chmod(launcher, 0o700);
-      await writeFile(
-        join(mcp, "helpers.mjs"),
+      const launcher = await installHelper(
+        join(root, "plugin with spaces"),
         `import { readFileSync } from "node:fs";
 const payload = Buffer.from(readFileSync(3, "ascii").trim(), "hex");
 console.log(JSON.stringify({
@@ -461,25 +451,12 @@ test
   ])(
   "launches argument-only helpers with closed stdin ($shell)",
   async ({ interpreter }) => {
-    const node = Bun.which("node");
-    if (node === null)
-      throw new Error("Node is required for the launcher test.");
-    const root = await realpath(
-      await mkdtemp(join(tmpdir(), "codex-security-helper-closed-stdin-")),
+    const { node, root } = await launcherFixture(
+      "codex-security-helper-closed-stdin-",
     );
     try {
-      const scripts = join(root, "plugin with spaces", "scripts");
-      const mcp = join(root, "plugin with spaces", "mcp");
-      await mkdir(scripts, { recursive: true });
-      await mkdir(mcp);
-      const launcher = join(scripts, "launch_codex_security_mcp");
-      await copyFile(
-        join(PLUGIN_ROOT, "scripts", "launch_codex_security_mcp"),
-        launcher,
-      );
-      await chmod(launcher, 0o700);
-      await writeFile(
-        join(mcp, "helpers.mjs"),
+      const launcher = await installHelper(
+        join(root, "plugin with spaces"),
         `import { readFileSync } from "node:fs";
 const payload = Buffer.from(readFileSync(3, "ascii").trim(), "hex");
 console.log(JSON.stringify({ payload: payload.toString("hex") }));
@@ -526,11 +503,8 @@ for (const mode of ["managed", "PATH"] as const) {
   test.skipIf(process.platform !== "darwin")(
     `resolves security policy with ${mode} Node and filesystem writes denied`,
     async () => {
-      const node = Bun.which("node");
-      if (node === null)
-        throw new Error("Node is required for the launcher test.");
-      const root = await realpath(
-        await mkdtemp(join(tmpdir(), "codex-security-read-only-helper-")),
+      const { node, root } = await launcherFixture(
+        "codex-security-read-only-helper-",
       );
       try {
         const repository = join(root, "repository with spaces");
@@ -587,25 +561,12 @@ for (const [signal, exitCode] of [
   test.skipIf(process.platform === "win32")(
     `forwards ${signal} and waits for the helper`,
     async () => {
-      const node = Bun.which("node");
-      if (node === null)
-        throw new Error("Node is required for the launcher test.");
-      const root = await realpath(
-        await mkdtemp(join(tmpdir(), "codex-security-helper-signal-")),
+      const { node, root } = await launcherFixture(
+        "codex-security-helper-signal-",
       );
       try {
-        const scripts = join(root, "scripts");
-        const mcp = join(root, "mcp");
-        await mkdir(scripts);
-        await mkdir(mcp);
-        const launcherPath = join(scripts, "launch_codex_security_mcp");
-        await copyFile(
-          join(PLUGIN_ROOT, "scripts", "launch_codex_security_mcp"),
-          launcherPath,
-        );
-        await chmod(launcherPath, 0o700);
-        await writeFile(
-          join(mcp, "helpers.mjs"),
+        const launcherPath = await installHelper(
+          root,
           `import { readFileSync } from "node:fs";
 readFileSync(3);
 process.on("SIGTERM", () => process.exit(23));
@@ -662,10 +623,12 @@ setInterval(() => {}, 1000);
 
 test.each(
   (["server", "helper"] as const).flatMap((mode) =>
-    ["none", "LOCALAPPDATA", "XDG_CACHE_HOME", "USERPROFILE"].map((cache) => ({
-      mode,
-      cache,
-    })),
+    (["none", "LOCALAPPDATA", "XDG_CACHE_HOME", "USERPROFILE"] as const).map(
+      (cache) => ({
+        mode,
+        cache,
+      }),
+    ),
   ),
 )(
   "starts the packaged $mode with managed Node before $cache cache and an empty PATH",
@@ -673,9 +636,7 @@ test.each(
     const node = Bun.which("node");
     if (node === null)
       throw new Error("Node is required for the MCP smoke test.");
-    const root = await realpath(
-      await mkdtemp(join(tmpdir(), "codex-security-node-")),
-    );
+    const root = await temporaryDirectory("codex-security-node-");
     try {
       const config = JSON.parse(
         await readFile(join(PLUGIN_ROOT, ".mcp.json"), "utf8"),
@@ -705,28 +666,7 @@ test.each(
         );
       }
       if (cache !== "none") {
-        const cacheNode = join(
-          root,
-          ...(cache === "LOCALAPPDATA"
-            ? [
-                "OpenAI",
-                "Codex",
-                "runtimes",
-                "cua_node",
-                "fixture",
-                "bin",
-                "node.exe",
-              ]
-            : [
-                ...(cache === "USERPROFILE" ? [".cache"] : []),
-                "codex-runtimes",
-                "codex-primary-runtime",
-                "dependencies",
-                "node",
-                "bin",
-                "node.exe",
-              ]),
-        );
+        const cacheNode = nodeCaches(root)[cache];
         await mkdir(dirname(cacheNode), { recursive: true });
         await copyFile(node, cacheNode);
       }
@@ -821,12 +761,7 @@ test.each(
 test.skipIf(process.platform !== "win32")(
   "returns helper status to a calling batch file and ignores repository Node candidates",
   async () => {
-    const node = Bun.which("node");
-    if (node === null)
-      throw new Error("Node is required for the launcher test.");
-    const root = await realpath(
-      await mkdtemp(join(tmpdir(), "helper-caller-")),
-    );
+    const { node, root } = await launcherFixture("helper-caller-");
     try {
       const runtime = join(root, "runtime with spaces");
       const repository = join(root, "repository with spaces");

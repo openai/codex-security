@@ -1,3 +1,8 @@
+import {
+  basicUsage,
+  legacyUsageRecord,
+  appendRecord,
+} from "./support/usage-rollout.js";
 import { createCliTest } from "./support/cli-run.js";
 import { workbenchCommand } from "./support/workbench-command.js";
 import { runWorkbenchFixtureCommands } from "./support/workbench-fixtures.js";
@@ -287,6 +292,8 @@ async function interruptedScan(
     python,
     environment,
     command,
+    scanCommand: (name: string, ...args: string[]) =>
+      command([name, "--scan-id", scanId, ...args]),
     recipe,
     scanId,
     threadId,
@@ -308,31 +315,19 @@ test("resume resolves an interrupted scan without changing its ID, recipe, or co
     "saved",
     "separate",
   );
-  const before = await f.command([
+  const before = await f.scanCommand(
     "get-deep-scan",
-    "--scan-id",
-    f.scanId,
     "--thread-id",
     f.threadId,
-  ]);
-  const resumed = await f.command([
-    "get-cli-scan-resume",
-    "--scan-id",
-    f.scanId,
-  ]);
+  );
+  const resumed = await f.scanCommand("get-cli-scan-resume");
   expect(resumed).toMatchObject({
     ...f.registration,
     recipe: f.recipe,
     threadId: f.threadId,
   });
   expect(
-    await f.command([
-      "get-deep-scan",
-      "--scan-id",
-      f.scanId,
-      "--thread-id",
-      f.threadId,
-    ]),
+    await f.scanCommand("get-deep-scan", "--thread-id", f.threadId),
   ).toEqual(before);
   expect(await readFile(f.checkpoint, "utf8")).toBe('{"completed":"setup"}\n');
 });
@@ -381,9 +376,7 @@ test.skipIf(process.platform !== "win32").each(["deep", "standard"] as const)(
     );
     expect(stderr.text()).toContain("Connection failed");
     expect(resumedThread).toBe(f.threadId);
-    expect(
-      (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
-    ).toMatchObject({
+    expect((await f.scanCommand("get-scan"))["scan"]).toMatchObject({
       continuationThreadId: f.threadId,
       progress: { status: "running" },
     });
@@ -404,15 +397,8 @@ test.each([
   async (mode, scenario) => {
     const f = await interruptedScan(mode);
     if (scenario === "failed")
-      await f.command([
-        "fail-scan",
-        "--scan-id",
-        f.scanId,
-        "--message",
-        "Synthetic failure",
-      ]);
-    if (scenario === "canceled")
-      await f.command(["cancel-scan", "--scan-id", f.scanId]);
+      await f.scanCommand("fail-scan", "--message", "Synthetic failure");
+    if (scenario === "canceled") await f.scanCommand("cancel-scan");
     if (scenario === "changed")
       await writeFile(join(f.repository, "source.py"), "# changed\n");
     if (scenario === "replaced") {
@@ -421,25 +407,12 @@ test.each([
       await writeFile(join(f.repository, "source.py"), "# synthetic source\n");
     }
     if (scenario === "wrong-owner")
-      await f.command([
-        "set-scan-thread",
-        "--scan-id",
-        f.scanId,
-        "--thread-id",
-        randomUUID(),
-      ]);
-    const before = await f.command(["get-scan", "--scan-id", f.scanId]);
+      await f.scanCommand("set-scan-thread", "--thread-id", randomUUID());
+    const before = await f.scanCommand("get-scan");
     expect(
-      await f.command([
-        "get-cli-scan-resume",
-        "--scan-id",
-        f.scanId,
-        "--allow-unavailable",
-      ]),
+      await f.scanCommand("get-cli-scan-resume", "--allow-unavailable"),
     ).toMatchObject({ unavailable: expect.any(String) });
-    await expect(
-      f.command(["get-cli-scan-resume", "--scan-id", f.scanId]),
-    ).rejects.toThrow(
+    await expect(f.scanCommand("get-cli-scan-resume")).rejects.toThrow(
       scenario === "changed"
         ? "revision or contents changed"
         : scenario === "replaced"
@@ -448,9 +421,7 @@ test.each([
             ? "original owning CLI session"
             : "running scan; completed, failed, and canceled",
     );
-    expect(await f.command(["get-scan", "--scan-id", f.scanId])).toEqual(
-      before,
-    );
+    expect(await f.scanCommand("get-scan")).toEqual(before);
     expect(await readFile(f.checkpoint, "utf8")).toBe(
       '{"completed":"setup"}\n',
     );
@@ -498,15 +469,13 @@ async function resumeWithPlugin(source: string) {
   using request = spyOn(globalThis, "fetch").mockRejectedValue(
     new Error("Unexpected rubric lookup"),
   );
-  await f.command([
+  await f.scanCommand(
     "update-scan-context",
-    "--scan-id",
-    f.scanId,
     "--thread-id",
     f.threadId,
     "--user-context",
     "Review the revised scan scope.",
-  ]);
+  );
   if (process.platform !== "win32") await chmod(f.scanDir, 0o755);
   const feedbackPath = join(
     f.scanDir,
@@ -521,30 +490,25 @@ async function resumeWithPlugin(source: string) {
   });
   await writeFile(feedbackPath, originalFeedback, { mode: 0o600 });
   const originalHome = join(f.root, "original-codex-home");
-  await appendFile(
-    f.sessionPath,
-    JSON.stringify({
-      type: "turn_context",
-      payload: {
-        permission_profile: {
-          type: "managed",
-          file_system: {
-            type: "restricted",
-            entries: [
-              { path: { type: "path", path: originalHome }, access: "deny" },
-            ],
-          },
+  await appendRecord(f.sessionPath, {
+    type: "turn_context",
+    payload: {
+      permission_profile: {
+        type: "managed",
+        file_system: {
+          type: "restricted",
+          entries: [
+            { path: { type: "path", path: originalHome }, access: "deny" },
+          ],
         },
       },
-    }) + "\n",
-  );
-  const before = await f.command([
+    },
+  });
+  const before = await f.scanCommand(
     "get-deep-scan",
-    "--scan-id",
-    f.scanId,
     "--thread-id",
     f.threadId,
-  ]);
+  );
   let resumedThread: string | undefined;
   const { stderr, runCli } = createCliTest(main);
   // The host can supply a ZIP through its SDK client when replaying a scan.
@@ -640,15 +604,14 @@ async function resumeWithPlugin(source: string) {
                   originalFeedback,
                 );
                 expect(prompt).toContain(f.scanId);
+                expect(prompt).toContain("false_positive_feedback.json");
                 expect(prompt).toContain("Review the revised scan scope.");
                 expect(prompt).toContain(JSON.stringify({ severityRubric }));
-                const joined = await f.command([
+                const joined = await f.scanCommand(
                   "begin-deep-scan",
-                  "--scan-id",
-                  f.scanId,
                   "--thread-id",
                   threadId,
-                ]);
+                );
                 expect(joined["deepScan"]).toMatchObject({
                   scanId: f.scanId,
                 });
@@ -667,17 +630,11 @@ async function resumeWithPlugin(source: string) {
   expect(resumedThread).toBe(f.threadId);
   expect(request).not.toHaveBeenCalled();
   expect(
-    await f.command([
-      "get-deep-scan",
-      "--scan-id",
-      f.scanId,
-      "--thread-id",
-      f.threadId,
-    ]),
+    await f.scanCommand("get-deep-scan", "--thread-id", f.threadId),
   ).toEqual(before);
-  expect(
-    (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
-  ).toMatchObject({ progress: { status: "running" } });
+  expect((await f.scanCommand("get-scan"))["scan"]).toMatchObject({
+    progress: { status: "running" },
+  });
   expect(await readFile(f.checkpoint, "utf8")).toBe('{"completed":"setup"}\n');
   expect(await readFile(feedbackPath, "utf8")).toBe(originalFeedback);
   if (process.platform !== "win32")
@@ -754,28 +711,23 @@ test.each([false, true])(
             SYNTHETIC_REPLAY_KEY: "synthetic-replay-key",
           });
           restored = true;
-          return {
-            startThread: () => fail("Resume must use the original session."),
-            resumeThread: (threadId) => ({
-              id: threadId,
-              runStreamed: async () => {
-                throw new Error("Synthetic private resume checked");
-              },
-            }),
-          };
+          return resumingCodex(f.threadId, async () => {
+            throw new Error("Synthetic private resume checked");
+          });
         },
         { deepScanConfigPath: join(f.codexHome, "worker-runtime.toml") },
       ),
     );
     expect(code).not.toBe(0);
     expect(restored, stderr.text()).toBe(true);
+    expect(stderr.text()).toContain("Synthetic private resume checked");
     expect(await readFile(savedPath, "utf8")).toBe(original);
     expect(
       (await readdir(f.codexHome)).filter((path) =>
         path.endsWith(".config.toml"),
       ),
     ).toEqual([`${name}.config.toml`]);
-    const saved = await f.command(["get-scan-recipe", "--scan-id", f.scanId]);
+    const saved = await f.scanCommand("get-scan-recipe");
     expect(saved["recipe"]).toEqual(f.recipe);
     expect(JSON.stringify(saved)).not.toContain(savedProvider.base_url);
     expect(JSON.stringify(saved)).not.toContain(
@@ -789,6 +741,13 @@ test("Standard resume preserves checkpoints through another disconnect and compl
     maxTimeMinutes: 5,
     ownerSuggestions: false,
   });
+  const feedbackPath = join(
+    f.scanDir,
+    "artifacts/01_context/false_positive_feedback.json",
+  );
+  const feedback = [{ reason: "Original reviewer rationale." }];
+  await mkdir(dirname(feedbackPath), { recursive: true });
+  await writeJson(feedbackPath, feedback);
   const draftPath = join(f.scanDir, "drafts", `${f.scanId}.json`);
   await mkdir(dirname(draftPath), { recursive: true });
   async function saveDraft(complete: boolean) {
@@ -811,13 +770,7 @@ test("Standard resume preserves checkpoints through another disconnect and compl
         explicitExclusions: [],
       },
     });
-    await f.command([
-      "write-scan-draft",
-      "--scan-id",
-      f.scanId,
-      "--draft-path",
-      draftPath,
-    ]);
+    await f.scanCommand("write-scan-draft", "--draft-path", draftPath);
   }
   await saveDraft(false);
   const head = await readJson<{ checkpoint: string }>(
@@ -832,11 +785,7 @@ test("Standard resume preserves checkpoints through another disconnect and compl
     );
   const original = await readDraft();
   let attempts = 0;
-  const initial = await f.command([
-    "get-cli-scan-resume",
-    "--scan-id",
-    f.scanId,
-  ]);
+  const initial = await f.scanCommand("get-cli-scan-resume");
   const deps = resumeDependencies(f, () => ({
     startThread: () => fail("Resume must not start a new session"),
     resumeThread(id, options) {
@@ -848,22 +797,16 @@ test("Standard resume preserves checkpoints through another disconnect and compl
           expect(prompt).toContain(
             new Date(initial["startedAt"] as string).toISOString(),
           );
+          expect(prompt).toContain("false_positive_feedback.json");
+          expect(await readJson(feedbackPath)).toEqual(feedback);
           expect(await readDraft()).toEqual(original);
           attempts++;
-          await appendFile(
+          await appendRecord(
             f.sessionPath,
-            JSON.stringify({
-              type: "event_msg",
-              payload: {
-                type: "token_count",
-                info: {
-                  total_token_usage: {
-                    input_tokens: 10000 + attempts * 100,
-                    output_tokens: 2000 + attempts * 20,
-                  },
-                },
-              },
-            }) + "\n",
+            legacyUsageRecord({
+              input_tokens: 10000 + attempts * 100,
+              output_tokens: 2000 + attempts * 20,
+            }),
           );
           if (attempts === 1)
             return {
@@ -882,18 +825,14 @@ test("Standard resume preserves checkpoints through another disconnect and compl
   expect(interrupted.stderr.text()).toContain(
     `codex-security scans resume ${f.scanId}`,
   );
-  expect(
-    await f.command(["get-cli-scan-resume", "--scan-id", f.scanId]),
-  ).toEqual(initial);
+  expect(await f.scanCommand("get-cli-scan-resume")).toEqual(initial);
   const completed = createCliTest(main);
   expect(
     await completed.runCli(["scans", "resume", f.scanId, "--json"], deps),
     completed.stderr.text(),
   ).toBe(0);
   expect(attempts).toBe(2);
-  expect(
-    (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
-  ).toMatchObject({
+  expect((await f.scanCommand("get-scan"))["scan"]).toMatchObject({
     scanId: f.scanId,
     continuationThreadId: f.threadId,
     progress: { status: "complete" },
@@ -902,9 +841,9 @@ test("Standard resume preserves checkpoints through another disconnect and compl
   expect(hash("sha256", await readFile(checkpoint)) + ".json").toBe(
     head.checkpoint,
   );
-  await expect(
-    f.command(["get-cli-scan-resume", "--scan-id", f.scanId]),
-  ).rejects.toThrow("running scan");
+  await expect(f.scanCommand("get-cli-scan-resume")).rejects.toThrow(
+    "running scan",
+  );
 });
 
 test("a new default Standard scan remains resumable after a network failure", async () => {
@@ -980,24 +919,21 @@ test.each(["access", "local"])(
     const cli = createCliTest(main);
     const code = await cli.runCli(
       ["scans", "resume", f.scanId, "--json"],
-      resumeDependencies(f, () => ({
-        startThread: () => fail("Unexpected new session"),
-        resumeThread: (id) => ({
-          id,
-          async runStreamed() {
-            if (kind === "local")
-              throw new Error(
-                "Invalid network configuration in saved settings",
-              );
-            return { events: failedEvents("403 forbidden: access denied") };
-          },
+      resumeDependencies(f, () =>
+        resumingCodex(f.threadId, async () => {
+          if (kind === "local")
+            throw new Error("Invalid network configuration in saved settings");
+          return { events: failedEvents("403 forbidden: access denied") };
         }),
-      })),
+      ),
     );
     expect(code).toBe(2);
-    expect(
-      (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
-    ).toMatchObject({ progress: { status: "failed" } });
+    expect(cli.stderr.text()).toContain(
+      kind === "local" ? "Invalid network configuration" : "403 forbidden",
+    );
+    expect((await f.scanCommand("get-scan"))["scan"]).toMatchObject({
+      progress: { status: "failed" },
+    });
     expect(cli.stderr.text()).not.toContain(
       `codex-security scans resume ${f.scanId}`,
     );
@@ -1007,20 +943,16 @@ test.each(["access", "local"])(
 test("canceling Standard resume keeps the scan canceled", async () => {
   const f = await interruptedScan("standard");
   const abort = new AbortController();
-  const deps = resumeDependencies(f, () => ({
-    startThread: () => fail("Unexpected new session"),
-    resumeThread: (id) => ({
-      id,
-      async runStreamed() {
-        async function* canceled() {
-          yield { type: "thread.started" as const, thread_id: id };
-          abort.abort();
-          abort.signal.throwIfAborted();
-        }
-        return { events: canceled() };
-      },
+  const deps = resumeDependencies(f, () =>
+    resumingCodex(f.threadId, async () => {
+      async function* canceled() {
+        yield { type: "thread.started" as const, thread_id: f.threadId };
+        abort.abort();
+        abort.signal.throwIfAborted();
+      }
+      return { events: canceled() };
     }),
-  }));
+  );
   await using client = deps.createSecurity({});
   await expect(
     client.run(f.repository, {
@@ -1030,12 +962,12 @@ test("canceling Standard resume keeps the scan canceled", async () => {
       signal: abort.signal,
     }),
   ).rejects.toThrow("interrupted");
-  expect(
-    (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
-  ).toMatchObject({ progress: { status: "canceled" } });
-  await expect(
-    f.command(["get-cli-scan-resume", "--scan-id", f.scanId]),
-  ).rejects.toThrow("running scan");
+  expect((await f.scanCommand("get-scan"))["scan"]).toMatchObject({
+    progress: { status: "canceled" },
+  });
+  await expect(f.scanCommand("get-cli-scan-resume")).rejects.toThrow(
+    "running scan",
+  );
 });
 
 test.each([
@@ -1087,22 +1019,12 @@ test("resuming reports a committed cancellation once without another launch", as
   const { stderr, runCli } = createCliTest(main);
   const code = await runCli(
     ["scans", "resume", f.scanId, "--json", "--verbose"],
-    resumeDependencies(f, () => ({
-      startThread: () => fail("Unexpected new session"),
-      resumeThread: (threadId) => ({
-        id: threadId,
-        async runStreamed() {
-          await f.command([
-            "cancel-scan",
-            "--scan-id",
-            f.scanId,
-            "--thread-id",
-            threadId,
-          ]);
-          throw new Error("Synthetic transport disconnected");
-        },
+    resumeDependencies(f, () =>
+      resumingCodex(f.threadId, async () => {
+        await f.scanCommand("cancel-scan", "--thread-id", f.threadId);
+        throw new Error("Synthetic transport disconnected");
       }),
-    })),
+    ),
   );
   expect(code).not.toBe(0);
   const lifecycle = stderr
@@ -1153,11 +1075,27 @@ test("resumed Bedrock scans retain provider context for the account advisory", a
   expect(stderr.text()).toContain("Resumed Bedrock prompt captured");
 });
 
+type CreateCodex = NonNullable<
+  ConstructorParameters<typeof TestClient>[1]["createCodex"]
+>;
+type TestThread = ReturnType<Awaited<ReturnType<CreateCodex>>["startThread"]>;
+
+function resumingCodex(
+  expectedId: string,
+  runStreamed: TestThread["runStreamed"],
+) {
+  return {
+    startThread: () => fail("Unexpected new session"),
+    resumeThread(id: string) {
+      expect(id).toBe(expectedId);
+      return { id, runStreamed };
+    },
+  };
+}
+
 function resumeDependencies(
   f: Awaited<ReturnType<typeof interruptedScan>>,
-  createCodex: NonNullable<
-    ConstructorParameters<typeof TestClient>[1]["createCodex"]
-  >,
+  createCodex: CreateCodex,
   runtimeOverrides: Partial<ReturnType<typeof preparedRuntime>> = {},
   createOperationTelemetry?: ConstructorParameters<
     typeof TestClient
@@ -1231,15 +1169,13 @@ async function finishDiscovery(f: Awaited<ReturnType<typeof interruptedScan>>) {
     }
     await writeFile(path, JSON.stringify(doc) + "\n");
   }
-  await f.command([
+  await f.scanCommand(
     "finish-deep-scan",
-    "--scan-id",
-    f.scanId,
     "--terminal-reason",
     "capped",
     "--manifest-path",
     join(f.scanDir, "scan-manifest.json"),
-  ]);
+  );
 }
 
 test.each(["completed", "failed"] as const)(
@@ -1273,20 +1209,9 @@ test.each(["completed", "failed"] as const)(
             return {
               id: threadId,
               async runStreamed() {
-                await appendFile(
+                await appendRecord(
                   f.sessionPath,
-                  JSON.stringify({
-                    type: "event_msg",
-                    payload: {
-                      type: "token_count",
-                      info: {
-                        total_token_usage: {
-                          input_tokens: 10000,
-                          output_tokens: 2000,
-                        },
-                      },
-                    },
-                  }) + "\n",
+                  legacyUsageRecord(basicUsage(10000, 2000)),
                 );
                 if (outcome === "failed")
                   throw new Error("Synthetic resumed failure");
@@ -1336,9 +1261,7 @@ test.each(["completed", "failed"] as const)(
     });
     expect(receipts[0]).not.toHaveProperty("cost");
     if (outcome === "completed") {
-      const saved = (await f.command(["get-scan", "--scan-id", f.scanId]))[
-        "scan"
-      ] as JsonObject;
+      const saved = (await f.scanCommand("get-scan"))["scan"] as JsonObject;
       expect(saved["usage"]).toMatchObject({
         coverage: "complete",
         totalTokens: 12000,
@@ -1380,26 +1303,19 @@ test.each([false, true])(
     await finishDiscovery(f);
     const { stderr, runCli } = createCliTest(main, { stderr: interactive });
     const progress = Promise.withResolvers<void>();
-    const deps = resumeDependencies(f, () => ({
-      startThread: () => fail("Unexpected new session"),
-      resumeThread(threadId) {
-        expect(threadId).toBe(f.threadId);
-        return {
-          id: threadId,
-          async runStreamed() {
-            await progress.promise;
-            const text = stripVTControlCharacters(stderr.text()).replace(
-              /\s+/gu,
-              " ",
-            );
-            expect(text).toContain("consolidating results");
-            expect(text).toContain("Reviews: 0 completed, 0 active, cap 40");
-            expect(text).not.toContain("Scan phase: discovery");
-            throw new Error("Terminal progress captured");
-          },
-        };
-      },
-    }));
+    const deps = resumeDependencies(f, () =>
+      resumingCodex(f.threadId, async () => {
+        await progress.promise;
+        const text = stripVTControlCharacters(stderr.text()).replace(
+          /\s+/gu,
+          " ",
+        );
+        expect(text).toContain("consolidating results");
+        expect(text).toContain("Reviews: 0 completed, 0 active, cap 40");
+        expect(text).not.toContain("Scan phase: discovery");
+        throw new Error("Terminal progress captured");
+      }),
+    );
     const code = await runCli(["scans", "resume", f.scanId, "--json"], {
       ...deps,
       createSecurity: (config) => {
@@ -1442,17 +1358,9 @@ test.each([
       "",
     );
     if (alreadyFinished) await finishDiscovery(f);
-    await appendFile(
+    await appendRecord(
       f.sessionPath,
-      JSON.stringify({
-        type: "event_msg",
-        payload: {
-          type: "token_count",
-          info: {
-            total_token_usage: { input_tokens: 10000, output_tokens: 2000 },
-          },
-        },
-      }) + "\n",
+      legacyUsageRecord(basicUsage(10000, 2000)),
     );
     const { stdout, stderr, runCli } = createCliTest(main);
 
@@ -1460,22 +1368,14 @@ test.each([
       bulk
         ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"]
         : ["scans", "resume", f.scanId, "--json"],
-      resumeDependencies(f, () => ({
-        startThread: () => fail("Unexpected new session"),
-        resumeThread(threadId) {
-          expect(threadId).toBe(f.threadId);
-          return {
-            id: threadId,
-            async runStreamed(prompt) {
-              expect(prompt).not.toContain(
-                "Keep the original scan instructions.",
-              );
-              if (!alreadyFinished) await finishDiscovery(f);
-              return { events: completedEvents(threadId) };
-            },
-          };
-        },
-      })),
+      resumeDependencies(f, () =>
+        resumingCodex(f.threadId, async (prompt) => {
+          expect(prompt).not.toContain("false_positive_feedback.json");
+          expect(prompt).not.toContain("Keep the original scan instructions.");
+          if (!alreadyFinished) await finishDiscovery(f);
+          return { events: completedEvents(f.threadId) };
+        }),
+      ),
     );
     // A valid bounded result succeeds while retaining follow-up notes.
     expect(code, stderr.text()).toBe(0);
@@ -1540,9 +1440,7 @@ test.each([
       expect(result.cost.inputTokens).toBe(10000);
       expect(result.cost.outputTokens).toBe(2000);
     }
-    expect(
-      (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
-    ).toMatchObject({
+    expect((await f.scanCommand("get-scan"))["scan"]).toMatchObject({
       progress: { status: "complete" },
       continuationThreadId: f.threadId,
     });
@@ -1552,9 +1450,9 @@ test.each([
     expect(await readFile(f.checkpoint, "utf8")).toBe(
       '{"completed":"setup"}\n',
     );
-    await expect(
-      f.command(["get-cli-scan-resume", "--scan-id", f.scanId]),
-    ).rejects.toThrow("running scan");
+    await expect(f.scanCommand("get-cli-scan-resume")).rejects.toThrow(
+      "running scan",
+    );
   },
 );
 
@@ -1600,7 +1498,7 @@ test.each([
     const artifacts = await Promise.all(
       artifactNames.map((name) => readFile(join(f.scanDir, name))),
     );
-    const before = await f.command(["get-scan", "--scan-id", f.scanId]);
+    const before = await f.scanCommand("get-scan");
     const rejected = !["single", "bulk"].includes(scenario);
     let turns = 0;
     const { stdout, stderr, runCli } = createCliTest(main);
@@ -1609,19 +1507,12 @@ test.each([
       scenario === "bulk"
         ? ["bulk-scan", f.input, "--output-dir", f.root, "--recover", "--json"]
         : ["scans", "resume", f.scanId, "--json"],
-      resumeDependencies(f, () => ({
-        startThread: () => fail("Unexpected new session"),
-        resumeThread(threadId) {
-          expect(threadId).toBe(f.threadId);
-          return {
-            id: threadId,
-            async runStreamed() {
-              turns++;
-              return { events: completedEvents(threadId) };
-            },
-          };
-        },
-      })),
+      resumeDependencies(f, () =>
+        resumingCodex(f.threadId, async () => {
+          turns++;
+          return { events: completedEvents(f.threadId) };
+        }),
+      ),
     );
     expect(code, stderr.text()).toBe(rejected ? 2 : 0);
     expect(
@@ -1629,7 +1520,7 @@ test.each([
         artifactNames.map((name) => readFile(join(f.scanDir, name))),
       ),
     ).toEqual(artifacts);
-    const after = await f.command(["get-scan", "--scan-id", f.scanId]);
+    const after = await f.scanCommand("get-scan");
     if (rejected) {
       expect(stderr.text()).toContain("Cannot resume sealed scan");
       expect(turns).toBe(0);
@@ -1826,75 +1717,56 @@ test.each([
         expect(options.config?.["features"]).toMatchObject({
           api_key_cyber_access_programs: true,
         });
-        return {
-          startThread: () => fail("Resume must use the original session."),
-          resumeThread(threadId) {
-            expect(threadId).toBe(f.threadId);
-            return {
-              id: threadId,
-              async runStreamed(prompt, turnOptions) {
-                expect(turnOptions?.cyberAccessProgram).toBe(
-                  settings.cyberAccessProgram,
-                );
-                prompts.push(prompt as string);
-                if (prompts.length === 1) {
-                  expect(prompt).toContain(
-                    "Keep the original scan instructions.",
-                  );
-                  const deepConfigPath =
-                    options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
-                  expect(deepConfigPath).toBe(
-                    preparedRuntime(f.codexHome).deepScanConfigPath,
-                  );
-                  const deep = parseToml(
-                    await readFile(deepConfigPath!, "utf8"),
-                  );
-                  expect(deep).toMatchObject({
-                    deep_scan: {
-                      workers: 2,
-                      subagents: 0,
-                      stop_after_no_new: 6,
-                      stop_after_consecutive_errors: 2,
-                      max_discovery_runs: 5,
-                      max_time_hours: 1.5,
-                    },
-                    worker_runtime: {
-                      daybreak: selected.daybreak,
-                      features: { goals: false },
-                    },
-                  });
-                  const workerConfigPath =
-                    options.env?.["CODEX_SECURITY_CONFIG_PATH"];
-                  expect(workerConfigPath).toBe(
-                    join(f.root, "resumed-runtime.toml"),
-                  );
-                  const workerConfig = parseToml(
-                    await readFile(workerConfigPath!, "utf8"),
-                  );
-                  expect(workerConfig).toMatchObject({
-                    daybreak: selected.daybreak,
-                    codex_security: {
-                      cyber_access_program: settings.cyberAccessProgram,
-                    },
-                    features: {
-                      api_key_cyber_access_programs: true,
-                    },
-                  });
-                  const saved = await f.command([
-                    "get-scan-recipe",
-                    "--scan-id",
-                    f.scanId,
-                  ]);
-                  expect(saved["recipe"]).toMatchObject({
-                    cyberAccessProgram: settings.cyberAccessProgram,
-                  });
-                  await finishDiscovery(f);
-                }
-                return { events: completedEvents(threadId) };
+        return resumingCodex(f.threadId, async (prompt, turnOptions) => {
+          expect(turnOptions?.cyberAccessProgram).toBe(
+            settings.cyberAccessProgram,
+          );
+          prompts.push(prompt as string);
+          if (prompts.length === 1) {
+            expect(prompt).toContain("Keep the original scan instructions.");
+            const deepConfigPath =
+              options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"];
+            expect(deepConfigPath).toBe(
+              preparedRuntime(f.codexHome).deepScanConfigPath,
+            );
+            const deep = parseToml(await readFile(deepConfigPath!, "utf8"));
+            expect(deep).toMatchObject({
+              deep_scan: {
+                workers: 2,
+                subagents: 0,
+                stop_after_no_new: 6,
+                stop_after_consecutive_errors: 2,
+                max_discovery_runs: 5,
+                max_time_hours: 1.5,
               },
-            };
-          },
-        };
+              worker_runtime: {
+                daybreak: selected.daybreak,
+                features: { goals: false },
+              },
+            });
+            const workerConfigPath =
+              options.env?.["CODEX_SECURITY_CONFIG_PATH"];
+            expect(workerConfigPath).toBe(join(f.root, "resumed-runtime.toml"));
+            const workerConfig = parseToml(
+              await readFile(workerConfigPath!, "utf8"),
+            );
+            expect(workerConfig).toMatchObject({
+              daybreak: selected.daybreak,
+              codex_security: {
+                cyber_access_program: settings.cyberAccessProgram,
+              },
+              features: {
+                api_key_cyber_access_programs: true,
+              },
+            });
+            const saved = await f.scanCommand("get-scan-recipe");
+            expect(saved["recipe"]).toMatchObject({
+              cyberAccessProgram: settings.cyberAccessProgram,
+            });
+            await finishDiscovery(f);
+          }
+          return { events: completedEvents(f.threadId) };
+        });
       }),
     );
     expect(await Bun.file(gitMarker).exists()).toBe(false);
@@ -1902,9 +1774,7 @@ test.each([
     expect(prompts, stderr.text()).toHaveLength(2);
     expect(prompts[1]).toBe(settings.postScanPrompt);
     expect(f.environment.OPENAI_API_KEY).toBe("synthetic-resume-key");
-    expect(
-      (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
-    ).toMatchObject({
+    expect((await f.scanCommand("get-scan"))["scan"]).toMatchObject({
       progress: { status: "complete" },
       continuationThreadId: f.threadId,
     });
@@ -1920,13 +1790,11 @@ test.each(["unchanged", "edited", "deleted"] as const)(
     const f = await interruptedScan("deep", false, {
       knowledgeBasePaths: [document],
     });
-    const before = await f.command([
+    const before = await f.scanCommand(
       "get-deep-scan",
-      "--scan-id",
-      f.scanId,
       "--thread-id",
       f.threadId,
-    ]);
+    );
     if (sourceState === "edited")
       await writeFile(document, "Changed architecture.\n");
     if (sourceState === "deleted") await rm(document);
@@ -1938,26 +1806,17 @@ test.each(["unchanged", "edited", "deleted"] as const)(
       ["scans", "resume", f.scanId, "--json"],
       stdout.stream,
       stderr.stream,
-      resumeDependencies(f, (codex) => ({
-        startThread() {
-          throw new Error("Expected original session");
-        },
-        resumeThread(threadId) {
-          expect(threadId).toBe(f.threadId);
-          return {
-            id: threadId,
-            async runStreamed(prompt) {
-              expect(prompt).toContain("Keep the original scan instructions.");
-              staged = codex.env!["CODEX_SECURITY_KNOWLEDGE_BASE"]!;
-              expect(
-                await readFile(join(staged, "0-architecture.md.txt"), "utf8"),
-              ).toBe("Original architecture.\n");
-              resumed = true;
-              throw new Error("synthetic interrupted transport");
-            },
-          };
-        },
-      })),
+      resumeDependencies(f, (codex) =>
+        resumingCodex(f.threadId, async (prompt) => {
+          expect(prompt).toContain("Keep the original scan instructions.");
+          staged = codex.env!["CODEX_SECURITY_KNOWLEDGE_BASE"]!;
+          expect(
+            await readFile(join(staged, "0-architecture.md.txt"), "utf8"),
+          ).toBe("Original architecture.\n");
+          resumed = true;
+          throw new Error("synthetic interrupted transport");
+        }),
+      ),
     );
     expect(resumed, stderr.text()).toBe(true);
     expect(code).toBe(2);
@@ -1966,17 +1825,11 @@ test.each(["unchanged", "edited", "deleted"] as const)(
     ).toContain("Original architecture.");
     expect(await readdir(staged).catch(() => null)).toBeNull();
     expect(
-      await f.command([
-        "get-deep-scan",
-        "--scan-id",
-        f.scanId,
-        "--thread-id",
-        f.threadId,
-      ]),
+      await f.scanCommand("get-deep-scan", "--thread-id", f.threadId),
     ).toEqual(before);
-    expect(
-      (await f.command(["get-scan-recipe", "--scan-id", f.scanId]))["recipe"],
-    ).toEqual(f.recipe);
+    expect((await f.scanCommand("get-scan-recipe"))["recipe"]).toEqual(
+      f.recipe,
+    );
   },
 );
 
@@ -2014,11 +1867,9 @@ test.each(["legacy", "missing", "modified"] as const)(
     expect(code).toBe(2);
     expect(stderr.text()).toMatch(/new scan/i);
     expect(await readFile(f.checkpoint, "utf8")).toBe(before);
-    expect(
-      (await f.command(["get-cli-scan-resume", "--scan-id", f.scanId]))[
-        "recipe"
-      ],
-    ).toEqual(f.recipe);
+    expect((await f.scanCommand("get-cli-scan-resume"))["recipe"]).toEqual(
+      f.recipe,
+    );
   },
 );
 
@@ -2046,32 +1897,18 @@ test("bulk Deep resume stages campaign knowledge after its source is removed", a
     stdout.stream,
     stderr.stream,
     {
-      ...resumeDependencies(f, (codex) => ({
-        startThread() {
-          throw new Error("Expected original session");
-        },
-        resumeThread(threadId) {
-          expect(threadId).toBe(f.threadId);
-          return {
-            id: threadId,
-            async runStreamed() {
-              const directory = codex.env!["CODEX_SECURITY_KNOWLEDGE_BASE"]!;
-              expect(await readdir(directory)).toEqual([
-                "0-architecture.md.txt",
-              ]);
-              expect(
-                await readFile(
-                  join(directory, "0-architecture.md.txt"),
-                  "utf8",
-                ),
-              ).toBe("Original architecture.");
-              resumed = true;
-              await finishDiscovery(f);
-              return { events: completedEvents(threadId) };
-            },
-          };
-        },
-      })),
+      ...resumeDependencies(f, (codex) =>
+        resumingCodex(f.threadId, async () => {
+          const directory = codex.env!["CODEX_SECURITY_KNOWLEDGE_BASE"]!;
+          expect(await readdir(directory)).toEqual(["0-architecture.md.txt"]);
+          expect(
+            await readFile(join(directory, "0-architecture.md.txt"), "utf8"),
+          ).toBe("Original architecture.");
+          resumed = true;
+          await finishDiscovery(f);
+          return { events: completedEvents(f.threadId) };
+        }),
+      ),
       runWorkbench: async (args, input) => {
         if (args[0] === "get-cli-scan-resume") await rm(document);
         return f.command(args, input);
@@ -2084,9 +1921,9 @@ test("bulk Deep resume stages campaign knowledge after its source is removed", a
     completed: 1,
     failed: 0,
   });
-  expect(
-    (await f.command(["get-scan-recipe", "--scan-id", f.scanId]))["recipe"],
-  ).toMatchObject({ knowledgeBasePaths: [document] });
+  expect((await f.scanCommand("get-scan-recipe"))["recipe"]).toMatchObject({
+    knowledgeBasePaths: [document],
+  });
 });
 
 test("missing session logs do not create another session or fail the original scan", async () => {
@@ -2115,9 +1952,9 @@ test("missing session logs do not create another session or fail the original sc
   } finally {
     await client.close();
   }
-  expect(
-    (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
-  ).toMatchObject({ progress: { status: "running" } });
+  expect((await f.scanCommand("get-scan"))["scan"]).toMatchObject({
+    progress: { status: "running" },
+  });
 });
 
 test.each(["failed", "missing-checkout", "missing-session", "standard"])(
@@ -2128,17 +1965,11 @@ test.each(["failed", "missing-checkout", "missing-session", "standard"])(
       true,
     );
     if (scenario === "failed")
-      await f.command([
-        "fail-scan",
-        "--scan-id",
-        f.scanId,
-        "--message",
-        "Synthetic failure",
-      ]);
+      await f.scanCommand("fail-scan", "--message", "Synthetic failure");
     if (scenario === "missing-checkout")
       await rm(f.repository, { recursive: true });
     if (scenario === "missing-session") await rm(f.sessionPath);
-    const before = await f.command(["get-scan", "--scan-id", f.scanId]);
+    const before = await f.scanCommand("get-scan");
     const { stdout, stderr, runCli } = createCliTest(main);
 
     const deps = dependencies({
@@ -2185,9 +2016,7 @@ test.each(["failed", "missing-checkout", "missing-session", "standard"])(
       completed: 1,
       failed: 0,
     });
-    expect(await f.command(["get-scan", "--scan-id", f.scanId])).toEqual(
-      before,
-    );
+    expect(await f.scanCommand("get-scan")).toEqual(before);
     expect(await readFile(f.checkpoint, "utf8")).toBe(
       '{"completed":"setup"}\n',
     );
@@ -2217,32 +2046,21 @@ test.each([false, true])(
     if (empty) manifest.scan.artifacts = [];
     else delete manifest.scan.artifacts;
     await writeFile(manifestPath, JSON.stringify(manifest));
-    const resume = await f.command([
-      "get-cli-scan-resume",
-      "--scan-id",
-      f.scanId,
-    ]);
+    const resume = await f.scanCommand("get-cli-scan-resume");
     expect(resume["sealedProducerVersion"]).toBeUndefined();
     const { stderr, runCli } = createCliTest(main);
     const code = await runCli(
       ["scans", "resume", f.scanId, "--json"],
-      resumeDependencies(f, () => ({
-        startThread: () => fail("Unexpected new session"),
-        resumeThread(threadId) {
-          expect(threadId).toBe(f.threadId);
-          return {
-            id: threadId,
-            async runStreamed() {
-              return { events: completedEvents(threadId) };
-            },
-          };
-        },
-      })),
+      resumeDependencies(f, () =>
+        resumingCodex(f.threadId, async () => {
+          return { events: completedEvents(f.threadId) };
+        }),
+      ),
     );
     expect(code, stderr.text()).toBe(0);
-    expect(
-      (await f.command(["get-scan", "--scan-id", f.scanId]))["scan"],
-    ).toMatchObject({ progress: { status: "complete" } });
+    expect((await f.scanCommand("get-scan"))["scan"]).toMatchObject({
+      progress: { status: "complete" },
+    });
     const sealed = JSON.parse(await readFile(manifestPath, "utf8"));
     const plugin = JSON.parse(
       await readFile(join(PLUGIN_ROOT, ".codex-plugin/plugin.json"), "utf8"),

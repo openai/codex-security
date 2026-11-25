@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import argparse
 import errno
 import os
 import shutil
@@ -16,9 +15,9 @@ from unittest.mock import Mock
 
 import pytest
 from test_deep_scan_publication_authority import emulate_windows_atomic_write
-from test_workbench_archive import recipe, register
+from test_workbench_archive import archive_registration_args
 from test_workbench_remediation_retry import pending_generation as pending_generation
-from workbench_test_support import load_script
+from workbench_test_support import load_script, register_scan
 
 pytestmark = pytest.mark.native_windows
 
@@ -204,7 +203,7 @@ def test_canceled_generation_removes_its_staged_patch_after_archive(
                 )
                 emulation.setattr(backend, "_create_directory", Path.mkdir)
             with stage(*stage_args, **options) as publish:
-                registered = register(
+                registered = register_scan(
                     tmp_path / "other-state" if other_state else database.parent,
                     tmp_path / "target",
                     scan_dir,
@@ -285,16 +284,7 @@ def test_archive_contention_during_windows_patch_write(
 
     def archive():
         target = tmp_path / "target"
-        registration = argparse.Namespace(
-            repository=str(target),
-            scan_dir=str(scan_dir),
-            archive_existing=True,
-            archived_scan_dir=None,
-            recipe_json=recipe(target),
-            recipe_json_stdin=False,
-            registration_json_stdin=False,
-            parent_scan_id=None,
-        )
+        registration = archive_registration_args(target, scan_dir)
         with sqlite3.connect(database, timeout=timeout) as connection:
             connection.row_factory = sqlite3.Row
             return Path(

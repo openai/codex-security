@@ -1,3 +1,4 @@
+import { cliOutputFormats } from "./cli-integrations.js";
 import { DEEP_SCAN_SETTINGS, DeepScanSettingsSchema } from "./scan-settings.js";
 
 type Row = { label: string; description: string };
@@ -21,11 +22,14 @@ const COMMAND_GROUPS: readonly Group[] = [
 ];
 
 const SCAN_GROUPS: readonly Group[] = [
-  ["Scope", ["path", "diff", "head", "working-tree", "base"]],
+  [
+    "Scope (at most one: --path, --diff, --working-tree)",
+    ["path", "diff", "head", "working-tree", "base"],
+  ],
   ["Configuration", ["config", "mode", "knowledge-base", "dry-run"]],
   ["Model and authentication", ["auth", "model", "effort", "provider"]],
   [
-    "Deep Scan",
+    "Deep Scan (deep mode only)",
     DEEP_SCAN_SETTINGS.flatMap(([, , , flag]) =>
       flag === null ? [] : [flag.slice(2)],
     ),
@@ -67,6 +71,7 @@ const VALUE_LABELS: Record<string, string> = {
   context: "text",
   "context-file": "file",
   "output-schema": "file",
+  "report-file": "file",
   config: "file",
   path: "path",
   "knowledge-base": "path",
@@ -213,7 +218,11 @@ function optionRow(row: Row, command: string): Row {
   return { label, description };
 }
 
-function globalRows(rows: Row[], command: string): Row[] {
+function globalRows(
+  rows: Row[],
+  command: string,
+  dependencyReport: boolean,
+): Row[] {
   const scan = command === "scan" || command === "scan import";
   const plainOutput = ["validate", "login", "logout", "export"].includes(
     command,
@@ -233,6 +242,8 @@ function globalRows(rows: Row[], command: string): Row[] {
   ) {
     formats.label = formats.label.replace("|md", "");
   }
+  if (formats && dependencyReport)
+    formats.label = `--format <${cliOutputFormats(dependencyReport).join("|")}>`;
   if (formats) {
     visible.push({
       label: "--json",
@@ -248,7 +259,11 @@ function globalRows(rows: Row[], command: string): Row[] {
 }
 
 /** Present Incur's generated help without changing its routing or command output. */
-export function formatCliHelp(text: string, columns = 80): string | undefined {
+export function formatCliHelp(
+  text: string,
+  columns = 80,
+  dependencyReport = false,
+): string | undefined {
   const header = text.match(
     /^(codex-security(?:@[^\s]+)?((?: [a-z][a-z-]*)*))(?: — ([^\n]*))?\n\nUsage: /u,
   );
@@ -368,17 +383,28 @@ export function formatCliHelp(text: string, columns = 80): string | undefined {
       if (deprecated.length)
         sections.push(renderRows("Deprecated options", deprecated, width));
     } else if (title === "Global Options:") {
-      const rows = globalRows(parseRows(lines), command);
+      const rows = globalRows(parseRows(lines), command, dependencyReport);
       if (command === "") {
         sections.push(
           ...groupedRows(rows, OUTPUT_GROUPS, "Agent options", width),
         );
       } else {
-        const outputRows = rows.filter((row) =>
-          OUTPUT_FLAGS.includes(rowName(row)),
+        const outputRows = rows.filter(
+          (row) =>
+            OUTPUT_FLAGS.includes(rowName(row)) ||
+            ((command === "scan" || command === "scan import") &&
+              rowName(row).startsWith("token-")),
         );
         if (outputRows.length)
           sections.push(renderRows("Output", outputRows, width));
+        if (command === "scan" || command === "scan import") {
+          sections.push(
+            wrap(
+              "--no-json, --no-full-output and --no-token-count cancel the matching output switch. The last switch wins. --no-json leaves --format unchanged.",
+              width,
+            ),
+          );
+        }
         sections.push(
           wrap(
             "See codex-security --help for shared help and agent options.",

@@ -90,6 +90,19 @@ the schema in this checkout. For a copy at your project root with
 `./node_modules/@openai/codex-security/schemas/project-config.schema.json`.
 You can also omit the hint. The CLI validates the file using its bundled schema.
 
+## Standard scans and change reviews in the plugin
+
+Pass an explicitly selected `projectConfigPath` to setup or a conversational
+scan start. These modes accept `scan.validation` and an optional
+`scan.mode: standard`. Other settings, including path exclusions, cause an
+error before a new scan starts. Inspection returns the
+provider name in `setup.validationProvider`. Saving setup or
+starting a conversational scan stores the selection before analysis begins.
+Rejoining the same scan uses the saved settings. When local validation text
+sharing is enabled, an explicitly reselected file must confirm the original
+grant and destination. See [validation providers](validation-providers.md)
+for recovery after a conflict.
+
 ## Desktop and conversational Deep Scans
 
 Deep Scan setup accepts an explicitly selected `.yaml`, `.yml`, or `.json` project
@@ -122,8 +135,11 @@ built-in defaults. The per-user file remains
 change that file or unrelated scans. No repository configuration is discovered or
 activated automatically.
 
-This integration supports `scan.mode: deep`, `scan.max_time_minutes`, and all
-`scan.deep` fields listed below. Other configured fields, including `codex`,
+Plugin scans run the configured validation provider on the host after sealing
+when the project file is explicitly selected.
+
+This integration supports `scan.mode: deep`, `scan.max_time_minutes`,
+`scan.validation`, and all `scan.deep` fields listed below. Other configured fields, including `codex`,
 `auth`, scope, context files, cost limits, output, and exit policy, are rejected
 with their names before model work starts. Use CLI/SDK configuration for those
 settings. If both minute and hour limits are present, they must agree.
@@ -158,6 +174,7 @@ load the same config also use that setting. The usual config file is
 | `scan.knowledge_base`          | Context files or directories                                                         | Empty list                         |
 | `scan.instructions_file`       | Additional scan instructions                                                         | Unset                              |
 | `scan.validation_file`         | Custom validation instructions; incompatible with active deep mode                   | Built-in validation                |
+| `scan.validation.provider`     | Host-side follow-up provider; `--validate=NAME` can override its name                | Static Codex validation            |
 | `scan.owner_suggestions`       | Generate an owner-suggestions report after a committed Git scan                      | `false`                            |
 | `scan.deep`                    | Deep discovery settings shown below                                                  | Existing deep defaults             |
 | `codex`                        | Native Codex settings and profiles                                                   | Existing isolated configuration    |
@@ -170,6 +187,59 @@ supported scan types, cost-limit behavior, and the saved report.
 
 Patching, PR creation, publication, post-scan prompt files, and machine-specific
 plugin or Python selection remain explicit CLI/SDK inputs.
+
+### Validation provider settings
+
+Select a host-side provider in the trusted project file, then use
+`codex-security scan . --validate -c codex-security.yaml`:
+
+```yaml
+scan:
+  validation:
+    provider: continuum
+    continuum:
+      environment_id: example
+      aws_region: us-east-1
+      aws_profile: my-profile
+      wait_minutes: 45
+```
+
+All keys below belong to `scan.validation.continuum`. Schema validation does not
+insert defaults; the adapter and AWS CLI apply them at runtime.
+
+| Key                        | Meaning                                                | Default                                           |
+| -------------------------- | ------------------------------------------------------ | ------------------------------------------------- |
+| `environment_id`           | Continuum environment containing the matching source   | Required                                          |
+| `include_local_validation` | Send the full local validation method and summary      | `false`                                           |
+| `aws_region`               | AWS Region for provider calls                          | AWS CLI Region settings                           |
+| `aws_profile`              | Named AWS credential profile                           | AWS CLI credential chain                          |
+| `wait_minutes`             | Shared polling deadline; positive, at most 240 minutes | 45                                                |
+| `console_base_url`         | Continuum console root used to construct issue links   | `https://REGION.console.aws.amazon.com/continuum` |
+
+Issue links use the Region from the AWS issue ARN.
+
+Set `include_local_validation: true` in the selected project file to append
+each finding's local `validation.method` and `validation.summary` to the
+descriptions sent to AWS. The default is `false`. SDK callers can set
+`includeLocalValidation` on `ContinuumValidationProvider`. AWS stores the
+text verbatim, including any secrets. For a local review, run the CLI scan
+without `--validate`. Then use
+`codex-security export --scan SCAN_ID --export-format json --output -`
+to inspect the full fields for each occurrence. `scans show` can shorten
+them. Pass the selected occurrence IDs to `validate --scan`. Omitting the
+IDs selects all open findings. Plugin scans send automatically if a provider
+is configured.
+
+Changing this setting can create a new AWS finding. Unacknowledged requests
+retain the submitted text in private host state until a receipt is saved.
+The adapter rejects descriptions over 65,536 characters or documents over 256 KiB
+before saving the request. [AWS document limits](https://docs.aws.amazon.com/continuum/latest/APIReference/API_CreateCodeFinding.html)
+and [field limits](https://docs.aws.amazon.com/continuum/latest/APIReference/API_FindingVulnerability.html).
+
+`--validate=NAME` overrides the provider name, not its settings. Without a
+configured provider, bare `--validate` keeps the existing Codex validation.
+The inference provider selected by `--provider` is separate. See
+[validation providers](validation-providers.md) for requirements and outputs.
 
 ## SDK and CLI contract
 
@@ -190,6 +260,7 @@ The resolver maps file keys to the existing SDK options:
 | `scan.knowledge_base`                     | `knowledgeBasePaths`                  | `--knowledge-base`                                   |
 | `scan.instructions_file`                  | `scanPromptFile`                      | `--scan-prompt-file`                                 |
 | `scan.validation_file`                    | `validationPromptFile`                | `--validation-prompt-file`                           |
+| `scan.validation`                         | `validationProvider`                  | `--validate=NAME` overrides the provider name        |
 | `scan.owner_suggestions`                  | `ownerSuggestions`                    | `--owner-suggestions`                                |
 | `scan.deep.workers`                       | `workers`                             | `--workers`                                          |
 | `scan.deep.subagents_per_worker`          | `subagents`                           | `--subagents`                                        |
@@ -273,8 +344,8 @@ hints; parsing does not insert them. Lists are replaced, not concatenated.
 | Path                                                    | Relative to                    |
 | ------------------------------------------------------- | ------------------------------ |
 | Repository positional argument                          | Invocation directory           |
-| File `scan.scope.paths`                                 | Selected repository            |
-| File `scan.exclude_paths`                               | Selected repository            |
+| File `scan.scope.paths` and CLI `--path`                | Selected repository            |
+| File `scan.exclude_paths` and CLI `--exclude-path`      | Selected repository            |
 | File context, instruction, validation, and output paths | Configuration file's directory |
 | CLI context, prompt, and output paths                   | Invocation directory           |
 | Native values under `codex`                             | Existing native Codex rules    |
@@ -293,6 +364,13 @@ file diff; `--base` can refine a file working-tree scope. Contradictory explicit
 selectors fail. `--no-working-tree` disables a configured working-tree scope but
 does not clear a path or committed-diff scope.
 
+Committed-diff scans require a clean, nonsparse checkout, including no untracked
+files, and the selected head must be the checked-out commit. Working-tree scans
+include staged, unstaged, and untracked changes. Both diff scopes allow `--exclude-path` and
+`scan.exclude_paths`. Neither supports `--path` or deep mode. Output directories
+must be new or empty and outside the enclosing Git worktree. `--archive-existing` can archive a directory selected
+through `output.directory` as well as `--output-dir`.
+
 There is no general CLI reset for configured context, policy, cost limit, or scope.
 Edit the file, select another file, or omit `-c` and unset
 `CODEX_SECURITY_PROJECT_CONFIG`. An empty context list is valid.
@@ -300,8 +378,10 @@ Edit the file, select another file, or omit `-c` and unset
 Native objects merge using the existing configuration code. Duplicate native CLI
 assignments remain errors; overriding a file value is valid. Selected native
 profiles can still override root model/effort values, including convenience flags.
-`--provider openai` retains its existing behavior and does not clear a native
-provider selected by the file.
+`--provider openai` explicitly selects OpenAI. Omit `--provider` to keep the
+configured provider. When project or CLI settings select an external provider,
+supply a model. Providers selected only in a native Codex profile file can
+inherit the scan default.
 
 ## Deep settings and limits
 
@@ -331,7 +411,8 @@ files still receive a complete snapshot.
 A valid deep block can stay inactive in standard mode. Explicit deep CLI options
 still require deep mode. Deep diff scans and custom validation remain unsupported.
 Counts retain their existing bounds; zero subagents is valid, and discovery time
-cannot exceed 96 hours.
+cannot exceed 96 hours. `stop_after_no_new` counts consecutive discovery runs
+without new findings and resets when new findings appear.
 
 `scan.max_time_minutes` accepts positive fractional minutes: an optional advisory
 allowance in Standard, or the enforced discovery limit in Deep (default and
@@ -345,7 +426,7 @@ aliases there are errors, while equivalent durations are accepted.
 
 `max_cost_usd_per_scan` has the same meaning as `--max-cost`: an estimated limit for one
 scan attempt. In-flight work may exceed it. It is not a total budget for a batch or
-follow-up actions. `fail_on_severity` changes the exit status without filtering the
+follow-up actions. There is no built-in cost limit. `fail_on_severity` changes the exit status without filtering the
 retained findings. A bounded scan cannot run `--patch` or `--validate`. Select a
 finding from the saved scan to patch or validate separately.
 
@@ -389,8 +470,9 @@ that the selected scan configuration still matches the campaign.
 target, prompt-file reads, credentials checks, or runtime initialization. With no
 file, it shows defaults. Active deep mode also resolves legacy TOML. It reports
 effective model details and native key sources without dumping raw native values.
-This is configuration inspection,
-not a filesystem, target, or model-availability check.
+It applies the same provider and model requirements as `scan`.
+This is configuration inspection, not a filesystem, target, or model-availability
+check.
 
 `scan ... --dry-run --json` checks local inputs without starting Codex, verifying
 credentials, or establishing model availability. Removing `--dry-run` starts a

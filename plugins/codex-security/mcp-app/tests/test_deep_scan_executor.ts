@@ -8,6 +8,9 @@ import {
   fakeCodexFixture,
   workerRequest,
   assertReadOnlyWorkerPolicy,
+  assertWorkerPermissionProfile,
+  captureWorkerLaunches,
+  workerLaunchForModel,
   workerPermissionProfileOverride,
   assertWorkerSubagentPolicy,
 } from "./deep_scan_executor_fixture.ts";
@@ -81,16 +84,7 @@ const ipcFrameError =
 
 try {
   await test("Deep worker lifecycle", async (t) => {
-    await check(
-      t,
-      () =>
-        testWorkerCancellation({
-          CodexSdkWorkerExecutor,
-          fakeCodexFixture,
-          trustedParentSandbox,
-        }),
-      "worker cancellation",
-    );
+    await check(t, testWorkerCancellation, "worker cancellation");
     await check(t, testWorkerTerminalEvents);
     await check(t, testCompletedWorkerSettlesWithoutWaitingForProcessExit);
     await check(t, testAbortPropagation);
@@ -107,18 +101,7 @@ try {
   await test("Deep worker runtime settings", async (t) => {
     await check(t, testLargeScopeTransport);
     await check(t, testOpenAiCredentialsReachWorker);
-    await check(
-      t,
-      () =>
-        testWorkerSelectedProfileFiles({
-          CodexSdkWorkerExecutor,
-          fakeCodexFixture,
-          workerPermissionProfileOverride,
-          assertReadOnlyWorkerPolicy,
-          assertWorkerSubagentPolicy,
-        }),
-      "selected profile files",
-    );
+    await check(t, testWorkerSelectedProfileFiles, "selected profile files");
     await check(t, testUnsupportedProviderSnapshotFailsBeforeLaunch);
     await check(t, testWorkerCyberAccessSettings, "cyber access settings");
     await check(t, testReportOnlyComparison);
@@ -152,17 +135,7 @@ try {
 
   await test("Deep worker executable selection", async (t) => {
     await check(t, testConfiguredExecutablePaths);
-    await check(
-      t,
-      () =>
-        testExecutorExecutablePinning({
-          CodexSdkWorkerExecutor,
-          fakeCodexFixture,
-          parentSandbox: trustedParentSandbox,
-          resolveCodexPath,
-        }),
-      "worker executable pinning",
-    );
+    await check(t, testExecutorExecutablePinning, "worker executable pinning");
     if (process.platform !== "win32") {
       await check(t, testWorkerLaunchesWithoutGlobalCodex);
       await check(t, testPreflightBindsExecutableAndHomeBeforeChangingCwd);
@@ -934,11 +907,11 @@ async function testPreflightBindsExecutableAndHomeBeforeChangingCwd() {
             bundledTools,
           );
           assert.equal(invocation.bundledTool, "synthetic bundled search");
-          assert.equal(
-            preflight.gitEnvironment.PATH,
-            invocation.runtimeEnvironment.PATH,
-          );
         }
+        assert.equal(
+          preflight.gitEnvironment.PATH,
+          invocation.runtimeEnvironment.PATH,
+        );
         assert.equal(process.env.CODEX_HOME, relativeHome);
         assert.deepEqual(preflight.requests, [
           { method: "config/read", cwd: workingDirectory },
@@ -995,14 +968,9 @@ async function testSdkInvocationAndThreadCapture() {
       "mcp_servers.codex-security.enabled": false,
     });
     assertReadOnlyWorkerPolicy(invocation.argv);
-    assert.deepEqual(
-      JSON.parse(
-        JSON.stringify(
-          parseToml(workerPermissionProfileOverride(invocation.argv))
-            .permissions,
-        ),
-      ),
-      { codex_security_deep_scan_worker: deniedWorkerPermissionProfile },
+    assertWorkerPermissionProfile(
+      invocation.argv,
+      deniedWorkerPermissionProfile,
     );
     const preflight = await readJson(fixture.preflightMarkerPath);
     assert.deepEqual(
@@ -1157,13 +1125,21 @@ async function testOpenAiCredentialsReachWorker() {
     };
     nativeProvider?: string;
     configuration?: string;
+    projectConfiguration?: string;
   }[] = [
     { openai: "synthetic-openai-key", expected: "synthetic-openai-key" },
+    {
+      configuration:
+        'model_provider = "amazon-bedrock"\nprofile = "selected"\n[profiles.selected]\nmodel_provider = "openai"\n',
+      openai: "synthetic-openai-key",
+      expected: "synthetic-openai-key",
+    },
     {
       openai: "synthetic-openai-key",
       expected: "synthetic-openai-key",
       // Optional null auth is omitted from the SDK's private TOML snapshot.
-      configuration: 'model_provider = "openai"\n[model_providers.openai]\n',
+      projectConfiguration:
+        'model_provider = "openai"\n[model_providers.openai]\n',
     },
     {
       openai: "  synthetic-openai-key  ",
@@ -1188,6 +1164,7 @@ async function testOpenAiCredentialsReachWorker() {
       accountResult: { account: { type: "chatgpt" }, requiresOpenaiAuth: true },
     },
     {
+      configuration: 'model_provider = "synthetic-provider"\n',
       openai: "synthetic-provider-key",
       accountResult: { account: null, requiresOpenaiAuth: false },
     },
@@ -1231,14 +1208,16 @@ async function testOpenAiCredentialsReachWorker() {
       restoreEnv("OPENAI_IDENTITY_TOKEN_FILE", undefined);
       process.env.CODEX_CLI_PATH = process.execPath;
       process.env.CODEX_HOME = fixture.root;
-      const configPath = path.join(fixture.root, "scan-settings.toml");
-      await writeFile(configPath, entry.configuration ?? "");
-      process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
+      delete process.env.CODEX_SECURITY_CONFIG_PATH;
+      if (entry.projectConfiguration !== undefined) {
+        const configPath = path.join(fixture.root, "scan-settings.toml");
+        await writeFile(configPath, entry.projectConfiguration);
+        process.env.CODEX_SECURITY_CONFIG_PATH = configPath;
+      }
+      let configuration = entry.configuration ?? 'model_provider = "openai"\n';
       Object.assign(process.env, runtimeEnvironment);
       if (entry.nativeProvider !== undefined) {
-        await writeFile(
-          path.join(fixture.root, "config.toml"),
-          `model_provider = ${JSON.stringify(entry.nativeProvider)}
+        configuration = `model_provider = ${JSON.stringify(entry.nativeProvider)}
 cli_auth_credentials_store = "file"
 [features]
 plugins = false
@@ -1249,9 +1228,9 @@ wire_api = "responses"
 base_url = "https://provider.example.test/v1"
 requires_openai_auth = false
 env_key = "CODEX_API_KEY"
-`,
-        );
+`;
       }
+      await writeFile(path.join(fixture.root, "config.toml"), configuration);
       let nativePreflight:
         | {
             codexHome: string | undefined;
@@ -1300,6 +1279,11 @@ env_key = "CODEX_API_KEY"
         parentSandbox: trustedParentSandbox,
       });
       for (const resumeThreadId of [undefined, "fixture-resume"]) {
+        if (resumeThreadId) {
+          runtimeEnvironment.RUNNER_TRACKING_ID = "synthetic-resumed-job";
+          process.env.RUNNER_TRACKING_ID =
+            runtimeEnvironment.RUNNER_TRACKING_ID;
+        }
         await executor.run(
           workerRequest(promptPath, fixture.root, { resumeThreadId }),
         );
@@ -1308,6 +1292,14 @@ env_key = "CODEX_API_KEY"
             ? await readJson(fixture.preflightMarkerPath)
             : nativePreflight!;
         const invocation = await readJson(fixture.markerPath);
+        assertReadOnlyWorkerPolicy(invocation.argv);
+        assert.equal(
+          workerPermissionProfileOverride(preflight.argv),
+          workerPermissionProfileOverride(invocation.argv),
+        );
+        if (resumeThreadId)
+          assertFlagPair(invocation.argv, "resume", resumeThreadId);
+        else assert.equal(invocation.argv.includes("resume"), false);
         assert.equal(preflight.codexHome, fixture.root);
         assert.equal(
           preflight.runnerTrackingId,
@@ -1328,6 +1320,14 @@ env_key = "CODEX_API_KEY"
           assert.equal(process.env[name], value);
         }
 
+        assert.equal(
+          invocation.configuration,
+          entry.projectConfiguration ?? configuration,
+        );
+        assertConfigOverrides(invocation.argv, {
+          model_provider:
+            entry.projectConfiguration === undefined ? undefined : "openai",
+        });
         assert.equal(
           invocation.openaiAuthentication.CODEX_API_KEY,
           entry.expected,
@@ -1542,8 +1542,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
       const settings = [
         { model: "gpt-5.6-sol", reasoningEffort: "xhigh" },
         { model: "gpt-6-astra", reasoningEffort: "ultra" },
-        { model: "gpt-6.1-sol", reasoningEffort: "max" },
-        { model: "gpt-6-sol", reasoningEffort: "high" },
+        { model: "gpt-6.1-sol", reasoningEffort: "high" },
+        { model: "gpt-6-sol", reasoningEffort: "max" },
         {
           model: 'fixture-"future"\\模型',
           reasoningEffort: 'future-"effort"\\強度\u007f',
@@ -2015,42 +2015,13 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         fixture.root,
         "ambient-plugin",
       );
-      const launches: {
-        command?: string;
-        args: readonly string[];
-        environment?: NodeJS.ProcessEnv;
-        markerPath: string;
-      }[] = [];
-      childProcess.spawn = ((
-        command: string,
-        args: readonly string[],
-        options: SpawnOptions,
-      ) => {
-        const markerPath = path.join(
-          fixture.root,
-          `invocation-${launches.length}.json`,
-        );
-        const environment = {
-          ...options!.env,
-          FAKE_CODEX_MARKER: markerPath,
-          FAKE_CODEX_PREFLIGHT_MARKER: markerPath,
-          FAKE_CODEX_PREFLIGHT_PROFILE: JSON.stringify(
-            workerConfigurations.find(
-              (entry) => entry.path === options.env?.CODEX_SECURITY_CONFIG_PATH,
-            )!.permissionProfile,
-          ),
-        };
-        launches.push({ command, args, environment, markerPath });
-        return originalSpawn(
-          command,
-          command === process.execPath ||
-            command === path.toNamespacedPath(process.execPath)
-            ? [fixture.executablePath, ...args]
-            : args,
-          { ...options, env: environment },
-        );
-      }) as typeof childProcess.spawn;
-      syncBuiltinESMExports();
+      const launches = captureWorkerLaunches(
+        originalSpawn,
+        fixture,
+        (configPath) =>
+          workerConfigurations.find((entry) => entry.path === configPath)!
+            .permissionProfile,
+      );
       const nodePaths = settings.map((_, index) =>
         path.join(fixture.root, `selected node ${index}`, "node"),
       );
@@ -2180,57 +2151,31 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
         assert.equal(workerLaunches.length, settings.length);
         for (const [index, { model, reasoningEffort }] of settings.entries()) {
           const selectedProvider = workerConfigurations[index];
-          const workerLaunch = workerLaunches.find(({ args }) =>
-            model === undefined
-              ? !args.includes("--model")
-              : args[args.indexOf("--model") + 1] === model,
-          );
-          assert.ok(workerLaunch, `missing worker launch for ${model}`);
+          const workerLaunch = workerLaunchForModel(workerLaunches, model);
           assert.equal(
-            workerLaunch.command,
-            process.platform === "win32"
-              ? path.toNamespacedPath(process.execPath)
-              : process.execPath,
-          );
-          assert.equal(
-            workerLaunch.environment!.CODEX_CLI_PATH,
-            process.execPath,
-          );
-          assert.equal(
-            workerLaunch.environment!.CODEX_HOME,
+            workerLaunch.environment.CODEX_HOME,
             await realpath(codexHome),
           );
           assert.equal(
-            workerLaunch.environment!.CODEX_SECURITY_PLUGIN_ROOT,
-            workerConfigurations[index].parentSandbox.pluginReadRoot ??
+            workerLaunch.environment.CODEX_SECURITY_PLUGIN_ROOT,
+            selectedProvider.parentSandbox.pluginReadRoot ??
               path.join(fixture.root, "ambient-plugin"),
           );
           assert.equal(
-            workerLaunch.environment!._CODEX_SECURITY_SDK_NODE_SEARCH_PATH,
+            workerLaunch.environment._CODEX_SECURITY_SDK_NODE_SEARCH_PATH,
             path.dirname(nodePaths[index]),
           );
           assert.equal(
-            workerLaunch.environment!.CODEX_SECURITY_CONFIG_PATH,
-            workerConfigurations[index].path,
+            workerLaunch.environment.CODEX_SECURITY_CONFIG_PATH,
+            selectedProvider.path,
           );
           const deepConfigPath =
-            workerLaunch.environment!.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH!;
+            workerLaunch.environment.CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH!;
           assert.ok(path.isAbsolute(deepConfigPath));
-          assert.notEqual(
-            deepConfigPath,
-            workerConfigurations[index].workerConfigPath,
-          );
-          assert.deepEqual(
-            JSON.parse(
-              JSON.stringify(
-                parseToml(workerPermissionProfileOverride(workerLaunch.args)!)
-                  .permissions,
-              ),
-            ),
-            {
-              codex_security_deep_scan_worker:
-                workerConfigurations[index].permissionProfile,
-            },
+          assert.notEqual(deepConfigPath, selectedProvider.workerConfigPath);
+          assertWorkerPermissionProfile(
+            workerLaunch.args,
+            selectedProvider.permissionProfile,
           );
           assert.equal(
             workerLaunch.args.some((arg) =>
@@ -2239,8 +2184,8 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             false,
           );
           assert.equal(
-            workerLaunch.environment!.CODEX_SECURITY_KNOWLEDGE_BASE,
-            workerConfigurations[index].knowledgePath,
+            workerLaunch.environment.CODEX_SECURITY_KNOWLEDGE_BASE,
+            selectedProvider.knowledgePath,
           );
           assert.equal(
             selectedProvider.parentSandbox.literalFilesystemDenies.includes(
@@ -2264,25 +2209,25 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             "DYLD_FALLBACK_LIBRARY_PATH",
           ]) {
             assert.equal(
-              workerLaunch.environment![name],
+              workerLaunch.environment[name],
               path.join(fixture.root, `libraries-${index}`),
             );
             assert.equal(
               invocation.runtimeEnvironment[name],
-              workerLaunch.environment![name],
+              workerLaunch.environment[name],
             );
           }
           assert.equal(
             invocation.runtimeEnvironment.PYTHONIOENCODING,
-            workerConfigurations[index].pythonIoEncoding,
+            selectedProvider.pythonIoEncoding,
           );
           assert.equal(
             invocation.knowledgePath,
-            workerConfigurations[index].knowledgePath,
+            selectedProvider.knowledgePath,
           );
           assert.deepEqual(
             invocation.knowledgeDocuments,
-            workerConfigurations[index].knowledgeDocuments,
+            selectedProvider.knowledgeDocuments,
           );
           assert.equal(invocation.codexHome, await realpath(codexHome));
           assert.deepEqual(invocation.temporaryEnvironment, {
@@ -2315,7 +2260,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           assert.equal(invocation.providerKey, providerKeys[index]);
           assert.deepEqual(
             invocation.providerHeaders,
-            expectedProviderHeaders(workerConfigurations[index].environment),
+            expectedProviderHeaders(selectedProvider.environment),
           );
           assert.equal(
             invocation.mcpNodePath,
@@ -2330,29 +2275,27 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           );
           assert.equal(invocation.providerHeader, providerHeaders[index]);
 
-          assert.equal(workerLaunch.environment!.CODEX_API_KEY, undefined);
+          assert.equal(workerLaunch.environment.CODEX_API_KEY, undefined);
           assert.equal(
-            workerLaunch.environment!.CODEX_SQLITE_HOME,
-            workerConfigurations[index].environment?.CODEX_SQLITE_HOME,
+            workerLaunch.environment.CODEX_SQLITE_HOME,
+            selectedProvider.environment?.CODEX_SQLITE_HOME,
           );
           assert.equal(process.env.SYNTHETIC_GATEWAY_KEY, undefined);
           assert.equal(process.env.SYNTHETIC_HEADER_VALUE, undefined);
           assert.equal(process.env.OPENROUTER_API_KEY, undefined);
           assert.equal(process.env.FIREWORKS_API_KEY, undefined);
           assertConfigOverrides(invocation.argv, {
-            ...workerConfigurations[index].authentication,
-            openai_base_url: workerConfigurations[index].endpoint,
+            ...selectedProvider.authentication,
+            openai_base_url: selectedProvider.endpoint,
             model_reasoning_summary: expected,
-            service_tier: workerConfigurations[index].serviceTier,
-            model_instructions_file:
-              workerConfigurations[index].instructionsFile,
-            model_verbosity: workerConfigurations[index].verbosity,
-            model_context_window:
-              workerConfigurations[index].modelContextWindow,
+            service_tier: selectedProvider.serviceTier,
+            model_instructions_file: selectedProvider.instructionsFile,
+            model_verbosity: selectedProvider.verbosity,
+            model_context_window: selectedProvider.modelContextWindow,
             model_auto_compact_token_limit:
-              workerConfigurations[index].autoCompactTokenLimit,
-            web_search: workerConfigurations[index].webSearch,
-            "windows.sandbox": workerConfigurations[index].windowsSandbox,
+              selectedProvider.autoCompactTokenLimit,
+            web_search: selectedProvider.webSearch,
+            "windows.sandbox": selectedProvider.windowsSandbox,
           });
           assertFlagPair(invocation.argv, "--cd", workerDirectories[index]);
           const selectedRuntime = parseToml(
@@ -2365,7 +2308,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               selectedRuntime[key] === undefined
                 ? undefined
                 : JSON.parse(JSON.stringify(selectedRuntime[key])),
-              workerConfigurations[index][key],
+              selectedProvider[key],
             );
           }
           assert.deepEqual(
@@ -2385,7 +2328,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ),
               ),
             )["skills"],
-            workerConfigurations[index].skills,
+            selectedProvider.skills,
             "Concurrent discovery workers retain their own skill selection on launch and resume.",
           );
           assert.deepEqual(
@@ -2403,16 +2346,16 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               ),
             ),
             {
-              ...workerConfigurations[index].telemetry,
-              ...(workerConfigurations[index].otel === undefined
+              ...selectedProvider.telemetry,
+              ...(selectedProvider.otel === undefined
                 ? {}
-                : { otel: workerConfigurations[index].otel }),
+                : { otel: selectedProvider.otel }),
               responses_api_metadata: {
                 codex_security_surface: "plugin",
                 codex_security_command: "scan",
                 codex_security_scan_mode: "deep",
                 codex_security_plugin_version: `9.9.${index}`,
-                ...workerConfigurations[index].telemetry.responses_api_metadata,
+                ...selectedProvider.telemetry.responses_api_metadata,
                 codex_security_operation_id:
                   selectedProvider.telemetry.responses_api_metadata
                     ?.codex_security_operation_id ??
@@ -2447,7 +2390,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             invocation.argv.includes("resume"),
             resumeThreadId !== undefined,
           );
-          assert.equal(invocation.configPath, workerConfigurations[index].path);
+          assert.equal(invocation.configPath, selectedProvider.path);
           if (selectedProvider.provider === undefined) {
             assert.equal(
               invocation.argv.some(
@@ -2593,7 +2536,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
                 ),
               ),
             ).shell_environment_policy,
-            workerConfigurations[index].shellPolicy,
+            selectedProvider.shellPolicy,
           );
           const workerFeatures = parseToml(
             invocation.argv
@@ -2601,7 +2544,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
               .join("\n"),
           ).features;
           assert.deepEqual(JSON.parse(JSON.stringify(workerFeatures)), {
-            ...workerConfigurations[index].features,
+            ...selectedProvider.features,
             multi_agent_v2: {
               enabled: false,
               max_concurrent_threads_per_session: subagents + 1,
@@ -2615,11 +2558,11 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           assertReadOnlyWorkerPolicy(invocation.argv);
           assertConfigOverrides(invocation.argv, {
             "agents.max_threads": subagents,
-            "agents.max_depth": workerConfigurations[index].agents?.max_depth,
+            "agents.max_depth": selectedProvider.agents?.max_depth,
             "agents.reviewer.description":
-              workerConfigurations[index].agents?.reviewer.description,
+              selectedProvider.agents?.reviewer.description,
             "agents.reviewer.config_file":
-              workerConfigurations[index].agents?.reviewer.config_file,
+              selectedProvider.agents?.reviewer.config_file,
           });
         }
         for (const launch of launches.filter(({ args }) =>
@@ -2652,7 +2595,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
             ...(index === 1 ? { TMP: temporaryEnvironments[index].TEMP } : {}),
           });
           assert.equal(
-            launch.environment!.CODEX_SECURITY_STATE_DIR,
+            launch.environment.CODEX_SECURITY_STATE_DIR,
             path.join(fixture.root, `state-${index}`),
           );
           assert.equal(
@@ -2731,7 +2674,7 @@ env_key = "SYNTHETIC_GATEWAY_KEY"`,
           );
           const execution = workerLaunches.find(
             (worker) =>
-              worker.environment!.CODEX_SECURITY_CONFIG_PATH ===
+              worker.environment.CODEX_SECURITY_CONFIG_PATH ===
               selectedProvider.path,
           )!;
           assert.deepEqual(

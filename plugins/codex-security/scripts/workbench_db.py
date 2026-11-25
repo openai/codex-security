@@ -79,7 +79,7 @@ from workbench_constants import (
     FINDINGS_RESULT_LIMIT,
     SQLITE_RETRY_ATTEMPTS,
 )
-from workbench_feedback import get_scan_feedback
+from workbench_feedback import FALSE_POSITIVE_FEEDBACK_PATH, get_scan_feedback
 from workbench_finding_index import index_findings
 from workbench_finding_workflows import finding_workflow, register_workflow_scan
 from workbench_scan_start import (
@@ -94,6 +94,8 @@ from workbench_scan_start import (
     scan_diff_identity,
     scan_target_identity,
     stored_diff_target,
+    workspace_confirmation_version,
+    workspace_setup_digest,
 )
 from workbench_schema import (
     MIGRATIONS,
@@ -113,6 +115,7 @@ from workbench_setup import (
     require_scope,
     require_target,
     resolve_git_commit,
+    validation_selection,
 )
 from workbench_source_excerpt import finding_source_excerpt
 from workbench_source_scopes import (
@@ -672,7 +675,9 @@ def save_workspace(connection: sqlite3.Connection, args: argparse.Namespace) -> 
                 args.mode,
                 user_context_argument(args),
                 *scan_diff_identity(diff_target or None),
-                json.dumps(inspected["deepScanConfig"]) if "deepScanConfig" in inspected else None,
+                json.dumps(inspected["deepScanConfig"])
+                if "deepScanConfig" in inspected
+                else getattr(args, "validation_project_json", None),
                 timestamp,
                 workspace["id"],
             ),
@@ -721,10 +726,9 @@ def require_working_tree_unchanged(target: Path, diff_target: dict[str, str] | N
 def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[str, Any]:
     workspace_id = require_uuid(args.workspace_id, "workspace-id")
     manages_transaction = not connection.in_transaction
-    try:
-        workspace = require_workspace(connection, workspace_id)
-        if not workspace["submitted"] or not workspace["target_path"]:
-            raise SystemExit("Save the Codex Security setup before starting the scan.")
+    confirmed = getattr(args, "confirmed_concurrent_scan_id", [])
+
+    def current_scan() -> sqlite3.Row | None:
         active = connection.execute(
             """
             SELECT *
@@ -733,6 +737,30 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             """,
             (workspace["id"],),
         ).fetchone()
+        if confirmed:
+            version = getattr(args, "workspace_version", None) or ""
+            if active is not None:
+                # Registration changes updated_at. Rejoins must still match the confirmed setup.
+                current = require_workspace(connection, workspace_id)
+                matches = version.partition(".")[0] == workspace_setup_digest(current)
+            else:
+                matches = version == workspace_confirmation_version(workspace)
+            if not matches:
+                raise SystemExit(
+                    "Concurrent scan confirmation requires the current workspace setup. Try again."
+                )
+        return active
+
+    try:
+        workspace = require_workspace(connection, workspace_id)
+        if not workspace["submitted"] or not workspace["target_path"]:
+            raise SystemExit("Save the Codex Security setup before starting the scan.")
+        pending = (
+            deep_scan.concurrent_launch_confirmation(connection, confirmed)
+            if workspace["default_mode"] == "deep"
+            else None
+        )
+        active = current_scan()
         if active is not None:
             require_scan_checkout_owner(connection, active)
             return workspace_state(connection, workspace["id"], result_scan_id=active["id"])
@@ -743,6 +771,13 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
         require_scannable_target(target)
         target_metadata = target.stat()
         scope = require_scope(workspace["default_scope"], workspace["default_mode"], target)
+        if pending and not (
+            workspace["thread_id"] is not None
+            and deep_scan.existing_deep_scan_for_target(
+                connection, workspace["thread_id"], str(target), scope
+            )
+        ):
+            return {**pending, "workspaceVersion": workspace_confirmation_version(workspace)}
         diff_target = None
         if workspace["default_mode"] == "diff":
             diff_target = require_diff_target(
@@ -770,19 +805,11 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
             diff_target_kind=diff_target["kind"] if diff_target is not None else None,
         )
         target_root = scan_target_root(args.scan_root, target)
-        create_private_directory(target_root, scan_output=True)
         require_working_tree_unchanged(target, diff_target)
         if manages_transaction:
             connection.execute("BEGIN IMMEDIATE")
         workspace = require_workspace(connection, workspace_id)
-        active = connection.execute(
-            """
-            SELECT *
-            FROM scans
-            WHERE workspace_id = ? AND status = 'running' AND canceled_at IS NULL
-            """,
-            (workspace["id"],),
-        ).fetchone()
+        active = current_scan()
         if active is not None:
             require_scan_checkout_owner(connection, active)
             if manages_transaction:
@@ -811,11 +838,18 @@ def start_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict
                     "This Codex thread already has an active Deep Scan for the selected "
                     "target and scope. Rejoin that scan instead of starting another one."
                 )
+        if workspace["default_mode"] == "deep":
+            pending = deep_scan.concurrent_launch_confirmation(connection, confirmed)
+            if pending:
+                if manages_transaction:
+                    connection.commit()
+                return {**pending, "workspaceVersion": workspace_confirmation_version(workspace)}
         registration = register_security_target(connection, str(current_target))
         if registration.target_id != workspace["target_id"]:
             raise SystemExit(
                 "The saved workspace no longer matches the selected repository target."
             )
+        create_private_directory(target_root, scan_output=True)
         insert_running_scan(
             connection,
             scan_id=scan_id,
@@ -848,6 +882,15 @@ def _start_prompt_driven_scan(
     thread_id = optional_text(args.thread_id, maximum=512)
     if thread_id is None:
         raise SystemExit("thread-id is required.")
+    join_only = getattr(args, "join_only", False)
+    if join_only:
+        # A fresh selection needs its configuration before we hash the checkout.
+        target_path = str(require_target(args.target_path))
+        if not connection.execute(
+            "SELECT 1 FROM scans WHERE target_path = ? AND status = 'running' LIMIT 1",
+            (target_path,),
+        ).fetchone():
+            return {"newScanTarget": target_path}
     inspected = inspect_setup_values(
         args.target_path,
         args.scope,
@@ -947,9 +990,17 @@ def _start_prompt_driven_scan(
                 require_scan_checkout_owner(connection, existing)
                 connection.commit()
                 return {
-                    **scan_context(connection, existing["id"], model_thread_id=thread_id),
+                    **scan_context(
+                        connection,
+                        existing["id"],
+                        model_thread_id=thread_id,
+                        include_investigation_policy=True,
+                    ),
                     "startDisposition": "joined",
                 }
+            if join_only:
+                connection.rollback()
+                return {"newScanTarget": target_path}
             create_private_directory(target_root, scan_output=True)
             workspace_id = str(uuid.uuid4())
             scan_id = str(uuid.uuid4())
@@ -961,8 +1012,9 @@ def _start_prompt_driven_scan(
                 INSERT INTO workspaces (
                     id, thread_id, target_id, target_path, target_title, target_summary, default_scope,
                     default_mode, user_context, diff_target_kind, diff_base_revision,
-                    diff_head_revision, diff_content_digest, submitted, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)
+                    diff_head_revision, diff_content_digest, submitted, created_at, updated_at,
+                    deep_scan_config_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)
                 """,
                 (
                     workspace_id,
@@ -977,6 +1029,7 @@ def _start_prompt_driven_scan(
                     *diff_identity,
                     timestamp,
                     timestamp,
+                    getattr(args, "validation_project_json", None),
                 ),
             )
             workspace = require_workspace(connection, workspace_id)
@@ -1022,7 +1075,10 @@ def _start_prompt_driven_scan(
         except BaseException:
             connection.rollback()
             raise
-    return {**scan_context(connection, scan_id), "startDisposition": "created"}
+    return {
+        **scan_context(connection, scan_id, include_investigation_policy=True),
+        "startDisposition": "created",
+    }
 
 
 def scan_local_file_digest(scan_dir: Path, relative_path: str) -> str:
@@ -1189,7 +1245,7 @@ def complete_budget_exhausted_scan(
         candidates = (
             []
             if run["manifest_path"] == str(scan_dir / "scan-manifest.json")
-            else budget_exhausted_candidates(scan, scan_dir)
+            else deep_scan.budget_exhausted_candidates(scan, scan_dir)
         )
         warning = optional_text(args.message)
         if warning is None:
@@ -1206,78 +1262,6 @@ def complete_budget_exhausted_scan(
             )
             connection.commit()
         return complete_scan_locked(connection, scan_id, None, cost_json)
-
-
-def budget_exhausted_candidates(scan: sqlite3.Row, scan_dir: Path) -> list[dict[str, Any]]:
-    artifacts = deep_scan.canonical_discovery_artifacts(scan)
-    ledger = Path(artifacts["candidateLedgerPath"])
-    try:
-        inventory = Path(artifacts["inScopeFilesPath"])
-        inventory_descriptor = open_scan_local_file_descriptor(
-            scan_dir,
-            inventory.relative_to(scan_dir).as_posix(),
-            "Canonical Deep Scan in-scope inventory",
-        )
-        with os.fdopen(inventory_descriptor, "rb") as source:
-            lines = re.split(r"\r?\n", source.read().decode("utf-8"))
-            in_scope = {re.sub(r"^(?:\./)+", "", line) for line in lines if line}
-        descriptor = open_scan_local_file_descriptor(
-            scan_dir,
-            ledger.relative_to(scan_dir).as_posix(),
-            "Canonical Deep Scan candidate ledger",
-        )
-        with os.fdopen(descriptor, "r", encoding="utf-8") as source:
-            candidates = [
-                json.loads(line, parse_constant=reject_non_finite_json)
-                for line in source
-                if line.strip()
-            ]
-    except (ContractError, OSError, UnicodeError, ValueError) as exc:
-        raise SystemExit(f"Canonical Deep Scan candidate ledger is invalid: {exc}") from exc
-
-    candidate_ids: set[str] = set()
-    for candidate in candidates:
-        if not isinstance(candidate, dict):
-            raise SystemExit("Canonical Deep Scan candidate ledger rows must be objects.")
-        candidate_id = candidate.get("candidate_id")
-        locations = candidate.get("locations")
-        if (
-            not isinstance(candidate_id, str)
-            or not candidate_id.strip()
-            or candidate_id in {".", ".."}
-            or "/" in candidate_id
-            or "\\" in candidate_id
-            or candidate_id in candidate_ids
-            or not isinstance(candidate.get("summary"), str)
-            or not candidate["summary"].strip()
-            or not isinstance(candidate.get("evidence"), str)
-            or not candidate["evidence"].strip()
-            or not isinstance(locations, list)
-            or not locations
-        ):
-            raise SystemExit("Canonical Deep Scan candidate ledger contains an invalid candidate.")
-        candidate_ids.add(candidate_id)
-        for location in locations:
-            if not isinstance(location, dict):
-                raise SystemExit("Canonical Deep Scan candidate location must be an object.")
-            path = location.get("path")
-            if (
-                not isinstance(path, str)
-                or not path
-                or "\\" in path
-                or "\x00" in path
-                or re.match(r"^[A-Za-z]:", path)
-                or PurePosixPath(path).is_absolute()
-                or any(part in {".", "..", ""} for part in path.split("/"))
-            ):
-                raise SystemExit(
-                    "Canonical Deep Scan candidate location must be repository-relative."
-                )
-        if not any(location["path"] in in_scope for location in locations):
-            raise SystemExit(
-                "Canonical Deep Scan candidate must include a location in its in-scope inventory."
-            )
-    return candidates
 
 
 def budget_exhausted_draft(
@@ -2399,6 +2383,11 @@ def assigned_remediation_context(
     ):
         # The next action may already have started since this write committed.
         return {"occurrenceId": occurrence_id, "requestId": request_id, "version": written_version}
+    if state.get("pendingAction") in ("generate", "verify"):
+        # List previews may abbreviate criteria. Assigned workers need every original test.
+        details = read_finding_details(occurrence["details_json"])
+        if "remediationTests" in details:
+            finding["remediationTests"] = details["remediationTests"]
     return {
         "scan": {
             "scanId": scan["id"],
@@ -2586,11 +2575,6 @@ def workspace_state(
         "mode": workspace["default_mode"],
         "scope": workspace["default_scope"],
         "setup": {"submitted": bool(workspace["submitted"])},
-        **(
-            {"deepScanConfig": json.loads(workspace["deep_scan_config_json"])}
-            if workspace["deep_scan_config_json"] is not None
-            else {}
-        ),
         "setupValidation": {"error": None, "valid": bool(workspace["submitted"])},
         "targetPath": workspace["target_path"],
         "targetSummary": workspace["target_summary"],
@@ -2598,6 +2582,11 @@ def workspace_state(
         "updatedAt": workspace["updated_at"],
         "userContext": workspace["user_context"],
     }
+    if workspace["deep_scan_config_json"] is not None:
+        snapshot = json.loads(workspace["deep_scan_config_json"])
+        if workspace["default_mode"] == "deep":
+            result["deepScanConfig"] = snapshot
+        result.update(validation_selection(snapshot))
     selected_scan_id = result_scan_id or workspace["active_scan_id"]
     if selected_scan_id:
         if result_scan is None:
@@ -2645,6 +2634,7 @@ def scan_context(
     scan_id: str,
     occurrence_id: str | None = None,
     *,
+    include_investigation_policy: bool = False,
     model_thread_id: str | None = None,
 ) -> dict[str, Any]:
     scan = require_scan(connection, scan_id)
@@ -2669,6 +2659,19 @@ def scan_context(
         "scan": result,
         "workspace": workspace,
     }
+    scan_dir = Path(scan["scan_dir"])
+    if (
+        scan["status"] == "running"
+        and scan["mode"] != "deep"
+        and scan_local_regular_file(scan_dir, FALSE_POSITIVE_FEEDBACK_PATH)
+    ):
+        context["reviewerFeedbackPath"] = str(scan_dir / FALSE_POSITIVE_FEEDBACK_PATH)
+    if (
+        include_investigation_policy
+        and result["progress"]["status"] == "running"
+        and scan["investigation_policy"] is not None
+    ):
+        context["investigationPolicy"] = scan["investigation_policy"]
     if scan["recipe_json"] is not None:
         context["parentScanId"] = scan["parent_scan_id"]
         context["recipe"] = public_scan_recipe(scan)
@@ -2745,7 +2748,11 @@ def get_scan(connection: sqlite3.Connection, args: argparse.Namespace) -> dict[s
         ):
             raise SystemExit("This finding was not found in the selected scan.")
     result = scan_context(
-        connection, args.scan_id, args.occurrence_id, model_thread_id=model_thread
+        connection,
+        args.scan_id,
+        args.occurrence_id,
+        model_thread_id=model_thread,
+        include_investigation_policy=True,
     )
     if result["scan"]["progress"]["status"] != "running":
         scan = require_scan(connection, args.scan_id)
@@ -2866,8 +2873,7 @@ def scan_result(
         **scan_usage.stored_scan_cost_fields(scan["cost_json"]),
         "contract": scan_contract(scan),
         "continuationThreadId": scan["continuation_thread_id"],
-        "threadIds": scan_usage._scan_root_thread_ids(connection, scan, None),
-        "executionThreadIds": scan_usage._scan_execution_thread_ids(connection, scan),
+        **scan_usage.scan_thread_fields(connection, scan),
         "failureMessage": scan["failure_message"],
         "lifecycle": json.loads(scan["lifecycle_json"]),
         "findings": [
@@ -2876,6 +2882,7 @@ def scan_result(
         ],
         "findingCount": finding_count,
         "findingsTruncated": finding_count > len(occurrence_rows),
+        "sealManifestDigest": scan["seal_manifest_digest"],
         "severityCounts": severity_counts,
         "handoffClaimedAt": scan["handoff_claimed_at"],
         "handoffClaimToken": scan["handoff_claim_token"],
@@ -3495,6 +3502,12 @@ def main(*, before_archive: Callable[[], None] | None = None) -> None:
             result = finding_workflow(connection, json.load(sys.stdin), now())
         else:
             raise SystemExit(f"Unknown command: {args.command}")
+        if args.command in {"start-scan", "start-prompt-only-scan", "start-headless-standard-scan"}:
+            workspace = result.get("workspace", result)
+            if "validationProvider" in workspace and workspace["mode"] != "deep":
+                stored = require_workspace(connection, workspace["id"])
+                snapshot = json.loads(stored["deep_scan_config_json"])
+                result["validationProviderConfiguration"] = snapshot["validation"]
     print(json.dumps(result, allow_nan=False, sort_keys=True))
 
 

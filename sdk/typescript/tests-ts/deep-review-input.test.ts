@@ -485,7 +485,7 @@ describe("deep-review worklists", () => {
           writeFileSync(expandedOutput, "expanded output sentinel");
           const result = await launcher.run(
             powershell,
-            "skills/security-scan/references/scan-artifacts-and-ledger.md",
+            "copy-worklist",
             {
               "<plugin_dir>": argument(launcher.plugin),
               "<discovery_dir>": argument(discovery),

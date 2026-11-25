@@ -26,8 +26,11 @@ import {
   type ScanTokenUsage,
 } from "./cost-model.js";
 import {
+  proseActivity,
   scanActivityFromSessionEvent,
   sessionContentText,
+  sessionProse,
+  sessionReasoningUpdate,
   type ScanActivity,
 } from "./scan-activity.js";
 import {
@@ -173,10 +176,9 @@ interface SessionProgress {
   update: ScanProgress;
   order?: number;
   position: number;
-  completion: boolean;
   markerIndex: number;
-  receipt: boolean;
-  duplicate: boolean;
+  // Only native completions retain duplicate markers, for parent ordering.
+  kind: "message" | "receipt" | "completion" | "duplicate";
   // This saved occurrence already supplied scope before a delayed live copy.
   inventoryAdmitted?: true;
   scopeFilesTotal?: number;
@@ -332,6 +334,8 @@ function sessionObservation<T>(
   return { position: session.eventPosition, value };
 }
 
+type MeasuredUsage = Awaited<ReturnType<typeof readScanBudgetUsage>>;
+
 interface ScanCostTrackerOptions {
   codexHome: string;
   pricingContext?: ScanPricingContext;
@@ -380,6 +384,15 @@ export interface ScanCostSnapshot {
 const COST_POLL_INTERVAL_MS = 100;
 const SESSION_READ_SIZE = 64 * 1_024;
 
+function createMessageProjections() {
+  return {
+    unpaired: new Map<string, number>(),
+    progressIds: new Map<string, number>(),
+    progress: [] as number[],
+    next: { native: 0, event: 0, response: 0 },
+  };
+}
+
 function createSessionUsage(observeUsage: boolean) {
   return {
     offset: 0,
@@ -412,19 +425,7 @@ function createSessionUsage(observeUsage: boolean) {
       number,
       { progress: ScanProgress; order: number }
     >(),
-    messageProjections: new Map<
-      string,
-      { native: number; event: number; response: number }
-    >(),
-    messageProgressOrder: 0,
-    messageProgressFrontiers: { native: 0, event: 0, response: 0 },
-    messageProgressProjections: new Map<
-      string,
-      {
-        occurrences: number[];
-        next: { native: number; event: number; response: number };
-      }
-    >(),
+    messages: createMessageProjections(),
     filesCompleted: 0,
     filesTotal: null as number | null,
     prose: new Set<string>(),
@@ -553,20 +554,12 @@ export class ScanCostTracker {
     this.#acceptedParent = null;
     this.#parentInventory = null;
     this.#parentReviewBefore = null;
-    // Historical logs may omit projection kinds emitted by the new turn.
-    this.#parentSession?.messageProjections.clear();
     if (this.#parentSession !== null) {
-      this.#parentSession.messageProgressProjections.clear();
-      this.#parentSession.messageProgressOrder = 0;
-      this.#parentSession.messageProgressFrontiers = {
-        native: 0,
-        event: 0,
-        response: 0,
-      };
+      // Retire unmatched copies and pending progress. Historical logs may
+      // omit projection kinds emitted by the new turn.
+      this.#parentSession.messages = createMessageProjections();
+      this.#parentSession.progress.length = 0;
     }
-    // A new turn retires unresolved hypotheses from the previous turn; admitted
-    // coverage and source summaries remain available for resumed scans.
-    if (this.#parentSession !== null) this.#parentSession.progress.length = 0;
     for (const completion of this.#parentSession?.completions ?? []) {
       completion.item = null;
       delete completion.kind;
@@ -1193,7 +1186,7 @@ export class ScanCostTracker {
           ? completion.projection
           : undefined;
       const projected = saved.projection?.markers[saved.markerIndex];
-      if (saved.duplicate) continue;
+      if (saved.kind === "duplicate") continue;
       const candidate = savedProgress(saved);
       const progress = candidate.progress;
       saved.scopeFilesTotal = scopeAt(
@@ -1201,7 +1194,8 @@ export class ScanCostTracker {
         completion?.position === saved.position ? completion : undefined,
       );
       const exact = completion?.projection?.position === saved.position;
-      const nativeOccurrence = this.#parentTurnStartKnown && saved.completion;
+      const nativeOccurrence =
+        this.#parentTurnStartKnown && saved.kind === "completion";
       if (projected !== undefined) {
         projected.scopeFilesTotal = saved.scopeFilesTotal;
         if (progressKey(projected.progress) === progressKey(progress))
@@ -1247,7 +1241,7 @@ export class ScanCostTracker {
             command.live !== this.#acceptedParent ||
             command.live.position !== null ||
             saved.position >= command.after)) ||
-        (!saved.receipt &&
+        (saved.kind !== "receipt" &&
           progress.filesCompleted > 0 &&
           this.#liveParentProgress.has(progressKey(progress)))
       )
@@ -1413,79 +1407,47 @@ export class ScanCostTracker {
         if (occurrences === undefined) saved.set(key, [completion]);
         else occurrences.push(completion);
       }
-      const observed = new Map<string, number[]>();
-      const groups = new Map<string, { keys: string[]; members: number[] }>();
+      const evidence = new Map<
+        number,
+        { saved: SessionCompletion[]; first: number }[]
+      >();
+      const seenPersisted = new Map<string, number>();
+      const reservedFull = new Map<string, number>();
       for (let index = start; index < stop; index++) {
         const live = this.#liveParentItems[index]!;
         if (live.item?.kind !== "command") continue;
-        const keys = [
-          ...new Set([live.item.outputDigest, live.item.persistedOutputDigest]),
-        ]
-          .filter((key) => saved.has(key))
-          .sort();
-        for (const key of keys) {
-          const occurrences = observed.get(key);
-          if (occurrences === undefined) observed.set(key, [index]);
-          else occurrences.push(index);
+        const { outputDigest, persistedOutputDigest } = live.item;
+        // Only oversized outputs have two signatures. Each determines one
+        // persisted form and is too large to be any other persisted form.
+        const full =
+          outputDigest === persistedOutputDigest
+            ? undefined
+            : saved.get(outputDigest);
+        const persisted = saved.get(persistedOutputDigest);
+        const previous = seenPersisted.get(persistedOutputDigest) ?? 0;
+        const firstFull = reservedFull.get(outputDigest) ?? 0;
+        // Reserve independently for each pair of signatures. Every preceding
+        // item with this persisted form competes for a copy, except those
+        // that took an earlier copy of this particular full output.
+        const firstPersisted =
+          persisted === undefined
+            ? 0
+            : Math.min(persisted.length, previous - firstFull);
+        if (live.markers.length > 0) {
+          const candidates = [];
+          if (full !== undefined)
+            candidates.push({ saved: full, first: firstFull });
+          if (persisted !== undefined)
+            candidates.push({ saved: persisted, first: firstPersisted });
+          evidence.set(index, candidates);
         }
-        if (live.markers.length === 0) continue;
-        const key = keys.join(":");
-        const group = groups.get(key);
-        if (group === undefined) groups.set(key, { keys, members: [index] });
-        else group.members.push(index);
-      }
-      const evidence = new Map<
-        number,
-        {
-          candidates: { saved: SessionCompletion[]; first: number }[];
-          reserved: boolean;
-        }
-      >();
-      for (const { keys, members } of groups.values()) {
-        const queues = keys.map((key) => ({
-          key,
-          saved: saved.get(key)!,
-          observed: observed.get(key)!,
-          reserved: 0,
-          next: 0,
-        }));
-        let reservations = 0;
-        for (const index of members) {
-          // Reserve preceding compatible live items once for this signature
-          // group. Advancing ordered cursors is equivalent to consuming the
-          // earliest compatible item for each saved occurrence, without splice.
-          while (true) {
-            const previous = Math.min(
-              ...queues.map((queue) => queue.observed[queue.next] ?? Infinity),
-            );
-            if (previous >= index) break;
-            const item = this.#liveParentItems[previous]!.item!;
-            let selected: (typeof queues)[number] | undefined;
-            for (const queue of queues) {
-              if (queue.observed[queue.next] === previous) queue.next++;
-              if (
-                (queue.key === item.outputDigest ||
-                  queue.key === item.persistedOutputDigest) &&
-                queue.reserved < queue.saved.length &&
-                (selected === undefined ||
-                  queue.saved[queue.reserved]!.position <
-                    selected.saved[selected.reserved]!.position)
-              )
-                selected = queue;
-            }
-            if (selected !== undefined) {
-              selected.reserved++;
-              reservations++;
-            }
-          }
-          evidence.set(index, {
-            candidates: queues.map((queue) => ({
-              saved: queue.saved,
-              first: queue.reserved,
-            })),
-            reserved: reservations > 0,
-          });
-        }
+        if (persisted !== undefined)
+          seenPersisted.set(persistedOutputDigest, previous + 1);
+        if (
+          (full?.[firstFull]?.position ?? Infinity) <
+          (persisted?.[firstPersisted]?.position ?? Infinity)
+        )
+          reservedFull.set(outputDigest, firstFull + 1);
       }
       // Later complete projections constrain earlier compatible copies. A
       // bound narrows the interval without assigning a live occurrence.
@@ -1498,17 +1460,14 @@ export class ScanCostTracker {
           if (bound !== Infinity) live.after = bound;
           continue;
         }
-        const { candidates, reserved } = evidence.get(index)!;
+        const candidates = evidence.get(index)!;
         let latest: SessionCompletion | undefined;
         for (const { saved, first } of candidates) {
-          let lower = first;
-          let upper = saved.length;
-          while (lower < upper) {
-            const middle = Math.floor((lower + upper) / 2);
-            if (saved[middle]!.position < bound) lower = middle + 1;
-            else upper = middle;
-          }
-          const candidate = lower > first ? saved[lower - 1] : undefined;
+          // The bound only moves earlier. Trim these interval-local lists
+          // from the end so all remaining reservation indexes stay valid.
+          while (saved.length > 0 && saved.at(-1)!.position >= bound)
+            saved.pop();
+          const candidate = saved.length > first ? saved.at(-1) : undefined;
           if (
             candidate !== undefined &&
             (latest === undefined || candidate.position > latest.position)
@@ -1517,7 +1476,7 @@ export class ScanCostTracker {
         }
         if (
           latest === undefined &&
-          !reserved &&
+          candidates.every(({ first }) => first === 0) &&
           bound === Infinity &&
           !isInventoryProgress(progress)
         )
@@ -1729,7 +1688,7 @@ export class ScanCostTracker {
       return undefined;
     const later = this.#parentSession?.progress.findLast(
       (saved) =>
-        !saved.duplicate &&
+        saved.kind !== "duplicate" &&
         isInventoryProgress(saved.update) &&
         (saved.position > position! ||
           (pending.position !== null &&
@@ -2313,7 +2272,7 @@ export class ScanCostTracker {
     // directly, so text equality and call-start time cannot establish a copy.
     // Treat it as a receipt; a copied truncated preview can consequently hide
     // omitted same-count phases from its earlier command. This is best effort.
-    if (saved.receipt) return true;
+    if (saved.kind === "receipt") return true;
     const live = this.#acceptedParent;
     if (live === null) return true;
     // A later saved occurrence may legitimately repeat an earlier live tuple,
@@ -2326,7 +2285,7 @@ export class ScanCostTracker {
   #unboundParentCopy(saved: SessionProgress): boolean {
     const live = this.#acceptedParent;
     return (
-      !saved.receipt &&
+      saved.kind !== "receipt" &&
       live?.position === null &&
       live.after === undefined &&
       this.#liveParentProgress.has(progressKey(saved.update))
@@ -2388,12 +2347,12 @@ export class ScanCostTracker {
       } catch (error) {
         const previous = this.#snapshot.measurement;
         this.#setSnapshot(
-          previous.usage,
+          {
+            ...previous,
+            complete: false,
+            missingThreadCount: Math.max(1, previous.missingThreadCount),
+          },
           previous.cost,
-          false,
-          previous.threadCount,
-          Math.max(1, previous.missingThreadCount),
-          previous,
         );
         throw error;
       }
@@ -2423,14 +2382,7 @@ export class ScanCostTracker {
     if (polling && performance.now() - this.#lastBudgetPoll < 1_000) return;
     const measured = await readBudgetUsage(this.#threadId);
     this.#lastBudgetPoll = performance.now();
-    this.#updateCost(
-      measured.usage,
-      measured.complete,
-      measured.threadCount ?? (measured.usage === null ? 0 : 1),
-      measured.missingThreadCount ??
-        (measured.complete || measured.warnings?.length ? 0 : 1),
-      measured,
-    );
+    this.#updateCost(measured);
   }
 
   public async stop(fallbackUsage?: unknown): Promise<ScanCostSnapshot> {
@@ -2450,15 +2402,12 @@ export class ScanCostTracker {
       this.#snapshot.measurement.warnings?.includes("token_usage_overflow")
     )
       return this.#snapshot;
-    const cost = estimateScanCost(
-      this.#options.model,
-      fallbackUsage,
-      this.#options.pricingContext,
-    );
     const usage = tokenUsage(fallbackUsage);
-    this.#setSnapshot(usage, cost, usage !== null, usage === null ? 0 : 1, 0);
-    this.#reportUsage(usage);
-    this.#reportCost(cost);
+    this.#updateCost({
+      usage,
+      complete: usage !== null,
+      missingThreadCount: 0,
+    });
     return this.#snapshot;
   }
 
@@ -2484,7 +2433,6 @@ export class ScanCostTracker {
       try {
         for await (const path of sessionFiles(
           join(this.#options.codexHome, directory),
-          true,
         )) {
           let session = this.#sessions.get(path);
           if (session === undefined) {
@@ -2527,11 +2475,19 @@ export class ScanCostTracker {
       this.#workerReceipts,
     );
     collectionErrors.push(...workerReceipts.errors);
-    const included = new Set([
-      this.#threadId,
-      ...this.#receipts.keys(),
-      ...workerReceipts.usages.keys(),
+    // A known thread without a receipt has unknown usage, not zero.
+    const usages = new Map<string, ScanTokenUsage | null>([
+      [this.#threadId, null],
+      ...this.#receipts,
     ]);
+    for (const [threadId, receipt] of workerReceipts.usages) {
+      const current = usages.get(threadId);
+      if (
+        current == null ||
+        (receipt !== null && receipt.total_tokens > current.total_tokens)
+      )
+        usages.set(threadId, receipt);
+    }
     if (this.#options.scanDirectory !== undefined) {
       const scanStartedAt =
         [...this.#sessions.values()].find(
@@ -2539,40 +2495,38 @@ export class ScanCostTracker {
         )?.startedAt ?? null;
       for (const session of this.#sessions.values()) {
         if (
-          session.threadId === null ||
-          session.parentThreadId !== null ||
-          session.workingDirectory === null ||
-          scanStartedAt === null ||
-          session.startedAt === null ||
-          session.startedAt < scanStartedAt
-        ) {
-          continue;
-        }
-        if (
+          session.threadId !== null &&
+          !usages.has(session.threadId) &&
+          session.parentThreadId === null &&
+          session.workingDirectory !== null &&
+          scanStartedAt !== null &&
+          session.startedAt !== null &&
+          session.startedAt >= scanStartedAt &&
           isScanArtifactDirectory(
             this.#options.scanDirectory,
             session.workingDirectory,
           )
         ) {
-          included.add(session.threadId);
+          usages.set(session.threadId, null);
         }
       }
     }
     let previousSize: number;
     do {
-      previousSize = included.size;
+      previousSize = usages.size;
       for (const session of this.#sessions.values()) {
         if (
           session.threadId !== null &&
           session.parentThreadId !== null &&
-          included.has(session.parentThreadId)
+          usages.has(session.parentThreadId) &&
+          !usages.has(session.threadId)
         ) {
-          included.add(session.threadId);
+          usages.set(session.threadId, null);
         }
       }
-    } while (included.size !== previousSize);
+    } while (usages.size !== previousSize);
     for (const [session, error] of unreadable) {
-      if (session.threadId !== null && included.has(session.threadId)) {
+      if (session.threadId !== null && usages.has(session.threadId)) {
         if (isBlockedLogRead(error)) blockingReadError ??= error;
         else collectionErrors.push(error);
       }
@@ -2580,27 +2534,13 @@ export class ScanCostTracker {
     if (blockingReadError !== undefined)
       collectionErrors.unshift(blockingReadError);
 
-    const usages = new Map<string, ScanTokenUsage | null>(
-      [...included].map((threadId) => [
-        threadId,
-        this.#receipts.get(threadId) ?? null,
-      ]),
-    );
-    for (const [threadId, receipt] of workerReceipts.usages) {
-      const current = usages.get(threadId);
-      if (
-        receipt !== null &&
-        receipt.total_tokens > (current?.total_tokens ?? -1)
-      )
-        usages.set(threadId, receipt);
-    }
     // SDK totals retain measured usage when a rollout is unavailable.
     // Native rollouts also establish descendant coverage.
     const incomplete = new Set(workerReceipts.usages.keys());
     const overflowedThreads = new Set<string>();
     for (const [path, tracked] of this.#sessions) {
       const threadId = tracked.threadId;
-      if (threadId === null || !included.has(threadId)) continue;
+      if (threadId === null || !usages.has(threadId)) continue;
       let session = tracked;
       const observe =
         !unreadable.has(tracked) &&
@@ -2666,9 +2606,6 @@ export class ScanCostTracker {
             (workerReceipts.usages.get(threadId)?.total_tokens ?? 0)
         )
           incomplete.delete(threadId);
-        // A discovered thread without a receipt has unknown usage, not zero.
-        // Retain it so a parent-only subtotal cannot appear to be complete.
-        if (receipt === undefined) usages.set(threadId, null);
         if (
           session.usage !== null &&
           (session.usage.total_tokens > (receipt?.total_tokens ?? -1) ||
@@ -2761,7 +2698,7 @@ export class ScanCostTracker {
         if (threadId === this.#threadId) {
           this.#parentSession = session;
           for (const saved of session.progress)
-            if (saved.order !== undefined && !saved.duplicate)
+            if (saved.order !== undefined && saved.kind !== "duplicate")
               this.#rememberParentFact(savedProgress(saved));
           this.#matchParentCompletions();
           inventoryWitness = this.#reconcileParentProgress();
@@ -2818,19 +2755,20 @@ export class ScanCostTracker {
     if (observeUsage) this.#reportUsageObservation(usages, complete);
     if (this.#options.readBudgetUsage === undefined)
       this.#updateCost(
-        usage,
-        complete,
-        threadCount,
-        missingThreadCount,
         {
+          usage,
+          complete,
+          threadCount,
+          missingThreadCount,
           ...(usageOverflow || overflowedThreads.size > 0
             ? { warnings: ["token_usage_overflow"] }
             : {}),
           coverageScope:
             collectionErrors.length === 0
               ? [
-                  ...[...included].map((id) => `thread:${id}`),
-                  ...[...workerReceipts.attemptIds].map(
+                  ...Array.from(usages.keys(), (id) => `thread:${id}`),
+                  ...Array.from(
+                    workerReceipts.attemptIds,
                     (id) => `worker-attempt:${id}`,
                   ),
                 ].sort()
@@ -2850,52 +2788,42 @@ export class ScanCostTracker {
       );
   }
 
-  #updateCost(
-    usage: ScanTokenUsage | null,
-    complete: boolean,
-    threadCount: number,
-    missingThreadCount: number,
-    details?: Pick<ScanUsageMeasurement, "coverageScope" | "warnings">,
-    reportCost = true,
-  ): void {
+  #updateCost(measured: MeasuredUsage, reportCost = true): void {
+    const { usage, complete } = measured;
     const cost = estimateScanCost(
       this.#options.model,
       usage,
       this.#options.pricingContext,
     );
-    this.#setSnapshot(
-      usage,
-      cost,
-      complete,
-      threadCount,
-      missingThreadCount,
-      details,
-    );
-    if (complete) this.#reportUsage(usage);
-    if (reportCost) this.#reportCost(cost, complete);
+    this.#setSnapshot(measured, cost);
+    if (complete && usage !== null) {
+      const signature = JSON.stringify(usage);
+      if (signature !== this.#lastUsage) {
+        this.#lastUsage = signature;
+        this.#options.onUsage?.(usage);
+      }
+    }
+    if (reportCost && cost !== null) {
+      const signature = JSON.stringify([cost, complete]);
+      if (signature !== this.#lastCost) {
+        this.#lastCost = signature;
+        this.#options.onCost?.(cost, complete);
+      }
+    }
   }
 
-  #setSnapshot(
-    usage: ScanTokenUsage | null,
-    cost: ScanCost | null,
-    complete: boolean,
-    threadCount: number,
-    missingThreadCount: number,
-    details?: Pick<ScanUsageMeasurement, "coverageScope" | "warnings">,
-  ): void {
+  #setSnapshot(measured: MeasuredUsage, cost: ScanCost | null): void {
+    const { usage, complete, coverageScope, warnings } = measured;
     const data = {
       usage,
       cost,
       coverage:
         usage === null ? "unavailable" : complete ? "complete" : "partial",
-      threadCount,
-      missingThreadCount,
-      ...(details?.coverageScope === undefined
-        ? {}
-        : { coverageScope: details.coverageScope }),
-      ...(details?.warnings === undefined
-        ? {}
-        : { warnings: details.warnings }),
+      threadCount: measured.threadCount ?? (usage === null ? 0 : 1),
+      missingThreadCount:
+        measured.missingThreadCount ?? (complete || warnings?.length ? 0 : 1),
+      ...(coverageScope === undefined ? {} : { coverageScope }),
+      ...(warnings === undefined ? {} : { warnings }),
     } as const;
     const measurement = { ...data, observedAt: new Date().toISOString() };
     this.#snapshot = {
@@ -2968,7 +2896,7 @@ export class ScanCostTracker {
       saved.position > this.#inventoryFrontier.position ||
       (saved.position === this.#inventoryFrontier.position &&
         saved.markerIndex > this.#inventoryFrontier.markerIndex);
-    if (saved.duplicate || !newer) return "retained";
+    if (saved.kind === "duplicate" || !newer) return "retained";
     if (
       !this.#inventoryPrecedesReview(
         saved.position,
@@ -3056,7 +2984,7 @@ export class ScanCostTracker {
         progress.filesCompleted > this.#highestFilesCompleted;
       if (
         parent &&
-        !saved.duplicate &&
+        saved.kind !== "duplicate" &&
         !inventoryMarker &&
         !this.#unboundParentCopy(saved)
       ) {
@@ -3081,8 +3009,8 @@ export class ScanCostTracker {
         !this.#savedParentProgressIsCurrent(saved)
       )
         continue;
-      if (saved.duplicate) {
-        if (parent && saved.completion)
+      if (saved.kind === "duplicate") {
+        if (parent)
           this.#advanceParentFrontier(saved.position, saved.markerIndex);
         continue;
       }
@@ -3241,22 +3169,6 @@ export class ScanCostTracker {
       );
     }
   }
-
-  #reportCost(cost: ScanCost | null, complete = true): void {
-    if (cost === null) return;
-    const signature = JSON.stringify([cost, complete]);
-    if (signature === this.#lastCost) return;
-    this.#lastCost = signature;
-    this.#options.onCost?.(cost, complete);
-  }
-
-  #reportUsage(usage: ScanTokenUsage | null): void {
-    if (usage === null) return;
-    const signature = JSON.stringify(usage);
-    if (signature === this.#lastUsage) return;
-    this.#lastUsage = signature;
-    this.#options.onUsage?.(usage);
-  }
 }
 
 async function readWorkerReceipts(
@@ -3344,10 +3256,7 @@ async function readWorkerReceipts(
   return result;
 }
 
-export async function* sessionFiles(
-  directory: string,
-  compressed = false,
-): AsyncGenerator<string> {
+export async function* sessionFiles(directory: string): AsyncGenerator<string> {
   let entries;
   try {
     entries = await readdir(directory, { withFileTypes: true });
@@ -3358,11 +3267,10 @@ export async function* sessionFiles(
   for (const entry of entries) {
     const path = join(directory, entry.name);
     if (entry.isDirectory()) {
-      yield* sessionFiles(path, compressed);
+      yield* sessionFiles(path);
     } else if (
       entry.isFile() &&
-      (entry.name.endsWith(".jsonl") ||
-        (compressed && entry.name.endsWith(".jsonl.zst")))
+      (entry.name.endsWith(".jsonl") || entry.name.endsWith(".jsonl.zst"))
     ) {
       yield path;
     }
@@ -3572,40 +3480,7 @@ function readSessionEvent(
     return;
   }
   if (event["type"] === "response_item") {
-    const receipt =
-      payload["type"] === "function_call_output" ||
-      payload["type"] === "custom_tool_call_output" ||
-      payload["type"] === "local_shell_call_output";
-    const message =
-      payload["type"] === "message" &&
-      payload["role"] === "assistant" &&
-      Array.isArray(payload["content"])
-        ? payload["content"]
-            .filter(isRecord)
-            .map((part) =>
-              typeof part["text"] === "string" ? part["text"] : "",
-            )
-            .join("")
-        : null;
-    const updates = sessionProgressUpdates(payload);
-    const duplicateMessage =
-      message !== null &&
-      repeatedMessageProjection(session, digest(message), "response", updates);
-    // Code-mode notifications and the final output can share a call ID.
-    // Each appended output record remains a distinct completion receipt.
-    for (const [markerIndex, update] of (duplicateMessage
-      ? []
-      : updates
-    ).entries()) {
-      session.progress.push({
-        update,
-        position,
-        completion: false,
-        markerIndex,
-        receipt,
-        duplicate: false,
-      });
-    }
+    readResponseProgress(session, payload);
     if (repository === undefined) return;
     if (
       payload["type"] === "reasoning" &&
@@ -3615,17 +3490,9 @@ function readSessionEvent(
       session.reasoning?.raw !== true
     ) {
       for (const [index, summary] of payload["summary"].entries()) {
-        const activity = scanActivityFromSessionEvent(
-          {
-            ...event,
-            payload: {
-              ...payload,
-              id: `${payload["id"]}:${index}`,
-              summary: [summary],
-            },
-          },
-          repository,
-        );
+        const id = payload["call_id"] ?? `${payload["id"]}:${index}`;
+        if (typeof id !== "string") return;
+        const activity = sessionProse(id, "reasoning", [summary]);
         if (
           activity === null ||
           session.prose.has(`${activity.kind}:${activity.description}`)
@@ -3691,9 +3558,9 @@ function readSessionEvent(
     }
     return;
   }
+  if (event["type"] !== "event_msg") return;
   if (
     session.threadId === progressThread &&
-    event["type"] === "event_msg" &&
     payload["type"] === "item_completed"
   ) {
     const item = nativeProgressItem(payload["item"]);
@@ -3701,7 +3568,7 @@ function readSessionEvent(
     const value = payload["item"];
     const duplicateCompletion =
       signature?.kind === "message" &&
-      repeatedMessageProjection(session, signature.outputDigest, "native");
+      repeatedMessageCompletion(session, signature.outputDigest, "native");
     let completion: SessionCompletion | undefined;
     if (
       isRecord(value) &&
@@ -3725,33 +3592,17 @@ function readSessionEvent(
           "native",
           item.updates,
         );
-      for (const [markerIndex, update] of item.updates.entries()) {
-        const saved = {
-          update,
-          position,
-          completion: true,
-          markerIndex,
-          receipt: false,
-          duplicate,
-        };
-        session.progress.push(saved);
-        if (completion !== undefined && item.signature.kind === "command")
-          completion.lastCommandProgress = saved;
-      }
+      appendSessionProgress(
+        session,
+        item.updates,
+        duplicate ? "duplicate" : "completion",
+        completion,
+      );
     }
+    return;
   }
-  if (
-    event["type"] === "event_msg" &&
-    (payload["type"] === "agent_reasoning" ||
-      payload["type"] === "agent_reasoning_delta" ||
-      payload["type"] === "agent_reasoning_raw_content" ||
-      payload["type"] === "agent_reasoning_raw_content_delta" ||
-      payload["type"] === "agent_message")
-  ) {
-    if (
-      payload["type"] === "agent_message" &&
-      typeof payload["message"] === "string"
-    ) {
+  if (payload["type"] === "agent_message") {
+    if (typeof payload["message"] === "string") {
       const signature = progressSignature("message", payload["message"]);
       const updates = scanProgressUpdatesFromText(payload["message"]);
       const duplicate = repeatedMessageProjection(
@@ -3764,31 +3615,15 @@ function readSessionEvent(
       // item. It provides the same compact output signature for live matching.
       if (
         session.threadId === progressThread &&
-        !repeatedMessageProjection(session, signature.outputDigest, "event")
+        !repeatedMessageCompletion(session, signature.outputDigest, "event")
       )
         session.completions.push({
           position,
           item: signature,
         });
-      for (const [markerIndex, update] of (duplicate
-        ? []
-        : updates
-      ).entries()) {
-        session.progress.push({
-          update,
-          position,
-          completion: false,
-          markerIndex,
-          receipt: false,
-          duplicate: false,
-        });
-      }
+      if (!duplicate) appendSessionProgress(session, updates, "message");
     }
     if (repository === undefined) return;
-    if (payload["type"] !== "agent_message") {
-      readSessionReasoning(event, payload, session, repository);
-      return;
-    }
     session.reasoning = null;
     const activity = scanActivityFromSessionEvent(event, repository);
     if (
@@ -3800,7 +3635,8 @@ function readSessionEvent(
     }
     return;
   }
-  if (event["type"] !== "event_msg" || payload["type"] !== "token_count") {
+  if (payload["type"] !== "token_count") {
+    if (repository !== undefined) readSessionReasoning(session, payload);
     return;
   }
   const rawUsage = isRecord(payload["info"])
@@ -3870,21 +3706,12 @@ function retainLatestRateLimit(
 }
 
 function readSessionReasoning(
-  event: Readonly<Record<string, unknown>>,
-  payload: Readonly<Record<string, unknown>>,
   session: SessionUsage,
-  repository: string,
+  payload: Readonly<Record<string, unknown>>,
 ): void {
-  const type = payload["type"];
-  const raw =
-    type === "agent_reasoning_raw_content" ||
-    type === "agent_reasoning_raw_content_delta";
-  const delta =
-    type === "agent_reasoning_delta" ||
-    type === "agent_reasoning_raw_content_delta";
-  const text = payload[delta ? "delta" : "text"];
-  if (typeof text !== "string") return;
-
+  const update = sessionReasoningUpdate(payload);
+  if (update === null) return;
+  const { raw, delta, text } = update;
   if (
     !delta &&
     !raw &&
@@ -3904,18 +3731,13 @@ function readSessionReasoning(
   }
   reasoning.text = delta ? `${reasoning.text}${text}` : text;
 
-  const activity = scanActivityFromSessionEvent(
-    {
-      ...event,
-      payload: {
-        ...payload,
-        [delta ? "delta" : "text"]: reasoning.text,
-      },
-    },
-    repository,
+  const activity = proseActivity(
+    reasoning.id,
+    "reasoning",
+    delta ? "running" : "completed",
+    reasoning.text,
   );
-  if (activity === null) return;
-  recordReasoningActivity(session, { ...activity, id: reasoning.id });
+  if (activity !== null) recordReasoningActivity(session, activity);
 }
 
 function recordReasoningActivity(
@@ -3991,49 +3813,41 @@ function progressSignature(
   };
 }
 
+// Pair native and legacy completions even when neither contains progress.
+function repeatedMessageCompletion(
+  session: SessionUsage,
+  key: string,
+  projection: "native" | "event",
+): boolean {
+  // Positive balances count unmatched native copies, negative ones legacy.
+  const { unpaired } = session.messages;
+  const previous = unpaired.get(key) ?? 0;
+  const balance = previous + (projection === "native" ? 1 : -1);
+  if (balance === 0) unpaired.delete(key);
+  else unpaired.set(key, balance);
+  return Math.abs(balance) < Math.abs(previous);
+}
+
 function repeatedMessageProjection(
   session: SessionUsage,
   textDigest: string,
   projection: "native" | "event" | "response",
-  updates?: readonly ScanProgress[],
+  updates: readonly ScanProgress[],
 ): boolean {
-  if (updates?.length === 0) return false;
-  // Completion matching counts every native/legacy message, even without
-  // progress. Keep those occurrences separate from parsed progress copies:
-  // multipart responses can recover updates absent from their native copy.
-  const key =
-    updates === undefined
-      ? textDigest
-      : `${textDigest}:${digest(JSON.stringify(updates))}`;
-  if (updates !== undefined) {
-    let queue = session.messageProgressProjections.get(key);
-    if (queue === undefined) {
-      queue = { occurrences: [], next: { native: 0, event: 0, response: 0 } };
-      session.messageProgressProjections.set(key, queue);
-    }
-    // Copies retain their order within each projection. A missing earlier copy
-    // cannot consume an identical message after that projection has advanced.
-    // These ordinals identify progress copies only, never completion positions.
-    while (queue.next[projection] < queue.occurrences.length) {
-      const order = queue.occurrences[queue.next[projection]++]!;
-      if (order <= session.messageProgressFrontiers[projection]) continue;
-      session.messageProgressFrontiers[projection] = order;
-      return true;
-    }
-    const order = ++session.messageProgressOrder;
-    queue.occurrences.push(order);
-    queue.next[projection] = queue.occurrences.length;
-    session.messageProgressFrontiers[projection] = order;
-    return false;
+  if (updates.length === 0) return false;
+  // Multipart responses can recover progress absent from a native copy.
+  const key = `${textDigest}:${digest(JSON.stringify(updates))}`;
+  // Copies arrive in order within each projection. Each cursor passes an
+  // occurrence at most once, even when intervening copies were dropped.
+  const { progress, progressIds, next } = session.messages;
+  let id = progressIds.get(key);
+  if (id === undefined) {
+    id = progressIds.size;
+    progressIds.set(key, id);
   }
-  let counts = session.messageProjections.get(key);
-  if (counts === undefined) {
-    counts = { native: 0, event: 0, response: 0 };
-    session.messageProjections.set(key, counts);
-  }
-  const previous = Math.max(counts.native, counts.event, counts.response);
-  counts[projection]++;
-  return counts[projection] <= previous;
+  const index = progress.indexOf(id, next[projection]);
+  next[projection] = index < 0 ? progress.push(id) : index + 1;
+  return index >= 0;
 }
 
 function progressKey(progress: ScanProgress): string {
@@ -4155,28 +3969,56 @@ function takeFirstIndex(heap: number[]): number {
   return first;
 }
 
-function sessionProgressUpdates(
+function appendSessionProgress(
+  session: SessionUsage,
+  updates: readonly ScanProgress[],
+  kind: SessionProgress["kind"],
+  completion?: SessionCompletion,
+): void {
+  for (const [markerIndex, update] of updates.entries()) {
+    const saved = { update, position: session.position, markerIndex, kind };
+    session.progress.push(saved);
+    if (completion?.kind === "command") completion.lastCommandProgress = saved;
+  }
+}
+
+function readResponseProgress(
+  session: SessionUsage,
   payload: Readonly<Record<string, unknown>>,
-): ScanProgress[] {
+): void {
   if (payload["type"] === "message" && payload["role"] === "assistant") {
-    return scanProgressUpdatesFromText(sessionContentText(payload["content"]));
+    const content = payload["content"];
+    if (!Array.isArray(content)) return;
+    const message = content
+      .filter(isRecord)
+      .map((part) => (typeof part["text"] === "string" ? part["text"] : ""))
+      .join("");
+    const updates = scanProgressUpdatesFromText(sessionContentText(content));
+    if (
+      !repeatedMessageProjection(session, digest(message), "response", updates)
+    )
+      appendSessionProgress(session, updates, "message");
+    return;
   }
   if (
     payload["type"] !== "function_call_output" &&
     payload["type"] !== "custom_tool_call_output" &&
     payload["type"] !== "local_shell_call_output"
-  ) {
-    return [];
-  }
+  )
+    return;
+  if (payload["status"] === "failed") return;
   const value = payload["output"];
   const output =
     typeof value === "string"
       ? value
       : sessionContentText(value, ["output_text", "input_text"]);
-  if (payload["status"] === "failed") {
-    return [];
-  }
-  return scanProgressUpdatesFromText(output);
+  // Code-mode notifications and the final output can share a call ID.
+  // Each appended output record remains a distinct completion receipt.
+  appendSessionProgress(
+    session,
+    scanProgressUpdatesFromText(output),
+    "receipt",
+  );
 }
 
 export function addTokenUsage(

@@ -13,6 +13,9 @@ import { Writable } from "node:stream";
 import { stripVTControlCharacters } from "node:util";
 import type { Finding, JsonObject, SeverityLevel } from "../src/index.js";
 import { main } from "../src/cli.js";
+import { ContinuumValidationProvider } from "../src/continuum-validation-provider.js";
+import { ScanResult } from "../src/index.js";
+import { creation } from "./support/continuum-validation-fixtures.js";
 import type { LinearClientFactory } from "../src/linear.js";
 import {
   capture,
@@ -217,6 +220,112 @@ async function runWorkflow(
 }
 
 describe("scan and patch workflow", () => {
+  test.each([false, true])(
+    "inline patch accepts evidence only from the host (validate=%s)",
+    async (validate) => {
+      const root = await temporaryDirectory("inline-assessment-", true);
+      const repository = join(root, "repo");
+      const scanDir = join(root, "scan");
+      const config = join(root, "project.json");
+      const base = resultWithFindings(["high"]);
+      const finding = base.findings.findings[0]!;
+      finding["continuumAssessment"] = { verdict: "EXPLOITABLE" };
+      const result = new ScanResult({
+        manifest: base.manifest,
+        findings: base.findings,
+        review: base.review,
+        mode: base.mode,
+        scanDir,
+        threadId: base.threadId,
+        turnResult: base.turnResult,
+      });
+      const validation = {
+        provider: "continuum",
+        continuum: { environment_id: "synthetic" },
+      };
+      using batch = spyOn(
+        ContinuumValidationProvider.prototype,
+        "validateBatch",
+      ).mockResolvedValue([
+        {
+          disposition: "not_applicable",
+          report: "Synthetic decline",
+          provenance: { provider: "continuum", providerVersion: "1" },
+          record: {
+            provider: "continuum",
+            itemId: finding.occurrenceId,
+            ...creation("f", "synthetic"),
+            submittedAt: "2026-01-01T00:00:00Z",
+            verdict: "DISCARDED",
+            severityBefore: "high",
+            severityAfter: "high",
+            reasons: [],
+            claimMatch: "unknown",
+            freshness: { stale: false, reasons: [] },
+          },
+        },
+      ]);
+      const received: Finding[] = [];
+      try {
+        await mkdir(repository);
+        await mkdir(scanDir);
+        await writeFile(config, JSON.stringify({ scan: { validation } }));
+        const outcome = await runWorkflow(
+          [
+            "scan",
+            ".",
+            "--patch",
+            "--json",
+            ...(validate ? ["--validate", "-c", config] : []),
+          ],
+          {
+            result,
+            environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
+            currentDirectory: repository,
+            onCodex: (args, output) => {
+              received.push(...completePatches(args, output));
+              return 0;
+            },
+          },
+        );
+        expect(outcome.exitCode, outcome.stderr).toBe(0);
+        expect(batch).toHaveBeenCalledTimes(validate ? 1 : 0);
+        expect(received).toHaveLength(1);
+        if (validate) {
+          expect(received[0]!["continuumAssessment"]).toMatchObject({
+            verdict: "DISCARDED",
+          });
+          expect(received[0]!["continuumAssessment"]).not.toHaveProperty(
+            "findingArn",
+          );
+        } else expect(received[0]).not.toHaveProperty("continuumAssessment");
+        expect(finding["continuumAssessment"]).toEqual({
+          verdict: "EXPLOITABLE",
+        });
+      } finally {
+        await rm(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  test("direct patch input cannot claim host Continuum evidence", async () => {
+    const input = {
+      title: "Example",
+      continuumAssessment: { verdict: "EXPLOITABLE" },
+    };
+    let received: unknown;
+    await runWorkflow(["patch", "text:" + JSON.stringify(input)], {
+      onCodex: (_args, output) => {
+        const [literal] = JSON.parse(
+          output!.appServer!.prompt.split("\n").at(-1)!,
+        );
+        received = JSON.parse(literal);
+        return 0;
+      },
+    });
+    expect(received).toEqual({ title: input.title });
+  });
+
   test.each([true, false])(
     "uses completion validation after an early HEAD drift warning (restored: %s)",
     async (restored) => {
@@ -1380,6 +1489,8 @@ describe("scan and patch workflow", () => {
           "--codex",
           'profiles.quiet.model_provider="amazon-bedrock"',
           "--codex",
+          'profiles.quiet.model="synthetic-bedrock-model"',
+          "--codex",
           'responses_api_metadata={ "team.tag"="root", caller="preserved" }',
           "--codex",
           'profiles.quiet.responses_api_metadata={ "team.tag"="selected", codex_security_integration="github_action" }',
@@ -1399,6 +1510,8 @@ describe("scan and patch workflow", () => {
       );
 
       expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(childArgs).toContain('model="synthetic-bedrock-model"');
+      expect(childArgs).toContain('model_provider="amazon-bedrock"');
       expect(childArgs).toContain(`analytics.enabled=${profileAnalytics}`);
       expect(requestMetadata(childArgs)).toMatchObject({
         "team.tag": "selected",
@@ -1685,10 +1798,9 @@ describe("scan and patch workflow", () => {
                 "<!-- codex-security:patch-risk-summary:end -->",
               );
               expect(output.appServer?.prompt).toContain(
-                "--helper validate-patch-risk-assessment <assessment.json>",
-              );
-              expect(output.appServer?.prompt).toContain(
-                "references/windows-validation.md",
+                process.platform === "win32"
+                  ? 'launch_codex_security_mcp.cmd" --helper validate-patch-risk-assessment'
+                  : "launch_codex_security_mcp' --helper validate-patch-risk-assessment",
               );
               const artifact = JSON.parse(
                 output

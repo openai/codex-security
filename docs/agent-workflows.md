@@ -34,6 +34,7 @@ Codex plugin session.
 | Review a PR, commit, branch diff, or working-tree patch | Ask for [`$security-diff-scan`](../plugins/codex-security/skills/security-diff-scan/SKILL.md) with the change to review.                                                                                                                   | `cs scan . --diff origin/main` for committed changes, or `cs scan . --working-tree` for local changes.                |
 | Run repeated audits of the same target                  | Ask for [`$deep-security-scan`](../plugins/codex-security/skills/deep-security-scan/SKILL.md). Later audits use findings from earlier ones.                                                                                                | `cs scan . --mode deep`                                                                                               |
 | Assess supplied findings against the source             | [`$triage-finding`](../plugins/codex-security/skills/triage-finding/SKILL.md) returns a verdict and any missing evidence for each claim.                                                                                                   | `cs validate findings.json` returns a [validation report](../sdk/typescript/docs/cli.md#validate-and-patch-findings). |
+| Validate scan findings with a configured provider       | Select the trusted project file explicitly when requesting a scan; the [provider runs after sealing](validation-providers.md).                                                                                                             | `cs scan . --validate -c codex-security.yaml`                                                                         |
 | Investigate a dependency alert                          | Give [`$resolve-dependency-alert`](../plugins/codex-security/skills/resolve-dependency-alert/SKILL.md) the alert and the checkout or image. It traces the dependency and proposes an upgrade or dismissal where the evidence supports one. | To retrieve a saved alert for that review, see below.                                                                 |
 | Prepare a fix                                           | Ask [`$fix-finding`](../plugins/codex-security/skills/fix-finding/SKILL.md) to patch a specific finding in the affected repository.                                                                                                        | [`cs patch --scan SCAN_ID`](../sdk/typescript/docs/cli.md#patch-existing-findings)                                    |
 | Check an existing fix                                   | Give [`$verify-fix`](../plugins/codex-security/skills/verify-fix/SKILL.md) the finding and current checkout.                                                                                                                               | [`cs verify-fix --scan SCAN_ID`](../sdk/typescript/docs/cli.md#verify-fixes)                                          |
@@ -48,6 +49,11 @@ To bring in an alert from your scanner, use the [scanner import guides](scanner-
 A scan or triage request produces findings. Ask to fix a specific finding when
 you want a patch. A separate fix verification reports `fixed`,
 `still_vulnerable`, or `inconclusive` with evidence.
+
+For a Standard or diff scan in Codex, you can ask for an investigation allowance,
+such as “spend 15 minutes reviewing this change.” The workbench saves the advisory
+deadline and returns it when you resume. Before starting another Deep Scan,
+Codex lists the active Deep Scans and asks whether to run them concurrently.
 
 Existing root and component `SECURITY.md` files already guide scans. Use
 [policy generation](../README.md#generate-securitymd) to draft or update one.
@@ -78,6 +84,11 @@ locations and validation evidence for each finding. Check the
 `scan.review.excludedPaths` list in `scan-manifest.json` for additional
 exclusions. To find the files selected for discovery, [check the retained
 scope list](#check-a-revision-range-scan-for-missing-files).
+
+For new plugin-managed output, set `CODEX_SECURITY_SCAN_ROOT` to override the
+scan directory root. The default is `scans/` under `CODEX_SECURITY_STATE_DIR`,
+which defaults to `$CODEX_HOME/state/plugins/codex-security`. Relative overrides
+resolve from the plugin directory. Existing scans keep their saved paths.
 
 A report with zero findings can still list exclusions or unresolved questions.
 Static triage reports what the source supports. An inconclusive fix verification
