@@ -3374,7 +3374,7 @@ describe("CLI", () => {
     expect(text).toContain("--effort <effort>");
     expect(text).toContain(DEFAULT_SCAN_MODEL_CONFIGURATION.reasoningEffort);
     expect(text).toContain("--codex <key=value>");
-    expect(text).toContain('model_reasoning_effort="high"');
+    expect(text).toContain("model_reasoning_effort='high'");
     expect(text).toContain("Concurrent repository scans.");
     expect(text).toContain("--mode <mode>");
     expect(text).toContain("bundled plugin");

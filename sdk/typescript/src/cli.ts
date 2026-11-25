@@ -545,12 +545,12 @@ const MATCHING_OPTIONS = modelOptions(
 ).extend({
   force: optInFlag("Recompute saved finding matches."),
 });
-const SKILL_CODEX_OVERRIDE_DESCRIPTION = `Repeat TOML KEY=VALUE; quote strings, e.g. --codex 'model="gpt-5.6-terra"' or --codex 'model_reasoning_effort="high"'. Also supports model_provider, model_providers.<name>.<key>, daybreak=true, and analytics.enabled=false.`;
+const SKILL_CODEX_OVERRIDE_DESCRIPTION = `Repeat TOML KEY=VALUE; quote strings, e.g. --codex "model='gpt-5.6-terra'" or --codex "model_reasoning_effort='high'". Also supports model_provider, model_providers.<name>.<key>, daybreak=true, and analytics.enabled=false.`;
 const SKILL_CONFIG_OPTIONS = MODEL_OPTIONS.extend({
   codex: repeatedValue("--codex").describe(SKILL_CODEX_OVERRIDE_DESCRIPTION),
 });
 type SkillConfiguration = z.infer<typeof SKILL_CONFIG_OPTIONS>;
-const CODEX_OVERRIDE_DESCRIPTION = `Repeat TOML KEY=VALUE; e.g. --codex 'model_reasoning_effort="high"'. Prefer --effort for reasoning effort.`;
+const CODEX_OVERRIDE_DESCRIPTION = `Repeat TOML KEY=VALUE; e.g. --codex "model_reasoning_effort='high'". Prefer --effort for reasoning effort.`;
 const RUNTIME_OPTION_SCHEMAS = runtimeOptions(optionValue);
 
 function runtimeOptions(value: typeof optionValue) {
@@ -8431,7 +8431,7 @@ export async function main(
     !actionFlags.length &&
     literalArgs[0] &&
     !literalArgs[0].startsWith("-") &&
-    firstNonGlobal(argv, 0) === argv.length
+    firstNonGlobal(argv, 0, literalArgs[0] === "scan") === argv.length
   ) {
     commandIndex = argv.length;
     const name = literalArgs.shift()!;
@@ -11001,11 +11001,16 @@ async function executeDependencyAgent(
   const home = scanCodexHome(dependencies.environment);
   const profile = mergeCodexOverrides(
     resolveCodexProfile(await readCodexHomeConfig(dependencies.environment)),
-    mergeCodexOverrides(
-      await readCodexFileProfile(projectCodex, home),
-      resolveCodexProfile(projectCodex),
-    ),
+    projectCodex,
   );
+  // Only inherit model selection. Private profile provider definitions must
+  // stay out of the investigator's command-line overrides.
+  const selected = selectedScanProfile(projectCodex);
+  const file = await readCodexFileProfile(projectCodex, home);
+  for (const key of ["model", "model_provider", "model_reasoning_effort"]) {
+    const value = selected?.[key] ?? projectCodex[key] ?? file[key];
+    if (value !== undefined) profile[key] = value;
+  }
   const agents = profile["agents"];
   const nativeFeatures = profile["features"];
   const multiAgent = isJsonObject(nativeFeatures)
@@ -14473,7 +14478,9 @@ async function parseScanCodexOverrides(
   const { codex: values, model, effort, provider } = options;
   const profileHome = scanCodexHome(environment);
   const explicit = parseCodexOverrideValues(values, model, effort);
-  const overrides = mergeCodexOverrides(defaults ?? {}, explicit);
+  const overrides = defaults
+    ? mergeCodexOverrides(defaults, explicit)
+    : explicit;
   const selectedProvider = provider ?? scanModelProvider(overrides);
   // A provider selected only in a native profile file can inherit the scan
   // model default. Validate providers selected by CLI or project settings.
@@ -14530,7 +14537,7 @@ export function parseCodexOverrides(
     provider,
     defaults,
   );
-  const effective = mergeCodexOverrides(defaults ?? {}, result);
+  const effective = defaults ? mergeCodexOverrides(defaults, result) : result;
   requireExternalProviderModel(effective, scanModelProvider(effective));
   return result;
 }
@@ -14577,7 +14584,7 @@ function parseCodexOverrideValues(
       parsed = parseToml(`value = ${literal}`)["value"] as JsonValue;
     } catch {
       throw new CodexSecurityError(
-        "Invalid --codex TOML value. Preserve string quotes in the shell, for example: --codex 'model_reasoning_effort=\"high\"'.",
+        "Invalid --codex TOML value. Preserve string quotes in the shell, for example: --codex \"model_reasoning_effort='high'\".",
       );
     }
     let cursor = result;
@@ -14613,7 +14620,7 @@ function parseCodexOverrideValues(
     cursor[final] = parsed;
   }
   if (provider !== undefined) {
-    const effective = mergeCodexOverrides(defaults ?? {}, result);
+    const effective = defaults ? mergeCodexOverrides(defaults, result) : result;
     const profile = effective["profile"];
     if (typeof profile === "string" && selectedScanProfile(effective)) {
       const overrides = selectedScanProfile({ ...result, profile });

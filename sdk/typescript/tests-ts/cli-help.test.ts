@@ -164,7 +164,7 @@ describe("CLI help", () => {
       scanModelConfiguration(DEFAULT_CODEX_CONFIG);
     expect(text).toContain(model);
     expect(text).toContain(reasoningEffort);
-    expect(text).toContain('model_reasoning_effort="high"');
+    expect(text).toContain("model_reasoning_effort='high'");
     expect(text).toContain("CODEX_SECURITY_STATE_DIR");
     expect(text).not.toContain("openai:gpt");
     expect(text).toContain("--path src --path tests");
@@ -195,7 +195,7 @@ describe("CLI help", () => {
 
   test("keeps TOML string quotes when a help example is copied into a shell", async () => {
     const text = await help(["scan", "--help"]);
-    const example = option(text, "--codex").match(/--codex ('[^']+')/u)?.[1];
+    const example = option(text, "--codex").match(/--codex ("[^"]+")/u)?.[1];
     expect(example).toBeDefined();
     // Bun's shell parses the displayed quoting on Unix and Windows.
     const value =

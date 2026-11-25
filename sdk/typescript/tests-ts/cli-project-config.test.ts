@@ -1276,9 +1276,9 @@ test("explicit OpenAI rejects a conflicting direct provider override", () => {
 
 test("malformed TOML explains shell quoting with a usable example", () => {
   expect(() => parseCodexOverrides(["model_reasoning_effort=high"])).toThrow(
-    "--codex 'model_reasoning_effort=\"high\"'",
+    "--codex \"model_reasoning_effort='high'\"",
   );
-  expect(parseCodexOverrides(['model_reasoning_effort="high"'])).toEqual({
+  expect(parseCodexOverrides(["model_reasoning_effort='high'"])).toEqual({
     model_reasoning_effort: "high",
   });
 });

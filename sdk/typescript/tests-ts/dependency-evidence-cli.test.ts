@@ -113,7 +113,12 @@ test.each(["project", "selected profile"])(
   },
 );
 
-test("a reviewed check calls only selected evidence sources and reviews the original replies", async () => {
+test.each(["inline", "native"] as const)(
+  "a reviewed check with a %s profile calls only selected evidence sources and reviews the original replies",
+  checkReviewed,
+);
+
+async function checkReviewed(source: "inline" | "native") {
   await using repo = await scopedTemporaryDirectory("dependency-evidence-cli-");
   const git = (...args: string[]) =>
     execFileSync("git", args, { cwd: repo.path });
@@ -138,12 +143,21 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
   );
   const server = { command: "fixture-server", enabled_tools: ["read_build"] };
   const config = join(repo.path, "investigation.json");
+  await using home = await scopedTemporaryDirectory("investigator-home-");
+  if (source === "native") {
+    await writeFile(
+      join(home.path, "review.config.toml"),
+      'model = "fixture-model"\n[model_providers.unused]\nexperimental_bearer_token = "synthetic-private-value"\n',
+    );
+  }
   await writeFile(
     config,
     JSON.stringify({
       codex: {
         profile: "review",
-        profiles: { review: { model: "fixture-model" } },
+        ...(source === "inline" && {
+          profiles: { review: { model: "fixture-model" } },
+        }),
         agents: {
           max_concurrent_threads_per_session: 7,
           default_subagent_reasoning_effort: "xhigh",
@@ -190,8 +204,12 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
     stderr.stream,
     dependencies({
       currentDirectory: repo.path,
-      environment: { CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY: "1" },
+      environment: {
+        CODEX_HOME: home.path,
+        CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY: "1",
+      },
       async onCodex(args, output, _environment, prompt) {
+        expect(args.join(" ")).not.toContain("synthetic-private-value");
         expect(args).toContain('model_provider="openrouter"');
         expect(args).toContain('model="fixture-model"');
         expect(args[0]).toBe(output?.appServer ? "app-server" : "exec");
@@ -471,7 +489,7 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
     input_tokens: 12,
     output_tokens: 6,
   });
-});
+}
 
 const outputFlags = {
   json: ["--json"],

@@ -422,6 +422,11 @@ test("negated output flags apply to scan results and execution failures", async 
     outcomeOptions("completed"),
   );
   expect(completed.stdout).toBe("");
+  const literal = await run(
+    ["--json", "--no-json", "--", "scan", "."],
+    outcomeOptions("completed"),
+  );
+  expect(literal.stdout).toBe("");
   const failure = await scanJson(
     [".", "--json", ...flags, "--codex", "bad"],
     {},
