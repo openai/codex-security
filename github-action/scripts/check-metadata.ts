@@ -20,7 +20,8 @@ assert.equal(defaults.scope, 'repository');
 assert.equal(defaults.uploadArtifacts, false);
 assert.equal(defaults.verbose, true);
 assert.equal(defaults.provider, 'openai');
-assert.equal(defaults.model, 'gpt-5.6-sol');
+assert.equal(defaults.model, 'gpt-6.1-sol');
+assert.equal(defaults.effort, 'high');
 for (const provider of ['amazon-bedrock', 'openrouter', 'fireworks']) {
   const inputs = parseWithMetadata({provider});
   assert.equal(inputs.model, '', 'Non-OpenAI providers must not inherit an OpenAI model default');
