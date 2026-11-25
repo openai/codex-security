@@ -342,6 +342,9 @@ test.each(["leaf", "table"])(
       model: "red",
       model_catalog_json: catalog,
       features: { cli_daybreak: true },
+      "model_providers.openai": {
+        model_catalog_url: "https://chatgpt.com/previous/models",
+      },
       profile: "selected",
       profiles: {
         selected: {
@@ -409,7 +412,11 @@ test("automatically selected Blue reaches fresh and resumed direct workers", asy
     fileURLToPath(new URL(relative, import.meta.url));
   await using client = new TestClient(
     {
-      codexOverrides: { model: "gpt-test", model_catalog_json: catalog },
+      codexOverrides: {
+        model: "gpt-test",
+        model_catalog_json: catalog,
+        "features.api_key_model_discovery": false,
+      },
     },
     {
       ...scanRuntimeDependencies(home, scanDir),
@@ -451,10 +458,12 @@ test("automatically selected Blue reaches fresh and resumed direct workers", asy
         const [, fresh, resumed] = parseJsonLines(output);
         expect(fresh).toMatchObject({
           program: "daybreak_blue",
+          daybreakFeatures: { api_key_model_discovery: false },
           resumed: false,
         });
         expect(resumed).toMatchObject({
           program: "daybreak_blue",
+          daybreakFeatures: { api_key_model_discovery: false },
           resumed: true,
           threadId: fresh.threadId,
         });

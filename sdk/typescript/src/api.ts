@@ -49,10 +49,7 @@ import {
 import { z } from "zod";
 import { readThreatModelPath } from "./artifact-export.js";
 import { scanSkillConfig } from "./scan-skill-paths.js";
-import {
-  resolveScanCyberAccessProgram,
-  scanCyberFeatures,
-} from "./scan-cyber-access.js";
+import { resolveScanCyberAccessProgram } from "./scan-cyber-access.js";
 import { isRecord } from "./record.js";
 import {
   STANDALONE_REMEDIATION_EVIDENCE,
@@ -87,6 +84,7 @@ import {
 } from "./codex-prompt.js";
 import {
   CODEX_AUTH_CONFIG_KEYS,
+  DEFAULT_CODEX_CONFIG,
   EXTERNAL_CODEX_PROVIDERS,
   inlineToml,
   isExternalModelProvider,
@@ -99,6 +97,7 @@ import {
   scanApprovalPolicy,
   scanPricingContext,
   scanCyberAccessConfig,
+  scanCyberFeatures,
   scanModelConfiguration,
   scanModelProvider,
   scanProviderEnvKey,
@@ -2943,6 +2942,10 @@ export class CodexSecurity {
         knowledgeBasePaths: knowledgeBase?.sources,
         deepScan: deepScanConfiguration?.settings,
       });
+      if (fileProfile)
+        recipe["modelDefaults"] = {
+          ...scanModelConfiguration(DEFAULT_CODEX_CONFIG),
+        };
       if (savedProviderProfile !== undefined) {
         recipe["providerProfile"] = {
           name: savedProviderProfile.name,
@@ -7643,11 +7646,6 @@ export function scanPreflightCodexConfig(config: JsonObject): JsonObject {
       if (safeString(value)) result[key] = value;
     }
     copyWorkerSettings(result, source);
-    // Literal dotted keys also become SDK flags. Preserve them on rerun.
-    for (const feature of scanCyberFeatures) {
-      const key = `features.${feature}`;
-      if (typeof source[key] === "boolean") result[key] = source[key];
-    }
     const features = capabilityFeatures(source["features"]);
     if (Object.keys(features).length > 0) result["features"] = features;
     const skills = source["skills"];

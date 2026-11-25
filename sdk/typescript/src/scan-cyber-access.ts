@@ -18,6 +18,7 @@ import {
   isBundledExecutable,
 } from "./codex-sdk-environment.js";
 import {
+  scanCyberFeatures,
   CODEX_AUTH_CONFIG_KEYS,
   hasCommandAuth,
   inlineToml,
@@ -54,11 +55,6 @@ const networkFeatures = [
   "respect_system_proxy",
   "system_proxy_fallback",
   "psp",
-];
-export const scanCyberFeatures = [
-  "cli_daybreak",
-  "api_key_model_discovery",
-  "api_key_cyber_access_programs",
 ];
 const catalogFeatures = [
   ...scanCyberFeatures,
