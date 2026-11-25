@@ -22,6 +22,8 @@ DEFAULT_STOP_AFTER_CONSECUTIVE_ERRORS = DEFAULTS["stopAfterConsecutiveErrors"]
 DEFAULT_MAX_DISCOVERY_RUNS = DEFAULTS["maxDiscoveryRuns"]
 DEFAULT_MAX_TIME_HOURS = DEFAULTS["maxTimeHours"]
 MAX_TIME_HOURS = 96
+# The SDK accepts the same counts only as JavaScript safe integers.
+MAX_SAFE_INTEGER = 2**53 - 1
 CONFIG_FIELDS = {
     "workers": "workers",
     "subagents": "subagents",
@@ -128,7 +130,7 @@ def resolve_deep_scan_setup(
 
 
 def require_integer(value: object, label: str, *, minimum: int) -> int:
-    """Return an integer at least minimum, accepting integral floats and raising SystemExit for invalid counts."""
+    """Accept integral floats and require a count within the SDK's safe integer range."""
     if isinstance(value, float) and value.is_integer():
         value = int(value)
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
@@ -140,6 +142,8 @@ def require_integer(value: object, label: str, *, minimum: int) -> int:
             else f"an integer of at least {minimum}"
         )
         raise SystemExit(f"{label} must be {qualifier}.")
+    if value > MAX_SAFE_INTEGER:
+        raise SystemExit(f"{label} must be no greater than {MAX_SAFE_INTEGER}.")
     return value
 
 
