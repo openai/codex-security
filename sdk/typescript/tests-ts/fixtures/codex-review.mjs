@@ -49,6 +49,10 @@ const turnFailures = {
     "other",
   ),
   "policy-terse-turn": failure("Refused due to the safety policy", "other"),
+  "policy-biological-turn": failure(
+    "This content was flagged for possible biological risk.",
+    "other",
+  ),
   "failed-turn": failure("Rate limit exceeded", "usageLimitExceeded"),
   "rate-limit-turn": failure("Rate limit reached", "rateLimitExceeded"),
   "server-error": httpFailure("Provider temporarily unavailable"),

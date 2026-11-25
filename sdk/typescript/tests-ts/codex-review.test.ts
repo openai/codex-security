@@ -178,6 +178,8 @@ const failureReasons: Record<string, string> = {
   "policy-accordance-turn":
     "This request was refused in accordance with the safety policy.",
   "policy-terse-turn": "Refused due to the safety policy",
+  "policy-biological-turn":
+    "This content was flagged for possible biological risk.",
   "policy-request": "Request rejected: cyber_policy.",
   ...refusalMessages,
   "policy-reported-error":
@@ -276,6 +278,7 @@ const modelFailures = new Set([
   "policy-turn",
   "policy-accordance-turn",
   "policy-terse-turn",
+  "policy-biological-turn",
   ...Object.keys(retryableProviderMessages).filter(
     (scenario) => !requestFailures.has(scenario),
   ),
@@ -954,6 +957,7 @@ test.each([
   "This request was refused under the safety policy",
   "This request was refused under the content policy",
   "Request flagged for potentially high-risk cyber activity.",
+  "This content was flagged for possible biological risk.",
   "I cannot help with this request.",
   "I’m sorry, but I can’t assist with your request.",
   "Request refused by cybersecurity policy.",
@@ -1080,6 +1084,7 @@ test.each([
   "Connection refused while fetching content-policy.ts",
   "Artifact upload was blocked by the content policy.",
   "Artifact upload failed due to content policy violation",
+  "Command failed: This content was flagged for possible biological risk.",
   "Artifact upload failed due to safety policy violation",
   "Content policy refusal report upload failed",
   "Artifact publication was refused due to the content policy.",
