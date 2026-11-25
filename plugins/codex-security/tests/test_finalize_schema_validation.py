@@ -26,3 +26,8 @@ def test_schema_references_preserve_constraints_siblings_and_cycle_errors() -> N
         FINALIZER._validate_schema_node("no", {**reference, "pattern": "^yes$"}, "value", root)
     with pytest.raises(RecursionError):
         FINALIZER._validate_schema_node("yes", {"$ref": "#"}, "value")
+
+
+@pytest.mark.parametrize("pattern", [r"\$", "[$]", r"\S"])
+def test_schema_patterns_preserve_literal_dollars_and_partial_matches(pattern: str) -> None:
+    FINALIZER._validate_schema_node("$\n", {"pattern": pattern}, "value")
