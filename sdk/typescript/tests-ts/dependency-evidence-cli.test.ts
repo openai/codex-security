@@ -64,23 +64,30 @@ test("command schema exposes complete and blocked reports as direct output alter
   );
 });
 
-test.each(["project", "selected profile"])(
-  "an investigator provider selected by the %s requires a model",
+test.each(["project", "selected profile", "profile provider"])(
+  "rejects invalid investigator settings from the %s",
   async (source) => {
     await using repo = await scopedTemporaryDirectory("investigator-provider-");
     await preparePackage(repo.path);
     const config = join(repo.path, "project.json");
+    const review =
+      source === "profile provider"
+        ? {
+            model_provider: "gateway",
+            model: "fixture-model",
+            model_providers: {
+              gateway: { base_url: "https://profile.invalid/" },
+            },
+          }
+        : { model_provider: "openrouter" };
+    const codex =
+      source === "project"
+        ? review
+        : { profile: "review", profiles: { review } };
+    await writeFile(config, JSON.stringify({ codex }));
     await writeFile(
-      config,
-      JSON.stringify({
-        codex:
-          source === "project"
-            ? { model_provider: "openrouter" }
-            : {
-                profile: "review",
-                profiles: { review: { model_provider: "openrouter" } },
-              },
-      }),
+      join(repo.path, "config.toml"),
+      '[model_providers.gateway]\nbase_url="https://ambient.invalid/"',
     );
     const stderr = capture();
     const stdout = capture();
@@ -99,6 +106,9 @@ test.each(["project", "selected profile"])(
       stderr.stream,
       dependencies({
         currentDirectory: repo.path,
+        async onCodex() {
+          throw new Error("Unexpected investigator launch");
+        },
         environment: {
           CODEX_HOME: repo.path,
           CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY: "1",
@@ -108,13 +118,17 @@ test.each(["project", "selected profile"])(
     expect(status, stderr.text()).toBe(2);
     expect(JSON.parse(stdout.text())).toMatchObject({
       status: "blocked",
-      reason: expect.stringContaining("--model is required"),
+      reason: expect.stringContaining(
+        source === "profile provider"
+          ? "provider definitions in a selected profile"
+          : "--model is required",
+      ),
     });
   },
 );
 
 test.each(["inline", "native"] as const)(
-  "a reviewed check with a %s profile calls only selected evidence sources and reviews the original replies",
+  "a reviewed check using the %s profile calls only selected evidence sources and reviews the original replies",
   checkReviewed,
 );
 

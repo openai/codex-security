@@ -11052,6 +11052,16 @@ async function executeDependencyAgent(
     typeof overrides["model_provider"] === "string"
       ? overrides["model_provider"]
       : undefined;
+  const providers = (selected ?? file)["model_providers"];
+  if (
+    provider &&
+    isJsonObject(providers) &&
+    Object.hasOwn(providers, provider)
+  ) {
+    throw new ConfigurationError(
+      "Dependency checks cannot use provider definitions in a selected profile. Configure this provider at the top level with env_key for credentials.",
+    );
+  }
   const deny = [
     configuredCodexHome(dependencies.environment),
     codexSecurityCredentialHome(dependencies.environment),

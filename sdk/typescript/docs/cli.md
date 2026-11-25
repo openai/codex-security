@@ -59,6 +59,8 @@ CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1 cs exploitability check CVE-20
 
 Add `--config project.yaml` with `exploitability.scope.instructions` to describe the callers to consider and the assumptions to use. The CLI saves this text as `callerScope` in the frozen packet and report. The investigator and independent reviewer use the same scope on every pass. Each verdict still needs evidence for the captured workload.
 
+The selected Codex profile can supply a model or provider name. For dependency checks, define the active provider in the top-level `model_providers` table and use `env_key` for credentials. A definition in the selected profile blocks the check because the independent reviewer ignores user configuration.
+
 The CLI looks up the CVE using the same OSV and alias resolution as a repository check. Before inspecting callers, it makes one model call to identify necessary trigger conditions for the supplied sinks. Each derived condition cites an exact passage in a resolved advisory. An investigator checks the supplied and derived conditions against the captured calls and the pinned source. The validator uses those same conditions for each verdict. The public lookup uses the CVE and associated advisory identifiers. The stack data stays out of the lookup.
 
 Open `report.json` to see the public records, their hashes and available revisions in `advisoryDetails`, and the per-sink conditions and supporting quotes in `triggerAnalysis`. If the public lookup fails, the CLI records `advisoryLookupError` and proceeds with the catalog advisory and its original preconditions. If the trigger analysis fails validation, the check stops before investigating callers.
