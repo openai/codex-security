@@ -84,6 +84,7 @@ import {
 } from "./codex-prompt.js";
 import {
   CODEX_AUTH_CONFIG_KEYS,
+  DEFAULT_CODEX_CONFIG,
   EXTERNAL_CODEX_PROVIDERS,
   inlineToml,
   isExternalModelProvider,
@@ -2928,6 +2929,10 @@ export class CodexSecurity {
         knowledgeBasePaths: knowledgeBase?.sources,
         deepScan: deepScanConfiguration?.settings,
       });
+      if (fileProfile)
+        recipe["modelDefaults"] = {
+          ...scanModelConfiguration(DEFAULT_CODEX_CONFIG),
+        };
       if (savedProviderProfile !== undefined) {
         recipe["providerProfile"] = {
           name: savedProviderProfile.name,

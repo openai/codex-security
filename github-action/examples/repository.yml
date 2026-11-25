@@ -21,8 +21,6 @@ jobs:
         uses: openai/codex-security@REPLACE_WITH_REVIEWED_COMMIT
         with:
           scope: repository
-          model: gpt-5.6-sol
-          effort: high
           max-cost: "5"
           fail-on-severity: none
         env:
