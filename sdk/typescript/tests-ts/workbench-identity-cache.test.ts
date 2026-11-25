@@ -618,6 +618,9 @@ with ExitStack() as stack:
                     diff_head_revision=None, diff_content_digest=None, user_context=None,
                     target_summary=None, scan_root=None, model=None, reasoning_effort=None,
                     claim_token=None, workflow_version="synthetic",
+                    confirmed_concurrent_scan_id=[
+                        active["scanId"] for active in deep_workbench.other_running_deep_scans(connection)
+                    ] if mode == "deep" else [],
                     join_only=False, project_config_path=None, service_tier=None,
                 )
                 try:
