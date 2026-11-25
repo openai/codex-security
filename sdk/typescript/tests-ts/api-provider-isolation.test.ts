@@ -1159,6 +1159,8 @@ test.each([
   ["profile", "openai"],
   ["root", "openrouter"],
   ["profile", "openrouter"],
+  ["root", "xai"],
+  ["profile", "xai"],
 ] as const)(
   "Deep workers, rerun and resume inherit the %s %s endpoint",
   async (selection, provider) => {
@@ -1167,7 +1169,10 @@ test.each([
     const scan = join(root, "scan");
     await mkdir(repository);
     await mkdir(scan, { mode: 0o700 });
-    const endpoint = "https://endpoint.example.test/v1";
+    const endpoint =
+      provider === "xai"
+        ? "https://api.x.ai/v1"
+        : "https://endpoint.example.test/v1";
     const routing: JsonObject =
       provider === "openai"
         ? {
@@ -1178,7 +1183,13 @@ test.each([
             model_provider: provider,
             model_providers: {
               [provider]: {
-                ...OPENROUTER_CODEX_PROVIDER,
+                ...(provider === "xai"
+                  ? {
+                      name: "xAI",
+                      wire_api: "responses",
+                      env_key: "XAI_API_KEY",
+                    }
+                  : OPENROUTER_CODEX_PROVIDER),
                 base_url: endpoint,
                 query_params: { version: "preview" },
               },
@@ -1188,6 +1199,8 @@ test.each([
       CODEX_SECURITY_STATE_DIR: join(root, "state"),
       OPENAI_API_KEY: "synthetic-openai-key",
       OPENROUTER_API_KEY: "synthetic-openrouter-key",
+      XAI_API_KEY: "synthetic-xai-key",
+      NO_PROXY: "example.invalid",
     };
     let recipe: JsonObject;
     const client = new TestClient(
@@ -1214,25 +1227,43 @@ test.each([
         repositoryRevision: async () => "deadbeef",
         createCodex: (options) =>
           codexFactory(async function runStreamed() {
-            const worker = parseToml(
-              await readFile(
-                options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
-                "utf8",
-              ),
-            );
-            const runtime = worker["worker_runtime"] as JsonObject;
-            const profile = runtime["native_profile"];
-            const providerConfig =
-              typeof profile === "string"
-                ? await readProviderProfile(
-                    options.env!["CODEX_HOME"]!,
-                    profile,
-                  )
-                : {};
+            const env = options.env!;
+            const settings = await workerRuntimeSettings(env);
+            const providerConfig = settings.nativeProfile
+              ? await readProviderProfile(
+                  env["CODEX_HOME"]!,
+                  settings.nativeProfile,
+                )
+              : {};
+            const expected = structuredClone(routing);
+            if (provider === "xai") {
+              expect(settings.nativeProfile).toBe(options.nativeProfile);
+              expect(env["NO_PROXY"]).toBe("example.invalid,127.0.0.1");
+              expect(settings.environment).toMatchObject({
+                NO_PROXY: env["NO_PROXY"],
+                XAI_API_KEY: environment.XAI_API_KEY,
+              });
+              const selected = await effectiveProvider(
+                options.env!,
+                repository,
+                profileConfigOverrides(settings.config),
+                settings.nativeProfile,
+              );
+              expect(selected.base_url).toMatch(
+                /^http:\/\/127\.0\.0\.1:\d+\//u,
+              );
+              const providers = expected["model_providers"] as Record<
+                string,
+                JsonObject
+              >;
+              providers[provider]!["base_url"] = selected.base_url;
+            }
             expect({ ...options.config, ...providerConfig }).toMatchObject(
-              routing,
+              expected,
             );
-            expect({ ...runtime, ...providerConfig }).toMatchObject(routing);
+            expect({ ...settings.config, ...providerConfig }).toMatchObject(
+              expected,
+            );
             throw new Error("synthetic endpoint inherited");
           })(),
       },

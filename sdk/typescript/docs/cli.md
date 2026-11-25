@@ -498,14 +498,33 @@ tool calling and streaming. Verification covered profile loading and a request t
 a local Responses endpoint.
 See [Opper's Codex setup guide](https://docs.opper.ai/integrations/coding-agents/codex).
 
-### xAI Responses API through a local gateway
+### xAI Responses API
 
-Codex 0.167.0 sends collaboration and Codex Security MCP tools as `namespace`
-declarations. A direct scan against xAI can pass `--dry-run` and then fail with
-HTTP 422 on the first model request. CLIProxyAPI's xAI adapter exposes each
-namespace member to xAI as a plain function and restores the namespace when
-Codex receives a tool call. Both connections use the Responses API.
-[Direct xAI provider support](https://github.com/openai/codex-security/issues/2412)
+Codex 0.172.0 sends collaboration and Codex Security MCP tools as `namespace`
+declarations. [xAI's Responses API](https://docs.x.ai/developers/rest-api-reference/inference/responses)
+accepts functions and web search. For direct HTTP requests to
+`https://api.x.ai/v1`, the SDK starts a private adapter on `127.0.0.1` for
+Codex and its discovery workers. It translates declarations to functions,
+restores tool calls, and replays plaintext subagent messages as assistant text
+with the sender and recipient. It rejects encrypted subagent messages.
+
+Set `XAI_API_KEY` in your environment. Try the command in a repository you
+can share with xAI. Standard and resumed Deep scans have been tested with
+synthetic responses. [Live direct scans remain unverified.](https://github.com/openai/codex-security/issues/2412)
+
+```bash
+codex-security scan . --auth api-key --model grok-4.7 --effort low \
+  --codex "model_provider='xai'" \
+  --codex "model_providers.xai.name='xAI'" \
+  --codex "model_providers.xai.base_url='https://api.x.ai/v1'" \
+  --codex "model_providers.xai.wire_api='responses'" \
+  --codex "model_providers.xai.env_key='XAI_API_KEY'"
+```
+
+#### CLIProxyAPI gateway
+
+Profiles with WebSockets enabled and other endpoints, including local gateways,
+retain their native behavior. CLIProxyAPI provides its own namespace translation.
 
 Install CLIProxyAPI v8.0.59 and save this gateway config outside the scanned
 repository in a file readable only by the gateway user. Replace the placeholders

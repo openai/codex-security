@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import type { Codex, CodexOptions } from "@openai/codex-sdk";
 import { parse } from "smol-toml";
-import { configuredCodexHome } from "./auth.js";
+import { configuredCodexHome, environmentEntry } from "./auth.js";
 import { CodexSecurityError } from "./errors.js";
 import {
   resolveCodexProfile,
@@ -16,6 +16,7 @@ import {
   type JsonObject,
 } from "./config.js";
 import { isRecord } from "./record.js";
+import { routeXaiProvider } from "./responses-compat-proxy.js";
 import { nativeCodexLaunch } from "./codex-sdk-environment.js";
 import {
   bundledPluginRoot,
@@ -32,7 +33,29 @@ import {
 export interface ProviderProfile {
   name: string;
   path: string;
+  loopback?: boolean;
   cleanup(): Promise<void>;
+}
+
+/** Keep the local adapter connection local, preserving existing proxy exclusions. */
+export function profileProxyExclusions(
+  profile: Pick<ProviderProfile, "loopback"> | undefined,
+  environment: ProcessEnvironment,
+): Record<string, string> {
+  if (!profile?.loopback) return {};
+  const upper = environmentEntry(environment, "NO_PROXY");
+  const lower = environmentEntry(environment, "no_proxy");
+  const exclude = (value?: string) => {
+    if (!value) return "127.0.0.1";
+    if (value.split(",").includes("127.0.0.1")) return value;
+    return `${value},127.0.0.1`;
+  };
+  return {
+    NO_PROXY: exclude(upper ?? lower),
+    ...(process.platform === "win32"
+      ? {}
+      : { no_proxy: exclude(lower ?? upper) }),
+  };
 }
 
 /** Keep provider metadata, analytics consent, and attribution on no-turn commands. */
@@ -114,13 +137,34 @@ export async function createProviderProfile(
   }
   if (options.replay) {
     await writePrivateConfig(path, JSON.stringify(config));
-  } else {
-    const providers = resolveCodexProfile(config)["model_providers"];
-    await writeCodexConfig(path, {
-      model_providers: isRecord(providers) ? providers : {},
-    });
+    return { name, path, cleanup: () => rm(path, { force: true }) };
   }
-  return { name, path, cleanup: () => rm(path, { force: true }) };
+
+  // resolveCodexProfile returns a fresh copy, so this route stays private.
+  const { model_provider: selected, model_providers } =
+    resolveCodexProfile(config);
+  const definitions = isRecord(model_providers) ? model_providers : {};
+  const adapter = await routeXaiProvider(
+    typeof selected === "string" ? definitions[selected] : undefined,
+  );
+  try {
+    await writeCodexConfig(path, { model_providers: definitions });
+  } catch (error) {
+    await adapter?.close();
+    throw error;
+  }
+  return {
+    name,
+    path,
+    loopback: adapter !== undefined,
+    cleanup: async () => {
+      try {
+        await adapter?.close();
+      } finally {
+        await rm(path, { force: true });
+      }
+    },
+  };
 }
 
 /** Restore private replay settings from the credential home, never scan artifacts. */

@@ -61,6 +61,7 @@ import {
   createProviderProfile,
   privateReplayOverrides,
   providerPreflightCommand,
+  profileProxyExclusions,
   type ProviderProfile,
 } from "./provider-profile.js";
 
@@ -2566,6 +2567,7 @@ export class CodexSecurity {
           scanDir,
           workerProviderEnvironment,
           session.nativeProviderEnvironment,
+          runtime.providerProfile,
         );
       const sqliteHome = workerRuntimeConfig["sqlite_home"];
       const sqliteEnvironment: Record<string, string> =
@@ -5106,7 +5108,10 @@ export class CodexSecurity {
         ? {}
         : { nativeProfile: runtime.providerProfile.name }),
       configOverrides: [...configOverrides, requestContext.configOverride],
-      env: sdkEnvironment,
+      env: {
+        ...sdkEnvironment,
+        ...profileProxyExclusions(runtime.providerProfile, sdkEnvironment),
+      },
       config: sdkCodexConfig as NonNullable<CodexOptions["config"]>,
     };
     const codex = await this.#dependencies.createCodex(codexOptions);
@@ -7767,15 +7772,18 @@ function selectedWorkerRuntimeConfig(
   workingDirectory: string,
   environment: ProcessEnvironment,
   nativeProviderEnvironment?: Record<string, string>,
+  profile?: ProviderProfile,
 ): JsonObject {
   const provider =
     typeof selectedProvider === "string" ? selectedProvider : undefined;
   const resolved = resolveCodexProfile(config);
   resolveNestedConfigPaths(resolved, workingDirectory);
   const providers = resolved["model_providers"];
-  const providerEnvironment =
-    nativeProviderEnvironment ??
-    declaredProviderEnvironment(providers, environment);
+  const providerEnvironment = {
+    ...(nativeProviderEnvironment ??
+      declaredProviderEnvironment(providers, environment)),
+    ...profileProxyExclusions(profile, environment),
+  };
   // Workers use separate directories; preserve the parent scan's native paths.
   for (const key of [...MODEL_FILE_SETTINGS, "sqlite_home"]) {
     const file = resolved[key];

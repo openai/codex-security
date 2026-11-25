@@ -166,6 +166,7 @@ const distModules = [
   "project-config-schema",
   "prompt-files",
   "provider-profile",
+  "responses-compat-proxy",
   "scan-modes",
   "scan-settings",
   "scan-owner-suggestions",
