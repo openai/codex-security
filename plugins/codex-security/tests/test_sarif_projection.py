@@ -32,6 +32,8 @@ class SarifProjectionTest(TestCase):
         finding = self.finding
         finding["extensions"] = {"candidateId": "candidate-example"}
         run = FINALIZER.build_sarif(self.manifest, self.findings)["runs"][0]
+        self.assertNotIn("automationDetails", run)
+        self.assertEqual(run["properties"]["codexSecurityScanId"], self.manifest["scan"]["id"])
         rule = run["tool"]["driver"]["rules"][0]
         result = run["results"][0]
         self.assertNotEqual(rule["name"], finding["ruleId"])

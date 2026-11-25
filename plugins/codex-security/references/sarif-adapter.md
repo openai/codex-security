@@ -18,6 +18,7 @@ The adapter:
 - maps categorical severity to SARIF `level`
 - sets GitHub's rule-level `security-severity` to the highest finding score. Unscored critical, high, medium, low, and informational findings use 9.5, 8.0, 5.0, 2.0, and 0.0. A rule with no positive score omits this field. These defaults are display values, not calculated CVSS scores.
 - preserves a deep scan's canonical `candidateId` under each child result's properties so consumers can group results without changing the original SARIF result presentation
+- stores the scan ID in `runs[].properties.codexSecurityScanId` and leaves `automationDetails` unset so GitHub’s `upload-sarif` action can apply the workflow category
 
 Lifecycle, rich validation evidence, attack-path context, and coverage are lossy or omitted in SARIF. Preserve them in semantic JSON.
 

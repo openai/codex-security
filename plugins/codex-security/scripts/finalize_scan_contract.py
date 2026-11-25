@@ -2652,13 +2652,14 @@ def build_sarif(
                 ],
             }
         },
-        "automationDetails": {"id": scan["id"]},
         "results": [
             _sarif_result(finding, rule_index[finding["ruleId"]], line_hash_cache)
             for finding in ordered_findings
         ],
         "properties": {
             "codexSecuritySchemaVersion": manifest["schemaVersion"],
+            # upload-sarif sets the workflow category only when automationDetails is absent.
+            "codexSecurityScanId": scan["id"],
             "codexSecurityTargetKind": target["kind"],
         },
     }
