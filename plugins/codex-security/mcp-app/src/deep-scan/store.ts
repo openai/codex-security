@@ -273,7 +273,17 @@ export class WorkbenchDeepScanStore {
           "Codex Security workbench returned an invalid coordinator lease.",
         );
       }
+      const { workbenchDatabasePath } = result;
+      if (
+        workbenchDatabasePath !== undefined &&
+        typeof workbenchDatabasePath !== "string"
+      ) {
+        throw new Error(
+          "Codex Security workbench returned an invalid database path.",
+        );
+      }
       this.coordinatorLeases.set(input.scanId, { input, run });
+      return { run, acquired, workbenchDatabasePath };
     }
     return { run, acquired };
   }

@@ -51,7 +51,9 @@ export { recordCodexSecurityScanDraftViaWorkbench, saveScanDraftCheckpoint } fro
 await testCanonicalParentCheckpointsSurviveSuccessiveWrites();
 await testJoiningCallerAdmission("fresh-empty");
 await testJoiningCallerAdmission("resumed-empty");
-await testJoiningCallerAdmission("resumed-with-source");
+await testJoiningCallerAdmission("fresh-empty", "ignored-only");
+await testJoiningCallerAdmission("resumed-empty", "with-source");
+await testJoiningCallerAdmission("resumed-with-source", "ignored-only");
 await testFreeformFailureMessagesAgainstRealWorkbench();
 await testWorkerRetryThreadsRemainInScanUsage();
 await testReducerCommitAndFinishAgainstRealWorkbench();
@@ -75,6 +77,7 @@ await testCoordinatorCommitResponseRecovery("finish-deep-scan");
 
 async function testJoiningCallerAdmission(
   scenario: "fresh-empty" | "resumed-empty" | "resumed-with-source",
+  gitAtRegistration?: "ignored-only" | "with-source",
 ) {
   const { fixtureRoot, targetPath, scanRoot, environment, runWorkbench } =
     await createWorkbenchFixture("deep-scan-joining-caller-");
@@ -86,7 +89,34 @@ async function testJoiningCallerAdmission(
   const start = registry.start.bind(registry);
   registry.start = (options: CoordinatorOptions) =>
     start({ ...options, executor });
+  const originalPath = process.env.PATH!;
+  const originalGit = process.env.CODEX_SECURITY_GIT;
   try {
+    const source = path.join(targetPath, "fixture.py");
+    if (gitAtRegistration) {
+      await execFileAsync("git", ["init", "-q", targetPath]);
+      await writeFile(
+        path.join(targetPath, ".git", "info", "exclude"),
+        "*.ignored\n",
+      );
+      await writeFile(path.join(targetPath, "cache.ignored"), "");
+      if (gitAtRegistration === "ignored-only") await rm(source);
+    }
+    if (gitAtRegistration && scenario === "fresh-empty") {
+      // Only host Git can identify the ignored file. The probe must exclude
+      // the unusable Git executable in this workbench's other saved target.
+      const historical = path.join(fixtureRoot, "historical");
+      await mkdir(historical);
+      const name = process.platform === "win32" ? "git.exe" : "git";
+      await writeFile(path.join(historical, name), "", { mode: 0o755 });
+      await owner.begin({
+        targetPath: historical,
+        threadId: "other",
+        scanRoot,
+      });
+      delete process.env.CODEX_SECURITY_GIT;
+      process.env.PATH = historical + path.delimiter + originalPath;
+    }
     const created = await owner.begin({ targetPath, threadId, scanRoot });
     const lease = { scanId: created.scanId, threadId };
     // Admission uses the later claim, even if the owner entered discovery before it expired.
@@ -99,6 +129,7 @@ async function testJoiningCallerAdmission(
     if (scenario !== "fresh-empty") {
       const claimed = await owner.claimCoordinator(lease);
       assert.equal(claimed.acquired, true);
+      assert.equal("workbenchDatabasePath" in claimed.run, false);
       await owner.updateProgress(discoveryProgress);
       const observer = await joiner.claimCoordinator(lease);
       assert.equal(observer.acquired, false);
@@ -106,8 +137,8 @@ async function testJoiningCallerAdmission(
       assert.equal(observer.run.dispatchedCount, 0);
       await expireLease(environment, created.scanId);
     }
-    if (scenario !== "resumed-with-source")
-      await rm(path.join(targetPath, "fixture.py"));
+    if (scenario === "resumed-with-source") await writeFile(source, "");
+    else await rm(source, { force: true });
     const { coordinator } = await startDeepScanEngine({
       run: joined,
       store: joiner,
@@ -140,12 +171,18 @@ async function testJoiningCallerAdmission(
         assert.equal(persisted.status, "failed");
         assert.deepEqual(persisted.persistedWorkers, []);
         assert.equal(persisted.dispatchedCount, 0);
+        for (const artifact of ["scan-manifest.json", "report.md"])
+          await assert.rejects(stat(path.join(created.scanDir, artifact)), {
+            code: "ENOENT",
+          });
       }
     } finally {
       coordinator.cancel("fixture cleanup");
       await coordinator.wait(undefined, 30_000);
     }
   } finally {
+    process.env.PATH = originalPath;
+    if (originalGit !== undefined) process.env.CODEX_SECURITY_GIT = originalGit;
     await rm(fixtureRoot, { recursive: true, force: true });
   }
 }

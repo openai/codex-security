@@ -61,8 +61,14 @@ export function startDeepScanEngine(options: {
       onStart: options.onStart,
       handoffClaimToken,
       threadId,
-      checkFreshTarget: (state, signal) =>
-        checkFreshTarget(state, signal, options.pythonCommand, pluginRoot),
+      checkFreshTarget: (state, signal, workbenchDatabasePath) =>
+        checkFreshTarget(
+          state,
+          signal,
+          options.pythonCommand,
+          pluginRoot,
+          workbenchDatabasePath,
+        ),
       onComplete: async (draft, signal, publication) => {
         const context = await createScanArtifactContext(
           run.scanId,
@@ -104,6 +110,7 @@ export async function checkFreshTarget(
   signal: AbortSignal,
   pythonCommand: string,
   pluginRoot: string,
+  workbenchDatabasePath?: string,
 ): Promise<void> {
   if (signal.aborted) return;
   try {
@@ -119,6 +126,7 @@ export async function checkFreshTarget(
         targetPath: run.targetPath,
         includePaths: run.includePaths ?? [run.scope],
         filePaths: run.filePaths ?? [],
+        workbenchDatabasePath,
       }),
       "Deep Scan target check",
       signal,

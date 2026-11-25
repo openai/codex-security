@@ -71,6 +71,7 @@ export interface ParentScanState {
 
 export interface CoordinatorOptions {
   run: DeepScanRunState;
+  workbenchDatabasePath?: string;
   store: DeepScanStore;
   executor: CodexWorkerExecutor;
   pluginRoot: string;
@@ -89,6 +90,7 @@ export interface CoordinatorOptions {
   checkFreshTarget?: (
     run: DeepScanRunState,
     signal: AbortSignal,
+    workbenchDatabasePath?: string,
   ) => Promise<void>;
   onComplete?: (
     draft: ScanDraftInput,
@@ -344,6 +346,7 @@ export class DeepScanCoordinator {
         await this.options.checkFreshTarget(
           this.state,
           this.discoveryAbortController.signal,
+          this.options.workbenchDatabasePath,
         );
       }
       if (this.canceled || this.externallyFailed) return;
