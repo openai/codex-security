@@ -1806,8 +1806,9 @@ overrides them with a path scope. `--output-dir` requires CSV input.
 
 Use `-c FILE` for shared settings; CSV mode/scope override file values.
 `--scan-prompt-file` adds shared instructions before each row's prompt.
-`--post-scan-prompt-file` runs a follow-up even after failure, but not after
-cancellation or a cost stop.
+`--post-scan-prompt-file` runs a follow-up after ordinary failures. Cancellation,
+a cost stop, or a recognized policy refusal from the primary local Standard
+turn skips the follow-up.
 
 By default, `bulk-scan` runs up to four repositories concurrently and tries each
 unfinished CSV row once per run. With `--max-attempts 2`, a row that fails

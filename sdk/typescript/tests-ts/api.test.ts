@@ -4375,21 +4375,40 @@ if __name__ == "__main__":
     await client.close();
   });
 
-  test.each([true, false])(
-    "records a native failure only when its terminal event preceded cancellation (failure first: %p)",
-    async (failureFirst) => {
+  const refusal = "This content was flagged for possible cybersecurity risk.";
+  const requestRefusal =
+    "This request has been flagged for possible cybersecurity risk.";
+  const nativeFailure = "Synthetic native turn failure";
+  test.each([
+    ["turn.failed", refusal, null, 1],
+    [
+      "error",
+      "This request was blocked due to a misalignment policy violation.",
+      null,
+      1,
+    ],
+    ["error", `Command failed: ${refusal}`, null, 2],
+    ["turn.failed", nativeFailure, "before", 1],
+    ["turn.failed", nativeFailure, "after", 1],
+    ["error", requestRefusal, "before", 1],
+    ["error", requestRefusal, "after", 1],
+  ] as const)(
+    "records the scan outcome and Standard follow-up for %s (%s, cancel %p)",
+    async (type, message, cancel, turns) => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       const controller = new AbortController();
-      const message = "Synthetic native turn failure";
       async function* events(): AsyncGenerator<ThreadEvent> {
-        if (!failureFirst) controller.abort();
+        yield { type: "thread.started", thread_id: "thread-1" };
+        if (cancel === "before") controller.abort();
         try {
-          yield { type: "turn.failed", error: { message } };
+          if (type === "error") yield { type, message };
+          yield* failedEvents(message);
         } finally {
-          // The reader closes a failed stream after observing its terminal event.
-          if (failureFirst) controller.abort();
+          // The reader closes the stream when it observes a failure.
+          if (cancel === "after") controller.abort();
         }
       }
+      const runStreamed = mock(async () => ({ events: events() }));
       const telemetry: Readonly<OperationTelemetryEvent>[] = [];
       let stopped: readonly string[] | undefined;
       await using client = TestClient.withDependencies({
@@ -4399,7 +4418,7 @@ if __name__ == "__main__":
             ...options,
             directory: join(root, "journal"),
           }),
-        createCodex: codexFactory(async () => ({ events: events() })),
+        createCodex: codexFactory(runStreamed),
         runWorkbench: async (_options, args, input) => {
           if (args[0] === "fail-scan" || args[0] === "cancel-scan")
             stopped = args;
@@ -4409,20 +4428,23 @@ if __name__ == "__main__":
       await expect(
         client.run(repository, {
           signal: controller.signal,
+          postScanPrompt: "Summarize the scan.",
           onTelemetry: (event) => telemetry.push(event),
         }),
-      ).rejects.toThrow();
+      ).rejects.toThrow(cancel === null ? message : undefined);
+      expect(runStreamed).toHaveBeenCalledTimes(turns);
+      const canceled = cancel === "before";
       expect(
         telemetry.filter((event) => event.type === "attempt_finished"),
       ).toEqual([
         expect.objectContaining({
-          outcome: failureFirst ? "failed" : "canceled",
-          failureCategory: failureFirst ? "execution" : "canceled",
+          outcome: canceled ? "canceled" : "failed",
+          failureCategory: canceled ? "canceled" : "execution",
         }),
       ]);
-      expect(controller.signal.aborted).toBe(true);
-      expect(stopped?.[0]).toBe(failureFirst ? "fail-scan" : "cancel-scan");
-      if (failureFirst) expect(stopped).toContain(`--message=${message}`);
+      expect(controller.signal.aborted).toBe(cancel !== null);
+      expect(stopped?.[0]).toBe(canceled ? "cancel-scan" : "fail-scan");
+      if (!canceled) expect(stopped).toContain(`--message=${message}`);
     },
   );
 

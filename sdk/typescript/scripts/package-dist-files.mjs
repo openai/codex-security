@@ -237,6 +237,7 @@ const distModules = [
   "deduplication/deduplication",
   "finding-retrieval",
   "contract-values",
+  "native-policy-refusals",
   "workbench-arguments",
   "executable-path",
   "finding-workflow",

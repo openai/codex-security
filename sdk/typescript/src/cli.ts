@@ -589,7 +589,7 @@ const PROJECT_CONFIG_OPTION = optionalValue("--config").describe(
 const VALIDATION_PROMPT_OPTION = optionalValue("--validation-prompt-file");
 const POST_SCAN_PROMPT_OPTION = optionalValue(
   "--post-scan-prompt-file",
-).describe("Run FILE after each scan, including failures.");
+).describe("Run FILE after completion or an ordinary scan failure.");
 const EXPORT_DEFAULT_OUTPUTS = ARTIFACT_EXPORT_FILENAMES;
 const PROVIDER_OPTION = z
   .enum([

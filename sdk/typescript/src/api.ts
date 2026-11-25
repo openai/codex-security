@@ -1,4 +1,5 @@
 /// <reference lib="esnext.disposable" preserve="true" />
+import { CYBERSECURITY_POLICY_REFUSAL_MESSAGES } from "./native-policy-refusals.js";
 import { workbenchArgs } from "./workbench-arguments.js";
 
 import { isSafeNonNegativeInteger as safeInteger } from "./value.js";
@@ -3778,14 +3779,21 @@ export class CodexSecurity {
         model,
         pricingContext,
         onTurnStatus: (status, message) => {
-          scanTurnStatus = status;
+          if (status === "completed") {
+            scanTurnStatus = status;
+            return;
+          }
+          // A refusal can close the stream on error before turn.failed.
+          const refused =
+            !hosted &&
+            skillName === "security-scan" &&
+            message !== undefined &&
+            CYBERSECURITY_POLICY_REFUSAL_MESSAGES.has(message);
+          if (status === "error" && !refused) return;
+          if (refused) runPostScan = null;
+          scanTurnStatus = "failed";
           // A later caller abort during iterator cleanup cannot undo a reported failure.
-          if (
-            status === "failed" &&
-            !directDeepScan &&
-            !this.#dependencies.hostedScan &&
-            !signal.aborted
-          ) {
+          if (!hosted && !directDeepScan && !signal.aborted) {
             nativeTurnFailure = message;
             if (this.#operationTelemetry !== null)
               this.#operationTelemetry.nativeTurnFailed = true;
@@ -6164,7 +6172,10 @@ interface ScanEventRunOptions extends Pick<ScanOptions, "onReconnect"> {
   model?: string;
   pricingContext?: ScanPricingContext;
   onFinalize?: (usage: unknown) => Promise<unknown>;
-  onTurnStatus?: (status: "completed" | "failed", message?: string) => void;
+  onTurnStatus?: (
+    status: "completed" | "failed" | "error",
+    message?: string,
+  ) => void;
   onThreadStarted?: (threadId: string) => Promise<void> | void;
   onScanStarted?: () => void;
   onTrustedAccessStatus?: (status: ScanTrustedAccessStatus) => void;
@@ -6192,6 +6203,8 @@ export async function runScanEvents(
           options.onTurnStatus?.("completed");
         if (event.type === "turn.failed")
           options.onTurnStatus?.("failed", turnFailureMessage(event["error"]));
+        if (event.type === "error" && typeof event["message"] === "string")
+          options.onTurnStatus?.("error", event["message"]);
         if (
           !tacStatusReported &&
           options.modelProvider !== "amazon-bedrock" &&
