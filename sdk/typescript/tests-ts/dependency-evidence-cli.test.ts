@@ -64,7 +64,82 @@ test("command schema exposes complete and blocked reports as direct output alter
   );
 });
 
-test("a reviewed check calls only selected evidence sources and reviews the original replies", async () => {
+test.each([
+  ["project", { model_provider: "openrouter" }, "--model is required"],
+  ["selected profile", { model_provider: "openrouter" }, "--model is required"],
+  [
+    "profile provider",
+    {
+      model_provider: "gateway",
+      model: "fixture-model",
+      model_providers: { gateway: { base_url: "https://profile.invalid/" } },
+    },
+    "provider definitions in a selected profile",
+  ],
+  [
+    "OpenAI gateway",
+    { model_provider: "openai", openai_base_url: "https://profile.invalid/" },
+    "custom OpenAI or ChatGPT endpoints",
+  ],
+] satisfies [string, object, string][])(
+  "rejects invalid investigator settings from the %s",
+  async (source, review, reason) => {
+    await using repo = await scopedTemporaryDirectory("investigator-provider-");
+    await preparePackage(repo.path);
+    const config = join(repo.path, "project.json");
+    const codex =
+      source === "project"
+        ? review
+        : {
+            model_provider: "gateway",
+            profile: "review",
+            profiles: { review },
+          };
+    await writeFile(config, JSON.stringify({ codex }));
+    await writeFile(
+      join(repo.path, "config.toml"),
+      '[model_providers.gateway]\nbase_url="https://ambient.invalid/"',
+    );
+    const stderr = capture();
+    const stdout = capture();
+    const status = await main(
+      [
+        "exploitability",
+        "check",
+        "npm:sample",
+        "--config",
+        config,
+        "--vuln-description",
+        "Synthetic issue",
+        "--json",
+      ],
+      stdout.stream,
+      stderr.stream,
+      dependencies({
+        currentDirectory: repo.path,
+        async onCodex() {
+          throw new Error("Unexpected investigator launch");
+        },
+        environment: {
+          CODEX_HOME: repo.path,
+          CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY: "1",
+        },
+      }),
+    );
+    expect(status, stderr.text()).toBe(2);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      status: "blocked",
+      reason: expect.stringContaining(reason),
+    });
+  },
+);
+
+test.each(["inline", "native"] as const)(
+  "a reviewed check using the %s profile calls only selected evidence sources and reviews the original replies",
+  checkReviewed,
+);
+
+async function checkReviewed(source: "inline" | "native") {
   await using repo = await scopedTemporaryDirectory("dependency-evidence-cli-");
   const git = (...args: string[]) =>
     execFileSync("git", args, { cwd: repo.path });
@@ -89,10 +164,21 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
   );
   const server = { command: "fixture-server", enabled_tools: ["read_build"] };
   const config = join(repo.path, "investigation.json");
+  await using home = await scopedTemporaryDirectory("investigator-home-");
+  if (source === "native") {
+    await writeFile(
+      join(home.path, "review.config.toml"),
+      'model = "fixture-model"\n[model_providers.unused]\nexperimental_bearer_token = "synthetic-private-value"\n',
+    );
+  }
   await writeFile(
     config,
     JSON.stringify({
       codex: {
+        profile: "review",
+        ...(source === "inline" && {
+          profiles: { review: { model: "fixture-model" } },
+        }),
         agents: {
           max_concurrent_threads_per_session: 7,
           default_subagent_reasoning_effort: "xhigh",
@@ -122,6 +208,8 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
       "--config",
       config,
       "--codex",
+      'model_provider="openrouter"',
+      "--codex",
       "features.multi_agent_v2.max_concurrent_threads_per_session=49",
       "--codex",
       'model_reasoning_effort="medium"',
@@ -137,8 +225,14 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
     stderr.stream,
     dependencies({
       currentDirectory: repo.path,
-      environment: { CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY: "1" },
+      environment: {
+        CODEX_HOME: home.path,
+        CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY: "1",
+      },
       async onCodex(args, output, _environment, prompt) {
+        expect(args.join(" ")).not.toContain("synthetic-private-value");
+        expect(args).toContain('model_provider="openrouter"');
+        expect(args).toContain('model="fixture-model"');
         expect(args[0]).toBe(output?.appServer ? "app-server" : "exec");
         expect(requestMetadata(args)).toMatchObject({
           codex_security_surface: "cli",
@@ -416,7 +510,7 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
     input_tokens: 12,
     output_tokens: 6,
   });
-});
+}
 
 const outputFlags = {
   json: ["--json"],
@@ -431,14 +525,13 @@ test.each(Object.keys(outputFlags) as (keyof typeof outputFlags)[])(
   checkCoordinatorOutput,
 );
 
-async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
-  await using repo = await scopedTemporaryDirectory("dependency-progress-");
-  execFileSync("git", ["init", "-q"], { cwd: repo.path });
+async function preparePackage(path: string) {
+  execFileSync("git", ["init", "-q"], { cwd: path });
   await writeFile(
-    join(repo.path, "package.json"),
+    join(path, "package.json"),
     JSON.stringify({ name: "fixture", version: "1.0.0" }),
   );
-  execFileSync("git", ["add", "package.json"], { cwd: repo.path });
+  execFileSync("git", ["add", "package.json"], { cwd: path });
   execFileSync(
     "git",
     [
@@ -450,8 +543,13 @@ async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
       "-qm",
       "fixture",
     ],
-    { cwd: repo.path },
+    { cwd: path },
   );
+}
+
+async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
+  await using repo = await scopedTemporaryDirectory("dependency-progress-");
+  await preparePackage(repo.path);
   const stdout = capture(format === "summary"),
     stderr = capture(false);
   const eventsPath = join(repo.path, "events.jsonl");

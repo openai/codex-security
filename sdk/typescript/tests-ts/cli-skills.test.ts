@@ -393,8 +393,8 @@ describe("CLI skill commands", () => {
       expect(help.text()).toContain("--effort <effort>");
       expect(help.text()).toContain("--model <model>");
       expect(help.text()).toContain("--codex <key=value>");
-      expect(help.text()).toContain('model="gpt-5.6-terra"');
-      expect(help.text()).toContain('model_reasoning_effort="high"');
+      expect(help.text()).toContain("model='gpt-5.6-terra'");
+      expect(help.text()).toContain("model_reasoning_effort='high'");
       expect(help.text()).toContain("daybreak=true");
       expect(help.text()).toContain("analytics.enabled=false");
       expect(help.text()).not.toContain("--provider");
