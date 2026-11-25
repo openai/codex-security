@@ -4342,7 +4342,7 @@ export async function main(
         provider: z
           .enum(EXTERNAL_FINDINGS_READERS)
           .describe(
-            "Select the file reader for this report. OpenGrep findings use the semgrep storage provider. Tenable and Tenzai require --to local and --source-repository-url. CrowdStrike requires --to local.",
+            "Select the file reader for this report. OpenGrep findings use the semgrep storage provider. Tenable and Tenzai require --to local and --source-repository-url. CrowdStrike and Grype require --to local.",
           ),
         sourceRepositoryUrl: optionalValue("--source-repository-url").describe(
           "Source repository URL when required by the selected reader. Checked against the Cloud destination or configured local Git remotes.",

@@ -18,6 +18,7 @@ import { isRecord } from "./record.js";
 import {
   awsTimestampSeconds,
   concreteVersion,
+  manifestPath,
   normalizeRecords,
   readScannerJson,
   record,
@@ -476,43 +477,6 @@ const ecosystems = new Map(
     PYTHONPKG: "pypi",
   }),
 );
-
-const manifests = new Set([
-  "package.json",
-  "package-lock.json",
-  "npm-shrinkwrap.json",
-  "yarn.lock",
-  "pnpm-lock.yaml",
-  "Cargo.toml",
-  "Cargo.lock",
-  "composer.json",
-  "composer.lock",
-  "Gemfile",
-  "Gemfile.lock",
-  "go.mod",
-  "go.sum",
-  "pom.xml",
-  "build.gradle",
-  "build.gradle.kts",
-  "gradle.lockfile",
-  "Pipfile",
-  "Pipfile.lock",
-  "poetry.lock",
-  "pyproject.toml",
-  "uv.lock",
-  "packages.config",
-  "packages.lock.json",
-]);
-
-function manifestPath(path: string | null): string | null {
-  if (!path) return null;
-  const name = posix.basename(path);
-  return manifests.has(name) ||
-    /^requirements(?:[-_.].*)?\.txt$/u.test(name) ||
-    /\.(?:csproj|fsproj|vbproj|gemspec)$/u.test(name)
-    ? path
-    : null;
-}
 
 function evidence(
   { native: finding, pkg, code }: ReturnType<typeof selectedFinding>,

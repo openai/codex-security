@@ -1,0 +1,58 @@
+{
+  "matches": [
+    {
+      "vulnerability": {
+        "id": "CVE-2099-0001",
+        "dataSource": "https://nvd.nist.gov/vuln/detail/CVE-2099-0001",
+        "namespace": "nvd:cpe",
+        "severity": "High",
+        "description": "A crafted length can cause excessive allocation in the example parser.",
+        "fix": { "versions": ["1.0.1"], "state": "fixed" }
+      },
+      "relatedVulnerabilities": [
+        {
+          "id": "GHSA-2345-6789-cfgh",
+          "namespace": "github:language:javascript",
+          "severity": "High"
+        }
+      ],
+      "matchDetails": [
+        { "type": "exact-direct-match", "matcher": "javascript-matcher" }
+      ],
+      "artifact": {
+        "id": "a1b2c3d4e5f60001",
+        "name": "@example/parser",
+        "version": "1.0.0",
+        "type": "npm",
+        "locations": [{ "path": "package-lock.json" }],
+        "language": "javascript",
+        "purl": "pkg:npm/%40example/parser@1.0.0"
+      }
+    },
+    {
+      "vulnerability": {
+        "id": "CVE-2099-0002",
+        "dataSource": "https://nvd.nist.gov/vuln/detail/CVE-2099-0002",
+        "namespace": "nvd:cpe",
+        "severity": "Critical",
+        "description": "Deserialization of untrusted data in the example client.",
+        "fix": { "versions": ["2.3.1", "3.0.0"], "state": "fixed" }
+      },
+      "relatedVulnerabilities": [],
+      "matchDetails": [
+        { "type": "exact-direct-match", "matcher": "python-matcher" }
+      ],
+      "artifact": {
+        "id": "a1b2c3d4e5f60002",
+        "name": "example-client",
+        "version": "2.3.0",
+        "type": "python",
+        "locations": [{ "path": "requirements.txt" }],
+        "language": "python",
+        "purl": "pkg:pypi/example-client@2.3.0"
+      }
+    }
+  ],
+  "source": { "type": "directory", "target": "." },
+  "descriptor": { "name": "grype", "version": "0.80.1" }
+}
