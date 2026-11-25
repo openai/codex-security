@@ -64,43 +64,54 @@ test("command schema exposes complete and blocked reports as direct output alter
   );
 });
 
-test("a project-selected investigator provider requires a model", async () => {
-  await using repo = await scopedTemporaryDirectory("investigator-provider-");
-  await preparePackage(repo.path);
-  const config = join(repo.path, "project.json");
-  await writeFile(
-    config,
-    JSON.stringify({ codex: { model_provider: "openrouter" } }),
-  );
-  const stderr = capture();
-  const stdout = capture();
-  const status = await main(
-    [
-      "exploitability",
-      "check",
-      "npm:sample",
-      "--config",
+test.each(["project", "selected profile"])(
+  "an investigator provider selected by the %s requires a model",
+  async (source) => {
+    await using repo = await scopedTemporaryDirectory("investigator-provider-");
+    await preparePackage(repo.path);
+    const config = join(repo.path, "project.json");
+    await writeFile(
       config,
-      "--vuln-description",
-      "Synthetic issue",
-      "--json",
-    ],
-    stdout.stream,
-    stderr.stream,
-    dependencies({
-      currentDirectory: repo.path,
-      environment: {
-        CODEX_HOME: repo.path,
-        CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY: "1",
-      },
-    }),
-  );
-  expect(status, stderr.text()).toBe(2);
-  expect(JSON.parse(stdout.text())).toMatchObject({
-    status: "blocked",
-    reason: expect.stringContaining("--model is required"),
-  });
-});
+      JSON.stringify({
+        codex:
+          source === "project"
+            ? { model_provider: "openrouter" }
+            : {
+                profile: "review",
+                profiles: { review: { model_provider: "openrouter" } },
+              },
+      }),
+    );
+    const stderr = capture();
+    const stdout = capture();
+    const status = await main(
+      [
+        "exploitability",
+        "check",
+        "npm:sample",
+        "--config",
+        config,
+        "--vuln-description",
+        "Synthetic issue",
+        "--json",
+      ],
+      stdout.stream,
+      stderr.stream,
+      dependencies({
+        currentDirectory: repo.path,
+        environment: {
+          CODEX_HOME: repo.path,
+          CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY: "1",
+        },
+      }),
+    );
+    expect(status, stderr.text()).toBe(2);
+    expect(JSON.parse(stdout.text())).toMatchObject({
+      status: "blocked",
+      reason: expect.stringContaining("--model is required"),
+    });
+  },
+);
 
 test("a reviewed check calls only selected evidence sources and reviews the original replies", async () => {
   await using repo = await scopedTemporaryDirectory("dependency-evidence-cli-");
@@ -131,7 +142,8 @@ test("a reviewed check calls only selected evidence sources and reviews the orig
     config,
     JSON.stringify({
       codex: {
-        model: "fixture-model",
+        profile: "review",
+        profiles: { review: { model: "fixture-model" } },
         agents: {
           max_concurrent_threads_per_session: 7,
           default_subagent_reasoning_effort: "xhigh",

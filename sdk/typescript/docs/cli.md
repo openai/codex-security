@@ -931,6 +931,11 @@ JSON and JSONL failures put the error under `error` in an `ok: false` envelope.
 YAML and TOON use the same failed envelope when retained sealed scan results are
 available (including TOON selected by default).
 
+For `scan` and `scan import`, `--no-json`, `--no-full-output` and
+`--no-token-count` cancel earlier uses of the corresponding output switches.
+Repeating a positive switch enables it again. `--no-json` leaves `--format json`
+and the `scan import --json FILE` input syntax unchanged.
+
 JSON token windows return the excerpt as a JSON string. With `--full-output`, the
 excerpt is in `data` and failure diagnostics remain in `error`.
 
@@ -1408,12 +1413,14 @@ resume and rerun do not depend on later changes to legacy defaults.
 ### Runtime configuration and worker limits
 
 Scans use an isolated Codex configuration. The default model and effort are
-`gpt-5.6-sol` and `xhigh`. Multi-agent v2 allows nine concurrent threads: the
+`gpt-6.1-sol` and `high`. Multi-agent v2 allows nine concurrent threads: the
 parent and up to eight delegated workers. That limit is separate from Deep Scan
 and bulk worker counts.
 
+To select a different model and effort for one scan and limit it to four threads, run
+
 ```bash
-codex-security scan . --model gpt-6.1-sol --effort high \
+codex-security scan . --model gpt-5.6-sol --effort xhigh \
   --codex features.multi_agent_v2.max_concurrent_threads_per_session=4
 ```
 
@@ -1460,6 +1467,8 @@ set `codex.profile: review`. The profile file uses top-level Codex TOML keys.
 Its settings override scanner defaults. Explicit scan settings take precedence.
 Relative file paths, including `model_instructions_file`, resolve from the
 profile directory. Saved launches retain the profile name and reload its settings.
+For an omitted model or effort, `scans resume` retains the scanner defaults from
+the original launch. `scans rerun` uses the installed scanner's defaults.
 Include custom provider definitions in the file so the scan
 can use them from its isolated Codex home. An absent file contributes no
 settings. Existing inline `profiles` tables still work.
@@ -2942,7 +2951,7 @@ codex-security scan . --diff origin/main \
 | Exit code     | Meaning                                                                  |
 | ------------- | ------------------------------------------------------------------------ |
 | `0`           | Complete report-only scan or passing severity policy.                    |
-| `1`           | Severity policy violation or blocked patch.                               |
+| `1`           | Severity policy violation or blocked patch.                              |
 | `2`           | Invalid input, runtime error, target change, or required-output failure. |
 | `130` / `143` | Interrupt / termination.                                                 |
 

@@ -397,6 +397,14 @@ export function formatCliHelp(
         );
         if (outputRows.length)
           sections.push(renderRows("Output", outputRows, width));
+        if (command === "scan" || command === "scan import") {
+          sections.push(
+            wrap(
+              "--no-json, --no-full-output and --no-token-count cancel the matching output switch. The last switch wins. --no-json leaves --format unchanged.",
+              width,
+            ),
+          );
+        }
         sections.push(
           wrap(
             "See codex-security --help for shared help and agent options.",
