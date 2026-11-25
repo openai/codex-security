@@ -99,6 +99,35 @@ def test_projection_normalizes_block_syntax_and_preserves_inline_tildes() -> Non
     assert f"Text: {instruction}" in markdown
 
 
+@pytest.mark.parametrize("marker", ["#", "######", "-", "+", "1.", "1)", "--", "---", "-- -"])
+def test_projection_keeps_marker_only_paragraphs_visible(marker: str) -> None:
+    markdown = report_with_finding(remediation=marker, summary=marker)
+    for section in ("Summary", "Remediation"):
+        assert f"#### {section}\n\nText: {marker}\n" in markdown
+
+
+def test_projection_keeps_trailing_heading_hashes_visible() -> None:
+    manifest, findings, coverage = canonical_documents()
+    manifest["scan"]["target"]["displayName"] = "C# ##"
+    findings["findings"][0]["title"] = "#"
+    markdown = PROJECTION.build_report_markdown(manifest, findings, coverage)
+    assert "# Security Review: C# \\##\n" in markdown
+    assert "### [1] \\#\n" in markdown
+    assert "[#](#finding-1)" in markdown
+
+
+def test_projection_preserves_inline_fields_and_non_marker_text() -> None:
+    manifest, findings, coverage = canonical_documents()
+    manifest["scan"]["target"]["revision"] = "1."
+    finding = findings["findings"][0]
+    finding["confidence"]["rationale"] = "#"
+    finding["remediationTests"] = ["#", "--flag", "-- input", "1000000000.", "*", ">"]
+    markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
+    assert "- Revision: 1.\n" in markdown
+    assert "| Confidence rationale | # |" in markdown
+    assert "- Text: #\n- --flag\n- -- input\n- 1000000000.\n- \\*\n- \\>\n" in markdown
+
+
 @pytest.mark.parametrize("linked_writeup", [False, True], ids=["inline", "linked"])
 def test_projection_retains_distinct_source_fixes(linked_writeup: bool) -> None:
     manifest, findings, coverage = canonical_documents()
