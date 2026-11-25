@@ -10,6 +10,9 @@ import { readFile } from "node:fs/promises";
 import { parse } from "smol-toml";
 import type { TurnOptions } from "@openai/codex-sdk";
 
+// Budget fixtures use exact dollar amounts for this model.
+export const BUDGET_TEST_CONFIG = { codexOverrides: { model: "gpt-5.6-sol" } };
+
 export const EXTERNAL_PROVIDER_CASES = [
   [
     "OpenRouter",
