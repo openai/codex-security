@@ -211,10 +211,15 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
         "storeExists": True,
         "receipts": [],
     }
-    path = db.database_path()
-    if payload["action"] == "inspect" or require_history:
+    inspect = payload["action"] == "inspect"
+    if inspect or require_history:
+        path = db.database_path()
+        if os.name == "nt":
+            from windows_scan_local_files import _extended_path
+
+            path = Path(_extended_path(path))
         try:
-            path.stat()
+            os.stat(path)
         except FileNotFoundError:
             if require_history:
                 raise SystemExit(
@@ -225,9 +230,13 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
             return result
         except PermissionError:
             pass  # Let SQLite report the open failure used by the host's state fallback.
-    if payload["action"] == "inspect":
+    if inspect:
+        uri = readonly_sqlite_uri(path)
+        if os.name == "nt":
+            # The default Win32 VFS can reject even extended paths at its UTF-8 byte limit.
+            uri += "&vfs=win32-longpath"
         try:
-            connection = sqlite3.connect(readonly_sqlite_uri(path), uri=True, timeout=5)
+            connection = sqlite3.connect(uri, uri=True, timeout=5)
         except sqlite3.OperationalError as exc:
             if str(exc) == "unable to open database file":
                 exc._codex_security_state_unavailable = True
@@ -236,11 +245,11 @@ def finding_issues(db: Any, payload: Any) -> dict[str, Any]:
     else:
         connection = db.connect()
     with closing(connection):
-        connection.execute("BEGIN" if payload["action"] == "inspect" else "BEGIN IMMEDIATE")
+        connection.execute("BEGIN" if inspect else "BEGIN IMMEDIATE")
         with connection:
             if require_history:
                 verify_publication_history(db, connection, scan_id, validated["scanDir"], findings)
-            if payload["action"] == "inspect":
+            if inspect:
                 result["receipts"] = inspect_issue_receipts(
                     connection, payload["destination"], key, list(selected)
                 )
