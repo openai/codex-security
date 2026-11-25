@@ -28,6 +28,7 @@
 - simplify sealed finding projections and SARIF line hashes ([#2826](https://github.com/openai/codex-security/pull/2826))
 - default scans to GPT-6.1 Sol with high reasoning effort ([#2358](https://github.com/openai/codex-security/pull/2358))
 - honor scan automation options and output contracts ([#1186](https://github.com/openai/codex-security/pull/1186))
+- select workflow instructions at runtime ([#2296](https://github.com/openai/codex-security/pull/2296))
 
 </details>
 

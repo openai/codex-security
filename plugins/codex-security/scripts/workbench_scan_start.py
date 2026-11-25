@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import errno
+import hashlib
 import json
 import os
 import re
@@ -27,7 +28,7 @@ from workbench.storage import (
     short_archive_prefix,
     state_dir,
 )
-from workbench_feedback import get_scan_feedback
+from workbench_feedback import FALSE_POSITIVE_FEEDBACK_PATH, get_scan_feedback
 from workbench_setup import require_target
 from workbench_target import (
     directory_content_digest,
@@ -35,6 +36,27 @@ from workbench_target import (
     worktree_content_digest,
 )
 from workbench_validation import optional_text, read_json_object, reject_non_finite_json
+
+
+def workspace_setup_digest(workspace: sqlite3.Row) -> str:
+    setup = [
+        workspace[key]
+        for key in (
+            "id",
+            "thread_id",
+            "target_id",
+            "target_path",
+            "default_mode",
+            "default_scope",
+            "user_context",
+            "deep_scan_config_json",
+        )
+    ]
+    return hashlib.sha256(json.dumps(setup).encode()).hexdigest()
+
+
+def workspace_confirmation_version(workspace: sqlite3.Row) -> str:
+    return f"{workspace_setup_digest(workspace)}.{workspace['updated_at']}"
 
 
 def safe_segment(value: str) -> str:
@@ -496,7 +518,7 @@ def insert_running_scan(
         if false_positives:
             write_scan_local_bytes(
                 scan_dir,
-                "artifacts/01_context/false_positive_feedback.json",
+                FALSE_POSITIVE_FEEDBACK_PATH,
                 (json.dumps(false_positives, allow_nan=False) + "\n").encode(),
             )
     return scan_id

@@ -242,9 +242,31 @@ def test_workbench_allows_user_confirmed_recovery_in_another_thread(tmp_path: Pa
     claim_token = f"recovery_{uuid.uuid4()}"
     scan_claim_command(state_dir, "claim-handoff-delivery", scan_id, claim_token)
 
-    delivered = mark_handoff_delivered(
-        state_dir, scan_id, claim_token, "--thread-id", "thread-recovery-confirmed"
-    )
+    thread = "thread-recovery-confirmed"
+
+    def allowance(*extra: str, token: str = claim_token, check: bool = False):
+        return scan_claim_command(
+            state_dir,
+            "update-scan-context",
+            scan_id,
+            token,
+            "--thread-id",
+            thread,
+            "--max-time-minutes",
+            "10",
+            *extra,
+            check=check,
+        )
+
+    assert allowance()["returncode"] != 0
+    delivered = mark_handoff_delivered(state_dir, scan_id, claim_token, "--thread-id", thread)
 
     assert delivered["results"]["handoffStatus"] == "delivered"
     assert delivered["results"]["handoffClaimToken"] == claim_token
+
+    assert allowance(token=f"recovery_{uuid.uuid4()}")["returncode"] != 0
+    assert allowance("--user-context", "replacement")["returncode"] != 0
+    assert "investigationPolicy" not in get_scan(state_dir, scan_id)
+    updated = allowance(check=True)
+    assert updated["investigationPolicy"]
+    assert updated["scan"]["userContext"] == delivered["results"]["userContext"]

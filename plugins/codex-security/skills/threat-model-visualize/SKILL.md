@@ -68,13 +68,9 @@ After browser-driven JSON edits, repeat the affected source/selection checks and
 
 Start browser QA only with the current JSON's `PASS` receipt from phase 3.
 
-```sh
-python3.12 <skill-directory>/scripts/build_explorer.py <model.json> --assessment <threat-model.md> --output <explorer.html>
-```
+Run the [`build-explorer` command](../../references/skill-runtime.md) on the build host with the model, assessment and output HTML paths.
 
-Choose browser tooling available and permitted in the current environment before starting a preview server. In standalone CLI/CI, check known runtime or dependency locations for an installed headless browser (such as Playwright with Chromium); do not assume a desktop browser host exists. Use that browser for interaction checks, screenshot inspection, offline loading and export verification when policy permits. A missing desktop host does not establish that every browser is unavailable; a policy denial does not authorize a workaround. If no permitted browser is available, deliver the local files and mark browser QA incomplete.
-
-Codex’s in-app browser automation does not support `file:` URLs. For browser QA there, use a local HTTP preview; do not try a file URL first. Other browsers may open the standalone HTML directly from disk. When HTTP is needed, bind your own server to `127.0.0.1` on an unused or OS-assigned port, serve only the output directory, and stop it after QA; do not assume another process on a familiar port serves these files.
+Use a permitted browser with interaction and screenshot support from the current tool surface or an installed local runtime such as Playwright with Chromium. Check the executor's installed browser tooling when no browser tool is exposed. Open the HTML using the browser's supported local transport. For browsers that require HTTP, serve only the output directory from your own server on `127.0.0.1` at an unused or OS-assigned port. Stop it after QA. Respect any policy denial. When no permitted browser is available, deliver the local files and mark browser QA incomplete.
 
 Review the builder’s connector warnings. After moving or resizing a node, align adjacent bends with its ports and check that each connector approaches the node from outside. Rebuild after correcting the authored points.
 

@@ -527,7 +527,7 @@ with ExitStack() as stack:
             mocks.enter_context(patch.object(deep_workbench, "deep_scan_result", side_effect=lambda database, scan_id, **kwargs: {"scanId": scan_id}))
             deep = deep_workbench.begin_deep_scan_for_target(connection, argparse.Namespace(
                 target_path=str(target), scope=".", workflow_version="synthetic", scan_root=str(root / "artifacts"),
-                user_context=None, model=None, reasoning_effort=None,
+                user_context=None, model=None, reasoning_effort=None, confirmed_concurrent_scan_id=[],
                 join_only=False, project_config_path=None, service_tier=None,
             ), "synthetic-thread")
         print(json.dumps({
@@ -618,6 +618,9 @@ with ExitStack() as stack:
                     diff_head_revision=None, diff_content_digest=None, user_context=None,
                     target_summary=None, scan_root=None, model=None, reasoning_effort=None,
                     claim_token=None, workflow_version="synthetic",
+                    confirmed_concurrent_scan_id=[
+                        active["scanId"] for active in deep_workbench.other_running_deep_scans(connection)
+                    ] if mode == "deep" else [],
                     join_only=False, project_config_path=None, service_tier=None,
                 )
                 try:
@@ -1225,6 +1228,7 @@ with ExitStack() as stack:
             "oldRegistrationRejected": old_registration_rejected,
         }))
     elif scenario == "lineage":
+        root = root.resolve()
         for name, stored, live in [
             ("requested", "repository-current", None),
             ("removed", "repository-current", None),
@@ -1237,9 +1241,9 @@ with ExitStack() as stack:
             add_target(name, stored, live, relative="service" if name == "scope" else ".")
             add_scan(name + "-scan", name, "missing" if name == "unverified" else "current")
         missing.add(paths["removed"])
+        Path(paths["requested"]).mkdir()
         scan_dir = root / "scan-output"
-        original_iterdir = Path.iterdir
-        stack.enter_context(patch.object(Path, "iterdir", lambda path: iter(()) if path == scan_dir else original_iterdir(path)))
+        scan_dir.mkdir()
         stack.enter_context(patch.object(workbench, "require_target", return_value=Path(paths["requested"])))
         stack.enter_context(patch.object(scan_start, "require_target", return_value=Path(paths["requested"])))
         stack.enter_context(patch.object(workbench, "require_scannable_target"))

@@ -604,6 +604,7 @@ async function resumeWithPlugin(source: string) {
                   originalFeedback,
                 );
                 expect(prompt).toContain(f.scanId);
+                expect(prompt).toContain("false_positive_feedback.json");
                 expect(prompt).toContain("Review the revised scan scope.");
                 expect(prompt).toContain(JSON.stringify({ severityRubric }));
                 const joined = await f.scanCommand(
@@ -740,6 +741,13 @@ test("Standard resume preserves checkpoints through another disconnect and compl
     maxTimeMinutes: 5,
     ownerSuggestions: false,
   });
+  const feedbackPath = join(
+    f.scanDir,
+    "artifacts/01_context/false_positive_feedback.json",
+  );
+  const feedback = [{ reason: "Original reviewer rationale." }];
+  await mkdir(dirname(feedbackPath), { recursive: true });
+  await writeJson(feedbackPath, feedback);
   const draftPath = join(f.scanDir, "drafts", `${f.scanId}.json`);
   await mkdir(dirname(draftPath), { recursive: true });
   async function saveDraft(complete: boolean) {
@@ -789,6 +797,8 @@ test("Standard resume preserves checkpoints through another disconnect and compl
           expect(prompt).toContain(
             new Date(initial["startedAt"] as string).toISOString(),
           );
+          expect(prompt).toContain("false_positive_feedback.json");
+          expect(await readJson(feedbackPath)).toEqual(feedback);
           expect(await readDraft()).toEqual(original);
           attempts++;
           await appendRecord(
@@ -1360,6 +1370,7 @@ test.each([
         : ["scans", "resume", f.scanId, "--json"],
       resumeDependencies(f, () =>
         resumingCodex(f.threadId, async (prompt) => {
+          expect(prompt).not.toContain("false_positive_feedback.json");
           expect(prompt).not.toContain("Keep the original scan instructions.");
           if (!alreadyFinished) await finishDiscovery(f);
           return { events: completedEvents(f.threadId) };
