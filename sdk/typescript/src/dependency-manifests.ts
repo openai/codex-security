@@ -139,10 +139,15 @@ export async function readNpmManifests(
           if (!isRecord(entry)) continue;
           const version = entry["version"];
           const versionLine = source.line(["packages", installed, "version"]);
+          // As in npm, a "*" or empty request is valid for any installed
+          // version, prereleases included.
           if (
             typeof version === "string" &&
             valid(version) &&
-            (!range || satisfies(version, range)) &&
+            (!range ||
+              requested === "*" ||
+              requested === "" ||
+              satisfies(version, range)) &&
             versionLine &&
             !entry["link"] &&
             (!entry["name"] || entry["name"] === name)

@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { discoverDependencyRepository } from "../src/dependency-discovery.js";
+import { readNpmManifests } from "../src/dependency-manifests.js";
 
 const pkg = { ecosystem: "npm", name: "sample-codec" };
 
@@ -225,5 +226,46 @@ test("reports a nested build-only package in the active caller boundary", async 
     ]);
   } finally {
     await rm(repo, { recursive: true, force: true });
+  }
+});
+
+test("a wildcard npm request selects a locked prerelease like npm does", async () => {
+  for (const [requested, selected] of [
+    ["*", true],
+    ["", true],
+    ["^2.0.0-beta.1", true],
+    [">=1.0.0", false],
+    [">=0.0.0", false],
+    ["x", false],
+  ] as const) {
+    const files: Record<string, string> = {
+      "package.json": JSON.stringify({
+        name: "app",
+        dependencies: { lib: requested },
+      }),
+      "package-lock.json": JSON.stringify(
+        {
+          lockfileVersion: 3,
+          packages: {
+            "": { name: "app", dependencies: { lib: requested } },
+            "node_modules/lib": { version: "2.0.0-beta.3" },
+          },
+        },
+        null,
+        2,
+      ),
+    };
+    const gaps: string[] = [];
+    const [manifest] = await readNpmManifests(
+      new Set(Object.keys(files)),
+      ["package.json"],
+      "lib",
+      async (path) => files[path]!,
+      gaps,
+    );
+    expect(manifest?.selection?.version).toBe(
+      selected ? "2.0.0-beta.3" : undefined,
+    );
+    expect(gaps.length).toBe(selected ? 0 : 1);
   }
 });
