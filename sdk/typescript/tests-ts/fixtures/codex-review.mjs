@@ -40,6 +40,7 @@ const turnFailures = {
     "Safety policy: request refused. Service unavailable.",
   ),
   "policy-turn-code": failure("Request blocked.", "cyberPolicy"),
+  "policy-bio-code": failure("Request blocked.", "bioPolicy"),
   "policy-turn": failure(
     "Request flagged for possible cybersecurity risk.",
     "other",

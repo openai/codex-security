@@ -173,6 +173,7 @@ const failureReasons: Record<string, string> = {
     "Safety policy: request refused because the service timed out",
   "service-timeout-text": "Codex did not submit a validated review",
   "policy-turn-code": "Request blocked.",
+  "policy-bio-code": "Request blocked.",
   "policy-request-code": "Request blocked.",
   "policy-turn": "Request flagged for possible cybersecurity risk.",
   "policy-accordance-turn":
@@ -273,6 +274,7 @@ const modelFailures = new Set([
   "transport-null-turn",
   "transport-timeout-turn",
   "policy-turn-code",
+  "policy-bio-code",
   "policy-turn",
   "policy-accordance-turn",
   "policy-terse-turn",
@@ -1029,7 +1031,7 @@ test.each([
   }
 });
 
-test.each(["cyberPolicy", "misalignmentPolicyViolation"])(
+test.each(["cyberPolicy", "bioPolicy", "misalignmentPolicyViolation"])(
   "recognizes structured policy refusal codes independently of message wording: %s",
   (code) => {
     expect(isReviewRefusal("Request blocked.", code)).toBe(true);
