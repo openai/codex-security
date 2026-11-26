@@ -31,7 +31,7 @@
   },
   "dependencies": {
     "@openai/codex-sdk": "0.172.0",
-    "promptfoo": "0.125.1"
+    "promptfoo": "0.126.0"
   },
   "devDependencies": {
     "yaml": "2.9.1"
