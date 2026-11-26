@@ -11,6 +11,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { tokenUsage } from "../src/cost-model";
 import {
   DependencyAttemptStore,
   dependencyRecordHash,
@@ -694,6 +695,29 @@ test("package checks freeze each advisory independently and verify exact source 
     });
     expect(details("assessment_finished")).toEqual({ uses: 1 });
   }
+});
+
+test("keeps an overflowed dependency usage total unavailable after a later receipt", async () => {
+  await using f = await fixture();
+  const result = await runReviewedDependencyCheck(
+    { ...f.packageOptions, vulnDescription: "Check calls to the parser." },
+    {
+      discover: async () => f.discovery,
+      runAgent: async (req) => {
+        const input = JSON.parse(req.prompt.split("\n\n").at(-1)!);
+        if (input.claims) return approvedReview(input.claims);
+        if (!req.onUsage) throw new Error("Expected the usage callback");
+        for (const inputTokens of [Number.MAX_SAFE_INTEGER, 2, 1]) {
+          req.onUsage(
+            tokenUsage({ input_tokens: inputTokens, output_tokens: 0 })!,
+          );
+        }
+        return JSON.stringify({ uses: [f.use], limitations: [] });
+      },
+    },
+  );
+  if (!("checks" in result)) throw new Error("Missing package checks");
+  expect(result.checks[0]!.usage).toBeNull();
 });
 
 test("caller descriptions stay scoped and a source-only positive is blocked", async () => {

@@ -754,6 +754,7 @@ async function investigateIssue(
       searches.push(dependencyLookupSearch(record));
     };
     let usage: ScanTokenUsage | null = null;
+    let usageOverflow = false;
     let lastAccessProgram: string | undefined;
     const run = (
       prompt: string,
@@ -782,7 +783,9 @@ async function investigateIssue(
             },
           }),
         onUsage(value) {
+          if (usageOverflow) return;
           usage = addTokenUsage(usage, value);
+          usageOverflow = usage === null;
         },
         ...(coordinator &&
           options.evidenceSources?.length && {

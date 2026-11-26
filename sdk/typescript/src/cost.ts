@@ -412,6 +412,7 @@ function createSessionUsage(observeUsage: boolean) {
       ? new Map<string, ScanAccountRateLimit>()
       : null,
     responseUsage: null as ScanTokenUsage | null,
+    usageOverflow: false,
     responseIds: new Set<string>(),
     eventPosition: 0,
     calls: new Map<string, ScanActivity>(),
@@ -2397,7 +2398,8 @@ export class ScanCostTracker {
       this.#options.readBudgetUsage ||
       this.#receipts.size > 0 ||
       this.#snapshot.measurement.usage !== null ||
-      this.#snapshot.measurement.missingThreadCount > 0
+      this.#snapshot.measurement.missingThreadCount > 0 ||
+      this.#snapshot.measurement.warnings?.includes("token_usage_overflow")
     )
       return this.#snapshot;
     const usage = tokenUsage(fallbackUsage);
@@ -2535,6 +2537,7 @@ export class ScanCostTracker {
     // SDK totals retain measured usage when a rollout is unavailable.
     // Native rollouts also establish descendant coverage.
     const incomplete = new Set(workerReceipts.usages.keys());
+    const overflowedThreads = new Set<string>();
     for (const [path, tracked] of this.#sessions) {
       const threadId = tracked.threadId;
       if (threadId === null || !usages.has(threadId)) continue;
@@ -2591,23 +2594,29 @@ export class ScanCostTracker {
           collectionErrors.push(error);
         }
       }
-      const receipt = usages.get(threadId);
-      if (
-        session.usage !== null &&
-        session.usage.total_tokens >=
-          (workerReceipts.usages.get(threadId)?.total_tokens ?? 0)
-      )
-        incomplete.delete(threadId);
-      if (
-        session.usage !== null &&
-        (session.usage.total_tokens > (receipt?.total_tokens ?? -1) ||
-          // Worker receipts retain field presence; the SDK may default to zero.
-          (session.usage.total_tokens === receipt?.total_tokens &&
-            (receipt.cache_write_input_tokens_reported === false ||
-              (receipt === this.#receipts.get(threadId) &&
-                receipt.cache_write_input_tokens === 0))))
-      ) {
-        usages.set(threadId, session.usage);
+      if (session.usageOverflow) overflowedThreads.add(threadId);
+      if (overflowedThreads.has(threadId)) {
+        usages.set(threadId, null);
+        incomplete.add(threadId);
+      } else {
+        const receipt = usages.get(threadId);
+        if (
+          session.usage !== null &&
+          session.usage.total_tokens >=
+            (workerReceipts.usages.get(threadId)?.total_tokens ?? 0)
+        )
+          incomplete.delete(threadId);
+        if (
+          session.usage !== null &&
+          (session.usage.total_tokens > (receipt?.total_tokens ?? -1) ||
+            // Worker receipts retain field presence; the SDK may default to zero.
+            (session.usage.total_tokens === receipt?.total_tokens &&
+              (receipt.cache_write_input_tokens_reported === false ||
+                (receipt === this.#receipts.get(threadId) &&
+                  receipt.cache_write_input_tokens === 0))))
+        ) {
+          usages.set(threadId, session.usage);
+        }
       }
       if (!observe) continue;
       let worker: number | undefined;
@@ -2725,6 +2734,7 @@ export class ScanCostTracker {
       this.#reportedSessionPositions.set(eventStream, reported);
     }
     let usage: ScanTokenUsage | null = null;
+    let usageOverflow = false;
     let missingThreadCount = workerReceipts.unknownAttempts;
     let threadCount = 0;
     for (const [threadId, value] of usages) {
@@ -2734,7 +2744,10 @@ export class ScanCostTracker {
       }
       threadCount += 1;
       if (incomplete.has(threadId)) missingThreadCount += 1;
-      usage = addTokenUsage(usage, value);
+      if (!usageOverflow) {
+        usage = addTokenUsage(usage, value);
+        if (usage === null) usageOverflow = true;
+      }
     }
     if (collectionErrors.length > 0)
       missingThreadCount = Math.max(1, missingThreadCount);
@@ -2747,6 +2760,9 @@ export class ScanCostTracker {
           complete,
           threadCount,
           missingThreadCount,
+          ...(usageOverflow || overflowedThreads.size > 0
+            ? { warnings: ["token_usage_overflow"] }
+            : {}),
           coverageScope:
             collectionErrors.length === 0
               ? [
@@ -3333,6 +3349,40 @@ async function readSessionUsage(
   }
 }
 
+function tokenUsageTotalOverflow(value: unknown): boolean {
+  if (!isRecord(value)) return false;
+  for (const key of [
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "cache_write_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+  ]) {
+    const count = value[key];
+    if (
+      typeof count === "number" &&
+      count >= 0 &&
+      (!Number.isFinite(count) ||
+        (Number.isInteger(count) && !isSafeNonNegativeInteger(count)))
+    )
+      return true;
+  }
+  const input = value["input_tokens"];
+  const output = value["output_tokens"];
+  if (!isSafeNonNegativeInteger(input) || !isSafeNonNegativeInteger(output))
+    return false;
+  const cached = value["cached_input_tokens"] ?? 0;
+  const cacheWrite =
+    value["cache_write_input_tokens"] ?? value["cache_write_tokens"] ?? 0;
+  return (
+    !isSafeNonNegativeInteger(input + output) ||
+    (isSafeNonNegativeInteger(cached) &&
+      isSafeNonNegativeInteger(cacheWrite) &&
+      !isSafeNonNegativeInteger(cached + cacheWrite))
+  );
+}
+
 function readSessionEvent(
   line: string,
   session: SessionUsage,
@@ -3365,8 +3415,13 @@ function readSessionEvent(
   if (session.replaying) {
     if (event["type"] !== "event_msg") return;
     if (payload["type"] === "token_count" && isRecord(payload["info"])) {
-      const usage = tokenUsage(payload["info"]["total_token_usage"]);
+      const rawUsage = payload["info"]["total_token_usage"];
+      const usage = tokenUsage(rawUsage);
       if (usage !== null) session.inheritedUsage = usage;
+      else if (tokenUsageTotalOverflow(rawUsage)) {
+        session.usageOverflow = true;
+        session.usage = null;
+      }
     }
     if (
       payload["type"] === "task_started" &&
@@ -3388,13 +3443,29 @@ function readSessionEvent(
     ) {
       return;
     }
-    const usage = tokenUsage(payload["usage"]);
+    const rawUsage = payload["usage"];
+    const rawTotal = payload["thread_token_usage"];
+    const usage = tokenUsage(rawUsage);
+    const total = tokenUsage(rawTotal);
+    if (
+      (usage === null && tokenUsageTotalOverflow(rawUsage)) ||
+      (total === null && tokenUsageTotalOverflow(rawTotal))
+    ) {
+      session.usageOverflow = true;
+      session.usage = null;
+      return;
+    }
     if (usage === null) return;
     session.responseIds.add(responseId);
+    if (session.usageOverflow) return;
     session.responseUsage = addTokenUsage(session.responseUsage, usage);
+    if (session.responseUsage === null) {
+      session.usageOverflow = true;
+      session.usage = null;
+      return;
+    }
     // Native thread totals include compaction and any earlier turns. They are
     // scoped to thread_id, unlike inherited legacy token_count snapshots.
-    const total = tokenUsage(payload["thread_token_usage"]);
     const recorded =
       total !== null && total.total_tokens >= session.responseUsage.total_tokens
         ? total
@@ -3568,9 +3639,14 @@ function readSessionEvent(
     if (repository !== undefined) readSessionReasoning(session, payload);
     return;
   }
-  const usage = isRecord(payload["info"])
-    ? tokenUsage(payload["info"]["total_token_usage"])
-    : null;
+  const rawUsage = isRecord(payload["info"])
+    ? payload["info"]["total_token_usage"]
+    : undefined;
+  const usage = tokenUsage(rawUsage);
+  if (usage === null && tokenUsageTotalOverflow(rawUsage)) {
+    session.usageOverflow = true;
+    session.usage = null;
+  }
   const ownUsage =
     session.inheritedUsage === null || usage === null
       ? usage
@@ -3578,6 +3654,7 @@ function readSessionEvent(
   // Older runtimes only emit token_count. In newer rollouts these snapshots can
   // lag compaction receipts, so do not replace a more complete native total.
   const measured =
+    !session.usageOverflow &&
     ownUsage !== null &&
     (session.usage === null ||
       ownUsage.total_tokens > session.usage.total_tokens ||
@@ -3947,9 +4024,9 @@ function readResponseProgress(
 export function addTokenUsage(
   previous: ScanTokenUsage | null,
   next: ScanTokenUsage,
-): ScanTokenUsage {
+): ScanTokenUsage | null {
   if (previous === null) return next;
-  return {
+  return tokenUsage({
     input_tokens: previous.input_tokens + next.input_tokens,
     cached_input_tokens:
       previous.cached_input_tokens + next.cached_input_tokens,
@@ -3962,8 +4039,7 @@ export function addTokenUsage(
     output_tokens: previous.output_tokens + next.output_tokens,
     reasoning_output_tokens:
       previous.reasoning_output_tokens + next.reasoning_output_tokens,
-    total_tokens: previous.total_tokens + next.total_tokens,
-  };
+  });
 }
 
 function subtractTokenUsage(
