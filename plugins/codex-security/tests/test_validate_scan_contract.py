@@ -155,6 +155,25 @@ class ValidateScanContractTest(ScanFixtureTestCase):
         with self.assertRaisesRegex(VALIDATOR.FINALIZER.ContractError, "sealed"):
             VALIDATOR.validate_contract(self.scan_dir)
 
+    def test_cli_rejects_non_string_scan_status(self) -> None:
+        validator = PLUGIN_ROOT / "scripts" / "validate_scan_contract.py"
+        for status in (["completed"], {}, "bogus"):
+            with self.subTest(status=status):
+                manifest = self.read_json("scan-manifest.json")
+                manifest["scan"]["status"] = status
+                self.write_json("scan-manifest.json", manifest)
+                result = subprocess.run(
+                    [sys.executable, "-B", str(validator), "--scan-dir", str(self.scan_dir)],
+                    capture_output=True,
+                    check=False,
+                    text=True,
+                )
+                self.assertEqual(result.returncode, 2, result.stderr)
+                self.assertIn(
+                    "manifest.scan.status: expected a terminal scan outcome", result.stderr
+                )
+                self.assertNotIn("Traceback", result.stderr)
+
     def test_finalizer_then_validator_cli_smoke(self) -> None:
         (self.scan_dir / "report.md").unlink()
         scan_dir = self.scan_dir.resolve()

@@ -141,6 +141,17 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         with self.assertRaisesRegex(FINALIZER.ContractError, message):
             FINALIZER.finalize_scan(self.scan_dir)
 
+    def test_finalizer_rejects_non_string_scan_status(self) -> None:
+        self.write_sealed_scan()
+        for status in (["completed"], {}, "bogus"):
+            with self.subTest(status=status):
+                manifest = self.read_json("scan-manifest.json")
+                manifest["scan"]["status"] = status
+                self.write_json("scan-manifest.json", manifest)
+                self.assert_finalization_fails(
+                    "manifest.scan.status: expected a terminal scan outcome before sealing"
+                )
+
     def write_scan(self) -> None:
         self.write_json("scan-manifest.json", self.manifest)
         self.write_json("findings.json", self.findings)
