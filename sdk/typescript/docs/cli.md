@@ -277,25 +277,25 @@ export CHEAPER_INFERENCE_API_KEY="<your-cheaper-inference-api-key>"
 codex-security scan . --provider cheaperinference --model gpt-5.4
 ```
 
-For UberLLM, save this profile in `$CODEX_HOME/uberllm.config.toml`
-(default `~/.codex/uberllm.config.toml`):
+For MartLLM, save this profile in `$CODEX_HOME/martllm.config.toml`
+(default `~/.codex/martllm.config.toml`):
 
 ```toml
-model_provider = "uberllm"
+model_provider = "martllm"
 model = "deepseek/deepseek-v4.1-flash"
 
-[model_providers.uberllm]
-name = "UberLLM"
-base_url = "https://api.uberllm.dev/v1"
+[model_providers.martllm]
+name = "MartLLM"
+base_url = "https://api.martllm.com/v1"
 wire_api = "responses"
-env_key = "UBERLLM_API_KEY"
+env_key = "MARTLLM_API_KEY"
 ```
 
-Set `UBERLLM_API_KEY` in your environment and run
-`codex-security scan . --codex 'profile="uberllm"'`. The example model handled a
+Set `MARTLLM_API_KEY` in your environment and run
+`codex-security scan . --codex 'profile="martllm"'`. The example model handled a
 shell tool call over the Responses API. A full scan also requires support for
-Codex Security's namespaced completion tool, which has yet to be verified on UberLLM.
-See [UberLLM's Codex setup guide](https://uberllm.dev/docs/codex).
+Codex Security's namespaced completion tool, which has yet to be verified on MartLLM.
+See [MartLLM's Codex setup guide](https://martllm.com/docs/codex).
 
 ### Hugging Face compatibility
 
