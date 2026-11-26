@@ -35,7 +35,8 @@ import {
   readOperationTelemetry,
   type OperationTelemetryEvent,
 } from "../src/operation-telemetry.js";
-import { preparedRuntime } from "./support/api-events.js";
+import { BUDGET_TEST_CONFIG } from "./support/api-client.js";
+import { completedTurn, preparedRuntime } from "./support/api-events.js";
 import { InternalSecurity } from "./support/internal-security.js";
 import type { PluginPythonOptions } from "../src/runtime.js";
 import * as runtime from "../src/runtime.js";
@@ -51,7 +52,11 @@ import {
   stageResult,
 } from "./support/security-policy.js";
 import { rejecting, throwing } from "./support/errors.js";
-import { writeSession } from "./support/usage-rollout.js";
+import {
+  basicUsage,
+  completedMessage,
+  writeSession,
+} from "./support/usage-rollout.js";
 
 const { fixture, cleanup } = createPolicyTestFixtures();
 afterEach(cleanup);
@@ -155,24 +160,8 @@ async function* events(
 ): AsyncGenerator<ThreadEvent> {
   yield { type: "thread.started", thread_id: `policy-${stage}` };
   yield { type: "turn.started" };
-  yield {
-    type: "item.completed",
-    item: {
-      id: "result",
-      type: "agent_message",
-      text: JSON.stringify(result),
-    },
-  };
-  yield {
-    type: "turn.completed",
-    usage: {
-      input_tokens: 100,
-      cached_input_tokens: 0,
-      cache_write_input_tokens: 0,
-      output_tokens: 10,
-      reasoning_output_tokens: 0,
-    },
-  };
+  yield completedMessage("result", JSON.stringify(result));
+  yield completedTurn({ input_tokens: 100, output_tokens: 10 });
 }
 
 describe("CodexSecurity policy API", () => {
@@ -538,7 +527,7 @@ describe("CodexSecurity policy API", () => {
     expect(preflight.targetPath).toBe(
       join(f.repository, "component", "SECURITY.md"),
     );
-    expect(preflight.model).toBe("gpt-5.6-sol");
+    expect(preflight.model).toBe("gpt-6.1-sol");
     expect(onPrepare).not.toHaveBeenCalled();
     expect(await readdir(f.outputDir)).toEqual([]);
     await f.security.close();
@@ -1467,7 +1456,7 @@ describe("CodexSecurity policy API", () => {
   });
 
   test("uses the shared runtime for three fresh, scoped, structured turns", async () => {
-    const f = await setup({ surface: "cli" });
+    const f = await setup({ surface: "cli", config: BUDGET_TEST_CONFIG });
     await writeFile(
       join(f.repository, "SECURITY.md"),
       "# Existing policy\nKeep the reporting channel.\n",
@@ -1840,7 +1829,7 @@ describe("CodexSecurity policy API", () => {
   });
 
   test("enforces one cost budget across stages and preserves completed evidence", async () => {
-    const f = await setup();
+    const f = await setup({ config: BUDGET_TEST_CONFIG });
     const observed: OperationTelemetryEvent[] = [];
     try {
       const result = f.security.generatePolicy(f.repository, {
@@ -1889,10 +1878,11 @@ describe("CodexSecurity policy API", () => {
         throw signal.reason;
       },
     });
-    await writeSession(f.runtime.codexHome, "policy-architecture", {
-      input_tokens: 3_000,
-      output_tokens: 0,
-    });
+    await writeSession(
+      f.runtime.codexHome,
+      "policy-architecture",
+      basicUsage(3_000, 0),
+    );
     await writeSession(
       f.runtime.codexHome,
       "policy-worker",
@@ -2050,20 +2040,8 @@ describe("CodexSecurity policy API", () => {
           }
           yield { type: "thread.started", thread_id: "policy-failed" };
           if (response === "invalid") {
-            yield {
-              type: "item.completed",
-              item: { id: "result", type: "agent_message", text: "not JSON" },
-            };
-            yield {
-              type: "turn.completed",
-              usage: {
-                input_tokens: 0,
-                cached_input_tokens: 0,
-                cache_write_input_tokens: 0,
-                output_tokens: 0,
-                reasoning_output_tokens: 0,
-              },
-            };
+            yield completedMessage("result", "not JSON");
+            yield completedTurn({ input_tokens: 0, output_tokens: 0 });
           }
         },
       });

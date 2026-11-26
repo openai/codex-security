@@ -7,7 +7,7 @@ import hashlib
 import os
 from collections import Counter, deque
 from functools import partial
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 from typing import Any
 
 from finalize_scan_contract import (
@@ -18,6 +18,7 @@ from finalize_scan_contract import (
     _require_safe_json_value,
     _validate_schema_node,
     finding_candidate_id,
+    finding_within_scope,
     manifest_is_sealed,
     write_scan_local_bytes,
 )
@@ -88,7 +89,7 @@ from workbench_coverage_receipts import (
     retain_recorded_receipt_ownership,
 )
 from workbench_target import committed_diff_snapshot_digest
-from workbench_validation import javascript_utf8, path_within_scope
+from workbench_validation import javascript_utf8
 
 
 def merge_saved_results(
@@ -459,6 +460,10 @@ def merge_saved_results(
             directory = directory.parent
         _, attempt = worker_attempts.get(directory.as_posix(), (worker_id, 0))
         source_order[relative] = (attempt, source_order[relative][1])
+
+    def retain_latest(orders, key, order):
+        orders[key] = max(orders.get(key, order), order)
+
     selected_observations: dict[str, tuple[int, int]] = {}
     authoritative_heads: set[str] = set()
     authoritative_observations: dict[str, tuple[int, int]] = {}
@@ -480,7 +485,7 @@ def merge_saved_results(
                 authoritative_observations[selected] = order
             if directory == Path("."):
                 parent_heads.append((observed, selected))
-        selected_observations[selected] = max(selected_observations.get(selected, order), order)
+        retain_latest(selected_observations, selected, order)
     # A registered result independently retains its latest accepted observation.
     # Restoring the head does not withdraw that result's publication authority.
     registered_result_orders = {
@@ -493,9 +498,10 @@ def merge_saved_results(
 
     # Keep frozen source digests over the original data, before discarding markers
     # that never passed through the worker draft writer.
-    retain_recorded_receipt_ownership(
-        sources, _digest, binding["scope"]["includePaths"], finding_scope
-    )
+    include_paths = binding["scope"]["includePaths"]
+    if finding_scope is None:
+        finding_scope = [(path, False) for path in include_paths]
+    retain_recorded_receipt_ownership(sources, _digest, include_paths, finding_scope)
     drafts_by_path = {relative: draft for relative, draft, _ in sources}
     # A frozen model capture supplies context without replacing earlier findings.
     model_path = frozen_model_source or canonical_model_source
@@ -1208,24 +1214,6 @@ def merge_saved_results(
         else:
             _ensure_finding_identity(finding)
 
-    def finding_within_scope(finding: dict[str, Any]) -> bool:
-        locations = finding.get("locations", [])
-        return isinstance(locations, list) and any(
-            isinstance(location, dict)
-            and isinstance(location.get("path"), str)
-            and any(
-                PurePosixPath(location["path"]) == PurePosixPath(path)
-                if is_file
-                else path_within_scope(location["path"], path)
-                for path, is_file in (
-                    finding_scope
-                    if finding_scope is not None
-                    else [(path, False) for path in binding["scope"]["includePaths"]]
-                )
-            )
-            for location in locations
-        )
-
     valid_findings: dict[bytes, bool] = {}
 
     def valid_finding(value: Any) -> bool:
@@ -1291,10 +1279,7 @@ def merge_saved_results(
                 candidate_id = finding_candidate_id(finding)
                 if candidate_id:
                     key = (worker_id, candidate_id)
-                    selected_reported_candidates[key] = max(
-                        selected_reported_candidates.get(key, source_order[relative]),
-                        source_order[relative],
-                    )
+                    retain_latest(selected_reported_candidates, key, source_order[relative])
     for (worker_id, relative), draft in accepted_sources.items():
         worker = workers_by_id[worker_id]
         reported = {
@@ -1432,9 +1417,7 @@ def merge_saved_results(
                 and (candidate := coverage_candidate(owner, surface)) is not None
             ):
                 order = candidate_order(relative, candidate[0], surface)
-                pending_surface_orders[candidate] = max(
-                    pending_surface_orders.get(candidate, order), order
-                )
+                retain_latest(pending_surface_orders, candidate, order)
     # Generic closures belong to one logical scan or worker, just like candidates.
     # Keep them when recovering a terminal checkpoint without its canonical write.
     closed_deferred: dict[tuple[str | None, str], tuple[tuple[int, int], dict[str, Any], str]] = {}
@@ -1482,9 +1465,7 @@ def merge_saved_results(
                         )
                     except ContractError:
                         continue
-                    accepted_deferred_orders[key] = max(
-                        accepted_deferred_orders.get(key, order), order
-                    )
+                    retain_latest(accepted_deferred_orders, key, order)
         for closure in _resolved_deferred_rows(draft, coverage_schema["resolvedDeferred"]):
             closure_owner, closure_relative = owner, relative
             if owner is None and (
@@ -1634,9 +1615,12 @@ def merge_saved_results(
             ):
                 resolved[key] = disposition
                 ordered_outcomes[key] = (order, relative)
-        return resolved, ordered_outcomes
+        selected_by_source = {}
+        for (owner, candidate_id), (_, relative) in ordered_outcomes.items():
+            selected_by_source.setdefault((owner, relative), set()).add(candidate_id)
+        return resolved, selected_by_source
 
-    resolved, ordered_outcomes = select_outcomes(set())
+    resolved, selected_by_source = select_outcomes(set())
     # Only the current parent may claim that another worker finding was absorbed.
     # A superseded checkpoint must not suppress a newer independent result.
     if parent:
@@ -1651,10 +1635,7 @@ def merge_saved_results(
                         represented_history.setdefault(retained_key, set()).add(
                             _digest(_finding_content(retained))
                         )
-                    previous_key = represented.get(retained_key)
-                    if retained_key not in represented:
-                        represented[retained_key] = canonical_key
-                    elif previous_key != canonical_key:
+                    if represented.setdefault(retained_key, canonical_key) != canonical_key:
                         # Ambiguous history cannot suppress an independent source.
                         represented[retained_key] = None
                 originals = finding["provenance"].get("sourceFindings", [])
@@ -1668,46 +1649,32 @@ def merge_saved_results(
                                 candidate_id,
                                 original["finding"],
                             )
-                            previous_key = represented_candidates.get(candidate_key)
-                            if candidate_key not in represented_candidates:
-                                represented_candidates[candidate_key] = canonical_key
-                            elif previous_key != canonical_key:
-                                # Candidate ids are only authoritative within one
-                                # logical worker. Multiple canonical owners make
-                                # that worker-local identity ambiguous.
+                            # Candidate IDs are authoritative only within one worker.
+                            owner_key = represented_candidates.setdefault(
+                                candidate_key, canonical_key
+                            )
+                            if owner_key != canonical_key:
                                 represented_candidates[candidate_key] = None
                             represented_candidate_history.setdefault(candidate_key, set()).add(
                                 _digest(_finding_content(original["finding"]))
                             )
     selected_terminal_orders: dict[str | None, tuple[int, int]] = {}
-    for relative, draft, worker_id in sources:
-        if (
-            relative in authoritative_heads
-            and draft.get("complete") is not False
-            and relative not in discarded_by_source
-            and relative not in discarded_coverage_sources
-        ):
-            order = source_order[relative]
-            selected_terminal_orders[worker_id] = max(
-                selected_terminal_orders.get(worker_id, order), order
-            )
     terminal_worker_orders: dict[str | None, tuple[int, int]] = {}
     terminal_coverage_orders: dict[str | None, tuple[int, int]] = {}
     for relative, draft, worker_id in sources:
-        if (
-            relative in current_results
-            and draft.get("complete") is not False
-            and relative not in discarded_by_source
-        ):
+        if draft.get("complete") is False or relative in discarded_by_source:
+            continue
+        if relative in authoritative_heads and relative not in discarded_coverage_sources:
+            retain_latest(selected_terminal_orders, worker_id, source_order[relative])
+        if relative in current_results:
             order = source_order[relative]
-            terminal_worker_orders[worker_id] = max(
-                terminal_worker_orders.get(worker_id, order), order
-            )
+            retain_latest(terminal_worker_orders, worker_id, order)
             if relative not in reducer_paths and relative not in discarded_coverage_sources:
-                terminal_coverage_orders[worker_id] = max(
-                    terminal_coverage_orders.get(worker_id, order), order
-                )
-    prior_terminal_orders: dict[str | None, tuple[int, int]] = {}
+                retain_latest(terminal_coverage_orders, worker_id, order)
+    # Ordinary coverage can be replaced by a result or a selected terminal checkpoint.
+    latest_terminal_orders = terminal_coverage_orders.copy()
+    for worker_id, order in selected_terminal_orders.items():
+        retain_latest(latest_terminal_orders, worker_id, order)
     partial_head_orders = {
         Path(path).parent: selected_observations[path]
         for path in authoritative_heads
@@ -1727,10 +1694,7 @@ def merge_saved_results(
             and order <= partial_order
         ):
             # A partial head adds coverage after the preceding terminal replacement.
-            worker_id = paths[relative]
-            prior_terminal_orders[worker_id] = max(
-                prior_terminal_orders.get(worker_id, order), order
-            )
+            retain_latest(latest_terminal_orders, paths[relative], order)
 
     # Reconcile raw records before generating context-dependent publication IDs.
     logical_rows: dict[tuple[Any, ...], dict[str, dict[str, Any]]] = {}
@@ -1920,9 +1884,7 @@ def merge_saved_results(
         for relative, _, owner in all_sources:
             attempt, modified = source_order[relative]
             if owner is not None and modified <= terminal_parent_time:
-                terminal_worker_attempts[owner] = max(
-                    terminal_worker_attempts.get(owner, attempt), attempt
-                )
+                retain_latest(terminal_worker_attempts, owner, attempt)
 
     def precedes_terminal_parent(relative: str, owner: str | None) -> bool:
         attempt, modified = source_order[relative]
@@ -1946,7 +1908,10 @@ def merge_saved_results(
             for sibling in draft["findings"]
             if isinstance(sibling, dict)
             and isinstance(sibling.get("identity"), dict)
-            and ((relative == "parent" and parent_is_canonical) or finding_within_scope(sibling))
+            and (
+                (relative == "parent" and parent_is_canonical)
+                or finding_within_scope(sibling, finding_scope)
+            )
         )
         pending = []
         for index, value in enumerate(draft["findings"]):
@@ -1956,7 +1921,7 @@ def merge_saved_results(
                 or not valid_finding(value)
                 or (
                     not (relative == "parent" and parent_is_canonical)
-                    and not finding_within_scope(value)
+                    and not finding_within_scope(value, finding_scope)
                 )
             ):
                 continue
@@ -2164,37 +2129,31 @@ def merge_saved_results(
             destinations = set()
             for value in group["rows"]:
                 history_key = _finding_key(value)
-                if _digest(_finding_content(value)) in represented_history.get(history_key, set()):
+                content_digest = _digest(_finding_content(value))
+                if content_digest in represented_history.get(history_key, ()):
                     destinations.add(represented.get(history_key))
                 elif group["owner"] and (candidate_id := finding_candidate_id(value)):
                     candidate_key = _worker_candidate_key(group["owner"], candidate_id, value)
-                    if _digest(_finding_content(value)) in represented_candidate_history.get(
-                        candidate_key, set()
-                    ):
+                    if content_digest in represented_candidate_history.get(candidate_key, ()):
                         destinations.add(represented_candidates[candidate_key])
             if len(destinations) == 1 and None not in destinations:
                 group["parent_key"] = destinations.pop()
 
     generated_worker_findings: list[dict[str, Any]] = []
 
+    def replaced_by_result(relative: str, order: tuple[int, int] | None) -> bool:
+        return (
+            relative not in current_results
+            and order is not None
+            and (relative not in selected_observations or source_order[relative] < order)
+        )
+
     def source_coverage_selection(
         relative: str,
         worker_id: str | None,
     ) -> tuple[bool, set[str], bool, bool, bool]:
-        worker_result_order = terminal_worker_orders.get(worker_id)
         selected_terminal_order = selected_terminal_orders.get(worker_id)
-        terminal_coverage_order = max(
-            (
-                order
-                for order in (
-                    terminal_coverage_orders.get(worker_id),
-                    selected_terminal_order,
-                    prior_terminal_orders.get(worker_id),
-                )
-                if order is not None
-            ),
-            default=None,
-        )
+        terminal_coverage_order = latest_terminal_orders.get(worker_id)
         selected_coverage_superseded = (
             terminal_coverage_order is not None and source_order[relative] < terminal_coverage_order
         ) or (
@@ -2211,46 +2170,24 @@ def merge_saved_results(
                 )
             )
         )
-        selected_candidates = {
-            candidate_id
-            for (owner, candidate_id), (_, source) in ordered_outcomes.items()
-            if owner == worker_id and source == relative
-        }
-        superseded = (
-            worker_id is None
-            and saved_parent is not None
-            and saved_parent.get("complete") is not False
-            and relative != "parent"
-            and source_order[relative] <= (0, parent_modified)
-            and (not stopped_parent_seal or relative in parent_preserved_sources)
-            and (
-                # Explicit recovery can admit checkpoints written after this parent.
-                frozen_parent_path is None
-                or relative == frozen_parent_path
-                or relative in saved_parent.get("previousParentCheckpoints", [])
-            )
-        ) or (
-            worker_id is not None
-            and relative not in current_results
-            and worker_result_order is not None
-            and (
-                relative not in selected_observations
-                or source_order[relative] < worker_result_order
-            )
-        )
         worker_coverage_order = terminal_coverage_orders.get(worker_id)
-        coverage_superseded = (
-            superseded
-            if worker_id is None
-            else (
-                relative not in current_results
-                and worker_coverage_order is not None
+        if worker_id is None:
+            superseded = coverage_superseded = (
+                saved_parent is not None
+                and saved_parent.get("complete") is not False
+                and relative != "parent"
+                and source_order[relative] <= (0, parent_modified)
+                and (not stopped_parent_seal or relative in parent_preserved_sources)
                 and (
-                    relative not in selected_observations
-                    or source_order[relative] < worker_coverage_order
+                    # Explicit recovery can admit checkpoints written after this parent.
+                    frozen_parent_path is None
+                    or relative == frozen_parent_path
+                    or relative in saved_parent.get("previousParentCheckpoints", [])
                 )
             )
-        )
+        else:
+            superseded = replaced_by_result(relative, terminal_worker_orders.get(worker_id))
+            coverage_superseded = replaced_by_result(relative, worker_coverage_order)
         # A failed result write can leave pending work outside the accepted result.
         accepted_order = (
             (0, parent_modified)
@@ -2266,7 +2203,7 @@ def merge_saved_results(
         )
         return (
             selected_coverage_superseded,
-            selected_candidates,
+            selected_by_source.get((worker_id, relative), set()),
             superseded,
             retain_pending,
             coverage_superseded,
@@ -2455,7 +2392,7 @@ def merge_saved_results(
                 continue
             for key in ("findingId", "occurrenceId", "fingerprints"):
                 finding.pop(key, None)
-            if not finding_within_scope(finding):
+            if not finding_within_scope(finding, finding_scope):
                 warnings.append(f"Skipped out-of-scope finding from {relative}.")
                 continue
             provenance = finding.setdefault("provenance", {"source": "local_plugin"})
@@ -2500,23 +2437,22 @@ def merge_saved_results(
                 history_key = _finding_key(value)
                 # A singleton key is not evidence that a new batch sibling was
                 # absorbed. Only recorded content may reuse that historical edge.
-                if _digest(_finding_content(value)) not in represented_history.get(
-                    history_key, set()
-                ):
+                content_digest = _digest(_finding_content(value))
+                if content_digest not in represented_history.get(history_key, ()):
                     history_key = key
                 if history_key in represented:
                     mapped_key = represented[history_key]
-                    historical_contents = represented_history.get(history_key, set())
+                    historical_contents = represented_history.get(history_key, ())
                 elif worker_id and candidate_id:
                     candidate_key = _worker_candidate_key(worker_id, candidate_id, finding)
                     mapped_key = represented_candidates.get(candidate_key)
-                    historical_contents = represented_candidate_history.get(candidate_key, set())
+                    historical_contents = represented_candidate_history.get(candidate_key, ())
                 else:
                     mapped_key = None
-                    historical_contents = set()
+                    historical_contents = ()
                 if mapped_key is not None:
                     key = mapped_key
-                    represented_by_parent = _digest(_finding_content(value)) in historical_contents
+                    represented_by_parent = content_digest in historical_contents
             if key in finding_positions:
                 position, retained_group = finding_positions[key]
                 retained = findings[position]
@@ -2740,20 +2676,7 @@ def merge_saved_results(
                 if draft.get("complete") is not False or relative in selected_observations
             },
         )
-        replaced_rows = {
-            "surfaces": replaced_surfaces,
-            "deferred": {
-                id(row)
-                for relative, _, owner in all_sources
-                for row in deferred_rows[relative]
-                if isinstance(row, dict)
-                and isinstance(identity := row.get("id"), str)
-                and (key := record_key("deferred", owner, row)) not in candidate_ids
-                and key not in ambiguous_deferred
-                and (updated := accepted_deferred_orders.get(key)) is not None
-                and updated > candidate_order(relative, key[0], row)
-            },
-        }
+        replaced_rows = {"surfaces": replaced_surfaces, "deferred": replaced_deferred}
         for field, replaced in replaced_rows.items():
             if parent and isinstance(coverage.get(field), list):
                 previous = parent["reviewState"].get(field, [])
@@ -3070,7 +2993,7 @@ def merge_saved_results(
         )
         if invalid:
             unavailable.update(invalid)
-            resolved, ordered_outcomes = select_outcomes(unavailable)
+            resolved, selected_by_source = select_outcomes(unavailable)
         else:
             dry_run = False
 

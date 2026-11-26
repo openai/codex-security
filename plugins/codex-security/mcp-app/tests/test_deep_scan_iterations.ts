@@ -13,8 +13,12 @@ import {
 } from "./deep_scan_coordinator_fixture.ts";
 
 const { recordCodexSecurityWorkerScanDraft } = await importSource(
-  join(import.meta.dirname, "../src/artifact-scan-draft.ts"),
+  "src/artifact-scan-draft.ts",
 );
+const { parseScanUnion, persistedScanUnion, scanUnionToDraft } =
+  await importSource("src/deep-scan/artifact-validation.ts");
+const { mergeBatch } = await importSource("src/deep-scan/iteration.ts");
+const { checkSameFix } = await importSource("src/deep-scan/same-fix.ts");
 after(() => temporaryDirectories.cleanup());
 const base = standardScanDraft("fixture", "one", "worker").findings[0]!;
 const lookup = {
@@ -63,16 +67,19 @@ async function scanLoop(
   observations: ScanDraftInput["findings"][],
   config: {
     workers?: number;
-    maxDiscoveryRuns: number;
-    stopAfterNoNew: number;
+    maxDiscoveryRuns?: number;
+    stopAfterNoNew?: number;
     comparisons?: (number[][] | ((input: Report[]) => unknown))[];
     sameFix?: (input: PairCheck) => unknown;
     sameSource?: (a: string, b: string) => boolean;
-  },
+  } = {},
   finish?: (index: number) => Promise<void>,
 ) {
   const { comparisons = [], sameFix, sameSource, ...limits } = config;
-  const { fixture, store } = await coordinatorFixture(limits);
+  const { fixture, store } = await coordinatorFixture({
+    maxDiscoveryRuns: observations.length,
+    ...limits,
+  });
   let comparisonsRun = 0;
   let draft: ScanDraftInput | undefined;
   const started: number[] = [];
@@ -159,7 +166,6 @@ test("a duplicate stops the loop and every observation survives", async () => {
   };
   const { terminal, draft, started } = await scanLoop([[base], [alias]], {
     maxDiscoveryRuns: 8,
-    stopAfterNoNew: 1,
     comparisons: [[[0, 1]]],
   });
   assert.deepEqual(started, [0, 1]);
@@ -185,7 +191,6 @@ test("an exact repeat of a merged source saturates without another comparison", 
   };
   const { terminal, draft } = await scanLoop([[base, alias], [alias]], {
     maxDiscoveryRuns: 4,
-    stopAfterNoNew: 1,
     comparisons: [[[0, 1]]],
   });
   assert.equal(terminal.terminalReason, "saturated");
@@ -206,10 +211,7 @@ test("reordered extension fields do not spend a comparison or restart the no-new
     ...base,
     extensions: { observed: { operation: "lookup", input: "request" } },
   };
-  const { terminal, draft } = await scanLoop([[first], [repeat]], {
-    maxDiscoveryRuns: 2,
-    stopAfterNoNew: 1,
-  });
+  const { terminal, draft } = await scanLoop([[first], [repeat]]);
   assert.equal(terminal.terminalReason, "saturated");
   assert.equal(draft.findings.length, 1);
   assert.equal(draft.findings[0].provenance.sourceFindings?.length, 2);
@@ -242,8 +244,6 @@ test("one scan's distinct rule and anchor survive a cross-scan alias", async () 
     identity: { anchor: "archive.destination" },
   };
   const { draft } = await scanLoop([[extract, remove], [alias]], {
-    maxDiscoveryRuns: 2,
-    stopAfterNoNew: 1,
     comparisons: [[[0, 1]], [[0, 2], [1]]],
     sameFix: () => ({ reviews: [samePair(0)] }),
   });
@@ -267,8 +267,6 @@ test("a concrete named input unique to one report survives a shared helper", asy
     identity: { anchor: "object.dispatch", instance: "packet" },
   };
   const { draft } = await scanLoop([[keys], [packet]], {
-    maxDiscoveryRuns: 2,
-    stopAfterNoNew: 1,
     comparisons: [[[0, 1]]],
   });
   assert.equal(draft.findings.length, 2);
@@ -297,8 +295,6 @@ test("an additional affected endpoint survives a narrower report with a differen
   };
   const { draft } = await scanLoop([[access], [disclosure], [alias]], {
     workers: 3,
-    maxDiscoveryRuns: 3,
-    stopAfterNoNew: 1,
     comparisons: [[[0, 1, 2]]],
   });
   assert.deepEqual(
@@ -323,8 +319,6 @@ test("overlapping lists of affected endpoints retain the additional fix", async 
   };
   const { draft } = await scanLoop([[routes], [admin]], {
     workers: 2,
-    maxDiscoveryRuns: 2,
-    stopAfterNoNew: 1,
     comparisons: [[[0, 1]]],
   });
   assert.deepEqual(
@@ -345,7 +339,6 @@ test("a new instance extends the loop and an unfinished final batch respects the
   const { terminal, draft, started, previousByPass } = await scanLoop(
     [[base], [other], [base]],
     {
-      maxDiscoveryRuns: 3,
       stopAfterNoNew: 3,
       workers: 2,
       comparisons: [[[0], [1]]],
@@ -373,7 +366,6 @@ test("a new instance extends the loop and an unfinished final batch respects the
 test("an empty first scan is a completed scan with no new findings", async () => {
   const { started, terminal, draft } = await scanLoop([[]], {
     maxDiscoveryRuns: 5,
-    stopAfterNoNew: 1,
   });
   assert.deepEqual(started, [0]);
   assert.equal(terminal.terminalReason, "saturated");
@@ -398,8 +390,6 @@ test("distinct operations on the same line stay separate when a matching report 
     title: "Unescaped read query",
   };
   const { draft } = await scanLoop([[read], [write], [alias]], {
-    maxDiscoveryRuns: 3,
-    stopAfterNoNew: 1,
     comparisons: [
       [[0], [1]],
       [[0, 2], [1]],
@@ -421,7 +411,6 @@ test("distinct named siblings survive an unnamed representative", async () => {
     identity: { anchor: "db.query", instance: "account" },
   };
   const { draft } = await scanLoop([[base], [first], [second], [first]], {
-    maxDiscoveryRuns: 4,
     stopAfterNoNew: 2,
     comparisons: [[[0, 1]], [[0, 1]]],
   });
@@ -468,8 +457,6 @@ test("matching source excerpts distinguish different bugs and tolerate a differe
     codeEvidence: [{ ...code, startLine: 3, code: "clean(fields[name])" }],
   };
   const { draft } = await scanLoop([[keys], [other], [alias]], {
-    maxDiscoveryRuns: 3,
-    stopAfterNoNew: 1,
     comparisons: [
       [[0], [1]],
       [[0, 2], [1]],
@@ -501,8 +488,6 @@ test("a report requiring both repairs stays separate from reports covering eithe
   };
   const { draft } = await scanLoop([[left], [broad], [right], [alias]], {
     workers: 4,
-    maxDiscoveryRuns: 4,
-    stopAfterNoNew: 1,
     comparisons: [
       [
         [0, 1, 3],
@@ -527,8 +512,6 @@ test("an incomplete comparison keeps unlisted reports and merges supported dupli
   const alias = { ...base, title: "Another observation of the first defect" };
   const { draft } = await scanLoop([[base, alias], [other]], {
     workers: 2,
-    maxDiscoveryRuns: 2,
-    stopAfterNoNew: 1,
     comparisons: [[[0, 1]]],
   });
   assert.deepEqual(
@@ -541,8 +524,6 @@ test("an incomplete comparison keeps unlisted reports and merges supported dupli
 test("a failed comparison keeps both reports and records why", async () => {
   const other = { ...base, title: "Another defect" };
   const { draft } = await scanLoop([[base, other]], {
-    maxDiscoveryRuns: 1,
-    stopAfterNoNew: 1,
     comparisons: [
       () => {
         throw new Error("comparison unavailable");
@@ -557,8 +538,6 @@ test("a repair citing evidence absent from its report cannot absorb it", async (
   const other = { ...base, title: "Independent operation" };
   const { draft } = await scanLoop([[base], [other]], {
     workers: 2,
-    maxDiscoveryRuns: 2,
-    stopAfterNoNew: 1,
     comparisons: [
       (rows) => ({
         uncertain: [],
@@ -596,8 +575,6 @@ test("one code-supported edit merges a disputed pair and keeps the broader repor
   const alias = { ...read, title: "Another user's object can be read" };
   const { draft, terminal } = await scanLoop([[read], [broad], [alias]], {
     workers: 3,
-    maxDiscoveryRuns: 3,
-    stopAfterNoNew: 1,
     comparisons: [[[0, 1, 2], [1], [2]]],
     sameFix({ pairs }) {
       return {
@@ -619,8 +596,6 @@ test("one code-supported edit merges a disputed pair and keeps the broader repor
 test("missing assignments can merge on cited code, without chaining through a discarded report", async () => {
   const records = ["A", "B", "C"].map((title) => ({ ...lookup, title }));
   const { draft } = await scanLoop([records], {
-    maxDiscoveryRuns: 1,
-    stopAfterNoNew: 1,
     comparisons: [() => ({ uncertain: [0, 1, 2], defects: [] })],
     sameFix({ pairs }) {
       assert.deepEqual(
@@ -655,8 +630,6 @@ test("a surviving path in an attached original vetoes a proposed match", async (
   ].map((title) => ({ ...lookup, title }));
   let checked = false;
   const { draft } = await scanLoop([[read, detail, both]], {
-    maxDiscoveryRuns: 1,
-    stopAfterNoNew: 1,
     comparisons: [[[0, 1, 2], [2]]],
     sameFix({ pairs, reports }) {
       assert.deepEqual(
@@ -706,8 +679,6 @@ test("a source listing additional affected handlers stays separate even when the
     locations: [...two.locations, sink("third.py")],
   };
   const { draft } = await scanLoop([[first, three, two]], {
-    maxDiscoveryRuns: 1,
-    stopAfterNoNew: 1,
     comparisons: [[[0, 1, 2], [2]]],
     sameFix: approvePairs,
   });
@@ -746,8 +717,6 @@ test("fixing login cannot hide a separately cited permissive action policy", asy
   // The primary comparison can agree on a single repair or send the pair to confirmation.
   for (const assignments of [[[0, 1]], [[0, 1], [1]]]) {
     const { draft } = await scanLoop([[login, policy]], {
-      maxDiscoveryRuns: 1,
-      stopAfterNoNew: 1,
       comparisons: [assignments],
       sameFix: approvePairs,
     });
@@ -766,8 +735,6 @@ test("a later source with a surviving path reopens the merge and counts as new",
   ].map((title) => ({ ...lookup, title }));
   const { draft, terminal } = await scanLoop([[left, alias], [broad]], {
     workers: 1,
-    maxDiscoveryRuns: 2,
-    stopAfterNoNew: 1,
     comparisons: [
       [[0, 1], [1]],
       [[0, 2], [1]],
@@ -792,8 +759,6 @@ test("a context fallback rechecks a prior consolidation before counting it as ne
   ].map((title) => ({ ...lookup, title }));
   const { draft, terminal } = await scanLoop([[left, alias], [clarification]], {
     workers: 1,
-    maxDiscoveryRuns: 2,
-    stopAfterNoNew: 1,
     comparisons: [
       [[0, 1], [1]],
       () => {
@@ -809,9 +774,6 @@ test("a context fallback rechecks a prior consolidation before counting it as ne
 });
 
 test("a failed comparison waits for every started worker batch", async () => {
-  const { checkSameFix } = await importSource(
-    join(import.meta.dirname, "../src/deep-scan/same-fix.ts"),
-  );
   const groups = [0, 1, 2].map((id) => ({ id, worker: id }));
   const records = groups.map(() => ({
     locations: [["fixture.py", 1, 1]],
@@ -846,13 +808,6 @@ test("a failed comparison waits for every started worker batch", async () => {
 });
 
 test("a saved same-fix merge keeps both original comparison inputs on resume", async () => {
-  const { mergeBatch } = await importSource(
-    join(import.meta.dirname, "../src/deep-scan/iteration.ts"),
-  );
-  const { parseScanUnion, persistedScanUnion, scanUnionToDraft } =
-    await importSource(
-      join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
-    );
   const [left, alias, unrelated] = [
     "Unchecked lookup",
     "Same lookup through a caller",
@@ -1037,8 +992,6 @@ test("the same proposed mitigation is insufficient evidence of a shared defect",
     remediation,
   };
   const { draft } = await scanLoop([[skipped, bytes]], {
-    maxDiscoveryRuns: 1,
-    stopAfterNoNew: 1,
     comparisons: [
       (rows) => {
         assert.ok(
@@ -1060,8 +1013,6 @@ test("independent handlers requiring the same change stay separate", async () =>
   const read = { ...base, locations: [{ path: "read.py", startLine: 3 }] };
   const write = { ...base, locations: [{ path: "write.py", startLine: 9 }] };
   const { draft } = await scanLoop([[read, write]], {
-    maxDiscoveryRuns: 1,
-    stopAfterNoNew: 1,
     comparisons: [[[0, 1]]],
   });
   assert.deepEqual(
@@ -1087,8 +1038,6 @@ test("an excerpt in a caller can support a fix in a different cited file", async
   };
   const path = base.locations[0].path;
   const { draft } = await scanLoop([[base, alias]], {
-    maxDiscoveryRuns: 1,
-    stopAfterNoNew: 1,
     comparisons: [
       (rows) => ({
         uncertain: [],
@@ -1121,8 +1070,6 @@ test("a merged report cannot lend its extra citation to a later comparison", asy
     locations: [alias.locations[1]],
   };
   const { draft } = await scanLoop([[base, alias], [other]], {
-    maxDiscoveryRuns: 2,
-    stopAfterNoNew: 1,
     comparisons: [
       [[0, 1]],
       (rows) => ({
@@ -1153,8 +1100,6 @@ test("a context-sized report does not prevent comparison of later observations",
   const separate = { ...base, title: "Oversized report" };
   const alias = { ...base, title: "Second description" };
   const { draft } = await scanLoop([[separate, base, alias]], {
-    maxDiscoveryRuns: 1,
-    stopAfterNoNew: 1,
     comparisons: [
       tooLarge,
       tooLarge,
@@ -1207,8 +1152,6 @@ test("same-worker identities and independently cited controls survive an identic
     ],
   };
   const { draft } = await scanLoop([[root, second, authorization]], {
-    maxDiscoveryRuns: 1,
-    stopAfterNoNew: 1,
     comparisons: [[[0, 1, 2]]],
     sameFix: approvePairs,
   });
@@ -1231,8 +1174,6 @@ test("repair assignment includes validated attack paths and a shared range retai
     attackPath: { steps: ["Dispatch calls the helper."] },
   };
   const { draft } = await scanLoop([[first, second]], {
-    maxDiscoveryRuns: 1,
-    stopAfterNoNew: 1,
     comparisons: [
       (rows) => {
         const record = rows[1] as unknown as typeof second;
@@ -1260,9 +1201,6 @@ test("repair assignment includes validated attack paths and a shared range retai
 
 for (const conflict of ["reviews", "sources"]) {
   test(`conflicting ${conflict} cannot hide an independent finding`, async () => {
-    const { checkSameFix } = await importSource(
-      join(import.meta.dirname, "../src/deep-scan/same-fix.ts"),
-    );
     const groups = [
       { id: 0, worker: 0 },
       { id: 1, worker: 0 },
@@ -1327,8 +1265,6 @@ test("repeated original observations require one source comparison", async () =>
     title: "Another description of the shared lookup",
   };
   const { draft } = await scanLoop([[...observations, alias]], {
-    maxDiscoveryRuns: 1,
-    stopAfterNoNew: 1,
     comparisons: [
       (rows) => {
         assert.deepEqual(
@@ -1350,9 +1286,6 @@ test("repeated original observations require one source comparison", async () =>
 });
 
 test("review batches limit pair counts and isolate rejected and stale decisions", async () => {
-  const { checkSameFix } = await importSource(
-    join(import.meta.dirname, "../src/deep-scan/same-fix.ts"),
-  );
   const groups = Array.from({ length: 9 }, (_, id) => ({ id, worker: 0 }));
   const records = groups.map(() => ({
     locations: [["fixture.py", 1, 1]],
@@ -1396,12 +1329,6 @@ test("review batches limit pair counts and isolate rejected and stale decisions"
 });
 
 test("legacy provenance cannot drop or overwrite visible findings on resume", async () => {
-  const { mergeBatch } = await importSource(
-    join(import.meta.dirname, "../src/deep-scan/iteration.ts"),
-  );
-  const { parseScanUnion } = await importSource(
-    join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
-  );
   const findings = [lookup, { ...lookup, title: "Independent report" }];
   for (const metadata of [
     "old model annotation",
@@ -1440,13 +1367,6 @@ test("legacy provenance cannot drop or overwrite visible findings on resume", as
 });
 
 test("resuming partial source ancestry isolates only the ambiguous finding", async () => {
-  const { mergeBatch } = await importSource(
-    join(import.meta.dirname, "../src/deep-scan/iteration.ts"),
-  );
-  const { parseScanUnion, persistedScanUnion, scanUnionToDraft } =
-    await importSource(
-      join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
-    );
   for (const ancestry of [
     {
       sourceFindings: [{ id: "w:0", finding: { title: "old" } }],
@@ -1549,13 +1469,6 @@ test("resuming partial source ancestry isolates only the ambiguous finding", asy
 
 for (const partialSource of ["primary", "secondary"] as const) {
   test(`an exact repeat stays merged after reloading a partial ${partialSource} source`, async () => {
-    const { mergeBatch } = await importSource(
-      join(import.meta.dirname, "../src/deep-scan/iteration.ts"),
-    );
-    const { parseScanUnion, persistedScanUnion, scanUnionToDraft } =
-      await importSource(
-        join(import.meta.dirname, "../src/deep-scan/artifact-validation.ts"),
-      );
     const scanId = randomUUID();
     const sources = [lookup, lookup].map((finding, index) => ({
       id: `old:${index}`,

@@ -1,10 +1,9 @@
-import { join } from "node:path";
 import { readFile } from "node:fs/promises";
 import assert from "node:assert/strict";
 import { importSource } from "./import-module.ts";
 
 const { renderDiscoveryPrompt } = await importSource(
-  join(import.meta.dirname, "../src/deep-scan/templates.ts"),
+  "src/deep-scan/templates.ts",
   { loader: { ".md": "text" } },
 );
 
@@ -27,7 +26,8 @@ const discoveryInput = {
 };
 
 const rendered = renderDiscoveryPrompt({ ...discoveryInput });
-assert.doesNotMatch(rendered, /false_positive_feedback\.json/);
+assert.doesNotMatch(rendered, /false_positive_feedback\.json|severityRubric/);
+assert.match(rendered, /default-severity-rubric\.md/);
 assert.match(rendered, /preserve literal \{\{DISCOVERY_CONTEXT_JSON\}\} text/);
 assert.match(rendered, /record_codex_security_scan_draft/);
 assert.match(rendered, /reviewState\.deferred/);

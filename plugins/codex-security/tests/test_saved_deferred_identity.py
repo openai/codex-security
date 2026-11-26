@@ -20,13 +20,16 @@ from test_workbench_standard_deep_results import (
 )
 from workbench_test_support import (
     fail_deep_scan,
+    pending_review,
     preserve_scan_results,
     read_review_state,
+    review_surface,
     run_workbench,
     saved_discovery_worker,
     saved_draft,
     select_checkpoint,
     write_checkpoint,
+    write_draft_checkpoint,
     write_result_draft,
 )
 
@@ -247,13 +250,11 @@ def test_missing_parent_identity_reuses_established_checkpoint(
         "Synthetic review finding",
         summary="Retain the saved result.",
     )
-    write_checkpoint(
-        tmp_path / "checkpoints",
-        saved_draft(
-            "identity-scan",
-            complete=True,
-            findings=[{**finding, "identity": {"anchor": saved_anchor}}],
-        ),
+    write_draft_checkpoint(
+        tmp_path,
+        "identity-scan",
+        complete=True,
+        findings=[{**finding, "identity": {"anchor": saved_anchor}}],
         mtime_ns=100,
     )
     if explicit_end_line:
@@ -364,11 +365,7 @@ def test_stopped_deep_recovery_uses_host_mode_for_terminal_replacement(
     write_saved_parent(scan_dir, saved_draft(scan_id, findings=[first], complete=True), 100)
     revised = {**first, "title": "Revised review", "summary": "Revised synthetic evidence."}
     del revised["identity"]
-    write_checkpoint(
-        scan_dir / "checkpoints",
-        saved_draft(scan_id, findings=[revised], complete=True),
-        mtime_ns=200,
-    )
+    write_draft_checkpoint(scan_dir, scan_id, findings=[revised], complete=True, mtime_ns=200)
     fail_deep_scan(state, codex_home, scan_id)
     findings_path = scan_dir / "findings.json"
     findings = json.loads(findings_path.read_text())["findings"]
@@ -420,14 +417,12 @@ def test_torn_worker_closure_reuses_observed_legacy_identity(
         saved_draft("identity-scan", deferred=[{**anonymous, "id": "independent-review"}]),
     )
     output = tmp_path / "reviewer"
-    checkpoint = write_checkpoint(
-        output / "checkpoints",
-        saved_draft(
-            "identity-scan",
-            deferred=named[1:],
-            closures=[{"id": identity, "reason": "Review completed."}],
-            complete=True,
-        ),
+    checkpoint = write_draft_checkpoint(
+        output,
+        "identity-scan",
+        deferred=named[1:],
+        closures=[{"id": identity, "reason": "Review completed."}],
+        complete=True,
         mtime_ns=1100,
     )
     select_checkpoint(output, checkpoint, mtime_ns=1200)
@@ -567,11 +562,7 @@ def test_unsafe_deferred_update_keeps_the_earlier_valid_path(
     state, codex_home, _, scan_dir, scan_id = deep_scan_fixture(tmp_path, run=setup_workbench)
     _, result = accepted_standard_worker(state, codex_home, scan_dir, scan_id, run=setup_workbench)
     original = {"id": "review", "reason": "Review remains.", "paths": ["app.py"]}
-    write_checkpoint(
-        result.parent / "checkpoints",
-        saved_draft(scan_id, deferred=[original]),
-        mtime_ns=100,
-    )
+    write_draft_checkpoint(result.parent, scan_id, deferred=[original], mtime_ns=100)
     update = {**original, "paths": ["../outside.py"]}
     write_result_draft(result, saved_draft(scan_id, deferred=[update]), mtime_ns=200)
 
@@ -695,13 +686,8 @@ def test_generic_surface_recovery_uses_resolved_candidate_identity(
         candidate["candidateId"] = "caller-review"
     if candidate_identity == "alias":
         candidate["id"] = "pending-caller"
-    generic = {"id": "generic-review", "reason": "Source review remains.", "surfaceIds": ["api"]}
-    pending_surface = {
-        "id": "api",
-        "label": "API",
-        "disposition": "needs_follow_up",
-        "receiptRefs": [],
-    }
+    generic = pending_review("generic-review", "Source review remains.", "api")
+    pending_surface = review_surface("api", "API")
     rejection = {
         "id": "candidate-outcome",
         "label": "Caller review",

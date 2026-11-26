@@ -22,10 +22,13 @@ from workbench_test_support import (
     empty_target_scan,
     fail_scan,
     get_scan,
+    git_in,
     initialize_git_repository,
     load_script,
     mark_deep_coordinator_succeeded,
     read_review_state,
+    register_scan,
+    repository_recipe,
     resume_deep_scan,
     run_workbench,
     save_workspace,
@@ -72,24 +75,10 @@ def register_cli_scan(
     recipe_fields: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     scan_dir.mkdir(mode=0o700)
-    return run_workbench(
-        state_dir,
-        "register-cli-scan",
-        "--repository",
-        str(target),
-        "--scan-dir",
-        str(scan_dir),
-        "--recipe-json",
-        json.dumps(
-            {
-                **(recipe_fields or {}),
-                "config": {},
-                "mode": "standard",
-                "repository": str(target),
-                "target": scan_target or {"kind": "repository", "paths": []},
-            }
-        ),
-    )
+    recipe = {**(recipe_fields or {}), **repository_recipe(target)}
+    if scan_target:
+        recipe["target"] = scan_target
+    return register_scan(state_dir, target, scan_dir, recipe=recipe)
 
 
 @pytest.mark.parametrize(
@@ -127,7 +116,7 @@ def test_cli_registration_saves_deduplicated_scope_estimate(
     src.mkdir()
     for name in ("code.py", "explicit.log", "tracked.log", "ignored.log"):
         (src / name).touch()
-    subprocess.run(["git", "add", "-f", "--", "src/tracked.log"], cwd=repo, check=True)
+    git_in(repo, "add", "-f", "--", "src/tracked.log")
 
     registered = register_cli_scan(state, repo, scan, scan_target={"kind": "paths", "paths": paths})
     assert registered["scopeFileCount"] == 3
@@ -273,13 +262,13 @@ def test_cli_registration_counts_the_selected_target(
     (target / "README.md").write_text("updated fixture\n")
     (target / "new.py").write_text("new = True\n")
     (target / "binary.dat").write_bytes(b"\0")
-    subprocess.run(["git", "add", "."], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "Update fixture"], cwd=target, check=True)
+    git_in(target, "add", ".")
+    git_in(target, "commit", "-qm", "Update fixture")
 
     (target / "README.md").unlink()
     (target / "new.py").write_bytes(b"\0")
     (target / "staged.py").write_text("staged = True\n")
-    subprocess.run(["git", "add", "staged.py"], cwd=target, check=True)
+    git_in(target, "add", "staged.py")
     (target / "untracked.py").write_text("untracked = True\n")
 
     scan_target = {"kind": kind, "paths": []}
@@ -400,7 +389,7 @@ def _start_diff_scan_with_draft(tmp_path: Path, kind: str) -> tuple[Path, Path, 
     target = tmp_path / "target"
     base = initialize_git_repository(target)
     (target / "README.md").write_text("changed fixture\n")
-    subprocess.run(["git", "commit", "-qam", "Update fixture"], cwd=target, check=True)
+    git_in(target, "commit", "-qam", "Update fixture")
     head = subprocess.run(
         ["git", "rev-parse", "HEAD"], cwd=target, check=True, capture_output=True, text=True
     ).stdout.strip()
@@ -838,8 +827,8 @@ def test_scoped_cli_completion_adopts_registered_revision_kind(tmp_path: Path) -
     initialize_git_repository(target)
     (target / "app").mkdir()
     (target / "app" / "main.py").write_text("print('fixture')\n")
-    subprocess.run(["git", "add", "app"], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "Add app"], cwd=target, check=True)
+    git_in(target, "add", "app")
+    git_in(target, "commit", "-qm", "Add app")
     revision = subprocess.run(
         ["git", "rev-parse", "HEAD"],
         cwd=target,
@@ -883,7 +872,7 @@ def test_full_repository_completion_adopts_registered_revision_kind(tmp_path: Pa
     state_dir = tmp_path / "state"
     target = tmp_path / "target"
     revision = initialize_git_repository(target)
-    subprocess.run(["git", "checkout", "--detach", revision], cwd=target, check=True)
+    git_in(target, "checkout", "--detach", revision)
     scan_dir = tmp_path / "scan"
     registered = register_cli_scan(state_dir, target, scan_dir)
     assert registered["contract"]["target"]["allowedKinds"] == ["git_revision"]
@@ -950,7 +939,7 @@ def test_cli_completion_adopts_diff_kind_with_bound_range_digest(tmp_path: Path)
     target = tmp_path / "target"
     initialize_git_repository(target)
     (target / "README.md").write_text("second fixture\n")
-    subprocess.run(["git", "commit", "-qam", "Second commit"], cwd=target, check=True)
+    git_in(target, "commit", "-qam", "Second commit")
     scan_dir = tmp_path / "scan"
     registered = register_cli_scan(
         state_dir,

@@ -10,8 +10,11 @@ import {
   type ValidationOptions,
 } from "../src/api.js";
 import { ScanResult } from "../src/result.js";
-import { main } from "../src/cli.js";
+import { main, parseCodexOverrides } from "../src/cli.js";
 import {
+  DEFAULT_CODEX_CONFIG,
+  scanModel,
+  scanModelProvider,
   mergedCodexConfig,
   type CodexSecurityConfig,
   type JsonObject,
@@ -55,7 +58,20 @@ async function fixture(input: ProjectConfigInput | string) {
     config,
     typeof input === "string" ? input : JSON.stringify(input),
   );
-  return { root, repository, configDirectory, config };
+  type Options = Parameters<typeof dependencies>[0];
+  function repositoryDependencies(options?: Options) {
+    return dependencies({ currentDirectory: repository, ...options });
+  }
+  return {
+    root,
+    repository,
+    configDirectory,
+    config,
+    dependencies: repositoryDependencies,
+    run(args: string[], options: Options) {
+      return runCapturedCli(main, args, repositoryDependencies(options));
+    },
+  };
 }
 
 async function bulkInventory(
@@ -219,6 +235,97 @@ test("info resolves a config and its sources without a target, prompt reads, or 
   });
 });
 
+test.each(
+  ["openrouter", "fireworks", "cheaperinference", "amazon-bedrock"].flatMap(
+    (provider) =>
+      ["root", "selected profile"].map((location) => ({ provider, location })),
+  ),
+)(
+  "info requires a configured model for $provider in the $location",
+  async ({ provider, location }) => {
+    const providerConfig: JsonObject = { model_provider: provider };
+    const codex: JsonObject =
+      location === "root"
+        ? providerConfig
+        : { profile: "review", profiles: { review: providerConfig } };
+    const input = await fixture({ codex });
+    const deps = dependencies({
+      currentDirectory: input.configDirectory,
+      environment: { CODEX_HOME: join(input.root, "unused-home") },
+      onConfig: throwing("No runtime for info"),
+    });
+    const rejected = createCliTest(main);
+    expect(
+      await rejected.runCli(["info", "-c", input.config, "--json"], deps),
+    ).toBe(2);
+    expect(rejected.stderr.text()).toContain(
+      `Set codex.model or the model in the selected profile to a nonempty string for provider ${provider}.`,
+    );
+
+    providerConfig["model"] = "synthetic-provider-model";
+    await writeFile(input.config, JSON.stringify({ codex }));
+    const accepted = createCliTest(main);
+    expect(
+      await accepted.runCli(["info", "-c", input.config, "--json"], deps),
+    ).toBe(0);
+    expect(JSON.parse(accepted.stdout.text())).toMatchObject({
+      model: "synthetic-provider-model",
+    });
+  },
+);
+
+test.each([
+  {
+    source: "project",
+    profile: 'model = "synthetic-file-model"\n',
+    model: "synthetic-file-model",
+  },
+  {
+    source: "native file only",
+    profile: 'model_provider = "openrouter"\n',
+    model: scanModel(DEFAULT_CODEX_CONFIG),
+  },
+])(
+  "info and dry-run resolve the model for a provider selected by $source",
+  async ({ source, profile, model }) => {
+    const codex: JsonObject = { profile: "review" };
+    if (source === "project") codex["model_provider"] = "openrouter";
+    const input = await fixture({ codex });
+    await writeFile(join(input.root, "review.config.toml"), profile);
+    const deps = dependencies({
+      currentDirectory: input.repository,
+      environment: { CODEX_HOME: input.root, OPENROUTER_API_KEY: "synthetic" },
+    });
+    for (const args of [["info"], ["scan", "--dry-run"]]) {
+      const cli = createCliTest(main);
+      expect(
+        await cli.runCli([...args, "-c", input.config, "--json"], deps),
+        cli.stderr.text(),
+      ).toBe(0);
+      expect(JSON.parse(cli.stdout.text()).model).toBe(model);
+    }
+  },
+);
+
+test("info ignores an external provider in an unselected profile", async () => {
+  const input = await fixture({
+    codex: { profiles: { unused: { model_provider: "openrouter" } } },
+  });
+  const stdout = captureCli(main, "stdout");
+  expect(
+    await stdout.run(
+      ["info", "-c", input.config, "--json"],
+      dependencies({
+        currentDirectory: input.configDirectory,
+        onConfig: throwing("No runtime for info"),
+      }),
+    ),
+  ).toBe(0);
+  expect(JSON.parse(stdout.text())).toMatchObject({
+    model: scanModel(DEFAULT_CODEX_CONFIG),
+  });
+});
+
 test("info without a file reports default sources, including unset settings", async () => {
   const input = await fixture({});
   const stdout = captureCli(main, "stdout");
@@ -258,15 +365,10 @@ test("an explicit config flag overrides the operator-selected environment file",
   ] as const) {
     const onConfig = mock<(config: CodexSecurityConfig) => void>();
     expect(
-      await runCapturedCli(
-        main,
-        ["scan", ...flags, "--json"],
-        dependencies({
-          currentDirectory: input.repository,
-          environment: { CODEX_SECURITY_PROJECT_CONFIG: input.config },
-          onConfig,
-        }),
-      ),
+      await input.run(["scan", ...flags, "--json"], {
+        environment: { CODEX_SECURITY_PROJECT_CONFIG: input.config },
+        onConfig,
+      }),
     ).toBe(0);
     const selected = onConfig.mock.lastCall?.[0];
     expect(selected?.codexOverrides?.["model"]).toBe(expected);
@@ -284,10 +386,9 @@ test("scan exclusions come from project config and repeatable CLI overrides", as
   ] as const) {
     const onTurn = mock<(_target: string, options: ScanOptions) => void>();
     expect(
-      await runCapturedCli(
-        main,
+      await input.run(
         ["scan", input.repository, "-c", input.config, ...flags, "--json"],
-        dependencies({ currentDirectory: input.repository, onTurn }),
+        { onTurn },
       ),
     ).toBe(0);
     expect(onTurn.mock.lastCall?.[1].excludePaths).toEqual([...expected]);
@@ -312,8 +413,7 @@ test.each([undefined, "standard", "daybreak_red"] as const)(
       scanDir: await temporaryDirectory(),
     });
     expect(
-      await runCapturedCli(
-        main,
+      await input.run(
         [
           "scan",
           input.repository,
@@ -325,12 +425,7 @@ test.each([undefined, "standard", "daybreak_red"] as const)(
             ? []
             : ["--cyber-access-program", override]),
         ],
-        dependencies({
-          currentDirectory: input.repository,
-          onTurn,
-          onValidate,
-          result,
-        }),
+        { onTurn, onValidate, result },
       ),
     ).toBe(0);
     const selected = onTurn.mock.lastCall?.[1];
@@ -355,7 +450,7 @@ test("validation rejects knowledge selected through a checkout link", async () =
     expect(
       await stderr.run(
         [...command, "--knowledge-base", join(link, "scan.json")],
-        dependencies({ currentDirectory: input.repository }),
+        input.dependencies(),
       ),
     ).toBe(2);
     expect(stderr.text()).toContain("repository directory links");
@@ -366,17 +461,12 @@ test("a missing operator-selected environment file fails without falling back", 
   const input = await fixture({});
   const onConfig = mock();
   expect(
-    await runCapturedCli(
-      main,
-      ["scan", "--json"],
-      dependencies({
-        currentDirectory: input.repository,
-        environment: {
-          CODEX_SECURITY_PROJECT_CONFIG: join(input.root, "missing.yaml"),
-        },
-        onConfig,
-      }),
-    ),
+    await input.run(["scan", "--json"], {
+      environment: {
+        CODEX_SECURITY_PROJECT_CONFIG: join(input.root, "missing.yaml"),
+      },
+      onConfig,
+    }),
   ).toBe(2);
   expect(onConfig).not.toHaveBeenCalled();
 });
@@ -392,10 +482,7 @@ test.each([123, "", "   "])(
     expect(
       await stderr.run(
         ["scan", "-c", input.config, "--provider", "amazon-bedrock", "--json"],
-        dependencies({
-          currentDirectory: input.repository,
-          onConfig,
-        }),
+        input.dependencies({ onConfig }),
       ),
     ).toBe(2);
     expect(stderr.text()).toContain(
@@ -477,10 +564,7 @@ test.each(["instructions_file", "validation_file"] as const)(
     const stderr = captureCli(main, "stderr");
     const exit = await stderr.run(
       ["bulk-scan", csv, "-c", input.config, "--json"],
-      dependencies({
-        currentDirectory: input.repository,
-        onConfig,
-      }),
+      input.dependencies({ onConfig }),
     );
     expect(exit).toBe(2);
     expect(stderr.text()).toContain(
@@ -753,8 +837,7 @@ test("actual CLI parsing preserves file values when flags are absent", async () 
   expect(
     await runCli(
       ["scan", "-c", input.config, "--json"],
-      dependencies({
-        currentDirectory: input.repository,
+      input.dependencies({
         environment: { OPENAI_API_KEY: "synthetic-test-key" },
         onConfig,
         onTurn,
@@ -805,8 +888,7 @@ test("CLI values override matching file values, including native objects and lis
   const onTurn = mock<(_target: string, options: ScanOptions) => void>();
   const onConfig = mock<(config: CodexSecurityConfig) => void>();
   expect(
-    await runCapturedCli(
-      main,
+    await input.run(
       [
         "scan",
         "--config",
@@ -833,11 +915,7 @@ test("CLI values override matching file values, including native objects and lis
         "synthetic_setting.names=[]",
         "--json",
       ],
-      dependencies({
-        currentDirectory: input.repository,
-        onConfig,
-        onTurn,
-      }),
+      { onConfig, onTurn },
     ),
   ).toBe(0);
   const selected = onTurn.mock.lastCall?.[1];
@@ -936,10 +1014,7 @@ test.each([
     expect(
       await stderr.run(
         ["scan", "-c", input.config, ...flags, "--json"],
-        dependencies({
-          currentDirectory: input.repository,
-          onTurn,
-        }),
+        input.dependencies({ onTurn }),
       ),
     ).toBe(0);
     const selected = onTurn.mock.lastCall?.[1];
@@ -967,10 +1042,7 @@ test.each([
     expect(
       await stderr.run(
         ["scan", "-c", input.config, ...flags, "--json"],
-        dependencies({
-          currentDirectory: input.repository,
-          onConfig,
-        }),
+        input.dependencies({ onConfig }),
       ),
     ).toBe(2);
     expect(stderr.text()).toContain(message);
@@ -987,13 +1059,9 @@ test("selecting standard mode leaves inactive file deep settings out of the acti
   });
   const onTurn = mock<(_target: string, options: ScanOptions) => void>();
   expect(
-    await runCapturedCli(
-      main,
+    await input.run(
       ["scan", "-c", input.config, "--mode", "standard", "--json"],
-      dependencies({
-        currentDirectory: input.repository,
-        onTurn,
-      }),
+      { onTurn },
     ),
   ).toBe(0);
   const selected = onTurn.mock.lastCall?.[1];
@@ -1020,8 +1088,7 @@ test("file prompts use the config directory and CLI prompt overrides use the inv
   );
   const onTurn = mock<(_target: string, options: ScanOptions) => void>();
   expect(
-    await runCapturedCli(
-      main,
+    await input.run(
       [
         "scan",
         "-c",
@@ -1030,10 +1097,7 @@ test("file prompts use the config directory and CLI prompt overrides use the inv
         "validate.md",
         "--json",
       ],
-      dependencies({
-        currentDirectory: input.repository,
-        onTurn,
-      }),
+      { onTurn },
     ),
   ).toBe(0);
   const selected = onTurn.mock.lastCall?.[1];
@@ -1043,19 +1107,191 @@ test("file prompts use the config directory and CLI prompt overrides use the inv
   });
 });
 
+test.each(["root", "file profile", "CLI profile"])(
+  "an explicit OpenAI provider overrides the %s and omission preserves it",
+  async (selection) => {
+    const configured: JsonObject = {
+      model: "synthetic-model",
+      model_provider: "amazon-bedrock",
+      ...(selection === "root"
+        ? {}
+        : {
+            profile: selection === "CLI profile" ? "other" : "review",
+            profiles: {
+              review: {
+                model_provider: "amazon-bedrock",
+                model_reasoning_effort: "high",
+              },
+              other: { model_provider: "amazon-bedrock" },
+            },
+          }),
+    };
+    const input = await fixture({ codex: configured });
+    for (const provider of [undefined, "openai"] as const) {
+      let native: CodexSecurityConfig | undefined;
+      expect(
+        await runCapturedCli(
+          main,
+          [
+            "scan",
+            "-c",
+            input.config,
+            ...(provider === undefined ? [] : ["--provider", provider]),
+            ...(selection === "CLI profile"
+              ? ["--codex", 'profile="review"']
+              : []),
+            "--json",
+          ],
+          dependencies({
+            currentDirectory: input.repository,
+            onConfig: (value) => {
+              native = value;
+            },
+          }),
+        ),
+      ).toBe(0);
+      expect(scanModelProvider(native!.codexOverrides!)).toBe(
+        provider ?? "amazon-bedrock",
+      );
+      if (selection !== "root") {
+        expect(native?.codexOverrides).toMatchObject({
+          profiles: {
+            review: { model_reasoning_effort: "high" },
+            other: { model_provider: "amazon-bedrock" },
+          },
+        });
+      }
+      expect((await readProjectConfig(input.config)).input.codex).toEqual(
+        configured,
+      );
+    }
+  },
+);
+
+test.each(["openrouter", "fireworks", "amazon-bedrock"] as const)(
+  "requires an explicit or configured model for inherited %s before preparing runtime",
+  async (provider) => {
+    for (const selection of [
+      "root",
+      "file profile",
+      "CLI profile",
+      "native override",
+    ]) {
+      for (const model of [undefined, "synthetic-provider-model"]) {
+        const providerConfig: JsonObject = {
+          model_provider: provider,
+          ...(model === undefined ? {} : { model }),
+        };
+        const codex: JsonObject =
+          selection === "root"
+            ? providerConfig
+            : selection === "native override"
+              ? {}
+              : {
+                  model_provider: "openai",
+                  profile: selection === "CLI profile" ? "other" : "review",
+                  profiles: {
+                    review: providerConfig,
+                    other: { model_provider: "openai" },
+                  },
+                };
+        const input = await fixture({ codex });
+        const { runCli, stdout, stderr } = createCliTest(main);
+        const onConfig = mock<(config: CodexSecurityConfig) => void>();
+        const args = [
+          "scan",
+          "-c",
+          input.config,
+          "--json",
+          ...(selection === "CLI profile"
+            ? ["--codex", 'profile="review"']
+            : []),
+          ...(selection === "native override"
+            ? [
+                "--codex",
+                `model_provider="${provider}"`,
+                ...(model === undefined ? [] : ["--codex", `model="${model}"`]),
+              ]
+            : []),
+        ];
+        expect(
+          await runCli(
+            args,
+            dependencies({
+              currentDirectory: input.repository,
+              onConfig,
+              environment: {
+                OPENROUTER_API_KEY: "synthetic-openrouter-key",
+                FIREWORKS_API_KEY: "synthetic-fireworks-key",
+              },
+            }),
+          ),
+          `${provider} / ${selection} / ${model}: ${stderr.text()}`,
+        ).toBe(model === undefined ? 2 : 0);
+        if (model === undefined) {
+          expect(onConfig).not.toHaveBeenCalled();
+          expect(JSON.parse(stdout.text())).toMatchObject({
+            status: "failed",
+            code: "SCAN_FAILED",
+          });
+          expect(stderr.text()).toContain(
+            `--model is required when using --provider ${provider}`,
+          );
+          if (selection !== "native override") {
+            expect(
+              await runCapturedCli(
+                main,
+                [...args, "--provider", "openai"],
+                dependencies({ currentDirectory: input.repository, onConfig }),
+              ),
+            ).toBe(0);
+            expect(
+              scanModelProvider(onConfig.mock.lastCall![0].codexOverrides!),
+            ).toBe("openai");
+          }
+        } else {
+          expect(onConfig).toHaveBeenCalledTimes(1);
+          expect(
+            scanModelProvider(onConfig.mock.lastCall![0].codexOverrides!),
+          ).toBe(provider);
+          expect(scanModel(onConfig.mock.lastCall![0].codexOverrides!)).toBe(
+            model,
+          );
+        }
+      }
+    }
+  },
+);
+
+test("explicit OpenAI rejects a conflicting direct provider override", () => {
+  expect(() =>
+    parseCodexOverrides(
+      ['model_provider="amazon-bedrock"'],
+      undefined,
+      undefined,
+      "openai",
+    ),
+  ).toThrow("--provider conflicts with --codex model_provider");
+});
+
+test("malformed TOML explains shell quoting with a usable example", () => {
+  expect(() => parseCodexOverrides(["model_reasoning_effort=high"])).toThrow(
+    "--codex \"model_reasoning_effort='high'\"",
+  );
+  expect(parseCodexOverrides(["model_reasoning_effort='high'"])).toEqual({
+    model_reasoning_effort: "high",
+  });
+});
+
 test("an explicit file can supply the model required by a provider override", async () => {
   const input = await fixture({
     codex: { model: "synthetic-model" },
   });
   const onConfig = mock<(config: CodexSecurityConfig) => void>();
   expect(
-    await runCapturedCli(
-      main,
+    await input.run(
       ["scan", "-c", input.config, "--provider", "amazon-bedrock", "--json"],
-      dependencies({
-        currentDirectory: input.repository,
-        onConfig,
-      }),
+      { onConfig },
     ),
   ).toBe(0);
   const native = onConfig.mock.lastCall?.[0];
@@ -1080,8 +1316,7 @@ test.each(["file", "CLI"])(
     });
     const onConfig = mock<(config: CodexSecurityConfig) => void>();
     expect(
-      await runCapturedCli(
-        main,
+      await input.run(
         [
           "scan",
           "-c",
@@ -1091,10 +1326,7 @@ test.each(["file", "CLI"])(
           ...(overrideProfile ? ["--codex", 'profile="review"'] : []),
           "--json",
         ],
-        dependencies({
-          currentDirectory: input.repository,
-          onConfig,
-        }),
+        { onConfig },
       ),
     ).toBe(0);
     const native = onConfig.mock.lastCall?.[0];
@@ -1117,10 +1349,7 @@ test("an unselected file profile does not satisfy the provider model requirement
   expect(
     await stderr.run(
       ["scan", "-c", input.config, "--provider", "amazon-bedrock", "--json"],
-      dependencies({
-        currentDirectory: input.repository,
-        onConfig,
-      }),
+      input.dependencies({ onConfig }),
     ),
   ).toBe(2);
   expect(onConfig).not.toHaveBeenCalled();
@@ -1137,16 +1366,7 @@ test.each([
   const input = await fixture("scan: [");
   await writeFile(join(input.repository, "codex-security.yaml"), "scan: [");
   const onConfig = mock();
-  expect(
-    await runCapturedCli(
-      main,
-      [...argv],
-      dependencies({
-        currentDirectory: input.repository,
-        onConfig,
-      }),
-    ),
-  ).toBe(0);
+  expect(await input.run([...argv], { onConfig })).toBe(0);
   expect(onConfig).not.toHaveBeenCalled();
 });
 
@@ -1158,7 +1378,7 @@ test.each(["--help", "--schema"])(
     expect(
       await stdout.run(
         ["scan", "-c", input.config, flag, "--json"],
-        dependencies({ currentDirectory: input.repository }),
+        input.dependencies(),
       ),
     ).toBe(0);
     if (flag === "--schema")
@@ -1176,10 +1396,7 @@ test("a malformed selected file fails before constructing a client", async () =>
   expect(
     await runCli(
       ["scan", "-c", input.config, "--dry-run", "--json"],
-      dependencies({
-        currentDirectory: input.repository,
-        onConfig,
-      }),
+      input.dependencies({ onConfig }),
     ),
   ).toBe(2);
   expect(onConfig).not.toHaveBeenCalled();
@@ -1212,8 +1429,7 @@ test("dry-run reports native defaults restored by a CLI table", async () => {
         "--dry-run",
         "--json",
       ],
-      dependencies({
-        currentDirectory: input.repository,
+      input.dependencies({
         onConfig,
         onRun: throwing("Dry-run must not start a scan"),
       }),
@@ -1266,10 +1482,7 @@ test("dry-run uses the real SDK without initializing its runtime and reports pro
 
   const createCodex = mock(throwing("No inference in dry-run"));
   const prepareRuntime = mock(rejecting("No runtime in dry-run"));
-  const deps = dependencies({
-    currentDirectory: input.repository,
-    environment,
-  });
+  const deps = input.dependencies({ environment });
   deps.createSecurity = cliClientFactory({
     environment,
     createCodex,
@@ -1306,6 +1519,7 @@ test("dry-run uses the real SDK without initializing its runtime and reports pro
     stopAfterConsecutiveErrors: 2,
     maxDiscoveryRuns: 40,
     maxTimeHours: 96,
+    maxTimeMinutes: 5760,
     projectConfig: {
       path: input.config,
       sources: {
@@ -1349,6 +1563,47 @@ test("dry-run uses the real SDK without initializing its runtime and reports pro
   expect(prepareRuntime).not.toHaveBeenCalled();
 });
 
+test.each([undefined, "2.5"])(
+  "Standard dry-run reports the effective time budget without a runtime: %s",
+  async (minutes) => {
+    const input = await fixture({});
+    const environment = {
+      CODEX_HOME: join(input.root, "ambient"),
+      CODEX_SECURITY_STATE_DIR: join(input.root, "state"),
+    };
+    const createCodex = mock(throwing("No inference in dry-run"));
+    const prepareRuntime = mock(rejecting("No runtime in dry-run"));
+    const deps = dependencies({
+      currentDirectory: input.repository,
+      environment,
+    });
+    deps.createSecurity = cliClientFactory({
+      environment,
+      createCodex,
+      prepareRuntime,
+    });
+    const stdout = captureCli(main, "stdout");
+    expect(
+      await stdout.run(
+        [
+          "scan",
+          "--dry-run",
+          "--json",
+          ...(minutes === undefined ? [] : ["--max-time", minutes]),
+        ],
+        deps,
+      ),
+    ).toBe(0);
+    const output = JSON.parse(stdout.text());
+    expect(output.mode).toBe("standard");
+    expect(output.maxTimeMinutes).toBe(
+      minutes === undefined ? undefined : Number(minutes),
+    );
+    expect(createCodex).not.toHaveBeenCalled();
+    expect(prepareRuntime).not.toHaveBeenCalled();
+  },
+);
+
 test.each([
   [{ output: { directory: "../repository/artifacts" } }, "outside"],
   [{ codex: { plugins: {} } }, "plugin"],
@@ -1368,10 +1623,7 @@ test.each([
     const stderr = captureCli(main, "stderr");
     const createCodex = mock(throwing("No inference"));
     const prepareRuntime = mock(rejecting("No runtime"));
-    const deps = dependencies({
-      currentDirectory: input.repository,
-      environment,
-    });
+    const deps = input.dependencies({ environment });
     deps.createSecurity = cliClientFactory({
       environment,
       createCodex,
@@ -1410,19 +1662,14 @@ test("rerun restores all saved deep settings and authentication without loading 
   };
   const onTurn = mock<(_target: string, options: ScanOptions) => void>();
   expect(
-    await runCapturedCli(
-      main,
-      ["scans", "rerun", "saved", "--json"],
-      dependencies({
-        currentDirectory: input.repository,
-        environment: {
-          OPENAI_API_KEY: "synthetic-test-key",
-          CODEX_SECURITY_PROJECT_CONFIG: input.config,
-        },
-        onWorkbench: async () => ({ scanId: "saved", recipe }),
-        onTurn,
-      }),
-    ),
+    await input.run(["scans", "rerun", "saved", "--json"], {
+      environment: {
+        OPENAI_API_KEY: "synthetic-test-key",
+        CODEX_SECURITY_PROJECT_CONFIG: input.config,
+      },
+      onWorkbench: async () => ({ scanId: "saved", recipe }),
+      onTurn,
+    }),
   ).toBe(0);
   const selected = onTurn.mock.lastCall?.[1];
   expect(selected).toMatchObject({
@@ -1457,8 +1704,7 @@ test.each([
     expect(
       await runCli(
         ["scans", "rerun", "saved", "--json", "--full-output"],
-        dependencies({
-          currentDirectory: input.repository,
+        input.dependencies({
           onWorkbench: async () => ({ recipe, scanId: "saved" }),
           onRun,
         }),
@@ -1472,6 +1718,69 @@ test.each([
     expect(onRun).not.toHaveBeenCalled();
   },
 );
+
+test.each([
+  { values: ['profiles.review.model_provider="amazon-bedrock"'] },
+  {
+    values: [
+      'profile="review"',
+      'profiles.review.model_provider="amazon-bedrock"',
+    ],
+  },
+  { values: ['profiles.review={model_provider="amazon-bedrock"}'] },
+])(
+  "rejects an explicit selected-profile provider conflict: %j",
+  ({ values }) => {
+    expect(() =>
+      parseCodexOverrides(values, undefined, undefined, "openai", {
+        profile: "review",
+        profiles: { review: { model: "synthetic-model" } },
+      }),
+    ).toThrow(
+      "--provider conflicts with --codex profiles.review.model_provider",
+    );
+  },
+);
+
+test("provider selection preserves inherited and unselected profile controls", () => {
+  const defaults = {
+    profile: "review",
+    profiles: {
+      review: { model: "synthetic-model", model_provider: "amazon-bedrock" },
+    },
+  };
+  expect(
+    parseCodexOverrides([], undefined, undefined, "openai", defaults),
+  ).toMatchObject({
+    model_provider: "openai",
+    profiles: { review: { model_provider: "openai" } },
+  });
+  expect(
+    parseCodexOverrides(
+      ['profiles.unselected.model_provider="amazon-bedrock"'],
+      undefined,
+      undefined,
+      "openai",
+      defaults,
+    ),
+  ).toMatchObject({
+    profiles: {
+      review: { model_provider: "openai" },
+      unselected: { model_provider: "amazon-bedrock" },
+    },
+  });
+  expect(
+    parseCodexOverrides(
+      ['profiles.review.model_provider="amazon-bedrock"'],
+      undefined,
+      undefined,
+      undefined,
+      defaults,
+    ),
+  ).toMatchObject({
+    profiles: { review: { model_provider: "amazon-bedrock" } },
+  });
+});
 
 test.each([
   { model: "gpt-5.6-sol", showCost: false },

@@ -229,13 +229,6 @@ type PublicationHandoffEvidence = {
 type PublicationEvidence =
   PublicationEventEvidence | PublicationHandoffEvidence;
 
-interface FindingReconciliation {
-  issue: PreparedPublicationIssue;
-  created?: PublishedScanIssue;
-  error?: string;
-  indeterminate: boolean;
-}
-
 export async function publishScan(
   scanDirectory: string,
   options: PublishScanOptions,
@@ -1210,32 +1203,10 @@ function reconcilePublicationEvidence(
     }
   }
 
-  const outcomes = publication.issues.map((issue) =>
-    reconcileFindingEvidence(issue, byOwner.get(issue.findingId)),
-  );
-  let indeterminate = outcomes.some((outcome) => outcome.indeterminate);
-
-  for (const outcome of outcomes) {
-    if (!collidingOwners.has(outcome.issue.findingId)) continue;
-    outcome.created = undefined;
-    outcome.error =
-      "Codex wrote a Linear publication that reused or relabeled a claim across incompatible publication evidence.";
-    indeterminate = true;
-  }
-
+  const created: PublishedScanIssue[] = [];
+  const failed: FailedScanPublication[] = [];
   const unowned = byOwner.get(undefined) ?? [];
-  if (
-    unowned.some(
-      (item) =>
-        (item.source === "event" &&
-          (item.status === "completed" || item.resolution.claims.length > 0)) ||
-        (item.source === "handoff" &&
-          (item.resolution.claims.length > 0 ||
-            item.possibleMutation === true)),
-    )
-  ) {
-    indeterminate = true;
-  }
+  let indeterminate = unowned.some(mayHaveCreatedIssue);
   const unexpected = unowned.map((item) =>
     item.source === "event"
       ? "Codex attempted to create an unexpected Linear issue."
@@ -1243,171 +1214,90 @@ function reconcilePublicationEvidence(
         ? "Codex wrote an unexpected Linear publication handoff."
         : item.error,
   );
-  const unexpectedTarget = outcomes.find(
-    (outcome) => outcome.created === undefined && outcome.error === undefined,
-  );
-  if (unexpectedTarget !== undefined && unexpected.length > 0) {
-    unexpectedTarget.error = unexpected.join(" ");
-  }
-
-  for (const outcome of outcomes) {
-    if (outcome.created === undefined && outcome.error === undefined) {
-      outcome.error = failureMessage;
+  let unansweredError =
+    unexpected.length > 0 ? unexpected.join(" ") : failureMessage;
+  for (const { findingId, occurrenceId } of publication.issues) {
+    const items = byOwner.get(findingId);
+    if (items === undefined) {
+      // Report unowned evidence only on the first unanswered finding.
+      failed.push({ findingId, error: unansweredError });
+      unansweredError = failureMessage;
+      continue;
+    }
+    const events = items.filter((item) => item.source === "event");
+    const outcome = collidingOwners.has(findingId)
+      ? "Codex wrote a Linear publication that reused or relabeled a claim across incompatible publication evidence."
+      : events.length > 1
+        ? "Codex attempted to create more than one Linear issue for this finding."
+        : reconcileFindingEvidence(
+            events[0],
+            items.filter((item) => item.source === "handoff"),
+          );
+    if (typeof outcome === "string") {
+      failed.push({ findingId, error: outcome });
+      indeterminate ||= events.length > 1 || items.some(mayHaveCreatedIssue);
+    } else {
+      created.push({
+        findingId,
+        occurrenceId,
+        issueIdentifier: outcome.issueIdentifier,
+        ...(outcome.url === undefined ? {} : { url: outcome.url }),
+      });
     }
   }
-  return {
-    ...(indeterminate ? { indeterminate: true } : {}),
-    created: outcomes.flatMap((outcome) =>
-      outcome.created === undefined ? [] : [outcome.created],
-    ),
-    failed: outcomes.flatMap((outcome) =>
-      outcome.error === undefined
-        ? []
-        : [{ findingId: outcome.issue.findingId, error: outcome.error }],
-    ),
-  };
+  return { ...(indeterminate ? { indeterminate: true } : {}), created, failed };
+}
+
+function mayHaveCreatedIssue(item: PublicationEvidence): boolean {
+  return (
+    item.resolution.claims.length > 0 ||
+    (item.source === "event"
+      ? item.status === "completed"
+      : item.possibleMutation === true)
+  );
 }
 
 function reconcileFindingEvidence(
-  issue: PreparedPublicationIssue,
-  bucket: PublicationEvidence[] = [],
-): FindingReconciliation {
-  const events = bucket.filter((item) => item.source === "event");
-  const handoffs = bucket.filter((item) => item.source === "handoff");
-  const failed = (
-    error: string,
-    indeterminate: boolean,
-  ): FindingReconciliation => ({ issue, error, indeterminate });
-  const created = (
-    resolution: Extract<ClaimResolution, { state: "resolved" }>,
-  ): FindingReconciliation => ({
-    issue,
-    indeterminate: false,
-    created: {
-      findingId: issue.findingId,
-      occurrenceId: issue.occurrenceId,
-      issueIdentifier: resolution.issueIdentifier,
-      ...(resolution.url === undefined ? {} : { url: resolution.url }),
-    },
-  });
-
-  if (events.length > 1) {
-    return failed(
-      "Codex attempted to create more than one Linear issue for this finding.",
-      true,
-    );
-  }
-  const completedCall = events.find((event) => event.status === "completed");
-  const eventFailure = events.find((event) => event.status === "failed");
-  const failedEventMayHaveMutated =
-    eventFailure !== undefined && eventFailure.resolution.claims.length > 0;
-  if (completedCall !== undefined && !completedCall.argumentsValid) {
-    return failed(
-      "Codex attempted to create a Linear issue with unexpected arguments or destination.",
-      true,
-    );
-  }
-  if (completedCall?.resolution.state === "conflicting") {
-    return failed(
-      "The connected Linear app returned conflicting created issue identifiers or URLs.",
-      true,
-    );
-  }
-  if (handoffs.length > 1) {
-    return failed(
-      "Codex wrote more than one Linear publication for this finding.",
-      completedCall !== undefined ||
-        failedEventMayHaveMutated ||
-        handoffs.some(
-          (item) =>
-            item.resolution.claims.length > 0 || item.possibleMutation === true,
-        ),
-    );
-  }
+  event: PublicationEventEvidence | undefined,
+  handoffs: readonly PublicationHandoffEvidence[],
+): Extract<ClaimResolution, { state: "resolved" }> | string {
+  const invalidArguments =
+    "Codex attempted to create a Linear issue with unexpected arguments or destination.";
+  if (event?.status === "completed" && !event.argumentsValid)
+    return invalidArguments;
+  const completed =
+    event?.status === "completed" ? event.resolution : undefined;
+  if (completed?.state === "conflicting")
+    return "The connected Linear app returned conflicting created issue identifiers or URLs.";
+  if (handoffs.length > 1)
+    return "Codex wrote more than one Linear publication for this finding.";
 
   const handoff = handoffs[0];
-  if (handoff?.status === "invalid") {
-    if (
-      completedCall?.resolution.state === "resolved" &&
-      evidenceClaimsCorroborate(
-        completedCall.resolution.claims,
-        handoff.resolution.claims,
-      ) &&
-      (handoff.recoverableWithEvent === true ||
-        corroboratesRelabeledEntity(completedCall.resolution, handoff))
-    ) {
-      const combined = resolveClaims([
-        ...completedCall.resolution.claims,
-        ...handoff.resolution.claims,
-      ]);
-      if (combined.state === "resolved") return created(combined);
-    }
-    return failed(
-      handoff.error,
-      handoff.possibleMutation === true ||
-        completedCall !== undefined ||
-        failedEventMayHaveMutated ||
-        handoff.resolution.claims.length > 0,
-    );
-  }
   if (handoff?.status === "failure") {
-    if (completedCall?.resolution.state === "resolved") {
-      return created(completedCall.resolution);
-    }
-    return failed(
-      handoff.error,
-      handoff.possibleMutation === true ||
-        completedCall !== undefined ||
-        failedEventMayHaveMutated,
-    );
+    return completed?.state === "resolved" ? completed : handoff.error;
   }
-  if (handoff?.status === "success") {
-    if (eventFailure !== undefined) {
-      return failed(
-        eventFailure.argumentsValid
-          ? eventFailure.error
-          : "Codex attempted to create a Linear issue with unexpected arguments or destination.",
-        true,
-      );
-    }
-    if (
-      completedCall !== undefined &&
-      !evidenceClaimsCorroborate(
-        completedCall.resolution.claims,
-        handoff.resolution.claims,
-      )
-    ) {
-      return failed(
-        "Codex reported a conflicting Linear issue for this finding.",
-        true,
-      );
-    }
-    const combined = resolveClaims([
-      ...(completedCall?.resolution.claims ?? []),
-      ...handoff.resolution.claims,
-    ]);
-    if (combined.state === "resolved") return created(combined);
-    return failed(
-      "Codex reported a conflicting Linear issue for this finding.",
-      true,
-    );
-  }
+  if (
+    handoff?.status === "invalid" &&
+    (completed?.state !== "resolved" ||
+      (handoff.recoverableWithEvent !== true &&
+        !corroboratesRelabeledEntity(completed, handoff)))
+  )
+    return handoff.error;
+  if (event?.status === "failed")
+    return event.argumentsValid ? event.error : invalidArguments;
+  if (handoff === undefined)
+    return completed?.state === "resolved"
+      ? completed
+      : MISSING_PUBLICATION_IDENTIFIER_ERROR;
 
-  if (completedCall?.resolution.state === "resolved") {
-    return created(completedCall.resolution);
+  const claims = completed?.claims ?? [];
+  if (evidenceClaimsCorroborate(claims, handoff.resolution.claims)) {
+    const combined = resolveClaims([...claims, ...handoff.resolution.claims]);
+    if (combined.state === "resolved") return combined;
   }
-  if (completedCall !== undefined) {
-    return failed(MISSING_PUBLICATION_IDENTIFIER_ERROR, true);
-  }
-  if (eventFailure !== undefined) {
-    return failed(
-      eventFailure.argumentsValid
-        ? eventFailure.error
-        : "Codex attempted to create a Linear issue with unexpected arguments or destination.",
-      failedEventMayHaveMutated,
-    );
-  }
-  return { issue, indeterminate: false };
+  return handoff.status === "invalid"
+    ? handoff.error
+    : "Codex reported a conflicting Linear issue for this finding.";
 }
 
 function evidenceClaimsCorroborate(

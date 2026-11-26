@@ -10,7 +10,9 @@ import pytest
 from test_workbench_deep_scan import begin_target_scan
 from workbench_test_support import (
     empty_target_paths,
+    get_scan,
     mark_deep_coordinator_succeeded,
+    resume_deep_scan,
     run_workbench,
 )
 
@@ -43,6 +45,7 @@ def test_target_request_does_not_reuse_different_user_context(
         scan_root,
         thread_id="thread-new-request",
         user_context=next_context,
+        confirmed_concurrent_scans=(first_scan_id,),
     )
 
     assert requested["startDisposition"] == "created"
@@ -97,14 +100,12 @@ def test_terminal_reuse_matches_discovery_context_after_edit(
             scan_root,
             thread_id="thread-new-request",
             user_context=context,
+            confirmed_concurrent_scans=(scan_id,) if disposition == "created" else (),
         )
         assert requested["startDisposition"] == disposition
         assert (requested["deepScan"]["scanId"] == scan_id) == (disposition == "joined")
         assert requested["deepScan"]["userContext"] == context
-    assert (
-        run_workbench(state_dir, "get-scan", "--scan-id", scan_id)["scan"]["userContext"]
-        == edited_context
-    )
+    assert get_scan(state_dir, scan_id)["scan"]["userContext"] == edited_context
 
 
 @pytest.mark.parametrize("original_context", (None, "Review authentication only."))
@@ -130,14 +131,8 @@ def test_context_snapshot_survives_owner_join_and_explicit_resume(
     )
     for requested in (
         begin_target_scan(state_dir, codex_home, target, scan_root, user_context="New request"),
-        run_workbench(
-            state_dir,
-            "begin-deep-scan",
-            "--scan-id",
-            scan_id,
-            "--thread-id",
-            "thread-deep-scan",
-            environment={"CODEX_HOME": str(codex_home)},
+        resume_deep_scan(
+            state_dir, scan_id, "thread-deep-scan", environment={"CODEX_HOME": str(codex_home)}
         ),
     ):
         assert requested["startDisposition"] == "joined"
@@ -168,14 +163,8 @@ def test_begin_and_resume_after_recorded_deep_scan_tables_are_repaired(
     thread_id = "thread-deep-scan" if resume_existing else "thread-new-request"
     expected_context = original_context if resume_existing else "Review SQL injection only."
     if resume_existing:
-        started = run_workbench(
-            state_dir,
-            "begin-deep-scan",
-            "--scan-id",
-            str(first["scanId"]),
-            "--thread-id",
-            thread_id,
-            environment={"CODEX_HOME": str(codex_home)},
+        started = resume_deep_scan(
+            state_dir, str(first["scanId"]), thread_id, environment={"CODEX_HOME": str(codex_home)}
         )
     else:
         started = begin_target_scan(
@@ -185,19 +174,14 @@ def test_begin_and_resume_after_recorded_deep_scan_tables_are_repaired(
             scan_root,
             thread_id=thread_id,
             user_context=expected_context,
+            confirmed_concurrent_scans=(str(first["scanId"]),),
         )
     scan_id = str(started["deepScan"]["scanId"])
     assert started["startDisposition"] == "created"
     assert (scan_id == first["scanId"]) is resume_existing
     assert started["deepScan"]["userContext"] == expected_context
-    resumed = run_workbench(
-        state_dir,
-        "begin-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        thread_id,
-        environment={"CODEX_HOME": str(codex_home)},
+    resumed = resume_deep_scan(
+        state_dir, scan_id, thread_id, environment={"CODEX_HOME": str(codex_home)}
     )
     assert resumed["startDisposition"] == "joined"
     assert resumed["deepScan"]["userContext"] == expected_context
@@ -225,14 +209,8 @@ def test_upgrade_keeps_unknown_discovery_context_resumable_but_not_reusable(
         connection.execute("ALTER TABLE deep_scan_runs DROP COLUMN discovery_user_context_json")
         if not migration_recorded:
             connection.execute("DELETE FROM schema_migrations WHERE version = 47")
-    resumed = run_workbench(
-        state_dir,
-        "begin-deep-scan",
-        "--scan-id",
-        scan_id,
-        "--thread-id",
-        "thread-deep-scan",
-        environment={"CODEX_HOME": str(codex_home)},
+    resumed = resume_deep_scan(
+        state_dir, scan_id, "thread-deep-scan", environment={"CODEX_HOME": str(codex_home)}
     )
     assert resumed["startDisposition"] == "joined"
     assert resumed["deepScan"]["userContext"] == current_context
@@ -243,6 +221,7 @@ def test_upgrade_keeps_unknown_discovery_context_resumable_but_not_reusable(
         scan_root,
         thread_id="thread-new-request",
         user_context=current_context,
+        confirmed_concurrent_scans=(scan_id,),
     )
     assert requested["startDisposition"] == "created"
     with sqlite3.connect(state_dir / "workbench.sqlite3") as connection:

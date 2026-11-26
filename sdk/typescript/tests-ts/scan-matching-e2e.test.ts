@@ -22,6 +22,7 @@ import { copyCompletedScanFixture, PLUGIN_ROOT } from "./plugin-root.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 import { readJson } from "./support/json.js";
 import { fail } from "./support/errors.js";
+import { scanRegistrationArguments } from "./support/workbench-command.js";
 
 const empty = { matches: [], uncertain: [] } satisfies ScanComparisonResult;
 
@@ -74,20 +75,9 @@ test("matches sealed scan history end to end without merging related findings", 
     async function scan(names: string[]) {
       const scanDir = join(root, `scan-${names[0]}`);
       await mkdir(scanDir, { mode: 0o700 });
-      const registered = await workbench([
-        "register-cli-scan",
-        "--repository",
-        repository,
-        "--scan-dir",
-        scanDir,
-        "--recipe-json",
-        JSON.stringify({
-          config: {},
-          mode: "standard",
-          repository,
-          target: { kind: "repository", paths: [] },
-        }),
-      ]);
+      const registered = await workbench(
+        scanRegistrationArguments(repository, scanDir),
+      );
       const scanId = String(registered["scanId"]);
       await copyCompletedScanFixture(scanDir);
       const manifest = await readJson<ScanManifest>(

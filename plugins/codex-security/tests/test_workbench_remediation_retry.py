@@ -18,7 +18,9 @@ from typing import Any
 import pytest
 from workbench_test_support import (
     RemediationRequest,
+    close_finding,
     empty_target_paths,
+    git_in,
     initialize_git_repository,
     scan_command,
     set_triage,
@@ -55,7 +57,7 @@ def test_generated_patch_does_not_fetch_missing_git_objects(tmp_path, workbench_
         "remote.origin.url": repo.as_uri(),
         "remote.origin.uploadpack": 'echo invoked > "$TEST_REMOTE_MARKER"; exit 1;',
     }.items():
-        subprocess.run(["git", "config", key, value], cwd=repo, check=True)
+        git_in(repo, "config", key, value)
 
     patch = b"--- /dev/null\n+++ b/added\n@@ -0,0 +1 @@\n+new\n"
     workbench_api["remediation_state"].require_valid_patch(repo, patch)
@@ -76,10 +78,10 @@ def test_generated_patch_requires_binary_contents(
     target.mkdir(parents=True)
     asset = target / "asset.bin"
     asset.write_bytes(b"\0before")
-    subprocess.run(["git", "add", "asset.bin"], cwd=target, check=True)
+    git_in(target, "add", "asset.bin")
     diff = ["git", "diff", "--relative"]
     added = subprocess.check_output([*diff, "--cached", "--binary"], cwd=target)
-    subprocess.run(["git", "commit", "-qm", "Add asset"], cwd=target, check=True)
+    git_in(target, "commit", "-qm", "Add asset")
     asset.write_bytes(b"\0after")
     summary = subprocess.check_output(diff, cwd=target)
     binary = subprocess.check_output([*diff, "--binary"], cwd=target)
@@ -88,7 +90,7 @@ def test_generated_patch_requires_binary_contents(
         notice.decode()
         + "Only in target: new-file\nindex 1234567..89abcde 100644\nGIT binary patch"
     )
-    subprocess.run(["git", "commit", "-qam", "Update asset", "-m", prose], cwd=target, check=True)
+    git_in(target, "commit", "-qam", "Update asset", "-m", prose)
     email = ["git", "format-patch", "-1", "--stdout", "--relative", "--signature", prose]
     mail = subprocess.check_output(email, cwd=target)
     mail_summary = subprocess.check_output([*email, "--no-binary"], cwd=target)
@@ -154,7 +156,7 @@ def test_generated_patch_with_quoted_no_stat_header(
 ) -> None:
     repo = tmp_path / "repo"
     initialize_git_repository(repo)
-    subprocess.run(["git", "config", "core.autocrlf", "false"], cwd=repo, check=True)
+    git_in(repo, "config", "core.autocrlf", "false")
 
     def git(*args: str) -> bytes:
         return subprocess.check_output(["git", *args], cwd=repo)
@@ -230,7 +232,7 @@ def test_generated_patch_rejects_truncated_hunk_header(tmp_path: Path, workbench
     initialize_git_repository(repo)
     path = repo / "source"
     path.write_bytes(b"before first\n" + b"context\n" * 12 + b"before last\n")
-    subprocess.run(["git", "add", "source"], cwd=repo, check=True)
+    git_in(repo, "add", "source")
     path.write_bytes(path.read_bytes().replace(b"before", b"after"))
     patch = subprocess.check_output(["git", "diff", "--", "source"], cwd=repo)
     first, last = patch.rsplit(b"\n@@ -", 1)
@@ -772,13 +774,10 @@ def test_failed_remediation_steps_can_retry_or_regenerate(
     assert failed["actionClaimToken"] is None
     assert failed["actionDeliveredAt"] is None
 
-    closed = set_triage(
+    closed = close_finding(
         state_dir,
         occurrence_id,
-        "closed",
-        "--close-reason",
         "wont_fix",
-        "--note",
         "Closing is allowed after the remediation worker has failed.",
     )["scan"]
     assert closed["findings"][0]["triage"]["status"] == "closed"

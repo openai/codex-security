@@ -1,37 +1,95 @@
-interface RosterGap {
-  id: string;
-  description: string;
-}
+import { createHash } from "node:crypto";
+import { z } from "zod";
+import type { JsonObject, JsonValue } from "./config.js";
 
-interface GapResolution {
-  id: string;
-  sourceRef: string;
-}
+const label = z.string().trim().min(1);
+const paths = z.array(z.string().min(1));
+const gapSchema = z.strictObject({ id: label, description: label });
+const resolutionSchema = z.strictObject({ id: label, sourceRef: label });
 
-interface RosterPage {
-  id: string;
-  owner: string;
-  expectedRevision?: number;
-  paths: readonly string[];
-  declaredComplete: boolean;
-  search: string;
-  sourceRefs: readonly string[];
-  gaps: readonly RosterGap[];
-  resolutions?: readonly GapResolution[];
-}
+export const sourceWorkMutationSchema = z.discriminatedUnion("operation", [
+  z.strictObject({
+    operation: z.literal("append_roster_page"),
+    id: label,
+    owner: label,
+    expectedRevision: z.number().int().positive().optional(),
+    paths,
+    declaredComplete: z.boolean(),
+    search: label,
+    sourceRefs: z.array(label),
+    gaps: z.array(gapSchema),
+    resolutions: z.array(resolutionSchema).optional(),
+  }),
+  z.strictObject({
+    operation: z.literal("assign_partition"),
+    id: label,
+    rosterId: label,
+    owner: label,
+    paths: paths.min(1),
+  }),
+  z.strictObject({
+    operation: z.literal("record_examined"),
+    partitionId: label,
+    paths: paths.min(1),
+  }),
+]);
 
-interface NewPartition {
-  id: string;
-  rosterId: string;
-  owner: string;
-  paths: readonly string[];
+const pageSchema = z.strictObject({
+  limit: z.number().int().positive(),
+  cursor: z
+    .strictObject({ revision: label, offset: z.number().int().positive() })
+    .optional(),
+});
+
+export const sourceWorkQuerySchema = z.union([
+  z.strictObject({}),
+  z.strictObject({
+    rosterId: label,
+    page: pageSchema
+      .extend({
+        view: z.enum(["paths", "unassigned", "pages", "gaps", "partitionIds"]),
+      })
+      .optional(),
+  }),
+  z.strictObject({
+    partitionId: label,
+    page: pageSchema
+      .extend({
+        view: z.enum(["paths", "remaining"]),
+      })
+      .optional(),
+  }),
+]);
+
+function pageOf<T>(
+  values: readonly T[],
+  request: z.infer<typeof pageSchema> & { view: string },
+  version: readonly unknown[],
+) {
+  const revision = createHash("sha256")
+    .update(JSON.stringify(version))
+    .digest("hex");
+  const offset = request.cursor?.offset ?? 0;
+  if (
+    request.cursor &&
+    (request.cursor.revision !== revision || offset >= values.length)
+  ) {
+    throw new Error(
+      "Source work changed since this cursor. Start a current page.",
+    );
+  }
+  const next = Math.min(offset + request.limit, values.length);
+  return {
+    view: request.view,
+    total: values.length,
+    items: values.slice(offset, next),
+    nextCursor: next < values.length ? { revision, offset: next } : null,
+  };
 }
 
 interface Roster {
   id: string;
   owner: string;
-  revision: number;
-  declaredComplete: boolean;
   paths: Set<string>;
   assignments: Map<string, string>;
   gaps: Map<string, string>;
@@ -40,8 +98,8 @@ interface Roster {
     sourceRefs: string[];
     matchedPaths: number;
     declaredComplete: boolean;
-    gaps: RosterGap[];
-    resolutions: GapResolution[];
+    gaps: z.infer<typeof gapSchema>[];
+    resolutions: z.infer<typeof resolutionSchema>[];
   }[];
 }
 
@@ -50,7 +108,7 @@ interface Partition {
   rosterId: string;
   owner: string;
   revision: number;
-  paths: Set<string>;
+  paths: readonly string[];
   examined: Set<string>;
 }
 
@@ -69,12 +127,22 @@ function checkedPaths(paths: readonly string[]): string[] {
   return unique;
 }
 
+function unassignedPaths(roster: Roster) {
+  return [...roster.paths]
+    .filter((path) => !roster.assignments.has(path))
+    .sort();
+}
+
+function remainingPaths(partition: Partition) {
+  return partition.paths.filter((path) => !partition.examined.has(path));
+}
+
 function rosterSummary(roster: Roster) {
   return {
     id: roster.id,
     owner: roster.owner,
-    revision: roster.revision,
-    declaredComplete: roster.declaredComplete,
+    revision: roster.pages.length,
+    declaredComplete: roster.gaps.size === 0,
     gapCount: roster.gaps.size,
     pageCount: roster.pages.length,
     matchedFileCount: roster.paths.size,
@@ -88,8 +156,8 @@ function partitionSummary(partition: Partition) {
     rosterId: partition.rosterId,
     owner: partition.owner,
     revision: partition.revision,
-    fileCount: partition.paths.size,
-    remainingFileCount: partition.paths.size - partition.examined.size,
+    fileCount: partition.paths.length,
+    remainingFileCount: partition.paths.length - partition.examined.size,
   };
 }
 
@@ -98,7 +166,7 @@ function partitionSummary(partition: Partition) {
  * searches. Completion here describes a supplied search roster or examined
  * files. Reviewed call evidence and the coordinator's plan live elsewhere.
  */
-export function createDependencySourceWorklist() {
+export function createDependencySourceWorkTools() {
   const rosters = new Map<string, Roster>();
   const partitions = new Map<string, Partition>();
   let generation = 0;
@@ -115,12 +183,13 @@ export function createDependencySourceWorklist() {
     return partition;
   }
 
-  return {
-    appendRosterPage(input: RosterPage) {
+  function update(args: unknown): JsonObject {
+    const input = sourceWorkMutationSchema.parse(args);
+    if (input.operation === "append_roster_page") {
       const old = rosters.get(input.id);
       if (
-        old?.revision !== input.expectedRevision ||
-        (old && (old.owner !== input.owner || old.declaredComplete))
+        old?.pages.length !== input.expectedRevision ||
+        (old && (old.owner !== input.owner || old.gaps.size === 0))
       ) {
         throw new Error(
           "Source roster is complete, or its owner or revision changed.",
@@ -133,8 +202,8 @@ export function createDependencySourceWorklist() {
           throw new Error("A source roster gap ID refers to a different gap.");
         gaps.set(id, description);
       }
-      for (const { id, sourceRef } of input.resolutions ?? []) {
-        if (!old?.gaps.has(id) || !sourceRef.trim() || !gaps.delete(id))
+      for (const { id } of input.resolutions ?? []) {
+        if (!old?.gaps.has(id) || !gaps.delete(id))
           throw new Error(
             "Resolve an existing source roster gap with its source reference.",
           );
@@ -148,38 +217,34 @@ export function createDependencySourceWorklist() {
           "Resolve all recorded source roster gaps before declaring completion.",
         );
       const received = checkedPaths(input.paths);
-      const paths = new Set([...(old?.paths ?? []), ...received]);
-      const page = {
-        search: input.search,
-        sourceRefs: [...input.sourceRefs],
-        matchedPaths: received.length,
-        declaredComplete: input.declaredComplete,
-        gaps: input.gaps.map((gap) => ({ ...gap })),
-        resolutions: (input.resolutions ?? []).map((resolution) => ({
-          ...resolution,
-        })),
-      };
-      const roster = {
+      const roster: Roster = old ?? {
         id: input.id,
         owner: input.owner,
-        revision: (old?.revision ?? 0) + 1,
-        declaredComplete: input.declaredComplete,
+        paths: new Set(),
+        assignments: new Map(),
+        pages: [],
         gaps,
-        pages: [...(old?.pages ?? []), page],
-        paths,
-        assignments: old?.assignments ?? new Map<string, string>(),
       };
+      roster.gaps = gaps;
+      for (const path of received) roster.paths.add(path);
+      roster.pages.push({
+        search: input.search,
+        sourceRefs: input.sourceRefs,
+        matchedPaths: received.length,
+        declaredComplete: input.declaredComplete,
+        gaps: input.gaps,
+        resolutions: input.resolutions ?? [],
+      });
       rosters.set(input.id, roster);
       generation++;
       return rosterSummary(roster);
-    },
-
-    createPartition(input: NewPartition) {
+    }
+    if (input.operation === "assign_partition") {
       const roster = getRoster(input.rosterId);
       if (partitions.has(input.id))
         throw new Error("Source partition ID is already in use.");
       const paths = checkedPaths(input.paths);
-      if (!paths.length || paths.some((path) => !roster.paths.has(path))) {
+      if (paths.some((path) => !roster.paths.has(path))) {
         throw new Error("Source partition requires paths in its roster.");
       }
       if (paths.some((path) => roster.assignments.has(path))) {
@@ -190,132 +255,153 @@ export function createDependencySourceWorklist() {
         rosterId: input.rosterId,
         owner: input.owner,
         revision: 1,
-        paths: new Set(paths),
+        paths,
         examined: new Set(),
       };
       partitions.set(input.id, partition);
       for (const path of paths) roster.assignments.set(path, input.id);
       generation++;
       return partitionSummary(partition);
-    },
+    }
+    const partition = getPartition(input.partitionId);
+    const paths = checkedPaths(input.paths);
+    const owners = getRoster(partition.rosterId).assignments;
+    if (paths.some((path) => owners.get(path) !== partition.id)) {
+      throw new Error("Path is outside the source partition.");
+    }
+    const before = partition.examined.size;
+    for (const path of paths) partition.examined.add(path);
+    if (partition.examined.size !== before) {
+      partition.revision++;
+      generation++;
+    }
+    return partitionSummary(partition);
+  }
 
-    recordExamined(input: { partitionId: string; paths: readonly string[] }) {
-      const partition = getPartition(input.partitionId);
-      const paths = checkedPaths(input.paths);
-      if (paths.some((path) => !partition.paths.has(path))) {
-        throw new Error("Path is outside the source partition.");
-      }
-      const before = partition.examined.size;
-      for (const path of paths) partition.examined.add(path);
-      if (partition.examined.size !== before) {
-        partition.revision++;
-        generation++;
-      }
-      return partitionSummary(partition);
-    },
-
-    generation: () => generation,
-
-    limitations() {
-      const result: string[] = [];
-      for (const roster of rosters.values()) {
-        const gaps = [...roster.gaps].map(
-          ([id, description]) =>
-            "gap " + JSON.stringify(id) + " (" + description + ")",
-        );
-        const unassigned = [...roster.paths].filter(
-          (path) => !roster.assignments.has(path),
-        );
-        if (unassigned.length)
-          gaps.push("unassigned files " + JSON.stringify(unassigned.sort()));
-        for (const id of new Set(roster.assignments.values())) {
-          const partition = getPartition(id);
-          const remaining = [...partition.paths].filter(
-            (path) => !partition.examined.has(path),
+  function limitations() {
+    const result: string[] = [];
+    for (const roster of rosters.values()) {
+      const gaps = [...roster.gaps].map(
+        ([id, description]) =>
+          "gap " + JSON.stringify(id) + " (" + description + ")",
+      );
+      const unassigned = unassignedPaths(roster);
+      if (unassigned.length)
+        gaps.push("unassigned files " + JSON.stringify(unassigned));
+      for (const id of new Set(roster.assignments.values())) {
+        const partition = getPartition(id);
+        const remaining = remainingPaths(partition);
+        const scope = "partition " + JSON.stringify(partition.id);
+        if (remaining.length)
+          gaps.push(
+            scope + " has unexamined files " + JSON.stringify(remaining),
           );
-          const scope = "partition " + JSON.stringify(partition.id);
-          if (remaining.length)
-            gaps.push(
-              scope +
-                " has unexamined files " +
-                JSON.stringify(remaining.sort()),
-            );
-        }
-        if (!gaps.length) continue;
-        const references = [
-          ...new Set(roster.pages.flatMap((page) => page.sourceRefs)),
-        ];
-        result.push(
-          "Source work roster " +
-            JSON.stringify(roster.id) +
-            " remains incomplete. " +
-            gaps.join(". ") +
-            "." +
-            (references.length
-              ? " Recorded source references are " +
-                JSON.stringify(references) +
-                "."
-              : ""),
-        );
       }
-      return result;
-    },
+      if (!gaps.length) continue;
+      const references = [
+        ...new Set(roster.pages.flatMap((page) => page.sourceRefs)),
+      ];
+      result.push(
+        "Source work roster " +
+          JSON.stringify(roster.id) +
+          " remains incomplete. " +
+          gaps.join(". ") +
+          "." +
+          (references.length
+            ? " Recorded source references are " +
+              JSON.stringify(references) +
+              "."
+            : ""),
+      );
+    }
+    return result;
+  }
 
-    summary() {
-      let remainingFileCount = 0;
-      for (const partition of partitions.values()) {
-        remainingFileCount += partition.paths.size - partition.examined.size;
-      }
-      const rosterSummaries = [...rosters.values()].map(rosterSummary);
-      return {
-        rosterCount: rosterSummaries.length,
-        incompleteRosterCount: rosterSummaries.filter(
-          (roster) => !roster.declaredComplete,
-        ).length,
-        gapCount: rosterSummaries.reduce(
-          (count, roster) => count + roster.gapCount,
-          0,
-        ),
-        unassignedFileCount: rosterSummaries.reduce(
-          (count, roster) =>
-            count + roster.matchedFileCount - roster.assignedFileCount,
-          0,
-        ),
-        remainingFileCount,
-      };
-    },
-
-    readRoster(id: string) {
-      const roster = getRoster(id);
-      const paths = [...roster.paths].sort();
-      return {
+  function query(args: unknown): JsonObject {
+    const input = sourceWorkQuerySchema.parse(args);
+    if ("rosterId" in input) {
+      const roster = getRoster(input.rosterId);
+      const ids = new Set(roster.assignments.values());
+      const summary = {
         ...rosterSummary(roster),
-        paths,
-        gaps: [...roster.gaps].map(([id, description]) => ({
-          id,
-          description,
-        })),
-        pages: roster.pages.map((page) => ({
-          ...page,
-          gaps: page.gaps.map((gap) => ({ ...gap })),
-          resolutions: page.resolutions.map((resolution) => ({
+        unassignedFileCount: roster.paths.size - roster.assignments.size,
+        partitionCount: ids.size,
+      };
+      if (!input.page) return summary;
+      const partitionIds = [...ids].sort();
+      const version = [
+        "roster",
+        input.rosterId,
+        input.page.view,
+        summary.revision,
+        summary.assignedFileCount,
+        partitionIds,
+      ];
+      if (input.page.view === "pages") {
+        const page = pageOf(roster.pages, input.page, version);
+        page.items = page.items.map((entry) => ({
+          ...entry,
+          sourceRefs: [...entry.sourceRefs],
+          gaps: entry.gaps.map((gap) => ({ ...gap })),
+          resolutions: entry.resolutions.map((resolution) => ({
             ...resolution,
           })),
-          sourceRefs: [...page.sourceRefs],
-        })),
-        partitionIds: [...new Set(roster.assignments.values())].sort(),
-        unassigned: paths.filter((path) => !roster.assignments.has(path)),
+        }));
+        return { ...summary, page };
+      }
+      const entries = {
+        paths: () => [...roster.paths].sort(),
+        unassigned: () => unassignedPaths(roster),
+        gaps: () =>
+          [...roster.gaps].map(([id, description]) => ({ id, description })),
+        partitionIds: () => partitionIds,
       };
-    },
-
-    readPartition(id: string) {
-      const partition = getPartition(id);
-      const paths = [...partition.paths].sort();
       return {
-        ...partitionSummary(partition),
-        paths,
-        remaining: paths.filter((path) => !partition.examined.has(path)),
+        ...summary,
+        page: pageOf<JsonValue>(
+          entries[input.page.view](),
+          input.page,
+          version,
+        ),
       };
-    },
+    }
+    if ("partitionId" in input) {
+      const partition = getPartition(input.partitionId);
+      const summary = partitionSummary(partition);
+      if (!input.page) return summary;
+      return {
+        ...summary,
+        page: pageOf(
+          input.page.view === "paths"
+            ? partition.paths
+            : remainingPaths(partition),
+          input.page,
+          ["partition", input.partitionId, input.page.view, summary.revision],
+        ),
+      };
+    }
+    const summary = {
+      rosterCount: rosters.size,
+      incompleteRosterCount: 0,
+      gapCount: 0,
+      unassignedFileCount: 0,
+      remainingFileCount: 0,
+    };
+    for (const roster of rosters.values()) {
+      if (roster.gaps.size) summary.incompleteRosterCount++;
+      summary.gapCount += roster.gaps.size;
+      summary.unassignedFileCount +=
+        roster.paths.size - roster.assignments.size;
+    }
+    for (const partition of partitions.values())
+      summary.remainingFileCount +=
+        partition.paths.length - partition.examined.size;
+    return summary;
+  }
+
+  return {
+    coverage: { generation: () => generation, limitations },
+    update,
+    query,
   };
 }

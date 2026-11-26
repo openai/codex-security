@@ -179,12 +179,12 @@ async function startDraftScan(
   return fixture;
 }
 
+function scanCommand(fixture: ScanFixture, name: string, ...args: string[]) {
+  return workbench(fixture, [name, "--scan-id", fixture.scanId, ...args]);
+}
+
 async function completeScan(fixture: ScanFixture): Promise<ScanSummary> {
-  const result = await workbench(fixture, [
-    "complete-scan",
-    "--scan-id",
-    fixture.scanId,
-  ]);
+  const result = await scanCommand(fixture, "complete-scan");
   return result["scan"] as unknown as ScanSummary;
 }
 
@@ -258,13 +258,7 @@ describe("scan publication and artifact recovery", () => {
       deps.createSecurity = () =>
         fakeSecurity(async (_repository, options) => {
           options?.onScanRegistered?.(fixture);
-          await workbench(fixture, [
-            "fail-scan",
-            "--scan-id",
-            fixture.scanId,
-            "--message",
-            message,
-          ]);
+          await scanCommand(fixture, "fail-scan", "--message", message);
           throw command === "resume"
             ? new ScanInterruptedError(message, fixture.scanDir)
             : new Error(message);
@@ -320,13 +314,7 @@ describe("scan publication and artifact recovery", () => {
       const fixture = await startDraftScan();
       const message = "Synthetic scanner failure.";
       if (artifactState !== "unsealed") {
-        await workbench(fixture, [
-          "fail-scan",
-          "--scan-id",
-          fixture.scanId,
-          "--message",
-          message,
-        ]);
+        await scanCommand(fixture, "fail-scan", "--message", message);
       }
       if (artifactState === "malformed")
         await writeFile(join(fixture.scanDir, "findings.json"), "invalid");
@@ -373,11 +361,7 @@ describe("scan publication and artifact recovery", () => {
         },
       },
     });
-    const saved = await workbench(fixture, [
-      "get-scan-recipe",
-      "--scan-id",
-      fixture.scanId,
-    ]);
+    const saved = await scanCommand(fixture, "get-scan-recipe");
     expect(saved["recipe"]).toMatchObject({ repository: fixture.repository });
   });
 
@@ -447,15 +431,14 @@ describe("scan publication and artifact recovery", () => {
     await writeJson(findingsPath, document);
     await completeScan(fixture);
 
-    const page = await workbench(fixture, [
+    const page = await scanCommand(
+      fixture,
       "list-findings",
-      "--scan-id",
-      fixture.scanId,
       "--offset",
       "20",
       "--limit",
       "1",
-    ]);
+    );
     const occurrenceId = (
       page["findingsPage"] as {
         findings: Array<{ occurrenceId: string }>;
@@ -584,14 +567,13 @@ describe("scan publication and artifact recovery", () => {
     "reconciles authoritative scan cost without replacing %s usage or sealed artifacts",
     async (_scenario, measuredUsage) => {
       const fixture = await startDraftScan();
-      const firstCompletion = await workbench(fixture, [
+      const firstCompletion = await scanCommand(
+        fixture,
         "complete-scan",
-        "--scan-id",
-        fixture.scanId,
         ...(measuredUsage === undefined
           ? []
           : ["--cost-json", JSON.stringify({ usage: measuredUsage })]),
-      ]);
+      );
       const initiallyCompleted = firstCompletion["scan"] as ScanSummary & {
         usage: Record<string, unknown>;
         cost?: unknown;
@@ -620,24 +602,19 @@ describe("scan publication and artifact recovery", () => {
         estimatedUsd: 0.00625,
       };
 
-      const reconciled = await workbench(fixture, [
+      const reconciled = await scanCommand(
+        fixture,
         "complete-scan",
-        "--scan-id",
-        fixture.scanId,
         "--cost-json",
         JSON.stringify(cost),
-      ]);
+      );
       expect(reconciled["scan"]).toMatchObject({
         progress: { status: "complete" },
         usage: initiallyCompleted.usage,
         cost,
       });
 
-      const persisted = await workbench(fixture, [
-        "get-scan",
-        "--scan-id",
-        fixture.scanId,
-      ]);
+      const persisted = await scanCommand(fixture, "get-scan");
       expect(persisted["scan"]).toMatchObject({
         progress: { status: "complete" },
         usage: initiallyCompleted.usage,
@@ -657,60 +634,39 @@ describe("scan publication and artifact recovery", () => {
     const original = await readFile(source, "utf8");
     await writeFile(source, "# target changed during scan\n");
 
-    const prepared = await workbench(fixture, [
-      "prepare-scan-completion",
-      "--scan-id",
-      fixture.scanId,
-    ]);
+    const prepared = await scanCommand(fixture, "prepare-scan-completion");
     const warning =
       "Directory contents changed while the scan was running; results were saved for the original snapshot.";
     expect(prepared["targetWarnings"]).toEqual([warning]);
 
     await writeFile(source, original);
-    const completed = await workbench(fixture, [
-      "complete-scan",
-      "--scan-id",
-      fixture.scanId,
-    ]);
+    const completed = await scanCommand(fixture, "complete-scan");
     expect((completed["scan"] as ScanSummary).warnings).toContain(warning);
     expect(completed["targetWarnings"]).toEqual([]);
   });
 
   test("marks rejected prepared scans as failed without publishing completion", async () => {
     const fixture = await startDraftScan();
-    await workbench(fixture, [
-      "prepare-scan-completion",
-      "--scan-id",
-      fixture.scanId,
-    ]);
+    await scanCommand(fixture, "prepare-scan-completion");
     await writeFile(join(fixture.scanDir, "findings.json"), "corrupted\n");
 
-    const failed = await workbench(fixture, [
+    const failed = await scanCommand(
+      fixture,
       "fail-scan",
-      "--scan-id",
-      fixture.scanId,
       "--message",
       "Sealed scan could not be accepted.",
-    ]);
+    );
 
     expect((failed["scan"] as ScanSummary).progress.status).toBe("failed");
-    const stored = await workbench(fixture, [
-      "get-scan",
-      "--scan-id",
-      fixture.scanId,
-    ]);
+    const stored = await scanCommand(fixture, "get-scan");
     expect((stored["scan"] as ScanSummary).progress.status).toBe("failed");
   });
 
   test("keeps explicit scan cancellation distinct from failure", async () => {
     const fixture = await startDraftScan();
 
-    await workbench(fixture, ["cancel-scan", "--scan-id", fixture.scanId]);
-    const stored = await workbench(fixture, [
-      "get-scan",
-      "--scan-id",
-      fixture.scanId,
-    ]);
+    await scanCommand(fixture, "cancel-scan");
+    const stored = await scanCommand(fixture, "get-scan");
 
     expect(stored["scan"]).toMatchObject({
       canceledAt: expect.any(String),
@@ -728,11 +684,7 @@ describe("scan publication and artifact recovery", () => {
     };
     await writeJson(path, document);
 
-    const prepared = await workbench(fixture, [
-      "prepare-scan-completion",
-      "--scan-id",
-      fixture.scanId,
-    ]);
+    const prepared = await scanCommand(fixture, "prepare-scan-completion");
     const preparedScan = prepared["scan"] as ScanSummary;
     expect(preparedScan.progress.status).toBe("running");
     expect(preparedScan.warnings).toHaveLength(1);
@@ -746,27 +698,15 @@ describe("scan publication and artifact recovery", () => {
     }>(join(fixture.scanDir, "scan-manifest.json"));
     expect(manifest.scan.artifacts.length).toBeGreaterThan(0);
     expect(manifest.scan).not.toHaveProperty("sealedAt");
-    const running = await workbench(fixture, [
-      "get-scan",
-      "--scan-id",
-      fixture.scanId,
-    ]);
+    const running = await scanCommand(fixture, "get-scan");
     expect((running["scan"] as ScanSummary).progress.status).toBe("running");
-    const completion = await workbench(fixture, [
-      "complete-scan",
-      "--scan-id",
-      fixture.scanId,
-    ]);
+    const completion = await scanCommand(fixture, "complete-scan");
     const completed = completion["scan"] as ScanSummary;
     expect(completed.progress.status).toBe("complete");
     expect(completed.findingCount).toBe(1);
     expect(completed.warnings).toEqual([warning]);
     expect(completion["targetWarnings"]).toEqual([]);
-    const saved = await workbench(fixture, [
-      "get-scan",
-      "--scan-id",
-      fixture.scanId,
-    ]);
+    const saved = await scanCommand(fixture, "get-scan");
     expect((saved["scan"] as ScanSummary).warnings).toEqual([warning]);
   });
 
@@ -792,11 +732,7 @@ describe("scan publication and artifact recovery", () => {
     expect(
       await Promise.all(artifactPaths.map((name) => readFile(name))),
     ).toEqual(original);
-    const pending = await workbench(fixture, [
-      "get-scan",
-      "--scan-id",
-      fixture.scanId,
-    ]);
+    const pending = await scanCommand(fixture, "get-scan");
     expect((pending["scan"] as ScanSummary).progress.status).toBe("running");
     await writeJson(path, valid);
     expect((await completeScan(fixture)).findingCount).toBe(1);
@@ -912,15 +848,11 @@ describe("scan publication and artifact recovery", () => {
       await writeJson(path, document);
       const original = await readFile(path);
 
-      await expect(
-        workbench(fixture, [command, "--scan-id", fixture.scanId]),
-      ).rejects.toThrow("inventoryStrategy");
+      await expect(scanCommand(fixture, command)).rejects.toThrow(
+        "inventoryStrategy",
+      );
       expect(await readFile(path)).toEqual(original);
-      const pending = await workbench(fixture, [
-        "get-scan",
-        "--scan-id",
-        fixture.scanId,
-      ]);
+      const pending = await scanCommand(fixture, "get-scan");
       expect((pending["scan"] as ScanSummary).progress.status).toBe("running");
 
       document.inventoryStrategy = validInventoryStrategy;

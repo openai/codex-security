@@ -12,6 +12,29 @@ import { writeCodexConfig } from "../src/config.js";
 import { resolveCodexCommand } from "../src/runtime.js";
 import { temporaryDirectory } from "./support/temporary-directories.js";
 
+function startAppServer(codexHome: string, cwd: string, config: string) {
+  const child = spawn(
+    resolveCodexCommand({}).command,
+    ["app-server", "--disable", "plugins", "--config", config],
+    {
+      cwd,
+      env: {
+        ...Object.fromEntries(
+          Object.entries(process.env).filter(([name]) =>
+            /^(path|systemroot|comspec|temp|tmp|tmpdir)$/iu.test(name),
+          ),
+        ),
+        CODEX_HOME: codexHome,
+      },
+      stdio: ["pipe", "pipe", "pipe"],
+      windowsHide: true,
+    },
+  );
+  child.stderr.resume();
+  const closed = once(child, "close");
+  return { child, closed };
+}
+
 test.each([
   [undefined, "patch"],
   ["untrusted", "patch"],
@@ -74,31 +97,11 @@ test.each([
             }),
         ...(projects === undefined ? {} : { projects }),
       });
-      const child = spawn(
-        resolveCodexCommand({}).command,
-        [
-          "app-server",
-          "--disable",
-          "plugins",
-          "--config",
-          "analytics.enabled=false",
-        ],
-        {
-          cwd: repository,
-          env: {
-            ...Object.fromEntries(
-              Object.entries(process.env).filter(([name]) =>
-                /^(path|systemroot|comspec|temp|tmp|tmpdir)$/iu.test(name),
-              ),
-            ),
-            CODEX_HOME: codexHome,
-          },
-          stdio: ["pipe", "pipe", "pipe"],
-          windowsHide: true,
-        },
+      const { child, closed } = startAppServer(
+        codexHome,
+        repository,
+        "analytics.enabled=false",
       );
-      child.stderr.resume();
-      const closed = once(child, "close");
       let servers: string[] | undefined;
       let analyticsEnabled: boolean | undefined;
       let inspectedThreadId: string | undefined;
@@ -231,31 +234,11 @@ test.each(["openai", undefined])(
       },
     });
     let modelProvider: unknown;
-    const child = spawn(
-      resolveCodexCommand({}).command,
-      [
-        "app-server",
-        "--disable",
-        "plugins",
-        "--config",
-        'cli_auth_credentials_store="ephemeral"',
-      ],
-      {
-        cwd: codexHome,
-        env: {
-          ...Object.fromEntries(
-            Object.entries(process.env).filter(([name]) =>
-              /^(path|systemroot|comspec|temp|tmp|tmpdir)$/iu.test(name),
-            ),
-          ),
-          CODEX_HOME: codexHome,
-        },
-        stdio: ["pipe", "pipe", "pipe"],
-        windowsHide: true,
-      },
+    const { child, closed } = startAppServer(
+      codexHome,
+      codexHome,
+      'cli_auth_credentials_store="ephemeral"',
     );
-    child.stderr.resume();
-    const closed = once(child, "close");
     let account: unknown;
     const input = new Writable({
       write(chunk, _encoding, callback) {

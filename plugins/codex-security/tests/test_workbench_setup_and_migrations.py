@@ -31,10 +31,12 @@ from workbench_test_support import (
     empty_target_scan,
     fail_scan,
     get_scan,
+    git_in,
     initialize_git_repository,
     load_script,
     mark_deep_coordinator_succeeded,
     run_workbench,
+    save_commit_diff,
     save_workspace,
     scan_command,
     start_delivered_scan,
@@ -120,6 +122,7 @@ EXPECTED_MIGRATIONS = [
     (70, "retain checkout roots for Git discovery"),
     (71, "retain rejected workspace checkout boundaries"),
     (72, "retain external finding import selections and provenance"),
+    (81, "retain native investigation time allowances"),
 ]
 
 
@@ -750,8 +753,8 @@ def test_workbench_does_not_run_textconv_during_diff_setup(tmp_path: Path) -> No
     )
     configure_git_command(target, "diff.codex-security-test.textconv", helper)
     (target / ".gitattributes").write_text("README.md diff=codex-security-test\n")
-    subprocess.run(["git", "add", ".gitattributes"], cwd=target, check=True)
-    subprocess.run(["git", "commit", "-qm", "Add attributes"], cwd=target, check=True)
+    git_in(target, "add", ".gitattributes")
+    git_in(target, "commit", "-qm", "Add attributes")
     (target / "README.md").write_text("changed fixture\n")
 
     subprocess.run(
@@ -840,21 +843,17 @@ def test_workbench_counts_scope_before_taking_sqlite_writer_lock(tmp_path: Path)
 
 def initialize_git_repository_with_submodule(target: Path, dependency: Path) -> None:
     initialize_git_repository(target)
-    subprocess.run(
-        [
-            "git",
-            "-c",
-            "protocol.file.allow=always",
-            "submodule",
-            "add",
-            "-q",
-            str(dependency),
-            "vendor/dependency",
-        ],
-        cwd=target,
-        check=True,
+    git_in(
+        target,
+        "-c",
+        "protocol.file.allow=always",
+        "submodule",
+        "add",
+        "-q",
+        str(dependency),
+        "vendor/dependency",
     )
-    subprocess.run(["git", "commit", "-qam", "Add dependency"], cwd=target, check=True)
+    git_in(target, "commit", "-qam", "Add dependency")
 
 
 def test_scan_start_rejects_dirty_initialized_submodule(tmp_path: Path) -> None:
@@ -878,11 +877,7 @@ def test_scan_start_allows_uninitialized_submodule(tmp_path: Path) -> None:
     initialize_git_repository(dependency)
     target = tmp_path / "target"
     initialize_git_repository_with_submodule(target, dependency)
-    subprocess.run(
-        ["git", "submodule", "deinit", "-f", "-q", "--", "vendor/dependency"],
-        cwd=target,
-        check=True,
-    )
+    git_in(target, "submodule", "deinit", "-f", "-q", "--", "vendor/dependency")
     assert not (target / "vendor/dependency/.git").exists()
     saved = create_saved_git_workspace(state_dir, target)
 
@@ -896,16 +891,12 @@ def test_scan_start_rejects_submodule_at_unrecorded_revision(tmp_path: Path) -> 
     dependency = tmp_path / "dependency"
     revision_a = initialize_git_repository(dependency)
     (dependency / "README.md").write_text("second revision\n")
-    subprocess.run(["git", "commit", "-qam", "Second revision"], cwd=dependency, check=True)
+    git_in(dependency, "commit", "-qam", "Second revision")
     target = tmp_path / "target"
     initialize_git_repository_with_submodule(target, dependency)
     submodule = target / "vendor/dependency"
-    subprocess.run(["git", "checkout", "-q", revision_a], cwd=submodule, check=True)
-    subprocess.run(
-        ["git", "config", "submodule.vendor/dependency.ignore", "all"],
-        cwd=target,
-        check=True,
-    )
+    git_in(submodule, "checkout", "-q", revision_a)
+    git_in(target, "config", "submodule.vendor/dependency.ignore", "all")
     saved = create_saved_git_workspace(state_dir, target)
 
     failed = start_scan_command(state_dir, str(saved["id"]), check=False)
@@ -939,8 +930,8 @@ def test_nested_target_name_is_a_literal_git_pathspec(
     outside = repository / outside_name
     (target / "source.py").write_text("selected = True\n")
     outside.write_text("outside = 1\n")
-    subprocess.run(["git", "add", "."], cwd=repository, check=True)
-    subprocess.run(["git", "commit", "-qm", "Add selected target"], cwd=repository, check=True)
+    git_in(repository, "add", ".")
+    git_in(repository, "commit", "-qm", "Add selected target")
     revision = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=repository, text=True
     ).strip()
@@ -1461,6 +1452,7 @@ def test_log_completion_migration_preserves_unknown_legacy_boundaries() -> None:
     assert after == [
         {
             **row,
+            "investigation_policy": None,
             "target_id": target_id,
             "log_completed_at": None,
             "windows_resume_output_identity": None,
@@ -1626,25 +1618,6 @@ def test_deep_scan_time_limit_migration_backfills_and_repairs_existing_runs(
 
     assert connection.execute("SELECT max_time_hours FROM deep_scan_runs").fetchone()[0] == 2.5
     assert migration_name_row(connection, 28)[0] == "persist deep scan discovery time limit"
-
-
-@pytest.mark.cross_platform
-def test_allowance_preview_retains_policy_and_applies_canonical_usage_migration() -> None:
-    db, migrate = create_historical_database(63)
-    with closing(db):
-        timestamp = "2026-01-01T00:00:00Z"
-        db.execute("ALTER TABLE scans ADD COLUMN investigation_policy TEXT")
-        record_migration(db, 63, "retain native investigation time allowances", timestamp)
-        insert_historical_row(db, "workspaces", timestamp, id="legacy-workspace")
-        insert_legacy_scan(db, timestamp, investigation_policy="saved policy")
-        migrate(db)
-        query = "SELECT name, applied_at FROM schema_migrations WHERE version = 63"
-        receipt = db.execute(query).fetchone()
-        assert receipt["name"] == "retain unverified Deep Scan worker attempts"
-        assert db.execute("SELECT count(worker_usage_gap) FROM deep_scan_runs").fetchone()[0] == 0
-        migrate(db)
-        assert db.execute(query).fetchone() == receipt
-        assert db.execute("SELECT investigation_policy FROM scans").fetchone()[0] == "saved policy"
 
 
 def test_workbench_reconciles_monorepo_migration_lineage() -> None:
@@ -2414,8 +2387,7 @@ def test_legacy_delivered_scan_waits_for_its_thread(
     assert "awaiting its owning Codex thread" in previous["stderr"]
 
     mark_deep_coordinator_succeeded(state_dir, scan_id, Path(begun["deepScan"]["scanDir"]))
-    replacement = run_workbench(
-        state_dir,
+    replacement_args = (
         "begin-deep-scan",
         "--target-path",
         str(target),
@@ -2427,6 +2399,12 @@ def test_legacy_delivered_scan_waits_for_its_thread(
         begun["deepScan"]["userContext"],
         "--workflow-version",
         "fixture",
+    )
+    pending = run_workbench(state_dir, *replacement_args)
+    assert pending["confirmationRequired"] is True
+    assert [scan["scanId"] for scan in pending["otherRunningDeepScans"]] == [scan_id]
+    replacement = run_workbench(
+        state_dir, *replacement_args, "--confirmed-concurrent-scan-id", scan_id
     )
     assert replacement["startDisposition"] == "created"
     assert replacement["deepScan"]["scanId"] != scan_id
@@ -2895,18 +2873,8 @@ def test_workbench_preserves_diff_target_summary_on_scan(tmp_path: Path) -> None
     revision = initialize_git_repository(target)
     workspace_id = str(uuid.uuid4())
     create_workspace(state_dir, workspace_id)
-    save_workspace(
-        state_dir,
-        workspace_id,
-        str(target),
-        ".",
-        "diff",
-        "--target-summary",
-        "Authentication callback changes",
-        "--diff-target-kind",
-        "commit",
-        "--diff-head-revision",
-        revision,
+    save_commit_diff(
+        state_dir, workspace_id, target, revision, summary="Authentication callback changes"
     )
 
     started = start_scan_command(state_dir, workspace_id, "--scan-root", str(tmp_path / "scans"))

@@ -12,7 +12,7 @@ from fractions import Fraction
 from functools import cache
 from itertools import chain
 from pathlib import Path, PurePosixPath
-from typing import Any, Callable
+from typing import Any, Callable, TypeVar
 
 # Some plugin hosts launch Python with safe-path isolation enabled.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -743,10 +743,15 @@ def _saved_finding_links(connection: sqlite3.Connection, scan_ids: set[str]) -> 
     ]
 
 
-def _finding_aliases(links: Iterable[tuple[str, str]]) -> dict[str, str]:
-    parents: dict[str, str] = {}
+_FindingKey = TypeVar("_FindingKey")
 
-    def root(value: str) -> str:
+
+def _finding_aliases(
+    links: Iterable[tuple[_FindingKey, _FindingKey]],
+) -> dict[_FindingKey, _FindingKey]:
+    parents: dict[_FindingKey, _FindingKey] = {}
+
+    def root(value: _FindingKey) -> _FindingKey:
         parents.setdefault(value, value)
         while parents[value] != value:
             parents[value] = parents[parents[value]]
@@ -755,7 +760,9 @@ def _finding_aliases(links: Iterable[tuple[str, str]]) -> dict[str, str]:
 
     for before_id, after_id in links:
         parents[root(after_id)] = root(before_id)
-    return {finding_id: root(finding_id) for finding_id in parents}
+    for finding in parents:
+        parents[finding] = root(finding)
+    return parents
 
 
 def _known_finding_groups(links: list[sqlite3.Row], scan_ids: set[str]) -> list[list[str]]:

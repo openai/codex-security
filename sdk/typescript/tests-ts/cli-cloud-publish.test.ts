@@ -20,7 +20,6 @@ import {
 } from "../src/cloud-publish.js";
 import type { JsonObject } from "../src/index.js";
 import {
-  capture,
   dependencies,
   FakeSignals,
   SYNTHETIC_CREDENTIALS,
@@ -720,10 +719,9 @@ describe("publish scan to Cloud", () => {
           }
           return result;
         };
-        const stdout = capture();
-        const stderr = capture();
+        const { stdout, stderr, runCli } = createCliTest(main);
         expect(
-          await main(
+          await runCli(
             [
               "publish",
               "scan",
@@ -732,8 +730,6 @@ describe("publish scan to Cloud", () => {
               "cloud",
               "--json",
             ],
-            stdout.stream,
-            stderr.stream,
             deps,
           ),
         ).toBe(code);
@@ -794,15 +790,9 @@ describe("publish scan to Cloud", () => {
       signals.emit("SIGINT");
       return result;
     };
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
     expect(
-      await main(
-        ["publish", "scan", "--csv", csv, "--to", "cloud"],
-        stdout.stream,
-        stderr.stream,
-        deps,
-      ),
+      await runCli(["publish", "scan", "--csv", csv, "--to", "cloud"], deps),
     ).toBe(130);
     expect(requests).toBe(0);
     expect(stdout.text()).toBe("");
@@ -1152,13 +1142,10 @@ describe("publish scan to Cloud", () => {
       signals.emit("SIGINT");
       throw options!.signal!.reason;
     };
-    const stdout = capture();
-    const stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
     expect(
-      await main(
+      await runCli(
         ["publish", "scan", "completed-scan", "--to", "cloud", "--dry-run"],
-        stdout.stream,
-        stderr.stream,
         deps,
       ),
     ).toBe(130);

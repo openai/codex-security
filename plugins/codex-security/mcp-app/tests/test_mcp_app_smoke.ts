@@ -22,6 +22,14 @@ import {
 import { tmpdir } from "node:os";
 import path from "node:path";
 
+function assertToolError(
+  response: { result: { isError?: boolean; content: { text: string }[] } },
+  pattern: RegExp,
+) {
+  assert.equal(response.result.isError, true);
+  assert.match(response.result.content[0].text, pattern);
+}
+
 function assertScanTarget(meta: unknown, scanId: string) {
   assert.deepEqual(meta, {
     "codex/telemetry": { span: { target_id: scanId } },
@@ -222,6 +230,32 @@ const testServer = startTestServer({
   },
 });
 const request = testServer.request;
+
+async function callStructuredTool(id: number, params: Record<string, unknown>) {
+  return (await testServer.callSuccessfulTool(id, params)).structuredContent;
+}
+
+function getDaybreakAccess(id: number, _meta?: object) {
+  return testServer.callSuccessfulTool(id, {
+    name: "get_codex_security_daybreak_access",
+    arguments: {},
+    _meta,
+  });
+}
+
+function successfulTool(name: string) {
+  return (id: number, args: object, _meta?: object) =>
+    testServer.callSuccessfulTool(id, { name, arguments: args, _meta });
+}
+
+const openWorkspace = successfulTool("open_codex_security_workspace");
+const submitSetup = successfulTool("submit_codex_security_setup");
+const startScan = successfulTool("start_codex_security_scan");
+const loadScan = successfulTool("get_codex_security_scan");
+const loadContext = successfulTool("get_codex_security_scan_context");
+const updateRemediation = successfulTool(
+  "set_codex_security_finding_remediation",
+);
 
 async function assertBundledNodeLauncher() {
   const emptyPath = await temporaryDirectory("codex-security-empty-path-");
@@ -508,7 +542,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     await headlessServer.initialize("codex-security-headless-smoke");
     const withoutOwner = await headlessServer.callTool(2, {
       name: "start_codex_security_standard_scan",
-      arguments: { targetPath: target },
+      arguments: { targetPath: target, threadId: ownerThread },
     });
     assert.equal(withoutOwner.result.isError, true);
     assert.equal(withoutOwner.result._meta, undefined);
@@ -522,6 +556,9 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       arguments: {
         targetPath: target,
         userContext: headlessContext,
+        mode: "diff",
+        threadId: "untrusted-thread",
+        model: "untrusted-model",
       },
       _meta: {
         "openai/threadId": ownerThread,
@@ -546,6 +583,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
     assert.equal(result.scan.model, "gpt-5.6-sol");
     assert.equal(result.scan.reasoningEffort, "high");
     assert.equal(result.scan.userContext, headlessContext);
+    assert.equal(result.investigationPolicy, undefined);
 
     const joined = await headlessServer.callTool(4, {
       name: "start_codex_security_standard_scan",
@@ -556,6 +594,16 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       _meta: { "openai/threadId": ownerThread },
     });
     assertNoError(joined);
+    for (const empty of [started.result, joined.result]) {
+      assert.equal(
+        Object.hasOwn(empty.structuredContent, "reviewerFeedbackPath"),
+        false,
+      );
+      assert.doesNotMatch(
+        empty.content[0].text,
+        /false_positive_feedback\.json/u,
+      );
+    }
     assert.equal(joined.result.structuredContent.startDisposition, "joined");
     assert.equal(joined.result.structuredContent.scanId, result.scanId);
     assert.match(
@@ -585,11 +633,7 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       arguments: { scanId: result.scanId },
       _meta: { "openai/threadId": "fixture-headless-other-thread" },
     });
-    assert.equal(wrongThread.result.isError, true);
-    assert.match(
-      wrongThread.result.content[0].text,
-      /current continuation claim/,
-    );
+    assertToolError(wrongThread, /current continuation claim/);
 
     const standardInventory = await headlessServer.callTool(7, {
       name: "list_codex_security_review_items",
@@ -599,12 +643,19 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       },
       _meta: { "openai/threadId": "fixture-headless-delegated-thread" },
     });
-    assert.equal(standardInventory.result.isError, true);
-    assert.match(
-      standardInventory.result.content[0].text,
-      /only available for Deep or diff scans/,
-    );
+    assertToolError(standardInventory, /only available for Deep or diff scans/);
 
+    const allowance = await headlessServer.callSuccessfulTool(80, {
+      name: "update_codex_security_scan_context",
+      arguments: {
+        scanId: result.scanId,
+        handoffClaimToken: result.handoffClaimToken,
+        maxTimeMinutes: 3,
+      },
+      _meta: { "openai/threadId": ownerThread },
+    });
+    const policy = allowance.structuredContent.investigationPolicy;
+    assert.equal(typeof policy, "string");
     await headlessServer.callSuccessfulTool(81, {
       name: "update_codex_security_scan_progress",
       arguments: {
@@ -631,20 +682,55 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
       "discovery",
     );
 
+    assert.equal(
+      rejoinedAfterPreflight.structuredContent.scanId,
+      result.scanId,
+    );
+    assert.equal(
+      rejoinedAfterPreflight.structuredContent.handoffClaimToken,
+      result.handoffClaimToken,
+    );
+    assert.equal(
+      rejoinedAfterPreflight.structuredContent.investigationPolicy,
+      policy,
+    );
+    assert.ok(rejoinedAfterPreflight.content[0].text.includes(policy));
+
     for (const threadSource of [undefined, "security_scan"]) {
       let scan = result;
       if (threadSource) {
-        const usageScan = await headlessServer.callSuccessfulTool(83, {
+        const launch = {
           name: "start_codex_security_standard_scan",
           arguments: {
             targetPath: target,
             userContext: "Check completion usage.",
           },
           _meta: { "openai/threadId": ownerThread },
-        });
+        };
+        const usageScan = await headlessServer.callSuccessfulTool(83, launch);
         scan = usageScan.structuredContent;
         assert.equal(scan.startDisposition, "created");
         assert.notEqual(scan.scanId, result.scanId);
+        const rejoined = await headlessServer.callSuccessfulTool(85, launch);
+        assert.equal(rejoined.structuredContent.startDisposition, "joined");
+        assert.equal(rejoined.structuredContent.scanId, scan.scanId);
+        const feedbackPath = path.join(
+          scan.scanDir,
+          "artifacts",
+          "01_context",
+          "false_positive_feedback.json",
+        );
+        for (const response of [usageScan, rejoined]) {
+          assert.equal(
+            response.structuredContent.reviewerFeedbackPath,
+            feedbackPath,
+          );
+          assert.ok(response.content[0].text.includes(feedbackPath));
+        }
+        assert.equal(
+          (await readJson(feedbackPath))[0].sourceScanId,
+          result.scanId,
+        );
       }
       await writeCompletedContract(
         scan.scanDir,
@@ -701,6 +787,16 @@ async function assertHeadlessStandardScanWorksWithoutUiCapability() {
           completed.structuredContent.scan.usage.completion,
           undefined,
         );
+        await headlessServer.callSuccessfulTool(84, {
+          name: "set_codex_security_finding_triage",
+          arguments: {
+            occurrenceId:
+              completed.structuredContent.scan.findings[0].occurrenceId,
+            status: "closed",
+            closeReason: "false_positive",
+            note: "The fixture checks the path before the write.",
+          },
+        });
       }
     }
   } finally {
@@ -1085,10 +1181,7 @@ try {
     /Skip it for Amazon Bedrock scans/,
   );
 
-  const unknownTrustedAccess = await testServer.callSuccessfulTool(9601, {
-    name: "get_codex_security_daybreak_access",
-    arguments: {},
-  });
+  const unknownTrustedAccess = await getDaybreakAccess(9601);
   assert.equal(unknownTrustedAccess._meta, undefined);
   assert.deepEqual(
     {
@@ -1133,13 +1226,9 @@ try {
     checkedAt: "2026-07-13T12:00:00.000Z",
     stale: false,
   };
-  const hostedTrustedAccess = await testServer.callSuccessfulTool(9602, {
-    name: "get_codex_security_daybreak_access",
-    arguments: {},
-    _meta: {
-      threadId: "fixture-trusted-access-thread",
-      "openai/entitlementContext": entitlementContext(grantedTrustedAccess),
-    },
+  const hostedTrustedAccess = await getDaybreakAccess(9602, {
+    threadId: "fixture-trusted-access-thread",
+    "openai/entitlementContext": entitlementContext(grantedTrustedAccess),
   });
   assert.equal(hostedTrustedAccess._meta, undefined);
   assert.deepEqual(
@@ -1153,10 +1242,8 @@ try {
   assert.match(hostedTrustedAccess.content[0].text, /Daybreak Blue/);
   assert.match(hostedTrustedAccess.content[0].text, /Daybreak Red/);
 
-  const isolatedOtherTrustedAccess = await testServer.callSuccessfulTool(9613, {
-    name: "get_codex_security_daybreak_access",
-    arguments: {},
-    _meta: { threadId: "fixture-isolated-trusted-access-other" },
+  const isolatedOtherTrustedAccess = await getDaybreakAccess(9613, {
+    threadId: "fixture-isolated-trusted-access-other",
   });
   assert.equal(isolatedOtherTrustedAccess.structuredContent.status, "unknown");
 
@@ -1169,31 +1256,23 @@ try {
     { level: "government", source: "project" },
   ];
   for (const [index, invalidGrant] of invalidGrantPairs.entries()) {
-    const response = await testServer.callSuccessfulTool(9620 + index, {
-      name: "get_codex_security_daybreak_access",
-      arguments: {},
-      _meta: {
-        threadId: "fixture-invalid-grant-thread",
-        "openai/entitlementContext": entitlementContext({
-          ...grantedTrustedAccess,
-          grants: [{ level: "tac1", source: "user" }, invalidGrant],
-        }),
-      },
+    const response = await getDaybreakAccess(9620 + index, {
+      threadId: "fixture-invalid-grant-thread",
+      "openai/entitlementContext": entitlementContext({
+        ...grantedTrustedAccess,
+        grants: [{ level: "tac1", source: "user" }, invalidGrant],
+      }),
     });
     assert.equal(response.structuredContent.status, "unknown");
     assert.deepEqual(response.structuredContent.programs, []);
   }
 
-  const staleGrantedAccess = await testServer.callSuccessfulTool(9626, {
-    name: "get_codex_security_daybreak_access",
-    arguments: {},
-    _meta: {
-      threadId: "fixture-stale-granted-thread",
-      "openai/entitlementContext": entitlementContext({
-        ...grantedTrustedAccess,
-        stale: true,
-      }),
-    },
+  const staleGrantedAccess = await getDaybreakAccess(9626, {
+    threadId: "fixture-stale-granted-thread",
+    "openai/entitlementContext": entitlementContext({
+      ...grantedTrustedAccess,
+      stale: true,
+    }),
   });
   assert.deepEqual(staleGrantedAccess.structuredContent, {
     schemaVersion: 1,
@@ -1207,10 +1286,8 @@ try {
     /protected results may not be displayable/,
   );
 
-  const untrustedReplay = await testServer.callSuccessfulTool(9603, {
-    name: "get_codex_security_daybreak_access",
-    arguments: {},
-    _meta: { threadId: "fixture-trusted-access-thread" },
+  const untrustedReplay = await getDaybreakAccess(9603, {
+    threadId: "fixture-trusted-access-thread",
   });
   assert.equal(untrustedReplay._meta, undefined);
   assert.equal(untrustedReplay.structuredContent.status, "unknown");
@@ -1223,13 +1300,9 @@ try {
     stale: false,
     enrollmentUrl: "https://chatgpt.com/cyber",
   };
-  const refreshedTrustedAccess = await testServer.callSuccessfulTool(9604, {
-    name: "get_codex_security_daybreak_access",
-    arguments: {},
-    _meta: {
-      threadId: "fixture-trusted-access-thread",
-      "openai/entitlementContext": entitlementContext(deniedTrustedAccess),
-    },
+  const refreshedTrustedAccess = await getDaybreakAccess(9604, {
+    threadId: "fixture-trusted-access-thread",
+    "openai/entitlementContext": entitlementContext(deniedTrustedAccess),
   });
   assert.equal(refreshedTrustedAccess._meta, undefined);
   assert.deepEqual(refreshedTrustedAccess.structuredContent, {
@@ -1253,18 +1326,14 @@ try {
     /does not determine Amazon Bedrock model access/,
   );
 
-  const timestampedTrustedAccess = await testServer.callSuccessfulTool(9608, {
-    name: "get_codex_security_daybreak_access",
-    arguments: {},
-    _meta: {
-      threadId: "fixture-timestamped-trusted-access-thread",
-      "openai/entitlementContext": entitlementContext({
-        schemaVersion: 1,
-        status: "granted",
-        grants: [{ level: "tac2", source: "user" }],
-        stale: false,
-      }),
-    },
+  const timestampedTrustedAccess = await getDaybreakAccess(9608, {
+    threadId: "fixture-timestamped-trusted-access-thread",
+    "openai/entitlementContext": entitlementContext({
+      schemaVersion: 1,
+      status: "granted",
+      grants: [{ level: "tac2", source: "user" }],
+      stale: false,
+    }),
   });
   assert.equal(timestampedTrustedAccess.structuredContent.status, "granted");
   assert.deepEqual(timestampedTrustedAccess.structuredContent.programs, [
@@ -1276,26 +1345,18 @@ try {
     ),
   );
 
-  const unownedTrustedAccess = await testServer.callSuccessfulTool(9605, {
-    name: "get_codex_security_daybreak_access",
-    arguments: {},
-    _meta: {
-      "openai/threadId": "fixture-spoofed-missing-canonical-thread",
-      "openai/entitlementContext": entitlementContext(grantedTrustedAccess),
-    },
+  const unownedTrustedAccess = await getDaybreakAccess(9605, {
+    "openai/threadId": "fixture-spoofed-missing-canonical-thread",
+    "openai/entitlementContext": entitlementContext(grantedTrustedAccess),
   });
   assert.equal(unownedTrustedAccess.structuredContent.status, "unknown");
 
-  const malformedTrustedAccess = await testServer.callSuccessfulTool(9606, {
-    name: "get_codex_security_daybreak_access",
-    arguments: {},
-    _meta: {
-      threadId: "fixture-malformed-trusted-access-thread",
-      "openai/entitlementContext": entitlementContext({
-        ...grantedTrustedAccess,
-        grants: [],
-      }),
-    },
+  const malformedTrustedAccess = await getDaybreakAccess(9606, {
+    threadId: "fixture-malformed-trusted-access-thread",
+    "openai/entitlementContext": entitlementContext({
+      ...grantedTrustedAccess,
+      grants: [],
+    }),
   });
   assert.equal(malformedTrustedAccess.structuredContent.status, "unknown");
 
@@ -1308,34 +1369,23 @@ try {
   });
   assert.equal(argumentTrustedAccess.result.isError, true);
 
-  const replayedTrustedAccess = await testServer.callSuccessfulTool(9609, {
-    name: "get_codex_security_daybreak_access",
-    arguments: {},
-    _meta: { threadId: "fixture-trusted-access-thread" },
+  const replayedTrustedAccess = await getDaybreakAccess(9609, {
+    threadId: "fixture-trusted-access-thread",
   });
   assert.equal(replayedTrustedAccess.structuredContent.status, "unknown");
 
-  const spoofedThreadTrustedAccess = await testServer.callSuccessfulTool(9610, {
-    name: "get_codex_security_daybreak_access",
-    arguments: {},
-    _meta: {
-      threadId: "fixture-trusted-access-owner",
-      "openai/threadId": "fixture-spoofed-trusted-access-owner",
-      "openai/entitlementContext": entitlementContext(grantedTrustedAccess),
-    },
+  const spoofedThreadTrustedAccess = await getDaybreakAccess(9610, {
+    threadId: "fixture-trusted-access-owner",
+    "openai/threadId": "fixture-spoofed-trusted-access-owner",
+    "openai/entitlementContext": entitlementContext(grantedTrustedAccess),
   });
   assert.deepEqual(
     spoofedThreadTrustedAccess.structuredContent,
     grantedDaybreakAccess,
   );
-  const canonicalThreadTrustedAccess = await testServer.callSuccessfulTool(
-    9611,
-    {
-      name: "get_codex_security_daybreak_access",
-      arguments: {},
-      _meta: { threadId: "fixture-trusted-access-owner" },
-    },
-  );
+  const canonicalThreadTrustedAccess = await getDaybreakAccess(9611, {
+    threadId: "fixture-trusted-access-owner",
+  });
   assert.equal(
     canonicalThreadTrustedAccess.structuredContent.status,
     "unknown",
@@ -1824,40 +1874,24 @@ try {
     arguments: {},
     _meta: { "openai/threadId": "fixture-thread" },
   });
-  assert.equal(missingDeepIdentity.result.isError, true);
-  assert.match(
-    missingDeepIdentity.result.content[0].text,
-    /exactly one Deep Scan identity/,
-  );
+  assertToolError(missingDeepIdentity, /exactly one Deep Scan identity/);
   const mixedDeepIdentity = await testServer.callTool(9101, {
     name: "start_codex_security_deep_scan",
     arguments: { scanId: randomUUID(), targetPath: target },
     _meta: { "openai/threadId": "fixture-thread" },
   });
-  assert.equal(mixedDeepIdentity.result.isError, true);
-  assert.match(
-    mixedDeepIdentity.result.content[0].text,
-    /exactly one Deep Scan identity/,
-  );
+  assertToolError(mixedDeepIdentity, /exactly one Deep Scan identity/);
   const invalidDeepScope = await testServer.callTool(9102, {
     name: "start_codex_security_deep_scan",
     arguments: { targetPath: target, scope: "src" },
     _meta: { "openai/threadId": "fixture-thread" },
   });
-  assert.equal(invalidDeepScope.result.isError, true);
-  assert.match(
-    invalidDeepScope.result.content[0].text,
-    /requires the whole target/,
-  );
+  assertToolError(invalidDeepScope, /requires the whole target/);
   const missingDeepThread = await testServer.callTool(9103, {
     name: "start_codex_security_deep_scan",
     arguments: { targetPath: target },
   });
-  assert.equal(missingDeepThread.result.isError, true);
-  assert.match(
-    missingDeepThread.result.content[0].text,
-    /owning Codex thread context/,
-  );
+  assertToolError(missingDeepThread, /owning Codex thread context/);
   const missingPersistedDeepScan = await testServer.callTool(9104, {
     name: "start_codex_security_deep_scan",
     arguments: { scanId: randomUUID() },
@@ -1901,17 +1935,17 @@ try {
 
   const urlContext =
     "Deployment details came from https://example.test/internal.";
-  const opened = await testServer.callSuccessfulTool(4, {
-    name: "open_codex_security_workspace",
-    arguments: {
+  const opened = await openWorkspace(
+    4,
+    {
       targetPath: target,
       targetTitle: "Fixture Repository",
       targetSummary: "Revision fixture123.",
       scope: ".",
       userContext: urlContext,
     },
-    _meta: { "openai/threadId": "fixture-thread" },
-  });
+    { "openai/threadId": "fixture-thread" },
+  );
   const workspace = opened.structuredContent.workspace;
   assert.equal(workspace.setup.submitted, false);
   assert.equal(workspace.mode, "standard");
@@ -1923,18 +1957,18 @@ try {
     reviewChangesSupported: false,
   });
 
-  const sameThreadReopen = await testServer.callSuccessfulTool(1162, {
-    name: "open_codex_security_workspace",
-    arguments: { sessionId: workspace.id },
-    _meta: { "openai/threadId": "fixture-thread" },
-  });
+  const sameThreadReopen = await openWorkspace(
+    1162,
+    { sessionId: workspace.id },
+    { "openai/threadId": "fixture-thread" },
+  );
   assert.equal(sameThreadReopen.structuredContent.workspace.id, workspace.id);
 
-  const otherThreadOpened = await testServer.callSuccessfulTool(1163, {
-    name: "open_codex_security_workspace",
-    arguments: { targetPath: replacementTarget },
-    _meta: { "openai/threadId": "fixture-other-thread" },
-  });
+  const otherThreadOpened = await openWorkspace(
+    1163,
+    { targetPath: replacementTarget },
+    { "openai/threadId": "fixture-other-thread" },
+  );
   assert.notEqual(
     otherThreadOpened.structuredContent.workspace.id,
     workspace.id,
@@ -1949,84 +1983,66 @@ try {
     arguments: { sessionId: workspace.id },
     _meta: { "openai/threadId": "fixture-other-thread" },
   });
-  assert.equal(crossThreadReopen.result.isError, true);
-  assert.match(
-    crossThreadReopen.result.content[0].text,
-    /workspace not found in this thread/,
-  );
+  assertToolError(crossThreadReopen, /workspace not found in this thread/);
 
   const metadataFreeReopen = await testServer.callTool(1165, {
     name: "open_codex_security_workspace",
     arguments: { sessionId: workspace.id },
   });
-  assert.equal(metadataFreeReopen.result.isError, true);
-  assert.match(
-    metadataFreeReopen.result.content[0].text,
-    /thread metadata is required/i,
-  );
+  assertToolError(metadataFreeReopen, /thread metadata is required/i);
 
-  const metadataFreeCreate = await testServer.callSuccessfulTool(1166, {
-    name: "open_codex_security_workspace",
-    arguments: { targetPath: target },
-  });
+  const metadataFreeCreate = await openWorkspace(1166, { targetPath: target });
   assert.match(
     metadataFreeCreate.structuredContent.workspace.id,
     /^[0-9a-f-]{36}$/,
   );
 
-  await testServer.callSuccessfulTool(2020, {
-    name: "submit_codex_security_setup",
-    arguments: {
-      sessionId: otherThreadOpened.structuredContent.workspace.id,
-      targetPath: replacementTarget,
-      scope: ".",
-      mode: "standard",
-    },
+  await submitSetup(2020, {
+    sessionId: otherThreadOpened.structuredContent.workspace.id,
+    targetPath: replacementTarget,
+    scope: ".",
+    mode: "standard",
   });
   testServer.notify("notifications/cancelled", {
     requestId: 2021,
     reason: "Smoke-test cancellation",
   });
-  await testServer.callSuccessfulTool(2023, {
-    name: "start_codex_security_scan",
-    arguments: {
-      sessionId: otherThreadOpened.structuredContent.workspace.id,
-    },
+  await startScan(2023, {
+    sessionId: otherThreadOpened.structuredContent.workspace.id,
   });
 
-  const absoluteScopeOpened = await testServer.callSuccessfulTool(150, {
-    name: "open_codex_security_workspace",
-    arguments: { targetPath: target, scope: target, mode: "standard" },
-    _meta: { "openai/threadId": "fixture-aux-thread" },
-  });
+  const absoluteScopeOpened = await openWorkspace(
+    150,
+    { targetPath: target, scope: target, mode: "standard" },
+    { "openai/threadId": "fixture-aux-thread" },
+  );
   assert.equal(absoluteScopeOpened.structuredContent.workspace.scope, ".");
 
   const invalidReopen = await testServer.callTool(151, {
     name: "open_codex_security_workspace",
     arguments: { sessionId: workspace.id, scope: "." },
   });
-  assert.equal(invalidReopen.result.isError, true);
-  assert.match(invalidReopen.result.content[0].text, /sessionId only reopens/);
+  assertToolError(invalidReopen, /sessionId only reopens/);
 
-  const deepOpened = await testServer.callSuccessfulTool(44, {
-    name: "open_codex_security_workspace",
-    arguments: { targetPath: target, scope: ".", mode: "deep" },
-    _meta: { "openai/threadId": "fixture-aux-thread" },
-  });
+  const deepOpened = await openWorkspace(
+    44,
+    { targetPath: target, scope: ".", mode: "deep" },
+    { "openai/threadId": "fixture-aux-thread" },
+  );
   assert.equal(deepOpened.structuredContent.workspace.mode, "deep");
   assert.equal(deepOpened.structuredContent.workspace.scope, ".");
 
-  const diffOpened = await testServer.callSuccessfulTool(45, {
-    name: "open_codex_security_workspace",
-    arguments: {
+  const diffOpened = await openWorkspace(
+    45,
+    {
       targetPath: gitTarget,
       scope: ".",
       mode: "diff",
       targetSummary: "Latest commit · fixture",
       diffTarget: { kind: "commit", headRevision: gitHead },
     },
-    _meta: { "openai/threadId": "fixture-aux-thread" },
-  });
+    { "openai/threadId": "fixture-aux-thread" },
+  );
   assert.equal(diffOpened.structuredContent.workspace.mode, "diff");
   assert.equal(
     diffOpened.structuredContent.workspace.targetSummary,
@@ -2041,15 +2057,15 @@ try {
     true,
   );
 
-  const inferredDiffOpened = await testServer.callSuccessfulTool(152, {
-    name: "open_codex_security_workspace",
-    arguments: {
+  const inferredDiffOpened = await openWorkspace(
+    152,
+    {
       targetPath: gitTarget,
       scope: ".",
       diffTarget: { kind: "commit", headRevision: gitHead },
     },
-    _meta: { "openai/threadId": "fixture-aux-thread" },
-  });
+    { "openai/threadId": "fixture-aux-thread" },
+  );
   assert.equal(inferredDiffOpened.structuredContent.workspace.mode, "diff");
 
   const contradictoryDiffOpened = await testServer.callTool(153, {
@@ -2061,34 +2077,26 @@ try {
       diffTarget: { kind: "commit", headRevision: gitHead },
     },
   });
-  assert.equal(contradictoryDiffOpened.result.isError, true);
-  assert.match(
-    contradictoryDiffOpened.result.content[0].text,
-    /requires mode 'diff'/,
-  );
+  assertToolError(contradictoryDiffOpened, /requires mode 'diff'/);
 
   const scopedDeepOpened = await testServer.callTool(154, {
     name: "open_codex_security_workspace",
     arguments: { targetPath: target, scope: "src", mode: "deep" },
   });
-  assert.equal(scopedDeepOpened.result.isError, true);
-  assert.match(
-    scopedDeepOpened.result.content[0].text,
-    /requires the whole target/,
-  );
+  assertToolError(scopedDeepOpened, /requires the whole target/);
 
   const nestedGitTarget = path.join(gitTarget, "nested");
   await mkdir(nestedGitTarget);
-  const nestedDiffOpened = await testServer.callSuccessfulTool(155, {
-    name: "open_codex_security_workspace",
-    arguments: {
+  const nestedDiffOpened = await openWorkspace(
+    155,
+    {
       targetPath: nestedGitTarget,
       scope: ".",
       mode: "diff",
       diffTarget: { kind: "commit", headRevision: gitHead },
     },
-    _meta: { "openai/threadId": "fixture-aux-thread" },
-  });
+    { "openai/threadId": "fixture-aux-thread" },
+  );
   assert.equal(
     nestedDiffOpened.structuredContent.workspace.setupValidation.valid,
     false,
@@ -2103,7 +2111,7 @@ try {
     false,
   );
 
-  const inspectedSetup = await testServer.callSuccessfulTool(46, {
+  const inspectedSetup = await callStructuredTool(46, {
     name: "inspect_codex_security_setup",
     arguments: {
       targetPath: gitTarget,
@@ -2112,55 +2120,48 @@ try {
       diffTarget: { kind: "commit", headRevision: "HEAD" },
     },
   });
-  const inspectedCommitTarget =
-    inspectedSetup.structuredContent.setup.diffTarget;
+  const inspectedCommitTarget = inspectedSetup.setup.diffTarget;
   assert.equal(inspectedCommitTarget.baseRevision, gitBase);
+  assert.equal(inspectedSetup.setup.diffTarget.headRevision, gitHead);
   assert.equal(
-    inspectedSetup.structuredContent.setup.diffTarget.headRevision,
-    gitHead,
-  );
-  assert.equal(
-    inspectedSetup.structuredContent.setup.target.targetMetadata.commitSubject,
+    inspectedSetup.setup.target.targetMetadata.commitSubject,
     "update fixture",
   );
 
-  const inspectedCommitOpened = await testServer.callSuccessfulTool(2200, {
-    name: "open_codex_security_workspace",
-    arguments: {
+  const inspectedCommitOpened = await openWorkspace(
+    2200,
+    {
       targetPath: gitTarget,
       scope: ".",
       mode: "diff",
       targetSummary: "Latest commit · fixture",
       diffTarget: { kind: "commit", headRevision: gitHead },
     },
-    _meta: { "openai/threadId": "fixture-inspected-commit-thread" },
-  });
+    { "openai/threadId": "fixture-inspected-commit-thread" },
+  );
 
-  const inspectedCommitSaved = await testServer.callSuccessfulTool(2201, {
-    name: "submit_codex_security_setup",
-    arguments: {
-      sessionId: inspectedCommitOpened.structuredContent.workspace.id,
-      targetPath: gitTarget,
-      scope: ".",
-      mode: "diff",
-      targetSummary: "Latest commit · fixture",
-      diffTarget: inspectedCommitTarget,
-    },
+  const inspectedCommitSaved = await submitSetup(2201, {
+    sessionId: inspectedCommitOpened.structuredContent.workspace.id,
+    targetPath: gitTarget,
+    scope: ".",
+    mode: "diff",
+    targetSummary: "Latest commit · fixture",
+    diffTarget: inspectedCommitTarget,
   });
   assert.deepEqual(
     inspectedCommitSaved.structuredContent.workspace.diffTarget,
     inspectedCommitTarget,
   );
 
-  const invalidOpened = await testServer.callSuccessfulTool(47, {
-    name: "open_codex_security_workspace",
-    arguments: {
+  const invalidOpened = await openWorkspace(
+    47,
+    {
       targetPath: path.join(target, "missing"),
       scope: ".",
       mode: "standard",
     },
-    _meta: { "openai/threadId": "fixture-aux-thread" },
-  });
+    { "openai/threadId": "fixture-aux-thread" },
+  );
   assert.equal(
     invalidOpened.structuredContent.workspace.setupValidation.valid,
     false,
@@ -2187,27 +2188,21 @@ try {
     false,
   );
 
-  const saved = await testServer.callSuccessfulTool(5, {
-    name: "submit_codex_security_setup",
-    arguments: {
-      sessionId: workspace.id,
-      targetPath: target,
-      scope: ".",
-      mode: "standard",
-      userContext: "Pay attention to the HTTP API.",
-    },
+  const saved = await submitSetup(5, {
+    sessionId: workspace.id,
+    targetPath: target,
+    scope: ".",
+    mode: "standard",
+    userContext: "Pay attention to the HTTP API.",
   });
   assert.equal(saved._meta, undefined);
   const savedWorkspace = saved.structuredContent.workspace;
   assert.equal(savedWorkspace.setup.submitted, true);
   assert.equal(savedWorkspace.userContext, "Pay attention to the HTTP API.");
-  const started = await testServer.callSuccessfulTool(6, {
-    name: "start_codex_security_scan",
-    arguments: {
-      model: "gpt-5.6-sol",
-      reasoningEffort: "high",
-      sessionId: workspace.id,
-    },
+  const started = await startScan(6, {
+    model: "gpt-5.6-sol",
+    reasoningEffort: "high",
+    sessionId: workspace.id,
   });
   const startedWorkspace = started.structuredContent.workspace;
   assert.equal(startedWorkspace.results.model, "gpt-5.6-sol");
@@ -2256,7 +2251,11 @@ try {
   ].entries()) {
     const claimedHandoff = await testServer.callSuccessfulTool(200200 + index, {
       name,
-      arguments: { claimToken: handoffClaimToken, scanId },
+      arguments: {
+        claimToken: handoffClaimToken,
+        scanId,
+        threadId: "untrusted-thread",
+      },
     });
     assert.equal(
       claimedHandoff.structuredContent.workspace.results.handoffClaimToken,
@@ -2271,10 +2270,7 @@ try {
       threadId: "fixture-thread",
     },
   });
-  const threadOwnedScan = await testServer.callSuccessfulTool(2202, {
-    name: "get_codex_security_scan",
-    arguments: { scanId },
-  });
+  const threadOwnedScan = await loadScan(2202, { scanId });
   assert.equal(
     threadOwnedScan.structuredContent.scan.continuationThreadId,
     "fixture-thread",
@@ -2285,27 +2281,19 @@ try {
     arguments: { handoffClaimToken, scanId },
     _meta: { "openai/threadId": "fixture-other-thread" },
   });
-  assert.equal(wrongThreadDelivery.result.isError, true);
-  assert.match(
-    wrongThreadDelivery.result.content[0].text,
-    /owning Codex thread/,
-  );
+  assertToolError(wrongThreadDelivery, /owning Codex thread/);
 
   const missingClaimToken = await testServer.callTool(2005, {
     name: "get_codex_security_scan_context",
     arguments: { scanId },
     _meta: { "openai/threadId": "fixture-thread" },
   });
-  assert.equal(missingClaimToken.result.isError, true);
-  assert.match(
-    missingClaimToken.result.content[0].text,
-    /Pass the handoffClaimToken/,
-  );
+  assertToolError(missingClaimToken, /Pass the handoffClaimToken/);
 
-  const delivered = await testServer.callSuccessfulTool(2003, {
-    name: "get_codex_security_scan_context",
-    arguments: { handoffClaimToken, scanId },
-    _meta: {
+  const delivered = await loadContext(
+    2003,
+    { handoffClaimToken, scanId },
+    {
       threadId: "fixture-thread",
       "openai/entitlementContext": {
         schemaVersion: 1,
@@ -2319,7 +2307,7 @@ try {
         },
       },
     },
-  });
+  );
   assert.equal(delivered.structuredContent.scan.handoffStatus, "delivered");
   assert.equal(delivered.structuredContent.scan.handoffClaimToken, undefined);
   assert.equal(delivered.structuredContent.scan.progress.phase, "threat_model");
@@ -2349,11 +2337,11 @@ try {
     delivered.structuredContent.workspace.results.handoffClaimToken,
     undefined,
   );
-  const reopenedWorkspace = await testServer.callSuccessfulTool(2203, {
-    name: "open_codex_security_workspace",
-    arguments: { sessionId: workspace.id },
-    _meta: { "openai/threadId": "fixture-thread" },
-  });
+  const reopenedWorkspace = await openWorkspace(
+    2203,
+    { sessionId: workspace.id },
+    { "openai/threadId": "fixture-thread" },
+  );
   assert.equal(
     reopenedWorkspace.structuredContent.workspace.results.handoffClaimToken,
     undefined,
@@ -2364,57 +2352,52 @@ try {
     arguments: { handoffClaimToken: randomUUID(), scanId },
     _meta: { "openai/threadId": "fixture-thread" },
   });
-  assert.equal(supersededClaim.result.isError, true);
-  assert.match(
-    supersededClaim.result.content[0].text,
-    /owned by another continuation/,
-  );
+  assertToolError(supersededClaim, /owned by another continuation/);
 
-  await testServer.callSuccessfulTool(2007, {
-    name: "get_codex_security_scan_context",
-    arguments: { scanId },
-    _meta: { "openai/threadId": "fixture-thread" },
-  });
+  await loadContext(2007, { scanId }, { "openai/threadId": "fixture-thread" });
 
   const longUserContext = `${"Prioritize tenant isolation. ".repeat(120)}Read https://example.test/context.`;
-  const renamedScan = await testServer.callSuccessfulTool(92020, {
+  const renamedScan = await callStructuredTool(92020, {
     name: "rename_codex_security_scan",
     arguments: { scanId, name: "  - Release audit  " },
   });
-  assert.deepEqual(renamedScan.structuredContent, {
+  assert.deepEqual(renamedScan, {
     scanId,
     name: "- Release audit",
   });
-  const reopenedScan = await testServer.callSuccessfulTool(92021, {
-    name: "get_codex_security_scan",
-    arguments: { scanId },
-  });
+  const reopenedScan = await loadScan(92021, { scanId });
   assert.equal(reopenedScan.structuredContent.scan.name, "- Release audit");
-  const updatedContext = await testServer.callSuccessfulTool(92010, {
+  const updatedContext = await callStructuredTool(92010, {
     name: "update_codex_security_scan_context",
     arguments: { handoffClaimToken, scanId, userContext: longUserContext },
     _meta: { "openai/threadId": "fixture-thread" },
   });
-  assert.equal(
-    updatedContext.structuredContent.scan.userContext,
-    longUserContext,
-  );
-  assert.equal(
-    updatedContext.structuredContent.workspace.userContext,
-    longUserContext,
-  );
+  assert.equal(updatedContext.scan.userContext, longUserContext);
+  assert.equal(updatedContext.workspace.userContext, longUserContext);
+
+  const budget = await testServer.callSuccessfulTool(92012, {
+    name: "update_codex_security_scan_context",
+    arguments: { handoffClaimToken, scanId, maxTimeMinutes: 2.5 },
+    _meta: { "openai/threadId": "fixture-thread" },
+  });
+  assert.equal(budget.structuredContent.scan.userContext, longUserContext);
+  const policy = budget.structuredContent.investigationPolicy;
+  assert.ok(typeof policy === "string" && policy.includes("2.5"));
+  const resumedBudget = await testServer.callSuccessfulTool(92019, {
+    name: "get_codex_security_scan_context",
+    arguments: { handoffClaimToken, scanId },
+    _meta: { "openai/threadId": "fixture-thread" },
+  });
+  assert.ok(resumedBudget.content[0].text.includes(policy));
 
   const appUserContext = "Focus on account recovery. ".repeat(120).trim();
-  const appUpdatedContext = await testServer.callSuccessfulTool(92011, {
+  const appUpdatedContext = await callStructuredTool(92011, {
     name: "update_codex_security_scan_context_from_app",
     arguments: { scanId, userContext: appUserContext },
   });
-  assert.equal(
-    appUpdatedContext.structuredContent.scan.userContext,
-    appUserContext,
-  );
+  assert.equal(appUpdatedContext.scan.userContext, appUserContext);
 
-  const mappingProgress = await testServer.callSuccessfulTool(90164, {
+  const mappingProgress = await callStructuredTool(90164, {
     name: "update_codex_security_scan_progress",
     _meta: {
       "openai/threadId": "fixture-thread",
@@ -2431,12 +2414,9 @@ try {
       phaseProgressUnit: "threat_surfaces",
     },
   });
-  const savedPreflight = await testServer.callSuccessfulTool(90165, {
-    name: "get_codex_security_scan",
-    arguments: { scanId },
-  });
+  const savedPreflight = await loadScan(90165, { scanId });
   const savedScan = savedPreflight.structuredContent.scan;
-  assert.deepEqual(mappingProgress.structuredContent, {
+  assert.deepEqual(mappingProgress, {
     scan: {
       scanId,
       progress: savedScan.progress,
@@ -2445,14 +2425,11 @@ try {
   });
   assert.equal(savedScan.model, "gpt-5.6-terra");
   assert.equal(savedScan.reasoningEffort, "low");
-  assert.deepEqual(
-    mappingProgress.structuredContent.scan.progress.preflightProgress,
-    { completed: 0, total: 0 },
-  );
-  assert.equal(
-    mappingProgress.structuredContent.scan.userContext,
-    appUserContext,
-  );
+  assert.deepEqual(mappingProgress.scan.progress.preflightProgress, {
+    completed: 0,
+    total: 0,
+  });
+  assert.equal(mappingProgress.scan.userContext, appUserContext);
 
   const nextPhaseUserContext = "Prioritize password-reset token validation.";
   await testServer.callSuccessfulTool(92013, {
@@ -2504,6 +2481,11 @@ try {
     name: "complete_codex_security_scan",
     arguments: { handoffClaimToken, scanId },
   });
+  const historical = await testServer.callSuccessfulTool(92029, {
+    name: "get_codex_security_scan_context",
+    arguments: { handoffClaimToken, scanId },
+  });
+  assert.equal(historical.structuredContent.investigationPolicy, undefined);
   assert.deepEqual(completed.structuredContent.scan.warnings, [
     "Directory contents changed while the scan was running; results were saved for the original snapshot.",
   ]);
@@ -2514,10 +2496,7 @@ try {
     completed.structuredContent.workspace.results.progress.status,
     "complete",
   );
-  const refreshed = await testServer.callSuccessfulTool(10, {
-    name: "get_codex_security_scan",
-    arguments: { scanId: scanId.toUpperCase() },
-  });
+  const refreshed = await loadScan(10, { scanId: scanId.toUpperCase() });
   assertScanTarget(refreshed._meta, scanId);
   const results = refreshed.structuredContent.scan;
   assert.equal(results.findings.length, 2);
@@ -2540,7 +2519,6 @@ try {
   assert.deepEqual(results.findings[0].remediationState, { state: "idle" });
 
   const occurrenceId = results.findings[0].occurrenceId;
-  const remediationRequestId = randomUUID();
   const closedFinding = await testServer.callSuccessfulTool(60, {
     name: "set_codex_security_finding_triage",
     arguments: {
@@ -2550,82 +2528,57 @@ try {
       note: "--synthetic triage note",
     },
   });
-  assert.equal(
-    closedFinding.structuredContent.scan.findings[0].triage.note,
-    "--synthetic triage note",
-  );
-  assert.equal(
-    closedFinding.structuredContent.scan.findings[0].triage.status,
-    "closed",
-  );
-  assert.equal(
-    closedFinding.structuredContent.scan.findings[0].triage.closeReason,
-    "false_positive",
-  );
+  const triage = closedFinding.structuredContent.scan.findings[0].triage;
+  assert.equal(triage.note, "--synthetic triage note");
+  assert.equal(triage.status, "closed");
+  assert.equal(triage.closeReason, "false_positive");
 
-  const generationActionToken = randomUUID();
+  const generationRequest = {
+    occurrenceId,
+    requestId: randomUUID(),
+    actionToken: randomUUID(),
+  };
   const rejectedClosedPatch = await testServer.callTool(159, {
     name: "request_codex_security_finding_remediation",
-    arguments: {
-      actionToken: generationActionToken,
-      occurrenceId,
-      requestId: remediationRequestId,
-    },
+    arguments: generationRequest,
   });
-  assert.equal(rejectedClosedPatch.result.isError, true);
-  assert.match(
-    rejectedClosedPatch.result.content[0].text,
-    /Reopen this finding/,
-  );
+  assertToolError(rejectedClosedPatch, /Reopen this finding/);
   await testServer.callSuccessfulTool(160, {
     name: "set_codex_security_finding_triage",
     arguments: { occurrenceId, status: "open" },
   });
 
-  const canceledRequestId = randomUUID();
-  const canceledActionToken = randomUUID();
+  const canceledRequest = {
+    occurrenceId,
+    requestId: randomUUID(),
+    actionToken: randomUUID(),
+  };
   await testServer.callSuccessfulTool(500, {
     name: "request_codex_security_finding_remediation",
-    arguments: {
-      actionToken: canceledActionToken,
-      occurrenceId,
-      requestId: canceledRequestId,
-    },
+    arguments: canceledRequest,
   });
-  const canceledPatch = await testServer.callSuccessfulTool(501, {
+  const canceledPatch = await callStructuredTool(501, {
     name: "cancel_codex_security_finding_remediation_request",
-    arguments: {
-      actionToken: canceledActionToken,
-      occurrenceId,
-      requestId: canceledRequestId,
-    },
+    arguments: canceledRequest,
   });
-  assert.deepEqual(
-    canceledPatch.structuredContent.scan.findings[0].remediationState,
-    {
-      state: "idle",
-    },
-  );
+  assert.deepEqual(canceledPatch.scan.findings[0].remediationState, {
+    state: "idle",
+  });
 
   for (const [index, name] of [
     "request_codex_security_finding_remediation",
     "release_codex_security_finding_remediation_claim",
     "claim_codex_security_finding_remediation_resend",
   ].entries()) {
-    const requestedPatch = await testServer.callSuccessfulTool(6100 + index, {
+    const requestedPatch = await callStructuredTool(6100 + index, {
       name,
-      arguments: {
-        actionToken: generationActionToken,
-        occurrenceId,
-        requestId: remediationRequestId,
-      },
+      arguments: generationRequest,
     });
-    const remediation =
-      requestedPatch.structuredContent.scan.findings[0].remediationState;
+    const remediation = requestedPatch.scan.findings[0].remediationState;
     assert.equal(remediation.state, "requested");
     assert.equal(
       remediation.actionClaimToken,
-      index === 1 ? null : generationActionToken,
+      index === 1 ? null : generationRequest.actionToken,
     );
   }
   const stageContext = (
@@ -2639,8 +2592,8 @@ try {
     });
   const generationClaim = {
     occurrenceId,
-    requestId: remediationRequestId.toUpperCase(),
-    actionToken: generationActionToken.toUpperCase(),
+    requestId: generationRequest.requestId.toUpperCase(),
+    actionToken: generationRequest.actionToken.toUpperCase(),
   };
   const configFile = path.join(
     stateDir,
@@ -2728,17 +2681,13 @@ try {
   );
   assert.equal(
     scopedScan.findings[0].remediationState.actionClaimToken,
-    generationActionToken,
+    generationRequest.actionToken,
   );
   const rejectedPendingClose = await testServer.callTool(161, {
     name: "set_codex_security_finding_triage",
     arguments: { occurrenceId, status: "closed", closeReason: "already_fixed" },
   });
-  assert.equal(rejectedPendingClose.result.isError, true);
-  assert.match(
-    rejectedPendingClose.result.content[0].text,
-    /pending remediation operation/,
-  );
+  assertToolError(rejectedPendingClose, /pending remediation operation/);
   const manifestPath = path.join(initializedScanDir, "scan-manifest.json");
   const sealedManifest = await readFile(manifestPath);
   const filesBeforeGeneration = await readdir(initializedScanDir, {
@@ -2751,17 +2700,12 @@ try {
 -vulnerable
 +fixed
 `;
-  const generatedPatch = await testServer.callSuccessfulTool(62, {
-    name: "set_codex_security_finding_remediation",
-    arguments: {
-      actionToken: generationActionToken.toUpperCase(),
-      occurrenceId,
-      requestId: remediationRequestId.toUpperCase(),
-      expectedVersion: 1,
-      state: "generated",
-      patch: remediationPatch,
-      summary: "Contain archive extraction under the output root.",
-    },
+  const generatedPatch = await updateRemediation(62, {
+    ...generationClaim,
+    expectedVersion: 1,
+    state: "generated",
+    patch: remediationPatch,
+    summary: "Contain archive extraction under the output root.",
   });
   assert.deepEqual(Object.keys(generatedPatch.structuredContent), ["scan"]);
   assert.deepEqual(
@@ -2793,45 +2737,39 @@ try {
   );
   assert.equal(generatedFinding.triage.status, "open");
 
-  const applyActionToken = randomUUID();
-  const requestedApply = await testServer.callSuccessfulTool(65, {
-    name: "request_codex_security_finding_remediation_action",
-    arguments: {
-      action: "apply",
-      actionToken: applyActionToken,
-      expectedVersion: 2,
-      occurrenceId,
-      requestId: remediationRequestId,
-    },
-  });
-  assert.equal(
-    requestedApply.structuredContent.scan.findings[0].remediationState
-      .pendingAction,
-    "apply",
-  );
-  assert.equal(
-    requestedApply.structuredContent.scan.findings[0].remediationState.version,
-    3,
-  );
+  async function requestAction(
+    id: number,
+    action: "apply" | "verify",
+    expectedVersion: number,
+  ) {
+    const claim = { ...generationRequest, actionToken: randomUUID() };
+    const result = await testServer.callSuccessfulTool(id, {
+      name: "request_codex_security_finding_remediation_action",
+      arguments: { ...claim, action, expectedVersion },
+    });
+    return {
+      claim,
+      remediation: result.structuredContent.scan.findings[0].remediationState,
+    };
+  }
+
+  const apply = await requestAction(65, "apply", 2);
+  assert.equal(apply.remediation.pendingAction, "apply");
+  assert.equal(apply.remediation.version, 3);
   const applying = await stageContext(6313, {
     ...generationClaim,
-    actionToken: applyActionToken,
+    actionToken: apply.claim.actionToken,
   });
   assertNoError(applying);
   const assignedApply = applying.result.structuredContent.scan.findings[0];
   assert.equal(assignedApply.continuumAssessment, undefined);
   assert.equal(assignedApply.remediationState.patch, remediationPatch);
-  const markedApplyDelivered = await testServer.callSuccessfulTool(166, {
+  const markedApplyDelivered = await callStructuredTool(166, {
     name: "mark_codex_security_finding_remediation_delivered",
-    arguments: {
-      actionToken: applyActionToken,
-      occurrenceId,
-      requestId: remediationRequestId,
-    },
+    arguments: apply.claim,
   });
   assert.ok(
-    markedApplyDelivered.structuredContent.scan.findings[0].remediationState
-      .actionDeliveredAt,
+    markedApplyDelivered.scan.findings[0].remediationState.actionDeliveredAt,
   );
   execFileSync("git", ["apply", "--no-index", "-"], {
     cwd: target,
@@ -2842,64 +2780,32 @@ try {
     /^fixed\r?\n$/,
   );
 
-  const appliedPatch = await testServer.callSuccessfulTool(66, {
-    name: "set_codex_security_finding_remediation",
-    arguments: {
-      actionToken: applyActionToken,
-      baseRevision: "unversioned",
-      expectedVersion: 3,
-      occurrenceId,
-      requestId: remediationRequestId,
-      state: "applied",
-      patchPath: remediation.patchPath,
-    },
+  const appliedPatch = await updateRemediation(66, {
+    ...apply.claim,
+    baseRevision: "unversioned",
+    expectedVersion: 3,
+    state: "applied",
+    patchPath: remediation.patchPath,
   });
   assert.equal(
     appliedPatch.structuredContent.scan.findings[0].remediationState.state,
     "applied",
   );
 
-  const verifyActionToken = randomUUID();
-  const requestedVerify = await testServer.callSuccessfulTool(168, {
-    name: "request_codex_security_finding_remediation_action",
-    arguments: {
-      action: "verify",
-      actionToken: verifyActionToken,
-      expectedVersion: 4,
-      occurrenceId,
-      requestId: remediationRequestId,
-    },
-  });
-  assert.equal(
-    requestedVerify.structuredContent.scan.findings[0].remediationState
-      .pendingAction,
-    "verify",
-  );
-  assert.equal(
-    requestedVerify.structuredContent.scan.findings[0].remediationState.version,
-    5,
-  );
+  const verify = await requestAction(168, "verify", 4);
+  assert.equal(verify.remediation.pendingAction, "verify");
+  assert.equal(verify.remediation.version, 5);
 
-  const verifyingPatch = await testServer.callSuccessfulTool(169, {
-    name: "set_codex_security_finding_remediation",
-    arguments: {
-      actionToken: verifyActionToken,
-      baseRevision: "unversioned",
-      expectedVersion: 5,
-      occurrenceId,
-      requestId: remediationRequestId,
-      state: "verifying",
-    },
+  const verifyingPatch = await updateRemediation(169, {
+    ...verify.claim,
+    baseRevision: "unversioned",
+    expectedVersion: 5,
+    state: "verifying",
   });
-  assert.equal(
-    verifyingPatch.structuredContent.scan.findings[0].remediationState.state,
-    "verifying",
-  );
-  assert.equal(
-    verifyingPatch.structuredContent.scan.findings[0].remediationState
-      .pendingAction,
-    "verify",
-  );
+  const verifying =
+    verifyingPatch.structuredContent.scan.findings[0].remediationState;
+  assert.equal(verifying.state, "verifying");
+  assert.equal(verifying.pendingAction, "verify");
 
   const superseded = await stageContext(6314, generationClaim);
   assert.equal(superseded.result.isError, true);
@@ -2911,50 +2817,33 @@ try {
   await save(revised);
   const refreshedStage = await stageContext(6322, {
     ...generationClaim,
-    actionToken: verifyActionToken,
+    actionToken: verify.claim.actionToken,
   });
   assertNoError(refreshedStage);
-  assert.deepEqual(
-    refreshedStage.result.structuredContent.scan.findings[0]
-      .continuumAssessment,
-    { ...modelAssessment, freshness: { stale: true } },
-  );
-  assert.deepEqual(
-    refreshedStage.result.structuredContent.scan.findings[0].remediationTests,
-    remediationCriteria,
-  );
+  const refreshedFinding =
+    refreshedStage.result.structuredContent.scan.findings[0];
+  assert.deepEqual(refreshedFinding.continuumAssessment, {
+    ...modelAssessment,
+    freshness: { stale: true },
+  });
+  assert.deepEqual(refreshedFinding.remediationTests, remediationCriteria);
   await rm(configFile);
   await rm(configFile + ".result");
   await rm(projection);
-  assert.equal(
-    refreshedStage.result.structuredContent.scan.findings[0].remediationState
-      .version,
-    6,
-  );
-  const verifiedPatch = await testServer.callSuccessfulTool(170, {
-    name: "set_codex_security_finding_remediation",
-    arguments: {
-      actionToken: verifyActionToken,
-      baseRevision: "unversioned",
-      expectedVersion: 6,
-      occurrenceId,
-      requestId: remediationRequestId,
-      state: "verified",
-      verificationSummary: "Focused remediation checks passed.",
-    },
+  assert.equal(refreshedFinding.remediationState.version, 6);
+  const verifiedPatch = await updateRemediation(170, {
+    ...verify.claim,
+    baseRevision: "unversioned",
+    expectedVersion: 6,
+    state: "verified",
+    verificationSummary: "Focused remediation checks passed.",
   });
+  const verified =
+    verifiedPatch.structuredContent.scan.findings[0].remediationState;
+  assert.equal(verified.state, "verified");
+  assert.equal(verified.pendingAction, null);
   assert.equal(
-    verifiedPatch.structuredContent.scan.findings[0].remediationState.state,
-    "verified",
-  );
-  assert.equal(
-    verifiedPatch.structuredContent.scan.findings[0].remediationState
-      .pendingAction,
-    null,
-  );
-  assert.equal(
-    verifiedPatch.structuredContent.scan.findings[0].remediationState
-      .verificationSummary,
+    verified.verificationSummary,
     "Focused remediation checks passed.",
   );
 
@@ -2982,17 +2871,10 @@ try {
     name: "set_codex_security_finding_remediation",
     arguments: { ...latin1Generation, patch: "bad\ud800" },
   });
-  assert.equal(malformedPatch.result.isError, true);
-  assert.match(
-    malformedPatch.result.content[0].text,
-    /unpaired Unicode surrogate.*base64/,
-  );
-  const generatedLatin1 = await testServer.callSuccessfulTool(176, {
-    name: "set_codex_security_finding_remediation",
-    arguments: {
-      ...latin1Generation,
-      patch: { encoding: "base64", content: latin1Patch.toString("base64") },
-    },
+  assertToolError(malformedPatch, /unpaired Unicode surrogate.*base64/);
+  const generatedLatin1 = await updateRemediation(176, {
+    ...latin1Generation,
+    patch: { encoding: "base64", content: latin1Patch.toString("base64") },
   });
   const { patchDigest, patchPath } =
     generatedLatin1.structuredContent.scan.findings[0].remediationState;
@@ -3013,7 +2895,7 @@ try {
   assert.equal(findingsPage.structuredContent.findingsPage.findings.length, 1);
   assert.equal(findingsPage.structuredContent.findingsPage.nextOffset, 1);
   assert.equal(findingsPage.structuredContent.findingsPage.total, 2);
-  const filteredFindingsPage = await testServer.callSuccessfulTool(94001, {
+  const filteredFindingsPage = await callStructuredTool(94001, {
     name: "list_codex_security_findings",
     arguments: {
       scanId,
@@ -3024,50 +2906,43 @@ try {
     },
   });
   assert.deepEqual(
-    filteredFindingsPage.structuredContent.findingsPage.findings.map(
+    filteredFindingsPage.findingsPage.findings.map(
       (finding: { occurrenceId: string }) => finding.occurrenceId,
     ),
     [occurrenceId],
   );
-  assert.equal(filteredFindingsPage.structuredContent.findingsPage.total, 1);
+  assert.equal(filteredFindingsPage.findingsPage.total, 1);
 
-  const csvExport = await testServer.callSuccessfulTool(63, {
+  const csvExport = await callStructuredTool(63, {
     name: "export_codex_security_findings",
     arguments: { scanId, format: "csv" },
   });
   assert.equal(
-    csvExport.structuredContent.export.path,
+    csvExport.export.path,
     path.join(initializedScanDir, "exports", "findings.csv"),
   );
   assert.match(
-    await readFile(csvExport.structuredContent.export.path, "utf8"),
+    await readFile(csvExport.export.path, "utf8"),
     /occurrence_id,finding_id,title/,
   );
 
-  const sarifExport = await testServer.callSuccessfulTool(64, {
+  const sarifExport = await callStructuredTool(64, {
     name: "export_codex_security_findings",
     arguments: { scanId, format: "sarif" },
   });
   assert.equal(
-    sarifExport.structuredContent.export.path,
+    sarifExport.export.path,
     path.join(initializedScanDir, "exports", "results.sarif"),
   );
 
-  const restarted = await testServer.callSuccessfulTool(171, {
-    name: "start_codex_security_scan",
-    arguments: { sessionId: workspace.id },
-  });
+  const restarted = await startScan(171, { sessionId: workspace.id });
   const canceledScanId = restarted.structuredContent.workspace.results.scanId;
   const unclaimedContext = await testServer.callTool(2010, {
     name: "get_codex_security_scan_context",
     arguments: { scanId: canceledScanId },
     _meta: { "openai/threadId": "fixture-thread" },
   });
-  assert.equal(unclaimedContext.result.isError, true);
-  assert.match(
-    unclaimedContext.result.content[0].text,
-    /handoff has not been delivered/,
-  );
+  assertToolError(unclaimedContext, /handoff has not been delivered/);
   assert.match(
     unclaimedContext.result.content[0].text,
     /Claim the pending Codex Security scan handoff/,
@@ -3077,11 +2952,11 @@ try {
     name: "claim_codex_security_scan_handoff_delivery",
     arguments: { claimToken: unattachedToken, scanId: canceledScanId },
   });
-  const unattachedContext = await testServer.callSuccessfulTool(20181, {
-    name: "get_codex_security_scan_context",
-    arguments: { handoffClaimToken: unattachedToken, scanId: canceledScanId },
-    _meta: { "openai/threadId": "fixture-thread" },
-  });
+  const unattachedContext = await loadContext(
+    20181,
+    { handoffClaimToken: unattachedToken, scanId: canceledScanId },
+    { "openai/threadId": "fixture-thread" },
+  );
   assert.equal(
     unattachedContext.structuredContent.scan.handoffStatus,
     "delivered",
@@ -3095,29 +2970,20 @@ try {
     arguments: { scanId: canceledScanId },
     _meta: { "openai/threadId": "fixture-thread" },
   });
-  assert.equal(unattachedRead.result.isError, true);
-  assert.match(
-    unattachedRead.result.content[0].text,
-    /current continuation claim/,
-  );
+  assertToolError(unattachedRead, /current continuation claim/);
 
   const rejectedWrongThreadCancel = await testServer.callTool(1169, {
     name: "cancel_codex_security_scan",
     arguments: { scanId: canceledScanId },
     _meta: { "openai/threadId": "fixture-other-thread" },
   });
-  assert.equal(rejectedWrongThreadCancel.result.isError, true);
-  assert.match(
-    rejectedWrongThreadCancel.result.content[0].text,
-    /owning Codex thread/,
-  );
+  assertToolError(rejectedWrongThreadCancel, /owning Codex thread/);
   const rejectedMissingThreadCancel = await testServer.callTool(1170, {
     name: "cancel_codex_security_scan",
     arguments: { scanId: canceledScanId },
   });
-  assert.equal(rejectedMissingThreadCancel.result.isError, true);
-  assert.match(
-    rejectedMissingThreadCancel.result.content[0].text,
+  assertToolError(
+    rejectedMissingThreadCancel,
     /continuation thread.*Codex Security workbench/,
   );
   const canceledFromNativeRoute = await testServer.callSuccessfulTool(2210, {
@@ -3145,16 +3011,9 @@ try {
     name: "update_codex_security_scan_progress",
     arguments: { scanId: canceledScanId, phase: "discovery" },
   });
-  assert.equal(rejectedCanceledProgress.result.isError, true);
-  assert.match(
-    rejectedCanceledProgress.result.content[0].text,
-    /Only a running scan/,
-  );
+  assertToolError(rejectedCanceledProgress, /Only a running scan/);
 
-  const fallbackStarted = await testServer.callSuccessfulTool(2011, {
-    name: "start_codex_security_scan",
-    arguments: { sessionId: workspace.id },
-  });
+  const fallbackStarted = await startScan(2011, { sessionId: workspace.id });
   const fallbackScanId =
     fallbackStarted.structuredContent.workspace.results.scanId;
   const oldCancellation = await testServer.callSuccessfulTool(2211, {
@@ -3167,7 +3026,7 @@ try {
   );
   assertScanTarget(oldCancellation._meta, canceledScanId);
   const fallbackClaimToken = `recovery_${randomUUID()}`;
-  const fallbackClaimed = await testServer.callSuccessfulTool(2012, {
+  const fallbackClaimed = await callStructuredTool(2012, {
     name: "claim_codex_security_scan_handoff_delivery",
     arguments: {
       claimToken: fallbackClaimToken,
@@ -3176,10 +3035,10 @@ try {
     },
   });
   assert.equal(
-    fallbackClaimed.structuredContent.workspace.results.handoffClaimToken,
+    fallbackClaimed.workspace.results.handoffClaimToken,
     fallbackClaimToken,
   );
-  const fallbackAttached = await testServer.callSuccessfulTool(2017, {
+  const fallbackAttached = await callStructuredTool(2017, {
     name: "attach_codex_security_scan_continuation_thread",
     arguments: {
       claimToken: fallbackClaimToken,
@@ -3188,7 +3047,7 @@ try {
     },
   });
   assert.equal(
-    fallbackAttached.structuredContent.workspace.results.continuationThreadId,
+    fallbackAttached.workspace.results.continuationThreadId,
     "fixture-recovery-thread",
   );
   const malformedRecovery = await testServer.callTool(20170, {
@@ -3199,8 +3058,7 @@ try {
     },
     _meta: { "openai/threadId": "fixture-replacement-recovery-thread" },
   });
-  assert.equal(malformedRecovery.result.isError, true);
-  assert.match(malformedRecovery.result.content[0].text, /invalid/i);
+  assertToolError(malformedRecovery, /invalid/i);
   const wrongRecoveryContext = await testServer.callTool(20171, {
     name: "get_codex_security_scan_context",
     arguments: {
@@ -3209,17 +3067,13 @@ try {
     },
     _meta: { "openai/threadId": "fixture-replacement-recovery-thread" },
   });
-  assert.equal(wrongRecoveryContext.result.isError, true);
-  assert.match(
-    wrongRecoveryContext.result.content[0].text,
+  assertToolError(
+    wrongRecoveryContext,
     /handoff delivery could not be recorded|owned by another continuation/i,
   );
-  const fallbackContext = await testServer.callSuccessfulTool(2013, {
-    name: "get_codex_security_scan_context",
-    arguments: {
-      handoffClaimToken: fallbackClaimToken,
-      scanId: fallbackScanId,
-    },
+  const fallbackContext = await loadContext(2013, {
+    handoffClaimToken: fallbackClaimToken,
+    scanId: fallbackScanId,
   });
   assert.equal(
     fallbackContext.structuredContent.scan.handoffStatus,
@@ -3233,19 +3087,13 @@ try {
     fallbackContext.structuredContent.workspace.results.handoffClaimToken,
     undefined,
   );
-  const cancelReplay = await testServer.callSuccessfulTool(22192, {
+  const cancelReplay = await callStructuredTool(22192, {
     name: "cancel_codex_security_scan",
     arguments: { scanId: canceledScanId },
     _meta: { "openai/threadId": "fixture-thread" },
   });
-  assert.equal(
-    cancelReplay.structuredContent.workspace.results.scanId,
-    canceledScanId,
-  );
-  assert.equal(
-    cancelReplay.structuredContent.workspace.results.progress.status,
-    "canceled",
-  );
+  assert.equal(cancelReplay.workspace.results.scanId, canceledScanId);
+  assert.equal(cancelReplay.workspace.results.progress.status, "canceled");
   const recoveryArtifactRead = (id: number) =>
     testServer.callTool(id, {
       name: "list_codex_security_review_items",
@@ -3253,19 +3101,15 @@ try {
       _meta: { "openai/threadId": "fixture-replacement-recovery-thread" },
     });
   const beforeRecovery = await recoveryArtifactRead(20174);
-  assert.equal(beforeRecovery.result.isError, true);
-  assert.match(
-    beforeRecovery.result.content[0].text,
-    /current continuation claim/,
-  );
-  const recoveredThreadContext = await testServer.callSuccessfulTool(20172, {
-    name: "get_codex_security_scan_context",
-    arguments: {
+  assertToolError(beforeRecovery, /current continuation claim/);
+  const recoveredThreadContext = await loadContext(
+    20172,
+    {
       handoffClaimToken: fallbackClaimToken,
       scanId: fallbackScanId,
     },
-    _meta: { "openai/threadId": "fixture-replacement-recovery-thread" },
-  });
+    { "openai/threadId": "fixture-replacement-recovery-thread" },
+  );
   assert.equal(
     recoveredThreadContext.structuredContent.scan.handoffStatus,
     "delivered",
@@ -3283,24 +3127,19 @@ try {
       .handoffClaimToken,
     undefined,
   );
-  await testServer.callSuccessfulTool(20176, {
-    name: "get_codex_security_scan_context",
-    arguments: { scanId: fallbackScanId },
-    _meta: { "openai/threadId": "fixture-replacement-recovery-thread" },
-  });
-  const afterRecovery = await recoveryArtifactRead(20175);
-  assert.equal(afterRecovery.result.isError, true);
-  assert.match(
-    afterRecovery.result.content[0].text,
-    /only available for Deep or diff scans/,
+  await loadContext(
+    20176,
+    { scanId: fallbackScanId },
+    { "openai/threadId": "fixture-replacement-recovery-thread" },
   );
-  const fallbackAppAcknowledgement = await testServer.callSuccessfulTool(2014, {
+  const afterRecovery = await recoveryArtifactRead(20175);
+  assertToolError(afterRecovery, /only available for Deep or diff scans/);
+  const fallbackAppAcknowledgement = await callStructuredTool(2014, {
     name: "mark_codex_security_scan_handoff_delivered",
     arguments: { claimToken: fallbackClaimToken, scanId: fallbackScanId },
   });
   assert.equal(
-    fallbackAppAcknowledgement.structuredContent.workspace.results
-      .handoffStatus,
+    fallbackAppAcknowledgement.workspace.results.handoffStatus,
     "delivered",
   );
   const rotatedFallbackClaimToken = `recovery_${randomUUID()}`;
@@ -3322,32 +3161,31 @@ with sqlite3.connect(sys.argv[1]) as connection:
     },
     _meta: { "openai/threadId": "fixture-replacement-recovery-thread" },
   });
-  assert.equal(staleRecoveryContext.result.isError, true);
-  assert.match(
-    staleRecoveryContext.result.content[0].text,
+  assertToolError(
+    staleRecoveryContext,
     /handoff delivery could not be recorded|owned by another continuation/i,
   );
-  const scanList = await testServer.callSuccessfulTool(2212, {
+  const scanList = await callStructuredTool(2212, {
     name: "list_codex_security_scans",
     arguments: {},
   });
-  const listedFallback = scanList.structuredContent.scans.find(
+  const listedFallback = scanList.scans.find(
     (scan: { targetId: string; scanId: string }) =>
       scan.scanId === fallbackScanId,
   );
   assert.equal(listedFallback.progress.status, "running");
   assert.equal("artifacts" in listedFallback, false);
   assert.equal("findings" in listedFallback, false);
-  const globalFindings = await testServer.callSuccessfulTool(2213, {
+  const globalFindings = await callStructuredTool(2213, {
     name: "list_codex_security_global_findings",
     arguments: { limit: 1 },
   });
-  const indexedFinding = globalFindings.structuredContent.findings.find(
+  const indexedFinding = globalFindings.findings.find(
     (finding: { occurrenceId: string }) =>
       finding.occurrenceId === occurrenceId,
   );
-  assert.equal(globalFindings.structuredContent.limit, 1);
-  assert.equal(globalFindings.structuredContent.nextOffset, 1);
+  assert.equal(globalFindings.limit, 1);
+  assert.equal(globalFindings.nextOffset, 1);
   assert.equal(indexedFinding.scanId, scanId);
   assert.equal(indexedFinding.status, "open");
   assert.equal(indexedFinding.occurrenceCount, 1);
@@ -3367,6 +3205,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
       query: "SRC/A.PY",
       severity: "high",
       status: "open",
+      repository: "--unexpected-filter",
       targetId: indexedFinding.targetId,
     },
   });
@@ -3390,12 +3229,12 @@ with sqlite3.connect(sys.argv[1]) as connection:
   assert.equal(indexedRepository.openFindingsCount, 2);
   assert.equal(
     indexedRepository.scanCount,
-    scanList.structuredContent.scans.filter(
+    scanList.scans.filter(
       (scan: { targetId: string; scanId: string }) =>
         scan.targetId === indexedFinding.targetId,
     ).length,
   );
-  const filteredScans = await testServer.callSuccessfulTool(94003, {
+  const filteredScans = await callStructuredTool(94003, {
     name: "list_codex_security_scans",
     arguments: {
       limit: 1,
@@ -3405,9 +3244,9 @@ with sqlite3.connect(sys.argv[1]) as connection:
       targetId: indexedFinding.targetId,
     },
   });
-  assert.equal(filteredScans.structuredContent.scans[0].scanId, fallbackScanId);
-  assert.equal(filteredScans.structuredContent.limit, 1);
-  const filteredRepositories = await testServer.callSuccessfulTool(94004, {
+  assert.equal(filteredScans.scans[0].scanId, fallbackScanId);
+  assert.equal(filteredScans.limit, 1);
+  const filteredRepositories = await callStructuredTool(94004, {
     name: "list_codex_security_repositories",
     arguments: {
       limit: 1,
@@ -3417,7 +3256,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
     },
   });
   assert.deepEqual(
-    filteredRepositories.structuredContent.repositories.map(
+    filteredRepositories.repositories.map(
       (repository: { targetId: string }) => repository.targetId,
     ),
     [indexedFinding.targetId],
@@ -3430,10 +3269,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
       threadId: "fixture-rotated-recovery-thread",
     },
   });
-  const observedRotatedScan = await testServer.callSuccessfulTool(2031, {
-    name: "get_codex_security_scan",
-    arguments: { scanId: fallbackScanId },
-  });
+  const observedRotatedScan = await loadScan(2031, { scanId: fallbackScanId });
   assert.equal(
     observedRotatedScan.structuredContent.scan.continuationThreadId,
     "fixture-rotated-recovery-thread",
@@ -3442,7 +3278,11 @@ with sqlite3.connect(sys.argv[1]) as connection:
   for (const operation of [
     {
       name: "update_codex_security_scan_progress",
-      arguments: { phase: "discovery" },
+      arguments: {
+        phase: "discovery",
+        modelThreadId: "fixture-rotated-recovery-thread",
+        claimToken: rotatedFallbackClaimToken,
+      },
     },
     { name: "complete_codex_security_scan", arguments: {} },
     {
@@ -3461,11 +3301,7 @@ with sqlite3.connect(sys.argv[1]) as connection:
           scanId: fallbackScanId,
         },
       });
-      assert.equal(rejected.result.isError, true);
-      assert.match(
-        rejected.result.content[0].text,
-        /owned by another continuation/,
-      );
+      assertToolError(rejected, /owned by another continuation/);
     }
   }
   await testServer.callSuccessfulTool(2038, {
@@ -3495,58 +3331,51 @@ with sqlite3.connect(sys.argv[1]) as connection:
     name: "recover_codex_security_scan_results",
     arguments: { scanId: fallbackScanId },
   });
-  assert.equal(unavailableRecovery.result.isError, true);
-  assert.match(
-    unavailableRecovery.result.content[0].text,
+  assertToolError(
+    unavailableRecovery,
     /No saved stopped-scan results were available to recover/,
   );
 
-  await testServer.callSuccessfulTool(11, {
-    name: "open_codex_security_workspace",
-    arguments: { sessionId: workspace.id },
-    _meta: { "openai/threadId": "fixture-thread" },
-  });
+  await openWorkspace(
+    11,
+    { sessionId: workspace.id },
+    { "openai/threadId": "fixture-thread" },
+  );
 
-  const replacementWorkspaceResponse = await testServer.callSuccessfulTool(42, {
-    name: "open_codex_security_workspace",
-    arguments: { targetPath: target, targetTitle: "Old target title" },
-    _meta: { "openai/threadId": "fixture-aux-thread" },
-  });
+  const replacementWorkspaceResponse = await openWorkspace(
+    42,
+    { targetPath: target, targetTitle: "Old target title" },
+    { "openai/threadId": "fixture-aux-thread" },
+  );
   const replacementWorkspace =
     replacementWorkspaceResponse.structuredContent.workspace;
-  const replacementSaved = await testServer.callSuccessfulTool(43, {
-    name: "submit_codex_security_setup",
-    arguments: {
-      sessionId: replacementWorkspace.id,
-      targetPath: replacementTarget,
-      scope: ".",
-      mode: "standard",
-    },
+  const replacementSaved = await submitSetup(43, {
+    sessionId: replacementWorkspace.id,
+    targetPath: replacementTarget,
+    scope: ".",
+    mode: "standard",
   });
   assert.equal(
     replacementSaved.structuredContent.workspace.targetTitle,
     path.basename(replacementTarget),
   );
 
-  const nativeSetupOpen = await testServer.callSuccessfulTool(9226, {
-    name: "open_codex_security_workspace",
-    arguments: {
+  const nativeSetupOpen = await openWorkspace(
+    9226,
+    {
       targetPath: target,
       scope: ".",
       mode: "standard",
     },
-    _meta: { "openai/threadId": "fixture-native-setup-thread" },
-  });
+    { "openai/threadId": "fixture-native-setup-thread" },
+  );
   assert.match(
     nativeSetupOpen.structuredContent.workspace.id,
     /^[0-9a-f-]{36}$/,
   );
   assert.equal(nativeSetupOpen.structuredContent.workspace.results, undefined);
 
-  const invalidScanStarted = await testServer.callSuccessfulTool(9401, {
-    name: "start_codex_security_scan",
-    arguments: { sessionId: workspace.id },
-  });
+  const invalidScanStarted = await startScan(9401, { sessionId: workspace.id });
   const invalidScanId =
     invalidScanStarted.structuredContent.workspace.results.scanId;
   const invalidScanClaimToken = randomUUID();
@@ -3561,15 +3390,8 @@ with sqlite3.connect(sys.argv[1]) as connection:
       scanId: invalidScanId,
     },
   });
-  assert.equal(prematureCompletion.result.isError, true);
-  assert.match(
-    prematureCompletion.result.content[0].text,
-    /scan-manifest\.json/,
-  );
-  const resumableScan = await testServer.callSuccessfulTool(9404, {
-    name: "get_codex_security_scan",
-    arguments: { scanId: invalidScanId },
-  });
+  assertToolError(prematureCompletion, /scan-manifest\.json/);
+  const resumableScan = await loadScan(9404, { scanId: invalidScanId });
   assert.equal(resumableScan.structuredContent.scan.progress.status, "running");
 
   assert.equal(

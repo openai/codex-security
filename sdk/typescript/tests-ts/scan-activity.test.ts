@@ -41,10 +41,40 @@ function toolEvent(
   };
 }
 
-function sessionEvent(
+function textEvent(
+  type: "reasoning" | "agent_message",
+  id: string,
+  text: string,
+  event: "item.completed" | "item.updated" = "item.completed",
+) {
+  return { type: event, item: { id, type, text } };
+}
+
+function sessionActivity(
   payload: Record<string, unknown>,
-): Record<string, unknown> {
-  return { type: "response_item", payload };
+  repository = "/code/juice-shop",
+) {
+  return scanActivityFromSessionEvent(
+    { type: "response_item", payload },
+    repository,
+  );
+}
+
+function sessionCall(
+  name: string,
+  callId: string,
+  args: Record<string, unknown>,
+  repository?: string,
+) {
+  return sessionActivity(
+    {
+      type: "function_call",
+      name,
+      call_id: callId,
+      arguments: JSON.stringify(args),
+    },
+    repository,
+  );
 }
 
 function expectCommandPaths(
@@ -58,16 +88,10 @@ function expectCommandPaths(
     type: "item.started",
     item: { id: "live", type: "command_execution", command: cmd, shell },
   };
-  const saved = sessionEvent({
-    type: "function_call",
-    name: "exec_command",
-    call_id: "saved",
-    arguments: JSON.stringify(args),
-  });
   for (const activity of [
     scanActivityFromEvent(live, repository),
     scanActivityFromEvent(toolEvent("exec", args), repository),
-    scanActivityFromSessionEvent(saved, repository),
+    sessionCall("exec_command", "saved", args, repository),
   ])
     expect(activity?.paths).toEqual([...paths]);
 }
@@ -167,15 +191,7 @@ describe("scan activity", () => {
     };
     for (const activity of [
       scanActivityFromEvent(toolEvent("read_file", args), repository),
-      scanActivityFromSessionEvent(
-        sessionEvent({
-          type: "function_call",
-          call_id: "read",
-          name: "read_file",
-          arguments: JSON.stringify(args),
-        }),
-        repository,
-      ),
+      sessionCall("read_file", "read", args, repository),
     ])
       expect(activity?.paths).toEqual(["logs\\annual.txt", "logs/annual.txt"]);
   });
@@ -237,12 +253,12 @@ describe("scan activity", () => {
     "uses the recorded argv boundaries for %p",
     (command, repository, paths) => {
       expect(
-        scanActivityFromSessionEvent(
-          sessionEvent({
+        sessionActivity(
+          {
             type: "local_shell_call",
             call_id: "argv",
             action: { type: "exec", command },
-          }),
+          },
           repository,
         ),
       ).toMatchObject({ description: command.join(" "), paths: [...paths] });
@@ -372,13 +388,10 @@ describe("scan activity", () => {
         ).toMatchObject(expected);
       }
       expect(
-        scanActivityFromSessionEvent(
-          sessionEvent({
-            type: "function_call",
-            name: "exec_command",
-            call_id: "worker-command-1",
-            arguments: JSON.stringify({ cmd: command }),
-          }),
+        sessionCall(
+          "exec_command",
+          "worker-command-1",
+          { cmd: command },
           "C:\\code\\project",
         ),
       ).toMatchObject(expected);
@@ -470,13 +483,10 @@ describe("scan activity", () => {
             toolEvent("exec", { cmd: command }),
             repository,
           ),
-          scanActivityFromSessionEvent(
-            sessionEvent({
-              type: "function_call",
-              name: "exec_command",
-              call_id: "worker-command-1",
-              arguments: JSON.stringify({ cmd: command }),
-            }),
+          sessionCall(
+            "exec_command",
+            "worker-command-1",
+            { cmd: command },
             repository,
           ),
         ]) {
@@ -517,13 +527,10 @@ describe("scan activity", () => {
         ),
       ).toMatchObject({ paths });
       expect(
-        scanActivityFromSessionEvent(
-          sessionEvent({
-            type: "function_call",
-            name: "exec_command",
-            call_id: "worker-command-1",
-            arguments: JSON.stringify({ cmd: command }),
-          }),
+        sessionCall(
+          "exec_command",
+          "worker-command-1",
+          { cmd: command },
           "C:\\code\\project",
         ),
       ).toMatchObject({ paths });
@@ -615,12 +622,12 @@ describe("scan activity", () => {
       const paths = inside ? ["Src/A.ts"] : [];
       const cmd = `type "${path}"`;
       expect(
-        scanActivityFromSessionEvent(
-          sessionEvent({
+        sessionActivity(
+          {
             type: "local_shell_call",
             call_id: "worker-argv",
             action: { type: "exec", command: ["cat", path] },
-          }),
+          },
           repository,
         ),
       ).toMatchObject({ paths });
@@ -635,13 +642,9 @@ describe("scan activity", () => {
         ["read_file", { path }],
         ["exec_command", { cmd }],
       ] as const) {
-        const event = sessionEvent({
-          type: "function_call",
-          call_id: "worker-call",
-          name,
-          arguments: JSON.stringify(args),
-        });
-        expect(scanActivityFromSessionEvent(event, repository)).toMatchObject({
+        expect(
+          sessionCall(name, "worker-call", args, repository),
+        ).toMatchObject({
           paths,
         });
       }
@@ -665,14 +668,11 @@ describe("scan activity", () => {
     });
     expect(
       scanActivityFromEvent(
-        {
-          type: "item.completed",
-          item: {
-            id: "reasoning-1",
-            type: "reasoning",
-            text: "Checking authentication\n and route boundaries.",
-          },
-        },
+        textEvent(
+          "reasoning",
+          "reasoning-1",
+          "Checking authentication\n and route boundaries.",
+        ),
         "/code/juice-shop",
       ),
     ).toEqual({
@@ -684,14 +684,12 @@ describe("scan activity", () => {
     });
     expect(
       scanActivityFromEvent(
-        {
-          type: "item.updated",
-          item: {
-            id: "reasoning-2",
-            type: "reasoning",
-            text: "Following login input into the database.",
-          },
-        },
+        textEvent(
+          "reasoning",
+          "reasoning-2",
+          "Following login input into the database.",
+          "item.updated",
+        ),
         "/code/juice-shop",
       ),
     ).toEqual({
@@ -707,14 +705,11 @@ describe("scan activity", () => {
     const detail = "Tracing the authentication boundary. ".repeat(40);
     expect(
       scanActivityFromEvent(
-        {
-          type: "item.completed",
-          item: {
-            id: "reasoning-1",
-            type: "reasoning",
-            text: `**Reviewing authentication**\n\n${detail}`,
-          },
-        },
+        textEvent(
+          "reasoning",
+          "reasoning-1",
+          `**Reviewing authentication**\n\n${detail}`,
+        ),
         "/code/juice-shop",
       ),
     ).toMatchObject({
@@ -726,16 +721,12 @@ describe("scan activity", () => {
   test("keeps complete reasoning summary headings separate", () => {
     expect(
       scanActivitiesFromEvent(
-        {
-          type: "item.completed",
-          item: {
-            id: "reasoning-1",
-            type: "reasoning",
-            text:
-              "**Implementing safe fallback file generation**\n\n" +
-              "**Planning batch file size verification and progress output**",
-          },
-        },
+        textEvent(
+          "reasoning",
+          "reasoning-1",
+          "**Implementing safe fallback file generation**\n\n" +
+            "**Planning batch file size verification and progress output**",
+        ),
         "/code/juice-shop",
       ),
     ).toEqual([
@@ -758,14 +749,12 @@ describe("scan activity", () => {
 
     expect(
       scanActivitiesFromEvent(
-        {
-          type: "item.updated",
-          item: {
-            id: "reasoning-2",
-            type: "reasoning",
-            text: "**Reviewing authentication**\n\nPreserving detailed prose.",
-          },
-        },
+        textEvent(
+          "reasoning",
+          "reasoning-2",
+          "**Reviewing authentication**\n\nPreserving detailed prose.",
+          "item.updated",
+        ),
         "/code/juice-shop",
       ),
     ).toEqual([
@@ -791,10 +780,7 @@ describe("scan activity", () => {
 
     for (const activity of [
       scanActivityFromEvent(
-        {
-          type: "item.completed",
-          item: { id: "message-1", type: "agent_message", text },
-        },
+        textEvent("agent_message", "message-1", text),
         "/code/juice-shop",
       ),
       scanActivityFromSessionEvent(
@@ -814,14 +800,7 @@ describe("scan activity", () => {
     const run = "`".repeat(16_000);
     expect(
       scanActivityFromEvent(
-        {
-          type: "item.completed",
-          item: {
-            id: "backtick-run",
-            type: "agent_message",
-            text: `${run}\rAfter the run.`,
-          },
-        },
+        textEvent("agent_message", "backtick-run", `${run}\rAfter the run.`),
         "/synthetic/repository",
       ),
     ).toMatchObject({ description: `${run} After the run.` });
@@ -830,17 +809,13 @@ describe("scan activity", () => {
   test("removes internal progress markers from fenced assistant examples", () => {
     expect(
       scanActivityFromEvent(
-        {
-          type: "item.completed",
-          item: {
-            id: "message-1",
-            type: "agent_message",
-            text:
-              "Example:\n```text\n" +
-              'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}\n' +
-              "keep this line\n```",
-          },
-        },
+        textEvent(
+          "agent_message",
+          "message-1",
+          "Example:\n```text\n" +
+            'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}\n' +
+            "keep this line\n```",
+        ),
         "/code/juice-shop",
       ),
     ).toMatchObject({ description: "Example:\n```text\nkeep this line\n```" });
@@ -849,14 +824,11 @@ describe("scan activity", () => {
   test("shows actual assistant prose and ignores internal progress markers", () => {
     expect(
       scanActivityFromEvent(
-        {
-          type: "item.completed",
-          item: {
-            id: "message-1",
-            type: "agent_message",
-            text: "The login route reaches the database without validation.",
-          },
-        },
+        textEvent(
+          "agent_message",
+          "message-1",
+          "The login route reaches the database without validation.",
+        ),
         "/code/juice-shop",
       ),
     ).toEqual({
@@ -868,14 +840,11 @@ describe("scan activity", () => {
     });
     expect(
       scanActivityFromEvent(
-        {
-          type: "item.completed",
-          item: {
-            id: "marker-1",
-            type: "agent_message",
-            text: 'CODEX_SECURITY_WORKER_STATUS {"phase":"ranking"}',
-          },
-        },
+        textEvent(
+          "agent_message",
+          "marker-1",
+          'CODEX_SECURITY_WORKER_STATUS {"phase":"ranking"}',
+        ),
         "/code/juice-shop",
       ),
     ).toBeNull();
@@ -929,17 +898,9 @@ describe("scan activity", () => {
 
   test("extracts real worker commands from persisted session events", () => {
     expect(
-      scanActivityFromSessionEvent(
-        sessionEvent({
-          type: "function_call",
-          name: "exec_command",
-          call_id: "worker-command-1",
-          arguments: JSON.stringify({
-            cmd: 'rg -n "password" "$CODEX_SECURITY_REPOSITORY/routes/login.ts"',
-          }),
-        }),
-        "/code/juice-shop",
-      ),
+      sessionCall("exec_command", "worker-command-1", {
+        cmd: 'rg -n "password" "$CODEX_SECURITY_REPOSITORY/routes/login.ts"',
+      }),
     ).toEqual({
       id: "worker-command-1",
       kind: "command",
@@ -952,17 +913,9 @@ describe("scan activity", () => {
 
   test("removes shell launchers from persisted worker commands", () => {
     expect(
-      scanActivityFromSessionEvent(
-        sessionEvent({
-          type: "function_call",
-          name: "exec_command",
-          call_id: "worker-command-1",
-          arguments: JSON.stringify({
-            cmd: `/bin/zsh -lc 'rg -n "password" "$CODEX_SECURITY_REPOSITORY/routes/login.ts"'`,
-          }),
-        }),
-        "/code/juice-shop",
-      ),
+      sessionCall("exec_command", "worker-command-1", {
+        cmd: `/bin/zsh -lc 'rg -n "password" "$CODEX_SECURITY_REPOSITORY/routes/login.ts"'`,
+      }),
     ).toMatchObject({
       description:
         'rg -n "password" "$CODEX_SECURITY_REPOSITORY/routes/login.ts"',
@@ -972,15 +925,12 @@ describe("scan activity", () => {
 
   test("shows the exact worker tool without exposing malformed arguments", () => {
     expect(
-      scanActivityFromSessionEvent(
-        sessionEvent({
-          type: "function_call",
-          name: "read_file",
-          call_id: "worker-tool-1",
-          arguments: "invalid secret=do-not-print",
-        }),
-        "/code/juice-shop",
-      ),
+      sessionActivity({
+        type: "function_call",
+        name: "read_file",
+        call_id: "worker-tool-1",
+        arguments: "invalid secret=do-not-print",
+      }),
     ).toEqual({
       id: "worker-tool-1",
       kind: "tool",
@@ -992,16 +942,13 @@ describe("scan activity", () => {
 
   test("extracts the shell command inside a worker exec call", () => {
     expect(
-      scanActivityFromSessionEvent(
-        sessionEvent({
-          type: "custom_tool_call",
-          name: "exec",
-          call_id: "worker-exec-1",
-          input:
-            'await tools.exec_command({cmd: "rg -n \\"token\\" \\"$CODEX_SECURITY_REPOSITORY/routes/login.ts\\""})',
-        }),
-        "/code/juice-shop",
-      ),
+      sessionActivity({
+        type: "custom_tool_call",
+        name: "exec",
+        call_id: "worker-exec-1",
+        input:
+          'await tools.exec_command({cmd: "rg -n \\"token\\" \\"$CODEX_SECURITY_REPOSITORY/routes/login.ts\\""})',
+      }),
     ).toEqual({
       id: "worker-exec-1",
       kind: "command",
@@ -1021,15 +968,12 @@ describe("scan activity", () => {
         workdir: "/code/juice-shop",
       })}); text(r.output)`;
       expect(
-        scanActivityFromSessionEvent(
-          sessionEvent({
-            type: "custom_tool_call",
-            name: "exec",
-            call_id: `worker-exec-${key}`,
-            input,
-          }),
-          "/code/juice-shop",
-        ),
+        sessionActivity({
+          type: "custom_tool_call",
+          name: "exec",
+          call_id: `worker-exec-${key}`,
+          input,
+        }),
       ).toEqual({
         id: `worker-exec-${key}`,
         kind: "command",
@@ -1042,16 +986,13 @@ describe("scan activity", () => {
 
   test("describes worker tool discovery instead of generic exec", () => {
     expect(
-      scanActivityFromSessionEvent(
-        sessionEvent({
-          type: "custom_tool_call",
-          name: "exec",
-          call_id: "worker-discovery-1",
-          input:
-            'const hits = ALL_TOOLS.filter(x => /multi.?agent|subagent|spawn.*agent|delegate/i.test(x.name+" "+x.description)); text(hits);',
-        }),
-        "/code/juice-shop",
-      ),
+      sessionActivity({
+        type: "custom_tool_call",
+        name: "exec",
+        call_id: "worker-discovery-1",
+        input:
+          'const hits = ALL_TOOLS.filter(x => /multi.?agent|subagent|spawn.*agent|delegate/i.test(x.name+" "+x.description)); text(hits);',
+      }),
     ).toMatchObject({
       kind: "tool",
       description: "find tools · multi-agent, subagent, spawn-agent, delegate",
@@ -1066,33 +1007,22 @@ describe("scan activity", () => {
       ["create_goal", "create_goal"],
     ] as const) {
       expect(
-        scanActivityFromSessionEvent(
-          sessionEvent({
-            type: "custom_tool_call",
-            name: "exec",
-            call_id: `worker-${description}`,
-            input: `const result = await tools.${tool}({}); text(result);`,
-          }),
-          "/code/juice-shop",
-        ),
+        sessionActivity({
+          type: "custom_tool_call",
+          name: "exec",
+          call_id: `worker-${description}`,
+          input: `const result = await tools.${tool}({}); text(result);`,
+        }),
       ).toMatchObject({ kind: "tool", description });
     }
   });
 
   test("shows the recipient and purpose of a worker message", () => {
     expect(
-      scanActivityFromSessionEvent(
-        sessionEvent({
-          type: "function_call",
-          name: "send_message",
-          call_id: "worker-message-1",
-          arguments: JSON.stringify({
-            target: "worker-4",
-            message: "Review routes/login.ts for SQL injection.",
-          }),
-        }),
-        "/code/juice-shop",
-      ),
+      sessionCall("send_message", "worker-message-1", {
+        target: "worker-4",
+        message: "Review routes/login.ts for SQL injection.",
+      }),
     ).toEqual({
       id: "worker-message-1",
       kind: "tool",
@@ -1105,20 +1035,17 @@ describe("scan activity", () => {
 
   test("shows actual worker reasoning summaries and assistant transcripts", () => {
     expect(
-      scanActivityFromSessionEvent(
-        sessionEvent({
-          id: "reasoning-1",
-          type: "reasoning",
-          summary: [
-            {
-              type: "summary_text",
-              text: "Following the login input into the SQL query.",
-            },
-          ],
-          encrypted_content: "encrypted-chain-of-thought",
-        }),
-        "/code/juice-shop",
-      ),
+      sessionActivity({
+        id: "reasoning-1",
+        type: "reasoning",
+        summary: [
+          {
+            type: "summary_text",
+            text: "Following the login input into the SQL query.",
+          },
+        ],
+        encrypted_content: "encrypted-chain-of-thought",
+      }),
     ).toEqual({
       id: "reasoning-1",
       kind: "reasoning",
@@ -1127,20 +1054,17 @@ describe("scan activity", () => {
       paths: [],
     });
     expect(
-      scanActivityFromSessionEvent(
-        sessionEvent({
-          id: "assistant-1",
-          type: "message",
-          role: "assistant",
-          content: [
-            {
-              type: "output_text",
-              text: "The request reaches an unsanitized database query.",
-            },
-          ],
-        }),
-        "/code/juice-shop",
-      ),
+      sessionActivity({
+        id: "assistant-1",
+        type: "message",
+        role: "assistant",
+        content: [
+          {
+            type: "output_text",
+            text: "The request reaches an unsanitized database query.",
+          },
+        ],
+      }),
     ).toEqual({
       id: "assistant-1",
       kind: "message",
@@ -1225,30 +1149,24 @@ describe("scan activity", () => {
       'CODEX_SECURITY_WORKER_STATUS {"phase":"file_review","planned":6,"started":3}',
     ]) {
       expect(
-        scanActivityFromSessionEvent(
-          sessionEvent({
-            id: "worker-marker-1",
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text }],
-          }),
-          "/code/juice-shop",
-        ),
+        sessionActivity({
+          id: "worker-marker-1",
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text }],
+        }),
       ).toBeNull();
     }
   });
 
   test("does not invent or expose encrypted worker reasoning", () => {
     expect(
-      scanActivityFromSessionEvent(
-        sessionEvent({
-          id: "encrypted-1",
-          type: "reasoning",
-          encrypted_content: "must-never-be-displayed",
-          summary: [],
-        }),
-        "/code/juice-shop",
-      ),
+      sessionActivity({
+        id: "encrypted-1",
+        type: "reasoning",
+        encrypted_content: "must-never-be-displayed",
+        summary: [],
+      }),
     ).toBeNull();
   });
 });

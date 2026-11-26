@@ -19,6 +19,7 @@ from workbench_test_support import (
     mark_handoff_delivered,
     scan_claim_command,
     scan_command,
+    scan_cost,
     start_delivered_scan,
     start_scan_command,
     write_completed_contract,
@@ -161,14 +162,7 @@ def test_workbench_cancels_running_scan_and_rejects_late_updates(tmp_path: Path)
     assert wrong_thread["returncode"] != 0
     assert "owning Codex thread" in str(wrong_thread["stderr"])
 
-    cost = {
-        "model": "synthetic-model",
-        "inputTokens": 25,
-        "cachedInputTokens": 0,
-        "cacheWriteInputTokens": 0,
-        "outputTokens": 1,
-        "estimatedUsd": 0.001,
-    }
+    cost = scan_cost("synthetic-model", input_tokens=25, output_tokens=1, usd=0.001)
     canceled = scan_command(
         state_dir, "cancel-scan", scan_id, "--thread-id", thread_id, "--cost-json", json.dumps(cost)
     )
@@ -248,9 +242,31 @@ def test_workbench_allows_user_confirmed_recovery_in_another_thread(tmp_path: Pa
     claim_token = f"recovery_{uuid.uuid4()}"
     scan_claim_command(state_dir, "claim-handoff-delivery", scan_id, claim_token)
 
-    delivered = mark_handoff_delivered(
-        state_dir, scan_id, claim_token, "--thread-id", "thread-recovery-confirmed"
-    )
+    thread = "thread-recovery-confirmed"
+
+    def allowance(*extra: str, token: str = claim_token, check: bool = False):
+        return scan_claim_command(
+            state_dir,
+            "update-scan-context",
+            scan_id,
+            token,
+            "--thread-id",
+            thread,
+            "--max-time-minutes",
+            "10",
+            *extra,
+            check=check,
+        )
+
+    assert allowance()["returncode"] != 0
+    delivered = mark_handoff_delivered(state_dir, scan_id, claim_token, "--thread-id", thread)
 
     assert delivered["results"]["handoffStatus"] == "delivered"
     assert delivered["results"]["handoffClaimToken"] == claim_token
+
+    assert allowance(token=f"recovery_{uuid.uuid4()}")["returncode"] != 0
+    assert allowance("--user-context", "replacement")["returncode"] != 0
+    assert "investigationPolicy" not in get_scan(state_dir, scan_id)
+    updated = allowance(check=True)
+    assert updated["investigationPolicy"]
+    assert updated["scan"]["userContext"] == delivered["results"]["userContext"]

@@ -102,6 +102,7 @@ import {
   PLUGIN_ROOT,
 } from "./plugin-root.js";
 import {
+  BUDGET_TEST_CONFIG,
   EXTERNAL_PROVIDER_CASES,
   measuredScanUsage,
   mockScanRegistration,
@@ -111,10 +112,12 @@ import {
   TEST_SNAPSHOT_DIGEST,
 } from "./support/api-client.js";
 import {
+  codexWithStream,
   codexFactory,
   collectObserverErrors,
   type ScanObserverName,
   completedEvents,
+  completedTurn,
   completedCodex,
   failedEvents,
   preparedRuntime,
@@ -123,7 +126,20 @@ import {
 import { createApiTestFixtures } from "./support/temporary-directories.js";
 import { runTestInSubprocess } from "./support/test-subprocess.js";
 import {
+  basicUsage,
+  appendRecord,
+  appendRecords,
+  customToolOutput,
+  nativeMessage,
+  responseMessage,
+  legacyMessage,
+  completedMessage,
+  scanProgress,
+  legacyUsageRecord,
   progressMarker,
+  commandTail,
+  persistedCommandOutput,
+  commandOutput,
   nativeCommand,
   completedCommand,
   writeSession as writeUsageSession,
@@ -139,22 +155,72 @@ import { mockFs, restoreFs } from "./support/module-mocks.js";
 
 const pythonExecutable = useTestPython();
 
-async function registerEightFileScan(
-  _options: unknown,
-  args: readonly string[],
-  input?: string,
-): Promise<JsonObject> {
-  return args[0] === "register-cli-scan"
-    ? { ...mockScanRegistration(args, input), scopeFileCount: 8 }
-    : mockWorkbench(args, input);
+function workbenchWithFileCount(
+  scopeFileCount: number | null,
+): typeof runWorkbench {
+  return async (_options, args, input) =>
+    args[0] === "register-cli-scan"
+      ? { ...mockScanRegistration(args, input), scopeFileCount }
+      : mockWorkbench(args, input);
 }
 
-// Exact ASCII fixture for the pinned native 64 KiB persistence representation.
-const commandHead = "h".repeat(32_743);
-const commandTail = "t".repeat(32_743);
-const persistedCommandOutput = `${commandHead}\n... command output truncated for persistence ...\n${commandTail}`;
-const commandOutput = (middle: string) =>
-  `${commandHead}\n${middle}\n${commandTail}`;
+function eightFileClient(
+  codexHome: string,
+  scanDir: string,
+  runStreamed: () => Promise<{ events: AsyncGenerator<ThreadEvent> }>,
+) {
+  return TestClient.withDependencies({
+    ...scanRuntimeDependencies(codexHome, scanDir),
+    runWorkbench: workbenchWithFileCount(8),
+    createCodex: codexFactory(runStreamed),
+  });
+}
+
+function holdSessionListing(
+  codexHome: string,
+  allowed: Promise<void>,
+  held = () => true,
+) {
+  const originalReaddir = fsPromises.readdir;
+  return spyOn(fsPromises, "readdir").mockImplementation((async (
+    ...args: Parameters<typeof originalReaddir>
+  ) => {
+    if (held() && String(args[0]) === join(codexHome, "sessions"))
+      await allowed;
+    return originalReaddir(...args);
+  }) as typeof originalReaddir);
+}
+
+function holdSessionClose(
+  session: { path: string; pauseClose: boolean },
+  entered: PromiseWithResolvers<void>,
+  released: PromiseWithResolvers<void>,
+) {
+  const originalOpen = fsPromises.open;
+  return spyOn(fsPromises, "open").mockImplementation((async (
+    ...args: Parameters<typeof originalOpen>
+  ) => {
+    const handle = await originalOpen(...args);
+    if (String(args[0]) !== session.path || !session.pauseClose) return handle;
+    // The read itself remains real. Delay only close after the snapshot EOF,
+    // so a later native completion can be durable before SDK delivery while
+    // still absent from this poll's already-read snapshot.
+    const close = handle.close.bind(handle);
+    handle.close = async () => {
+      if (session.pauseClose) {
+        session.pauseClose = false;
+        entered.resolve();
+        await released.promise;
+      }
+      await close();
+    };
+    return handle;
+  }) as typeof originalOpen);
+}
+
+function writeWorkerSession(codexHome: string, id = "worker-thread") {
+  return writeUsageSession(codexHome, id, {}, { parent: "thread-1" });
+}
 
 const EXAMPLE = join(PLUGIN_ROOT, "examples", "legacy-completed-scan");
 const { cleanup, temporaryDirectory } = createApiTestFixtures();
@@ -247,18 +313,7 @@ function nodeCodex(script: string): {
 }
 
 async function appendUsage(path: string, inputTokens: number): Promise<void> {
-  await appendFile(
-    path,
-    `${JSON.stringify({
-      type: "event_msg",
-      payload: {
-        type: "token_count",
-        info: {
-          total_token_usage: { input_tokens: inputTokens, output_tokens: 0 },
-        },
-      },
-    })}\n`,
-  );
+  await appendRecord(path, legacyUsageRecord(basicUsage(inputTokens, 0)));
 }
 
 function runtimePreparer(
@@ -314,7 +369,7 @@ describe("CodexSecurity orchestration", () => {
         ? environment.CODEX_STATE_DB
         : join(expectedHome, "state_5.sqlite");
       let measured: JsonObject | undefined;
-      const client = new TestClient(
+      await using client = new TestClient(
         {
           pluginPath: PLUGIN_ROOT,
           codexOverrides: { model: "synthetic-unpriced-model" },
@@ -381,28 +436,22 @@ describe("CodexSecurity orchestration", () => {
           },
         },
       );
-      try {
-        await expect(client.run(repository)).rejects.toThrow(
-          "workbench usage captured",
-        );
-        expect(measured).toMatchObject({
-          coverage: "partial",
-          warnings: ["turn_in_progress"],
-          inputTokens: 100,
-          outputTokens: 10,
-          totalTokens: 110,
-        });
-      } finally {
-        await client.close();
-      }
+      await expect(client.run(repository)).rejects.toThrow(
+        "workbench usage captured",
+      );
+      expect(measured).toMatchObject({
+        coverage: "partial",
+        warnings: ["turn_in_progress"],
+        inputTokens: 100,
+        outputTokens: 10,
+        totalTokens: 110,
+      });
     },
   );
 
   test("isolates per-run safety identifiers across clients and clears them on reuse", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
+    const { root, repository } = await repositoryDirectories();
     const codexHome = join(root, "home");
-    await mkdir(repository);
     await mkdir(codexHome);
     const runtimeEnvironment = { codex_safety_identifier: "ambient-user" };
     const received: Array<CodexOptions> = [];
@@ -594,11 +643,7 @@ describe("CodexSecurity orchestration", () => {
           prepareRuntime: async () => preparedRuntime(codexHome),
           resolvePluginPython: async () => "/managed/python",
           repositoryRevision: async () => null,
-          runWorkbench: async (
-            _options: unknown,
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> => {
+          runWorkbench: async (_options, args, input): Promise<JsonObject> => {
             if (args[0] === "register-cli-scan") {
               recipe = JSON.parse(input!).recipe;
             }
@@ -737,8 +782,8 @@ describe("CodexSecurity orchestration", () => {
         source: "OPENAI_API_KEY",
         verified: false,
       },
-      model: "gpt-5.6-sol",
-      reasoningEffort: "xhigh",
+      model: "gpt-6.1-sol",
+      reasoningEffort: "high",
     });
     await expect(
       client.preflight(repository, { outputDir: join(repository, "scan") }),
@@ -844,7 +889,7 @@ describe("CodexSecurity orchestration", () => {
 
     await expect(
       client.preflight(repository, { maxCostUsd: 5 }),
-    ).resolves.toMatchObject({ model: "gpt-5.6-sol", maxCostUsd: 5 });
+    ).resolves.toMatchObject({ model: "gpt-6.1-sol", maxCostUsd: 5 });
     for (const model of [
       "gpt-6-astra",
       "gpt-6-cyber",
@@ -941,10 +986,8 @@ describe("CodexSecurity orchestration", () => {
   });
 
   test("validates an explicit severity rubric during local preflight", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
+    const { root, repository } = await repositoryDirectories();
     const rubricPath = join(root, "rubric.md");
-    await mkdir(repository);
     const { client, prepareRuntime } = localClient(
       {},
       { CODEX_SECURITY_STATE_DIR: join(root, "state") },
@@ -964,13 +1007,11 @@ describe("CodexSecurity orchestration", () => {
   });
 
   test("validates knowledge-base documents before initializing the runtime", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
+    const { root, repository } = await repositoryDirectories();
     const knowledgeBase = join(root, "context.json");
     const invalidDocument = join(root, "broken.pdf");
     const unsupportedDocument = join(root, "unsupported.exe");
     const emptyDirectory = join(root, "empty");
-    await mkdir(repository);
     await mkdir(emptyDirectory);
     await writeFile(knowledgeBase, '{"scope":"Public API"}');
     await writeFile(invalidDocument, "not a PDF");
@@ -1395,7 +1436,7 @@ describe("CodexSecurity orchestration", () => {
       expect(createCodex.mock.lastCall?.[0]?.env).toMatchObject(credentials);
       expect(createCodex.mock.lastCall?.[0]?.config).toMatchObject({
         model_reasoning_summary: "none",
-        model_reasoning_effort: "xhigh",
+        model_reasoning_effort: "high",
       });
       const configuration = JSON.parse(
         await readFile(join(PLUGIN_ROOT, ".mcp.json"), "utf8"),
@@ -1455,11 +1496,7 @@ describe("CodexSecurity orchestration", () => {
         environment,
         ...scanRuntimeDependencies(codexHome, scanDir),
         prepareRuntime: unauthenticatedRuntime(codexHome, () => environment),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> => {
+        runWorkbench: async (_options, args, input): Promise<JsonObject> => {
           if (args[0] === "register-cli-scan") {
             savedRecipe = JSON.parse(input!).recipe;
           } else if (args[0] === "complete-scan") {
@@ -1503,7 +1540,7 @@ describe("CodexSecurity orchestration", () => {
     });
     expect(createCodex.mock.lastCall?.[0]?.config).toMatchObject({
       model_reasoning_summary: "none",
-      model_reasoning_effort: "xhigh",
+      model_reasoning_effort: "high",
     });
     expect(createCodex.mock.lastCall?.[0]?.env).not.toHaveProperty(
       "OPENAI_API_KEY",
@@ -1666,7 +1703,7 @@ describe("CodexSecurity orchestration", () => {
     };
     const observed: CodexOptions[] = [];
     const onAuthentication = mock<(selected: ScanAuthentication) => void>();
-    const client = new TestClient(
+    await using client = new TestClient(
       {
         pluginPath: PLUGIN_ROOT,
         codexOverrides: {
@@ -1685,58 +1722,52 @@ describe("CodexSecurity orchestration", () => {
         },
       },
     );
-    try {
-      await expect(
-        client.run(repository, { onAuthentication }),
-      ).rejects.toThrow("Bedrock environment captured");
-      expect(onAuthentication.mock.lastCall?.[0]).toMatchObject({
-        method: "aws_credentials",
-        source: "AWS_BEARER_TOKEN_BEDROCK",
-      });
-      delete environment["AWS_BEARER_TOKEN_BEDROCK"];
-      environment["AWS_ACCESS_KEY_ID"] = "synthetic-refreshed-access-key";
-      environment["AWS_SECRET_ACCESS_KEY"] = "synthetic-refreshed-secret-key";
-      environment["AWS_REGION"] = "us-west-2";
-      await expect(
-        client.run(repository, { onAuthentication }),
-      ).rejects.toThrow("Bedrock environment captured");
-      expect(onAuthentication.mock.lastCall?.[0]).toMatchObject({
-        method: "aws_credentials",
-        source: "AWS_ACCESS_KEY_ID",
-      });
-      expect(observed[1]?.env).toMatchObject({
-        AWS_ACCESS_KEY_ID: "synthetic-refreshed-access-key",
-        AWS_SECRET_ACCESS_KEY: "synthetic-refreshed-secret-key",
-        AWS_REGION: "us-west-2",
-        GIT_SSH_COMMAND: "synthetic-ssh --first",
-      });
-      expect(observed[1]?.env).not.toHaveProperty("AWS_BEARER_TOKEN_BEDROCK");
-      expect(observed[1]?.env).not.toHaveProperty("OPENAI_API_KEY");
-      environment["GIT_SSH_COMMAND"] = "synthetic-ssh --caller";
-      await expect(client.run(repository)).rejects.toThrow(
-        "Bedrock environment captured",
-      );
-      expect(observed[2]?.env?.["GIT_SSH_COMMAND"]).toBe(
-        "synthetic-ssh --caller",
-      );
-      expect(observed[2]?.env?.["CODEX_HOME"]).toBe(
-        observed[0]?.env?.["CODEX_HOME"],
-      );
-      expect(observed[0]?.env).toMatchObject({
-        AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer",
-        AWS_REGION: "us-east-2",
-        GIT_SSH_COMMAND: "synthetic-ssh --first",
-      });
-    } finally {
-      await client.close();
-    }
+    await expect(client.run(repository, { onAuthentication })).rejects.toThrow(
+      "Bedrock environment captured",
+    );
+    expect(onAuthentication.mock.lastCall?.[0]).toMatchObject({
+      method: "aws_credentials",
+      source: "AWS_BEARER_TOKEN_BEDROCK",
+    });
+    delete environment["AWS_BEARER_TOKEN_BEDROCK"];
+    environment["AWS_ACCESS_KEY_ID"] = "synthetic-refreshed-access-key";
+    environment["AWS_SECRET_ACCESS_KEY"] = "synthetic-refreshed-secret-key";
+    environment["AWS_REGION"] = "us-west-2";
+    await expect(client.run(repository, { onAuthentication })).rejects.toThrow(
+      "Bedrock environment captured",
+    );
+    expect(onAuthentication.mock.lastCall?.[0]).toMatchObject({
+      method: "aws_credentials",
+      source: "AWS_ACCESS_KEY_ID",
+    });
+    expect(observed[1]?.env).toMatchObject({
+      AWS_ACCESS_KEY_ID: "synthetic-refreshed-access-key",
+      AWS_SECRET_ACCESS_KEY: "synthetic-refreshed-secret-key",
+      AWS_REGION: "us-west-2",
+      GIT_SSH_COMMAND: "synthetic-ssh --first",
+    });
+    expect(observed[1]?.env).not.toHaveProperty("AWS_BEARER_TOKEN_BEDROCK");
+    expect(observed[1]?.env).not.toHaveProperty("OPENAI_API_KEY");
+    environment["GIT_SSH_COMMAND"] = "synthetic-ssh --caller";
+    await expect(client.run(repository)).rejects.toThrow(
+      "Bedrock environment captured",
+    );
+    expect(observed[2]?.env?.["GIT_SSH_COMMAND"]).toBe(
+      "synthetic-ssh --caller",
+    );
+    expect(observed[2]?.env?.["CODEX_HOME"]).toBe(
+      observed[0]?.env?.["CODEX_HOME"],
+    );
+    expect(observed[0]?.env).toMatchObject({
+      AWS_BEARER_TOKEN_BEDROCK: "synthetic-bedrock-bearer",
+      AWS_REGION: "us-east-2",
+      GIT_SSH_COMMAND: "synthetic-ssh --first",
+    });
   });
 
   test("isolates resolved Deep settings across concurrent Bedrock scans", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
+    const { root, repository } = await repositoryDirectories();
     const stateDirectory = join(root, "state");
-    await mkdir(repository);
     const scenarios: [JsonObject, string, string | undefined][] = [
       [{}, "none", undefined],
       [
@@ -1844,7 +1875,7 @@ describe("CodexSecurity orchestration", () => {
           profiles: {
             "cloud.production": {
               model: "synthetic-profile-model",
-              model_reasoning_effort: "high",
+              model_reasoning_effort: "xhigh",
               model_reasoning_summary: "concise",
               service_tier: "fast",
               model_instructions_file: "profile-instructions.md",
@@ -1883,7 +1914,7 @@ describe("CodexSecurity orchestration", () => {
         const expectedModel = {
           model:
             index === 3 ? "synthetic-profile-model" : "openai.gpt-5.6-luna",
-          model_reasoning_effort: index === 3 ? "high" : "xhigh",
+          model_reasoning_effort: index === 3 ? "xhigh" : "high",
         };
         const scanDir = join(root, `scan-${index}`);
         await mkdir(scanDir, { mode: 0o700 });
@@ -2308,7 +2339,7 @@ describe("CodexSecurity orchestration", () => {
     async (store) => {
       const { repository, codexHome, scanDir } = await scanDirectories();
       const advisories: string[] = [];
-      const client = new TestClient(
+      await using client = new TestClient(
         { codexOverrides: { cli_auth_credentials_store: store } },
         {
           ...scanRuntimeDependencies(codexHome, scanDir),
@@ -2324,20 +2355,16 @@ describe("CodexSecurity orchestration", () => {
           }),
         },
       );
-      try {
-        for (const auth_mode of ["apikey", "chatgpt", "unknown"]) {
-          await writeFile(
-            join(codexHome, "auth.json"),
-            JSON.stringify({ auth_mode }),
-          );
-          await expect(client.run(repository)).rejects.toThrow(
-            "Standard prompt captured",
-          );
-        }
-        expect(new Set(advisories).size).toBe(1);
-      } finally {
-        await client.close();
+      for (const auth_mode of ["apikey", "chatgpt", "unknown"]) {
+        await writeFile(
+          join(codexHome, "auth.json"),
+          JSON.stringify({ auth_mode }),
+        );
+        await expect(client.run(repository)).rejects.toThrow(
+          "Standard prompt captured",
+        );
       }
+      expect(new Set(advisories).size).toBe(1);
     },
   );
 
@@ -2431,10 +2458,8 @@ describe("CodexSecurity orchestration", () => {
   });
 
   test("previews an existing output archive without changing files", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
+    const { root, repository } = await repositoryDirectories();
     const output = join(root, "scan");
-    await mkdir(repository);
     await mkdir(output, { mode: 0o700 });
     await writeFile(join(output, "previous.txt"), "previous scan\n");
     const { client, prepareRuntime } = localClient();
@@ -2472,7 +2497,7 @@ describe("CodexSecurity orchestration", () => {
       const { root, repository, codexHome, scanDir } = await scanDirectories();
       await writeFile(join(scanDir, "previous.txt"), "previous scan\n");
       const cancellation = new AbortController();
-      const client = new TestClient(
+      await using client = new TestClient(
         { pluginPath: PLUGIN_ROOT },
         {
           prepareRuntime: async () => preparedRuntime(codexHome),
@@ -2489,26 +2514,22 @@ describe("CodexSecurity orchestration", () => {
           createCodex: codexFactory(scanDidNotStart),
         },
       );
-      try {
-        await expect(
-          client.run(repository, {
-            outputDir: scanDir,
-            archiveExisting: true,
-            signal: cancellation.signal,
-            mock: failurePoint === "mock",
-          }),
-        ).rejects.toThrow();
-        expect(await readFile(join(scanDir, "previous.txt"), "utf8")).toBe(
-          "previous scan\n",
-        );
-        expect(
-          (await readdir(root)).filter((name) =>
-            name.startsWith("scan.previous-"),
-          ),
-        ).toEqual([]);
-      } finally {
-        await client.close();
-      }
+      await expect(
+        client.run(repository, {
+          outputDir: scanDir,
+          archiveExisting: true,
+          signal: cancellation.signal,
+          mock: failurePoint === "mock",
+        }),
+      ).rejects.toThrow();
+      expect(await readFile(join(scanDir, "previous.txt"), "utf8")).toBe(
+        "previous scan\n",
+      );
+      expect(
+        (await readdir(root)).filter((name) =>
+          name.startsWith("scan.previous-"),
+        ),
+      ).toEqual([]);
     },
   );
 
@@ -2529,11 +2550,7 @@ describe("CodexSecurity orchestration", () => {
           prepareRuntime: async () => preparedRuntime(codexHome),
           resolvePluginPython: async () => "/managed/python",
           repositoryRevision: async () => null,
-          runWorkbench: async (
-            _options: Parameters<typeof runWorkbench>[0],
-            args: readonly string[],
-            input?: string,
-          ): Promise<JsonObject> => {
+          runWorkbench: async (_options, args, input): Promise<JsonObject> => {
             if (args[0] === "register-cli-scan") registration = args;
             const result = await runWorkbench(
               {
@@ -2942,21 +2959,16 @@ if __name__ == "__main__":
       prepareRuntime: async () => preparedRuntime(codexHome),
       resolvePluginPython: async () => "/managed/python",
       repositoryRevision: async () => "deadbeef",
-      createCodex: (options: CodexOptions) => ({
-        startThread: () => ({
-          id: null,
-          async runStreamed() {
-            // Cleanup removes the target paths file with a non-recursive rm, so
-            // replacing that file with a directory makes cleanup reject on every
-            // platform.
-            failedCleanupPath =
-              options.env?.["CODEX_SECURITY_TARGET_PATHS_FILE"];
-            await rm(failedCleanupPath!, { force: true });
-            await mkdir(failedCleanupPath!);
-            throw new Error("the model refused the scan");
-          },
+      createCodex: (options: CodexOptions) =>
+        codexWithStream(async () => {
+          // Cleanup removes the target paths file with a non-recursive rm, so
+          // replacing that file with a directory makes cleanup reject on every
+          // platform.
+          failedCleanupPath = options.env?.["CODEX_SECURITY_TARGET_PATHS_FILE"];
+          await rm(failedCleanupPath!, { force: true });
+          await mkdir(failedCleanupPath!);
+          throw new Error("the model refused the scan");
         }),
-      }),
     });
 
     await expect(
@@ -3287,9 +3299,9 @@ if __name__ == "__main__":
           },
         }),
         runWorkbench: async (
-          workbenchOptions: Parameters<typeof runWorkbench>[0],
-          args: readonly string[],
-          input?: string,
+          workbenchOptions,
+          args,
+          input,
         ): Promise<JsonObject> => {
           workbenchGitExecutables.push(
             workbenchOptions.environment["CODEX_SECURITY_GIT"] ?? null,
@@ -3395,7 +3407,12 @@ if __name__ == "__main__":
     expect(prompt).toContain("record_codex_security_scan_draft");
     expect(prompt).toContain("scan-results.md");
     expect(prompt).not.toContain("bind-repo-scopes");
-    expect(prompt).not.toContain("CODEX_SECURITY_TARGET_REVISION");
+    expect(codexEnvironment?.["CODEX_SECURITY_TARGET_REVISION"]).toBe(
+      "deadbeef",
+    );
+    expect(prompt).toContain(
+      `Use exactly ${shellEnvironmentReference("CODEX_SECURITY_TARGET_REVISION")} as scan.target.revision.`,
+    );
     expect(prompt).toContain("CODEX_SECURITY_SCAN_PROGRESS");
     expect(prompt).toContain(
       `Repository root: ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")}`,
@@ -3480,7 +3497,7 @@ if __name__ == "__main__":
       let revision = "deadbeef";
       let completed = false;
       const details: unknown[] = [];
-      const client = TestClient.withDependencies({
+      await using client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         repositoryRevision: async () => revision,
         runWorkbench: async (_options, args, input) => {
@@ -3488,35 +3505,26 @@ if __name__ == "__main__":
           if (args[0] === "register-cli-scan") revision = "changed";
           return result;
         },
-        createCodex: () => ({
-          startThread: () => ({
-            id: null,
-            async runStreamed() {
-              expect(details).toEqual([undefined]);
-              expect(completed).toBe(false);
-              await copyCompletedScan(root);
-              return { events: completedEvents() };
-            },
-          }),
+        createCodex: codexFactory(async () => {
+          expect(details).toEqual([undefined]);
+          expect(completed).toBe(false);
+          await copyCompletedScan(root);
+          return { events: completedEvents() };
         }),
       });
-      try {
-        await client.run(repository, {
-          onWarning: (message, detail) => {
-            if (!message.startsWith("Repository HEAD changed")) return;
-            expect(completed).toBe(false);
-            details.push(detail);
-            if (observerFails) throw new Error("Synthetic observer failure");
-          },
-          onObserverError: () => {
-            throw new Error("Synthetic observer error handler failure");
-          },
-        });
-        completed = true;
-        expect(details).toEqual([undefined]);
-      } finally {
-        await client.close();
-      }
+      await client.run(repository, {
+        onWarning: (message, detail) => {
+          if (!message.startsWith("Repository HEAD changed")) return;
+          expect(completed).toBe(false);
+          details.push(detail);
+          if (observerFails) throw new Error("Synthetic observer failure");
+        },
+        onObserverError: () => {
+          throw new Error("Synthetic observer error handler failure");
+        },
+      });
+      completed = true;
+      expect(details).toEqual([undefined]);
     },
   );
 
@@ -3631,7 +3639,7 @@ if __name__ == "__main__":
       const readRevision = mock(async () =>
         kind === "unversioned" ? null : "deadbeef",
       );
-      const client = TestClient.withDependencies({
+      await using client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         repositoryRevision: readRevision,
         runWorkbench: async (_options, args, input) => {
@@ -3649,51 +3657,58 @@ if __name__ == "__main__":
           throw new Error("Synthetic scan boundary");
         },
       });
-      try {
-        await expect(
-          client.run(repository, {
-            onWarning: observed ? mock() : undefined,
-            target:
-              kind === "refs"
-                ? DiffTarget.refs({ base: "HEAD", head: "HEAD" })
-                : kind === "working_tree"
-                  ? DiffTarget.workingTree({ base: "HEAD" })
-                  : "repository",
-          }),
-        ).rejects.toThrow("Synthetic scan boundary");
-        expect(readRevision).toHaveBeenCalledTimes(expectedReads);
-      } finally {
-        await client.close();
-      }
+      await expect(
+        client.run(repository, {
+          onWarning: observed ? mock() : undefined,
+          target:
+            kind === "refs"
+              ? DiffTarget.refs({ base: "HEAD", head: "HEAD" })
+              : kind === "working_tree"
+                ? DiffTarget.workingTree({ base: "HEAD" })
+                : "repository",
+        }),
+      ).rejects.toThrow("Synthetic scan boundary");
+      expect(readRevision).toHaveBeenCalledTimes(expectedReads);
     },
   );
 
-  test("passes the workbench snapshot contract to dirty Git scans", async () => {
+  test.each([
+    ["git_revision", "cafebabe", undefined],
+    ["git_worktree", "cafebabe", TEST_SNAPSHOT_DIGEST],
+    ["directory_snapshot", "unversioned", TEST_SNAPSHOT_DIGEST],
+  ] as const)("binds %s metadata", async (kind, revision, digest) => {
     const { repository, codexHome, scanDir } = await scanDirectories();
+    let prompt = "";
     const createCodex = mock((_options: CodexOptions) => {
-      return {
-        startThread: () => ({
-          id: null,
-          runStreamed: async () => fail("target contract captured"),
-        }),
-      };
+      return codexWithStream(async (input: string) => {
+        prompt = input;
+        return fail("target contract captured");
+      });
     });
 
-    const client = TestClient.withDependencies({
+    await using client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
-      runWorkbench: async (
-        _options: unknown,
-        args: readonly string[],
-        input?: string,
-      ): Promise<JsonObject> => {
+      prepareRuntime: async () => ({
+        ...preparedRuntime(codexHome),
+        environment: {
+          CODEX_SECURITY_TARGET_REVISION: "stale-revision",
+          CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST: "stale-digest",
+          ...(process.platform === "win32"
+            ? { Codex_Security_Target_Snapshot_Digest: "stale-digest" }
+            : {}),
+        },
+      }),
+      runWorkbench: async (_options, args, input): Promise<JsonObject> => {
         if (args[0] === "register-cli-scan") {
           return {
             ...mockScanRegistration(args, input),
-            targetRevision: "cafebabe",
+            targetRevision: revision,
             contract: {
               target: {
-                allowedKinds: ["git_worktree"],
-                requiredSnapshotDigest: TEST_SNAPSHOT_DIGEST,
+                allowedKinds: [kind],
+                ...(digest === undefined
+                  ? {}
+                  : { requiredSnapshotDigest: digest }),
               },
             },
           };
@@ -3706,21 +3721,31 @@ if __name__ == "__main__":
     await expect(client.run(repository)).rejects.toThrow(
       "target contract captured",
     );
-    expect(createCodex.mock.lastCall?.[0]?.env).toMatchObject({
-      CODEX_SECURITY_TARGET_KIND: "git_worktree",
-      CODEX_SECURITY_TARGET_REVISION: "cafebabe",
-      CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST: TEST_SNAPSHOT_DIGEST,
-    });
-    await client.close();
+    const env = createCodex.mock.lastCall?.[0]?.env;
+    expect(env?.["CODEX_SECURITY_TARGET_KIND"]).toBe(kind);
+    expect(env?.["CODEX_SECURITY_TARGET_REVISION"]).toBe(
+      revision === "unversioned" ? undefined : revision,
+    );
+    expect(env?.["CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST"]).toBe(digest);
+    expect(env).not.toHaveProperty("Codex_Security_Target_Snapshot_Digest");
+    expect(
+      prompt.includes(
+        shellEnvironmentReference("CODEX_SECURITY_TARGET_REVISION"),
+      ),
+    ).toBe(revision !== "unversioned");
+    expect(
+      prompt.includes(
+        shellEnvironmentReference("CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST"),
+      ),
+    ).toBe(digest !== undefined);
+    expect(prompt).not.toContain(TEST_SNAPSHOT_DIGEST);
   });
 
   test("resolves deep settings before runtime preparation and records the snapshot", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
+    const { root, repository } = await repositoryDirectories();
     const ambientHome = join(root, "ambient-home");
     const codexHome = join(root, "runtime-home");
     const scanDir = join(root, "scan");
-    await mkdir(repository);
     await mkdir(join(ambientHome, "codex-security"), { recursive: true });
     await mkdir(codexHome);
     await mkdir(scanDir, { mode: 0o700 });
@@ -3749,11 +3774,7 @@ if __name__ == "__main__":
         );
         return preparedRuntime(codexHome);
       },
-      runWorkbench: async (
-        _options: unknown,
-        args: readonly string[],
-        input?: string,
-      ): Promise<JsonObject> => {
+      runWorkbench: async (_options, args, input): Promise<JsonObject> => {
         if (args[0] !== "register-cli-scan") {
           return {
             scanId: "scan_example_001",
@@ -3841,11 +3862,7 @@ if __name__ == "__main__":
             async run(_request, { onEvent }) {
               onEvent?.({
                 type: "progress",
-                progress: {
-                  phase: "validation",
-                  filesCompleted: 8,
-                  filesTotal: 8,
-                },
+                progress: scanProgress("validation", 8, 8),
               });
               savedProgress.resolve({
                 scan: {
@@ -3897,7 +3914,7 @@ if __name__ == "__main__":
         planned: 2,
         started: 2,
       } as const;
-      const client = TestClient.withDependencies({
+      await using client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (options, args, input) => {
           if (args[0] === "register-cli-scan") {
@@ -3927,35 +3944,27 @@ if __name__ == "__main__":
             events: completedEvents(
               "thread-1",
               (async function* (): AsyncGenerator<ThreadEvent> {
-                yield {
-                  type: "item.completed",
-                  item: {
-                    id: "follow-up-dispatch",
-                    type: "agent_message",
-                    text: `CODEX_SECURITY_WORKER_STATUS ${JSON.stringify(status)}`,
-                  },
-                };
+                yield completedMessage(
+                  "follow-up-dispatch",
+                  `CODEX_SECURITY_WORKER_STATUS ${JSON.stringify(status)}`,
+                );
               })(),
             ),
           };
         }, "thread-1"),
       });
-      try {
-        const result = client.run(repository, {
-          postScanPrompt: "Review the synthetic fix.",
-          onProgress() {},
-          onWorkerStatus: (update) => statuses.push(update),
-          onWarning: (warning) => warnings.push(warning),
-        });
-        if (primaryFails)
-          await expect(result).rejects.toThrow("Could not draft fixes.");
-        else await result;
-        expect(turns).toBe(2);
-        expect(warnings).toEqual([]);
-        expect(statuses).toEqual(primaryFails ? [] : [status]);
-      } finally {
-        await client.close();
-      }
+      const result = client.run(repository, {
+        postScanPrompt: "Review the synthetic fix.",
+        onProgress() {},
+        onWorkerStatus: (update) => statuses.push(update),
+        onWarning: (warning) => warnings.push(warning),
+      });
+      if (primaryFails)
+        await expect(result).rejects.toThrow("Could not draft fixes.");
+      else await result;
+      expect(turns).toBe(2);
+      expect(warnings).toEqual([]);
+      expect(statuses).toEqual(primaryFails ? [] : [status]);
     },
   );
 
@@ -3974,13 +3983,9 @@ if __name__ == "__main__":
       const observerErrors: string[] = [];
       const workerStatuses: unknown[] = [];
       let failNextProgressRead = scenario === "unavailable";
-      const client = TestClient.withDependencies({
+      await using client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> => {
+        runWorkbench: async (_options, args, input): Promise<JsonObject> => {
           if (args[0] === "register-cli-scan") {
             return { ...mockScanRegistration(args, input), scopeFileCount: 8 };
           }
@@ -4007,77 +4012,61 @@ if __name__ == "__main__":
         createCodex: codexFactory(async () => ({
           events: (async function* (): AsyncGenerator<ThreadEvent> {
             if (scenario === "late marker") {
-              yield {
-                type: "item.completed",
-                item: {
-                  id: "late-discovery-update",
-                  type: "agent_message",
-                  text: 'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
-                },
-              };
+              yield completedMessage(
+                "late-discovery-update",
+                'CODEX_SECURITY_SCAN_PROGRESS {"phase":"discovery","filesCompleted":3,"filesTotal":8}',
+              );
             }
             if (scenario === "late worker") {
-              yield {
-                type: "item.completed",
-                item: {
-                  id: "late-worker-dispatch",
-                  type: "agent_message",
-                  text: 'CODEX_SECURITY_WORKER_STATUS {"kind":"dispatch","phase":"file_review","planned":2,"started":2}',
-                },
-              };
+              yield completedMessage(
+                "late-worker-dispatch",
+                'CODEX_SECURITY_WORKER_STATUS {"kind":"dispatch","phase":"file_review","planned":2,"started":2}',
+              );
             }
             throw new Error("original scan failure");
           })(),
         })),
       });
-      try {
-        await expect(
-          client.run(repository, {
-            onProgress: (progress) => {
-              updates.push(progress);
-              if (progress.reviewItems !== undefined)
-                throw new Error("presenter failed");
-            },
-            onWarning: (warning) => warnings.push(warning),
-            onWorkerStatus: (status) => workerStatuses.push(status),
-            onObserverError: (observer) => observerErrors.push(observer),
-          }),
-        ).rejects.toThrow("original scan failure");
-        expect(updates[0]).toEqual({
-          phase: "preflight",
+      await expect(
+        client.run(repository, {
+          onProgress: (progress) => {
+            updates.push(progress);
+            if (progress.reviewItems !== undefined)
+              throw new Error("presenter failed");
+          },
+          onWarning: (warning) => warnings.push(warning),
+          onWorkerStatus: (status) => workerStatuses.push(status),
+          onObserverError: (observer) => observerErrors.push(observer),
+        }),
+      ).rejects.toThrow("original scan failure");
+      expect(updates[0]).toEqual(scanProgress("preflight", 0, 8));
+      expect(workerStatuses).toEqual([]);
+      if (["marker-free", "late marker", "late worker"].includes(scenario)) {
+        expect(updates[1]).toEqual({
+          phase: "validation",
           filesCompleted: 0,
           filesTotal: 8,
+          reviewItems: { completed: 11, total: 13 },
         });
-        expect(workerStatuses).toEqual([]);
-        if (["marker-free", "late marker", "late worker"].includes(scenario)) {
-          expect(updates[1]).toEqual({
-            phase: "validation",
-            filesCompleted: 0,
-            filesTotal: 8,
-            reviewItems: { completed: 11, total: 13 },
+        if (scenario === "late marker") {
+          expect(updates.at(-1)).toEqual({
+            ...updates[1]!,
+            phase: "discovery",
+            filesCompleted: 3,
           });
-          if (scenario === "late marker") {
-            expect(updates.at(-1)).toEqual({
-              ...updates[1]!,
-              phase: "discovery",
-              filesCompleted: 3,
-            });
-          }
-          expect(warnings).toEqual([]);
-          expect(observerErrors).toEqual(
-            Array(updates.length - 1).fill("onProgress"),
-          );
-        } else {
-          expect(updates).toHaveLength(1);
-          expect(observerErrors).toEqual([]);
-          expect(warnings).toEqual([
-            scenario === "unavailable"
-              ? "Could not track scan progress: progress read failed"
-              : "Could not track scan progress: Codex Security workbench returned invalid scan progress.",
-          ]);
         }
-      } finally {
-        await client.close();
+        expect(warnings).toEqual([]);
+        expect(observerErrors).toEqual(
+          Array(updates.length - 1).fill("onProgress"),
+        );
+      } else {
+        expect(updates).toHaveLength(1);
+        expect(observerErrors).toEqual([]);
+        expect(warnings).toEqual([
+          scenario === "unavailable"
+            ? "Could not track scan progress: progress read failed"
+            : "Could not track scan progress: Codex Security workbench returned invalid scan progress.",
+        ]);
       }
     },
   );
@@ -4095,11 +4084,7 @@ if __name__ == "__main__":
         ...scanRuntimeDependencies(codexHome, scanDir),
         prepareRuntime: runtimePreparer(codexHome, () => ({ environment })),
         resolveCodexCommand: () => ({ command: process.execPath }),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> => {
+        runWorkbench: async (_options, args, input): Promise<JsonObject> => {
           if (args[0] === "get-scan") {
             expect(args).toContain("--progress-only");
             return {
@@ -4158,12 +4143,10 @@ if __name__ == "__main__":
   test.skipIf(process.platform !== "win32")(
     "loads deep scan settings from a backslash home-relative CODEX_HOME",
     async () => {
-      const root = await temporaryDirectory();
-      const repository = join(root, "repository");
+      const { root, repository } = await repositoryDirectories();
       const ambientHome = join(root, "ambient-home");
       const codexHome = join(root, "runtime-home");
       const scanDir = join(root, "scan");
-      await mkdir(repository);
       await mkdir(join(ambientHome, "codex-security"), { recursive: true });
       await mkdir(codexHome);
       await mkdir(scanDir, { mode: 0o700 });
@@ -4385,11 +4368,7 @@ if __name__ == "__main__":
 
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
-      runWorkbench: async (
-        _options: unknown,
-        args: readonly string[],
-        input?: string,
-      ): Promise<JsonObject> =>
+      runWorkbench: async (_options, args, input): Promise<JsonObject> =>
         args[0] === "register-cli-scan"
           ? {
               ...mockScanRegistration(args, input),
@@ -4411,11 +4390,7 @@ if __name__ == "__main__":
 
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
-      runWorkbench: async (
-        _options: unknown,
-        args: readonly string[],
-        input?: string,
-      ): Promise<JsonObject> => {
+      runWorkbench: async (_options, args, input): Promise<JsonObject> => {
         commands.push(args[0]!);
         if (args[0] === "prepare-scan-completion") {
           await writeFile(join(scanDir, "findings.json"), "corrupted\n");
@@ -4496,11 +4471,7 @@ if __name__ == "__main__":
 
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
-      runWorkbench: async (
-        _options: unknown,
-        args: readonly string[],
-        input?: string,
-      ): Promise<JsonObject> => {
+      runWorkbench: async (_options, args, input): Promise<JsonObject> => {
         commands.push(args[0]!);
         if (args[0] === "prepare-scan-completion") {
           throw new Error("Only a running scan can be completed.");
@@ -4544,11 +4515,7 @@ if __name__ == "__main__":
             ...options,
             directory: join(root, "telemetry-state"),
           }),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> => {
+        runWorkbench: async (_options, args, input): Promise<JsonObject> => {
           commands.push(args[0]!);
           return mockWorkbench(args, input);
         },
@@ -4618,26 +4585,21 @@ if __name__ == "__main__":
       const warnings: string[] = [];
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        createCodex: () => ({
-          startThread: () => ({
-            id: null,
-            async runStreamed() {
-              await copyCompletedScan(root);
-              async function* events(): AsyncGenerator<ThreadEvent> {
-                yield { type: "thread.started", thread_id: "thread-1" };
-                await first;
-                denied.delete(logs[0]!);
-                denied.add(logs[1]!);
-                await appendFile(logs[1]!, "{}\n");
-                await second;
-                denied.delete(logs[1]!);
-                for await (const event of completedEvents()) {
-                  if (event.type !== "thread.started") yield event;
-                }
-              }
-              return { events: events() };
-            },
-          }),
+        createCodex: codexFactory(async () => {
+          await copyCompletedScan(root);
+          async function* events(): AsyncGenerator<ThreadEvent> {
+            yield { type: "thread.started", thread_id: "thread-1" };
+            await first;
+            denied.delete(logs[0]!);
+            denied.add(logs[1]!);
+            await appendFile(logs[1]!, "{}\n");
+            await second;
+            denied.delete(logs[1]!);
+            for await (const event of completedEvents()) {
+              if (event.type !== "thread.started") yield event;
+            }
+          }
+          return { events: events() };
         }),
       });
       // The fake stream has no process handle to keep the unref'ed poll alive.
@@ -4679,14 +4641,7 @@ if __name__ == "__main__":
       const updates: ScanProgress[] = [];
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 4_207 }
-            : mockWorkbench(args, input),
+        runWorkbench: workbenchWithFileCount(4_207),
         createCodex: codexFactory(async (prompt: string) => {
           expect(prompt).toContain(
             "The SDK's current in-scope file-count estimate is 4207",
@@ -4697,12 +4652,11 @@ if __name__ == "__main__":
               yield event;
               if (event.type === "turn.started") {
                 const texts = [0, 250, 4_198].map((filesCompleted) => {
-                  const progress: ScanProgress = {
-                    phase:
-                      filesCompleted === 4_198 ? "validation" : "discovery",
+                  const progress = scanProgress(
+                    filesCompleted === 4_198 ? "validation" : "discovery",
                     filesCompleted,
-                    filesTotal: 4_198,
-                  };
+                    4_198,
+                  );
                   return (
                     "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(progress)
                   );
@@ -4718,14 +4672,10 @@ if __name__ == "__main__":
                   );
                 } else {
                   for (const [index, text] of texts.entries()) {
-                    yield {
-                      type: "item.completed",
-                      item: {
-                        id: "inventory-" + [0, 250, 4_198][index],
-                        type: "agent_message",
-                        text,
-                      },
-                    };
+                    yield completedMessage(
+                      "inventory-" + [0, 250, 4_198][index],
+                      text,
+                    );
                   }
                 }
               }
@@ -4741,10 +4691,10 @@ if __name__ == "__main__":
 
       expect(result.threadId).toBe("thread-1");
       expect(updates).toEqual([
-        { phase: "preflight", filesCompleted: 0, filesTotal: 4_207 },
-        { phase: "discovery", filesCompleted: 0, filesTotal: 4_198 },
-        { phase: "discovery", filesCompleted: 250, filesTotal: 4_198 },
-        { phase: "validation", filesCompleted: 4_198, filesTotal: 4_198 },
+        scanProgress("preflight", 0, 4_207),
+        scanProgress("discovery", 0, 4_198),
+        scanProgress("discovery", 250, 4_198),
+        scanProgress("validation", 4_198, 4_198),
       ]);
       await client.close();
     },
@@ -4758,14 +4708,10 @@ if __name__ == "__main__":
       const sessionEvents: ScanSessionEvent[] = [];
       const workers: ScanWorkerEvent[] = [];
       const observerErrors: ScanObserverName[] = [];
-      const usage = { input_tokens: 100, output_tokens: 10 };
+      const usage = basicUsage(100, 10);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> => {
+        runWorkbench: async (_options, args, input): Promise<JsonObject> => {
           if (args[0] === "register-cli-scan")
             return {
               ...mockScanRegistration(args, input),
@@ -4800,22 +4746,13 @@ if __name__ == "__main__":
             phase: ScanProgress["phase"],
             filesCompleted: number,
             filesTotal: number,
-          ): string =>
-            `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({
-              phase,
-              filesCompleted,
-              filesTotal,
-            })}`;
+          ): string => progressMarker(phase, filesCompleted, filesTotal);
           async function* events(): AsyncGenerator<ThreadEvent> {
             if (parentDispatch) {
-              yield {
-                type: "item.completed",
-                item: {
-                  id: "parent-validation-dispatch",
-                  type: "agent_message",
-                  text: 'CODEX_SECURITY_WORKER_STATUS {"kind":"dispatch","phase":"validation","planned":2,"started":2}',
-                },
-              };
+              yield completedMessage(
+                "parent-validation-dispatch",
+                'CODEX_SECURITY_WORKER_STATUS {"kind":"dispatch","phase":"validation","planned":2,"started":2}',
+              );
             }
             for (const [threadId, text] of [
               ["worker-thread", marker("discovery", 3, 1_249)],
@@ -4826,7 +4763,7 @@ if __name__ == "__main__":
               ["worker-thread", marker("discovery", 1_249, 1_249)],
               ["worker-thread", marker("validation", 1_249, 1_249)],
             ] as const) {
-              await appendFile(
+              await appendRecord(
                 join(
                   codexHome,
                   "sessions",
@@ -4835,7 +4772,7 @@ if __name__ == "__main__":
                   "26",
                   `rollout-${threadId}.jsonl`,
                 ),
-                `${JSON.stringify({
+                {
                   type: "response_item",
                   payload: {
                     type: "custom_tool_call_output",
@@ -4845,7 +4782,7 @@ if __name__ == "__main__":
                       { type: "input_text", text },
                     ],
                   },
-                })}\n`,
+                },
               );
             }
           }
@@ -4867,7 +4804,7 @@ if __name__ == "__main__":
 
       expect(result.threadId).toBe("thread-1");
       expect(updates).toEqual([
-        { phase: "preflight", filesCompleted: 0, filesTotal: 1_258 },
+        scanProgress("preflight", 0, 1_258),
         {
           phase: "discovery",
           filesCompleted: 0,
@@ -4906,30 +4843,21 @@ if __name__ == "__main__":
     [
       "both phases streamed",
       [0, 1],
-      [
-        { phase: "discovery", filesCompleted: 8, filesTotal: 8 },
-        { phase: "validation", filesCompleted: 8, filesTotal: 8 },
-      ],
+      [scanProgress("discovery", 8, 8), scanProgress("validation", 8, 8)],
       [0, 1],
       false,
     ],
     [
       "newer phase omitted from the preview",
       [0, 1],
-      [
-        { phase: "discovery", filesCompleted: 8, filesTotal: 8 },
-        { phase: "validation", filesCompleted: 8, filesTotal: 8 },
-      ],
+      [scanProgress("discovery", 8, 8), scanProgress("validation", 8, 8)],
       [0],
       false,
     ],
     [
       "multipart native marker",
       [1],
-      [
-        { phase: "discovery", filesCompleted: 8, filesTotal: 8 },
-        { phase: "validation", filesCompleted: 8, filesTotal: 8 },
-      ],
+      [scanProgress("discovery", 8, 8), scanProgress("validation", 8, 8)],
       [0],
       false,
     ],
@@ -4937,9 +4865,9 @@ if __name__ == "__main__":
       "older tool phase",
       [1],
       [
-        { phase: "discovery", filesCompleted: 8, filesTotal: 8 },
-        { phase: "validation", filesCompleted: 8, filesTotal: 8 },
-        { phase: "attack_path", filesCompleted: 8, filesTotal: 8 },
+        scanProgress("discovery", 8, 8),
+        scanProgress("validation", 8, 8),
+        scanProgress("attack_path", 8, 8),
       ],
       [0, 1, 2],
       false,
@@ -4948,9 +4876,9 @@ if __name__ == "__main__":
       "older inventory",
       [1],
       [
-        { phase: "discovery", filesCompleted: 0, filesTotal: 8 },
-        { phase: "discovery", filesCompleted: 0, filesTotal: 9 },
-        { phase: "discovery", filesCompleted: 1, filesTotal: 9 },
+        scanProgress("discovery", 0, 8),
+        scanProgress("discovery", 0, 9),
+        scanProgress("discovery", 1, 9),
       ],
       [0, 1, 2],
       false,
@@ -4958,10 +4886,7 @@ if __name__ == "__main__":
     [
       "truncated streamed marker",
       [0],
-      [
-        { phase: "discovery", filesCompleted: 1, filesTotal: 8 },
-        { phase: "discovery", filesCompleted: 2, filesTotal: 8 },
-      ],
+      [scanProgress("discovery", 1, 8), scanProgress("discovery", 2, 8)],
       [1],
       false,
     ],
@@ -4969,9 +4894,9 @@ if __name__ == "__main__":
       "truncated streamed inventory",
       [1],
       [
-        { phase: "discovery", filesCompleted: 0, filesTotal: 8 },
-        { phase: "discovery", filesCompleted: 0, filesTotal: 9 },
-        { phase: "discovery", filesCompleted: 1, filesTotal: 9 },
+        scanProgress("discovery", 0, 8),
+        scanProgress("discovery", 0, 9),
+        scanProgress("discovery", 1, 9),
       ],
       [0, 2],
       false,
@@ -4979,10 +4904,7 @@ if __name__ == "__main__":
     [
       "worker already reported the parent phase",
       [1],
-      [
-        { phase: "discovery", filesCompleted: 8, filesTotal: 8 },
-        { phase: "validation", filesCompleted: 8, filesTotal: 8 },
-      ],
+      [scanProgress("discovery", 8, 8), scanProgress("validation", 8, 8)],
       [0, 1],
       true,
     ],
@@ -4996,100 +4918,60 @@ if __name__ == "__main__":
       const markerTexts = progress.map(
         (update) => "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(update),
       );
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          const rollout = await writeUsageSession(codexHome, "thread-1", {
-            input_tokens: 100,
-            output_tokens: 10,
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        const rollout = await writeUsageSession(
+          codexHome,
+          "thread-1",
+          basicUsage(100, 10),
+        );
+        if (workerFirst) {
+          const worker = await writeUsageSession(
+            codexHome,
+            "worker-thread",
+            basicUsage(100, 10),
+            { parent: "thread-1" },
+          );
+          await appendRecord(worker, {
+            type: "response_item",
+            payload: {
+              type: "custom_tool_call_output",
+              output: [{ type: "input_text", text: markerTexts[1] }],
+            },
           });
-          if (workerFirst) {
-            const worker = await writeUsageSession(
-              codexHome,
-              "worker-thread",
-              {
-                input_tokens: 100,
-                output_tokens: 10,
-              },
-              { parent: "thread-1" },
+        }
+        async function* markers(): AsyncGenerator<ThreadEvent> {
+          if (workerFirst) await workerReady.promise;
+          for (const index of streamed) {
+            yield completedMessage(
+              `parent-progress-${index}`,
+              markerTexts[index]!,
             );
-            await appendFile(
-              worker,
-              JSON.stringify({
+          }
+          // Native item completions retain the order even when the separate
+          // response-item preview omits a streamed marker.
+          const saved = [];
+          for (const [index, text] of markerTexts.entries()) {
+            if (streamed.some((i) => i === index)) {
+              const parts =
+                _scenario === "multipart native marker"
+                  ? [text.slice(0, 35), text.slice(35)]
+                  : text;
+              saved.push(nativeMessage(parts, `native-${index}`));
+            }
+            if (persisted.some((i) => i === index))
+              saved.push({
                 type: "response_item",
                 payload: {
                   type: "custom_tool_call_output",
-                  output: [{ type: "input_text", text: markerTexts[1] }],
+                  status: "completed",
+                  output: [{ type: "input_text", text }],
                 },
-              }) + "\n",
-            );
+              });
           }
-          async function* markers(): AsyncGenerator<ThreadEvent> {
-            if (workerFirst) await workerReady.promise;
-            for (const index of streamed) {
-              yield {
-                type: "item.completed",
-                item: {
-                  id: `parent-progress-${index}`,
-                  type: "agent_message",
-                  text: markerTexts[index]!,
-                },
-              };
-            }
-            // Native item completions retain the order even when the separate
-            // response-item preview omits a streamed marker.
-            const saved = progress.flatMap((_update, index) => [
-              ...(streamed.includes(index as never)
-                ? [
-                    {
-                      type: "event_msg",
-                      payload: {
-                        type: "item_completed",
-                        item: {
-                          type: "AgentMessage",
-                          id: `native-${index}`,
-                          content:
-                            _scenario === "multipart native marker"
-                              ? [
-                                  {
-                                    type: "Text",
-                                    text: markerTexts[index]!.slice(0, 35),
-                                  },
-                                  {
-                                    type: "Text",
-                                    text: markerTexts[index]!.slice(35),
-                                  },
-                                ]
-                              : [{ type: "Text", text: markerTexts[index] }],
-                        },
-                      },
-                    },
-                  ]
-                : []),
-              ...(persisted.includes(index as never)
-                ? [
-                    {
-                      type: "response_item",
-                      payload: {
-                        type: "custom_tool_call_output",
-                        status: "completed",
-                        output: [
-                          { type: "input_text", text: markerTexts[index] },
-                        ],
-                      },
-                    },
-                  ]
-                : []),
-            ]);
-            await appendFile(
-              rollout,
-              saved.map((event) => JSON.stringify(event)).join("\n") + "\n",
-            );
-          }
-          return { events: completedEvents("thread-1", markers()) };
-        }),
+          await appendRecords(rollout, saved);
+        }
+        return { events: completedEvents("thread-1", markers()) };
       });
       // The fake stream has no process handle to keep the unref'ed poll alive.
       const keepAlive = setInterval(() => {}, 1_000);
@@ -5103,11 +4985,7 @@ if __name__ == "__main__":
           },
           onSessionEvent: (event) => sessionEvents.push(event),
         });
-        expect(updates[0]).toEqual({
-          phase: "preflight",
-          filesCompleted: 0,
-          filesTotal: 8,
-        });
+        expect(updates[0]).toEqual(scanProgress("preflight", 0, 8));
         expect(updates.at(-1)).toEqual(progress.at(-1));
         for (let index = 1; index < updates.length; index++) {
           expect(updates[index]).not.toEqual(updates[index - 1]);
@@ -5148,91 +5026,45 @@ if __name__ == "__main__":
         review = Promise.withResolvers<void>(),
         workerSeen = Promise.withResolvers<void>();
       const marker = (count: number, filesTotal: number) =>
-        `CODEX_SECURITY_SCAN_PROGRESS ${JSON.stringify({ phase: "discovery", filesCompleted: count, filesTotal })}`;
+        progressMarker("discovery", count, filesTotal);
       const saved = (id: string, text: string) => [
-        {
-          type: "event_msg",
-          payload:
-            mode === "legacy"
-              ? { type: "agent_message", message: text }
-              : {
-                  type: "item_completed",
-                  item: {
-                    type: "AgentMessage",
-                    id,
-                    content: [{ type: "Text", text }],
-                  },
-                },
-        },
-        {
-          type: "response_item",
-          payload: {
-            type: "message",
-            id,
-            role: "assistant",
-            content: [{ type: "output_text", text }],
-          },
-        },
+        mode === "legacy" ? legacyMessage(text) : nativeMessage(text, id),
+        responseMessage(text, id),
       ];
-      const live = (id: string, text: string): ThreadEvent => ({
-        type: "item.completed",
-        item: { type: "agent_message", id, text },
-      });
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          const parent = await writeUsageSession(codexHome, "thread-1", {});
-          const append = async (...rows: unknown[]) =>
-            appendFile(
-              parent,
-              rows
-                .flat()
-                .map((row) => JSON.stringify(row))
-                .join("\n") + "\n",
-            );
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            yield live("first-inventory", marker(0, 8));
-            await append(
-              saved("first-inventory", marker(0, 8)),
-              saved("expanded-inventory", marker(0, 9)),
-            );
-            await expanded.promise;
-            // The SDK can deliver a review while older persisted inventory is still
-            // being flushed. Its saved position becomes known only in the next poll.
-            yield live("parent-review", marker(1, total));
-            await append(
-              saved("final-inventory", marker(0, total)),
-              ...(savedReviewFirst
-                ? [saved("parent-review", marker(1, total))]
-                : []),
-            );
-            await inventory.promise;
-            if (!savedReviewFirst)
-              await append(saved("parent-review", marker(1, total)));
-            await review.promise;
-            const worker = await writeUsageSession(
-              codexHome,
-              "worker-thread",
-              {},
-              { parent: "thread-1" },
-            );
-            await appendFile(
-              worker,
-              JSON.stringify({
-                type: "response_item",
-                payload: {
-                  type: "custom_tool_call_output",
-                  call_id: "oversized-worker",
-                  output: marker(9, 9),
-                },
-              }) + "\n",
-            );
-            await workerSeen.promise;
-          }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+      const live = completedMessage;
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        const parent = await writeUsageSession(codexHome, "thread-1", {});
+        const append = async (...rows: unknown[]) =>
+          appendRecords(parent, rows.flat());
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          yield live("first-inventory", marker(0, 8));
+          await append(
+            saved("first-inventory", marker(0, 8)),
+            saved("expanded-inventory", marker(0, 9)),
+          );
+          await expanded.promise;
+          // The SDK can deliver a review while older persisted inventory is still
+          // being flushed. Its saved position becomes known only in the next poll.
+          yield live("parent-review", marker(1, total));
+          await append(
+            saved("final-inventory", marker(0, total)),
+            ...(savedReviewFirst
+              ? [saved("parent-review", marker(1, total))]
+              : []),
+          );
+          await inventory.promise;
+          if (!savedReviewFirst)
+            await append(saved("parent-review", marker(1, total)));
+          await review.promise;
+          const worker = await writeWorkerSession(codexHome);
+          await appendRecord(
+            worker,
+            customToolOutput(marker(9, 9), "oversized-worker"),
+          );
+          await workerSeen.promise;
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       const keepAlive = setInterval(() => {}, 1000);
       try {
@@ -5246,11 +5078,7 @@ if __name__ == "__main__":
             if (p?.call_id === "oversized-worker") workerSeen.resolve();
           },
         });
-        expect(updates.at(-1)).toEqual({
-          phase: "discovery",
-          filesCompleted: 1,
-          filesTotal: total,
-        });
+        expect(updates.at(-1)).toEqual(scanProgress("discovery", 1, total));
         expect(updates.some((update) => update.filesCompleted === 9)).toBe(
           false,
         );
@@ -5321,134 +5149,82 @@ if __name__ == "__main__":
       );
       const stale = progressMarker("attack_path", 9, 9);
       const savedMessage = (text: string) => [
-        {
-          type: "event_msg",
-          payload:
-            mode === "legacy"
-              ? { type: "agent_message", message: text }
-              : {
-                  type: "item_completed",
-                  item: {
-                    type: "AgentMessage",
-                    content: [{ type: "Text", text }],
-                  },
-                },
-        },
-        {
-          type: "response_item",
-          payload: {
-            type: "message",
-            role: "assistant",
-            content: [{ type: "output_text", text }],
-          },
-        },
+        mode === "legacy" ? legacyMessage(text) : nativeMessage(text),
+        responseMessage(text),
       ];
-      const liveMessage = (id: string, text: string): ThreadEvent => ({
-        type: "item.completed",
-        item: { id, type: "agent_message", text },
-      });
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          const rollout = await writeUsageSession(codexHome, "thread-1", {});
-          const persisted = [
-            {
-              type: "response_item",
-              payload: {
-                type: "custom_tool_call_output",
-                call_id: "inventory",
-                output: old,
-              },
-            },
-            ...(mode === "paginated" ? [nativeCommand("inventory", old)] : []),
-            // Legacy saves the agent-message event before its raw response copy,
-            // and does not save the command completion delivered to the SDK.
-            ...savedMessage(current),
-          ];
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            if (inventoryPhase) {
-              await appendFile(rollout, jsonLines(savedMessage(old)) + "\n");
-              yield liveMessage("earlier-phase", old);
-              await boundaryRead.promise;
-              await appendFile(
-                rollout,
-                jsonLines(savedMessage(current)) + "\n",
-              );
-              await inventoryRead.promise;
-              yield liveMessage("current-inventory", current);
-              return;
-            }
-            if (savedFirst) {
-              await appendFile(rollout, jsonLines(persisted) + "\n");
-              await inventoryRead.promise;
-            }
-            yield completedCommand("inventory", old);
-            if (delivery === "poll-between") {
-              await appendFile(
-                rollout,
-                jsonLines(savedMessage("Synthetic poll boundary.")) + "\n",
-              );
-              await boundaryRead.promise;
-            }
-            if (
-              ["live-first", "saved-first", "poll-between"].includes(delivery)
-            )
-              yield liveMessage("current-inventory", current);
-            if (!savedFirst)
-              await appendFile(rollout, jsonLines(persisted) + "\n");
-            if (delivery === "later-inventory")
-              await appendFile(
-                rollout,
-                jsonLines(savedMessage(progressMarker("discovery", 0, 7))) +
-                  "\n",
-              );
-            if (completeFirst) yield liveMessage("review-complete", complete);
-            await appendFile(
-              rollout,
-              jsonLines([
-                ...(delivery === "saved-only-stale-live"
-                  ? savedMessage(stale)
-                  : []),
-                ...savedMessage(complete),
-              ]) + "\n",
-            );
-            if (savedOnly) {
-              await completeRead.promise;
-              if (delivery === "saved-only-stale-live")
-                yield liveMessage("older-review", stale);
-              await appendFile(
-                rollout,
-                jsonLines(savedMessage("Scan finished.")) + "\n",
-              );
-              yield liveMessage("final-summary", "Scan finished.");
-            } else if (!completeFirst) {
-              if (delivery === "omitted-inventory-saved-review" || shrinking)
-                await completeRead.promise;
-              if (shrinking) {
-                if (delivery === "shrink-delayed-inventory")
-                  yield liveMessage("current-inventory", current);
-                const final = progressMarker(finalPhase, total, total);
-                await appendFile(
-                  rollout,
-                  jsonLines(savedMessage(final)) + "\n",
-                );
-                yield liveMessage("final-review", final);
-              } else yield liveMessage("review-complete", complete);
-            }
-            if (delivery === "later-inventory") {
-              await completeRead.promise;
-              const oversized = progressMarker("discovery", 9, 9);
-              await appendFile(
-                rollout,
-                jsonLines(savedMessage(oversized)) + "\n",
-              );
-              yield liveMessage("oversized-review", oversized);
-            }
+      const liveMessage = completedMessage;
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        const rollout = await writeUsageSession(codexHome, "thread-1", {});
+        const persisted = [
+          customToolOutput(old, "inventory"),
+          ...(mode === "paginated" ? [nativeCommand("inventory", old)] : []),
+          // Legacy saves the agent-message event before its raw response copy,
+          // and does not save the command completion delivered to the SDK.
+          ...savedMessage(current),
+        ];
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          if (inventoryPhase) {
+            await appendRecords(rollout, savedMessage(old));
+            yield liveMessage("earlier-phase", old);
+            await boundaryRead.promise;
+            await appendRecords(rollout, savedMessage(current));
+            await inventoryRead.promise;
+            yield liveMessage("current-inventory", current);
+            return;
           }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+          if (savedFirst) {
+            await appendRecords(rollout, persisted);
+            await inventoryRead.promise;
+          }
+          yield completedCommand("inventory", old);
+          if (delivery === "poll-between") {
+            await appendRecords(
+              rollout,
+              savedMessage("Synthetic poll boundary."),
+            );
+            await boundaryRead.promise;
+          }
+          if (["live-first", "saved-first", "poll-between"].includes(delivery))
+            yield liveMessage("current-inventory", current);
+          if (!savedFirst) await appendRecords(rollout, persisted);
+          if (delivery === "later-inventory")
+            await appendRecords(
+              rollout,
+              savedMessage(progressMarker("discovery", 0, 7)),
+            );
+          if (completeFirst) yield liveMessage("review-complete", complete);
+          await appendRecords(rollout, [
+            ...(delivery === "saved-only-stale-live"
+              ? savedMessage(stale)
+              : []),
+            ...savedMessage(complete),
+          ]);
+          if (savedOnly) {
+            await completeRead.promise;
+            if (delivery === "saved-only-stale-live")
+              yield liveMessage("older-review", stale);
+            await appendRecords(rollout, savedMessage("Scan finished."));
+            yield liveMessage("final-summary", "Scan finished.");
+          } else if (!completeFirst) {
+            if (delivery === "omitted-inventory-saved-review" || shrinking)
+              await completeRead.promise;
+            if (shrinking) {
+              if (delivery === "shrink-delayed-inventory")
+                yield liveMessage("current-inventory", current);
+              const final = progressMarker(finalPhase, total, total);
+              await appendRecords(rollout, savedMessage(final));
+              yield liveMessage("final-review", final);
+            } else yield liveMessage("review-complete", complete);
+          }
+          if (delivery === "later-inventory") {
+            await completeRead.promise;
+            const oversized = progressMarker("discovery", 9, 9);
+            await appendRecords(rollout, savedMessage(oversized));
+            yield liveMessage("oversized-review", oversized);
+          }
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       const keepAlive = setInterval(() => {}, 1_000);
       try {
@@ -5480,11 +5256,9 @@ if __name__ == "__main__":
           );
           expect(updates.at(-1)?.filesCompleted).toBe(0);
         } else
-          expect(updates.at(-1)).toEqual({
-            phase: finalPhase,
-            filesCompleted: inventoryPhase ? 0 : total,
-            filesTotal: total,
-          });
+          expect(updates.at(-1)).toEqual(
+            scanProgress(finalPhase, inventoryPhase ? 0 : total, total),
+          );
         if (delivery === "saved-only-stale-live") {
           const recovered = updates.findIndex(
             (update) => update.phase === "validation",
@@ -5542,49 +5316,22 @@ if __name__ == "__main__":
         if (!seen.has(id)) seen.set(id, Promise.withResolvers<void>());
         return seen.get(id)!;
       };
-      let path = "",
-        pause = false;
+      const session = { path: "", pauseClose: false };
       const closeEntered = Promise.withResolvers<void>(),
         release = Promise.withResolvers<void>();
-      const originalOpen = fsPromises.open;
-      const opening = spyOn(fsPromises, "open").mockImplementation((async (
-        ...args: Parameters<typeof originalOpen>
-      ) => {
-        const file = await originalOpen(...args);
-        if (String(args[0]) !== path || !pause) return file;
-        const close = file.close.bind(file);
-        file.close = async () => {
-          if (pause) {
-            pause = false;
-            closeEntered.resolve();
-            await release.promise;
-          }
-          await close();
-        };
-        return file;
-      }) as typeof originalOpen);
 
-      const custom = (id: string, text: string) => ({
-        type: "response_item",
-        payload: { type: "custom_tool_call_output", call_id: id, output: text },
-      });
+      const opening = holdSessionClose(session, closeEntered, release);
+
+      const custom = (id: string, text: string) => customToolOutput(text, id);
       const native = (command: string, output: string) =>
         nativeCommand(command, output);
       const live = (command: string, output: string): ThreadEvent =>
         completedCommand(command, output);
       const append = async (file: string, rows: readonly unknown[]) => {
-        await appendFile(
-          file,
-          rows.map((x) => JSON.stringify(x)).join("\n") + "\n",
-        );
+        await appendRecords(file, rows);
       };
       const worker = async (id: string, count: number, total: number) => {
-        const file = await writeUsageSession(
-          codexHome,
-          id,
-          {},
-          { parent: "thread-1" },
-        );
+        const file = await writeWorkerSession(codexHome, id);
         await append(file, [
           custom(id, progressMarker(workerPhase, count, total)),
         ]);
@@ -5592,25 +5339,12 @@ if __name__ == "__main__":
       };
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? {
-                ...mockScanRegistration(args, input),
-                scopeFileCount:
-                  family === "parent-only"
-                    ? 9
-                    : family === "selected-live"
-                      ? 4
-                      : 8,
-              }
-            : mockWorkbench(args, input),
+        runWorkbench: workbenchWithFileCount(
+          family === "parent-only" ? 9 : family === "selected-live" ? 4 : 8,
+        ),
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
-          path = await writeUsageSession(codexHome, "thread-1", {});
+          session.path = await writeUsageSession(codexHome, "thread-1", {});
           async function* events(): AsyncGenerator<ThreadEvent> {
             await wait("metadata").promise;
             if (family === "accepted-eligibility") {
@@ -5620,7 +5354,7 @@ if __name__ == "__main__":
                 native("eligible", progressMarker(parentPhase, 4, 5)),
               ];
               if (early) {
-                await append(path, prefix);
+                await append(session.path, prefix);
                 await wait("eligible").promise;
               }
               // Native can deliver events after a persistence error, then retry
@@ -5630,14 +5364,14 @@ if __name__ == "__main__":
               yield live("ineligible", progressMarker(workerPhase, 4, 7));
               yield live("last-parent", progressMarker(parentPhase, 8, 8));
               if (!early) {
-                await append(path, prefix);
+                await append(session.path, prefix);
                 await wait("eligible").promise;
               }
-              await append(path, [
+              await append(session.path, [
                 native("ineligible", progressMarker(workerPhase, 4, 7)),
               ]);
               await wait("ineligible").promise;
-              await append(path, [
+              await append(session.path, [
                 native("last-parent", progressMarker(parentPhase, 8, 8)),
               ]);
               await wait("last-parent").promise;
@@ -5645,12 +5379,12 @@ if __name__ == "__main__":
               // Inventory may be absent from SDK delivery; all native records
               // are durable before either review is delivered live.
               // Start a real read: unchanged logs are skipped by the tracker.
-              pause = !early;
+              session.pauseClose = !early;
               if (!early) {
-                await appendFile(path, "\n");
+                await appendFile(session.path, "\n");
                 await closeEntered.promise;
               }
-              await append(path, [
+              await append(session.path, [
                 native("inventory", progressMarker("discovery", 0, 8)),
                 native("eligible", progressMarker(parentPhase, 4, 8)),
                 native("last-parent", progressMarker(workerPhase, 6, 9)),
@@ -5663,24 +5397,26 @@ if __name__ == "__main__":
             } else if (family === "fresh-batch") {
               await worker("first", 3, 3);
               await worker("second", 1, 8);
-              pause = !early;
+              session.pauseClose = !early;
               if (!early) {
-                await appendFile(path, "\n");
+                await appendFile(session.path, "\n");
                 await closeEntered.promise;
               }
-              await append(path, [
+              await append(session.path, [
                 custom("inventory6", progressMarker("discovery", 0, 6)),
                 custom("eligible", progressMarker(parentPhase, 3, 6)),
               ]);
               if (early) await wait("eligible").promise;
-              await append(path, [
+              await append(session.path, [
                 native("last-parent", progressMarker(workerPhase, 4, 8)),
               ]);
               yield live("last-parent", progressMarker(workerPhase, 4, 8));
               release.resolve();
               await wait("last-parent").promise;
             } else if (family === "admitted") {
-              await append(path, [native("inventory", persistedCommandOutput)]);
+              await append(session.path, [
+                native("inventory", persistedCommandOutput),
+              ]);
               if (early) {
                 yield live(
                   "inventory",
@@ -5689,11 +5425,11 @@ if __name__ == "__main__":
                 await wait("scope6").promise;
               }
               await worker("first", 3, 3);
-              await append(path, [
+              await append(session.path, [
                 custom("eligible", progressMarker(parentPhase, 3, 6)),
               ]);
               await wait("eligible").promise;
-              await append(path, [
+              await append(session.path, [
                 custom("oversized", progressMarker(parentPhase, 4, 8)),
               ]);
               await wait("oversized").promise;
@@ -5708,15 +5444,15 @@ if __name__ == "__main__":
                 custom("inventory6", progressMarker("discovery", 0, 6)),
               ];
               if (early) {
-                await append(path, inventories);
+                await append(session.path, inventories);
                 await wait("inventory6").promise;
                 await wait("scope6").promise;
               } else {
-                pause = true;
-                await appendFile(path, "\n");
+                session.pauseClose = true;
+                await appendFile(session.path, "\n");
                 await closeEntered.promise;
               }
-              await append(path, [
+              await append(session.path, [
                 ...(early ? [] : inventories),
                 native("first-parent", persistedCommandOutput),
                 native("last-parent", persistedCommandOutput),
@@ -5733,15 +5469,15 @@ if __name__ == "__main__":
               await wait("last-parent").promise;
             } else {
               if (early) {
-                await append(path, [
+                await append(session.path, [
                   custom("inventory6", progressMarker("discovery", 0, 6)),
                 ]);
                 await wait("scope6").promise;
               }
               await worker("first", 3, 3);
               await worker("second", 1, 8);
-              pause = !early;
-              await append(path, [
+              session.pauseClose = !early;
+              await append(session.path, [
                 ...(early
                   ? []
                   : [custom("inventory6", progressMarker("discovery", 0, 6))]),
@@ -5749,7 +5485,7 @@ if __name__ == "__main__":
               ]);
               if (!early) await closeEntered.promise;
               else await wait("eligible").promise;
-              await append(path, [
+              await append(session.path, [
                 native("last-parent", progressMarker(parentPhase, 4, 8)),
               ]);
               yield live("last-parent", progressMarker(parentPhase, 4, 8));
@@ -5796,19 +5532,19 @@ if __name__ == "__main__":
               .every((p) => p.phase === parentPhase),
           ).toBe(true);
         }
-        expect(updates.at(-1)).toEqual({
-          phase: parentPhase,
-          filesCompleted:
+        expect(updates.at(-1)).toEqual(
+          scanProgress(
+            parentPhase,
             family === "parent-only" || family === "accepted-eligibility"
               ? 4
               : 3,
-          filesTotal:
             family === "parent-only"
               ? 8
               : family === "accepted-eligibility"
                 ? 5
                 : 6,
-        });
+          ),
+        );
       } finally {
         clearInterval(keepAlive);
         release.resolve();
@@ -5834,118 +5570,47 @@ if __name__ == "__main__":
       const pollAllowed = Promise.withResolvers<void>();
       const closeEntered = Promise.withResolvers<void>();
       const closeReleased = Promise.withResolvers<void>();
-      let parentPath = "";
-      let pauseClose = delivery === "delayed suffix";
-      const originalOpen = fsPromises.open;
-      const originalReaddir = fsPromises.readdir;
-      const opening = spyOn(fsPromises, "open").mockImplementation((async (
-        ...args: Parameters<typeof originalOpen>
-      ) => {
-        const handle = await originalOpen(...args);
-        if (String(args[0]) !== parentPath || !pauseClose) return handle;
-        const close = handle.close.bind(handle);
-        handle.close = async () => {
-          if (pauseClose) {
-            pauseClose = false;
-            closeEntered.resolve();
-            await closeReleased.promise;
-          }
-          await close();
-        };
-        return handle;
-      }) as typeof originalOpen);
-      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-        ...args: Parameters<typeof originalReaddir>
-      ) => {
-        if (String(args[0]) === join(codexHome, "sessions"))
-          await pollAllowed.promise;
-        return originalReaddir(...args);
-      }) as typeof originalReaddir);
+      const session = { path: "", pauseClose: delivery === "delayed suffix" };
+
+      const opening = holdSessionClose(session, closeEntered, closeReleased);
+      const listing = holdSessionListing(codexHome, pollAllowed.promise);
       const append = async (id: string, phase: ScanProgress["phase"]) => {
-        const text =
-          "CODEX_SECURITY_SCAN_PROGRESS " +
-          JSON.stringify({
-            phase,
-            filesCompleted: 4,
-            filesTotal: 8,
-          });
-        const native =
-          projection === "command"
-            ? {
-                type: "CommandExecution",
-                id,
-                command: ["review"],
-                aggregated_output: text,
-              }
-            : { type: "AgentMessage", id, content: [{ type: "Text", text }] };
-        await appendFile(
-          parentPath,
-          [
-            {
-              type: "event_msg",
-              payload:
-                projection === "legacy message"
-                  ? { type: "agent_message", message: text }
-                  : { type: "item_completed", item: native },
-            },
-            {
-              type: "response_item",
-              payload:
-                projection === "command"
-                  ? {
-                      type: "custom_tool_call_output",
-                      call_id: id,
-                      output: "done",
-                    }
-                  : {
-                      type: "message",
-                      role: "assistant",
-                      content: [{ type: "output_text", text }],
-                    },
-            },
-          ]
-            .map((row) => JSON.stringify(row))
-            .join("\n") + "\n",
-        );
-        return {
-          type: "item.completed",
-          item:
-            projection === "command"
-              ? {
-                  type: "command_execution",
-                  id,
-                  command: "review",
-                  aggregated_output: text,
-                  status: "completed",
-                  exit_code: 0,
-                }
-              : { type: "agent_message", id, text },
-        } as ThreadEvent;
+        const text = progressMarker(phase, 4, 8);
+        if (projection === "command") {
+          await appendRecords(session.path, [
+            nativeCommand("review", text, id),
+            customToolOutput("done", id),
+          ]);
+          return completedCommand("review", text, id);
+        }
+        await appendRecords(session.path, [
+          projection === "legacy message"
+            ? legacyMessage(text)
+            : nativeMessage(text, id),
+          responseMessage(text),
+        ]);
+        return completedMessage(id, text);
       };
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          parentPath = await writeUsageSession(codexHome, "thread-1", {});
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            const first = await append("first", "discovery");
-            if (delivery === "delayed suffix") {
-              pollAllowed.resolve();
-              await closeEntered.promise;
-            }
-            const second = await append("second", "validation");
-            // Native queue backpressure can omit an ordinary start/completion.
-            // Every saved completion here precedes its corresponding live copy.
-            if (delivery === "intact") yield first;
-            yield second;
-            if (delivery === "repeated signature")
-              yield await append("third", "discovery");
-            closeReleased.resolve();
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        session.path = await writeUsageSession(codexHome, "thread-1", {});
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          const first = await append("first", "discovery");
+          if (delivery === "delayed suffix") {
             pollAllowed.resolve();
+            await closeEntered.promise;
           }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+          const second = await append("second", "validation");
+          // Native queue backpressure can omit an ordinary start/completion.
+          // Every saved completion here precedes its corresponding live copy.
+          if (delivery === "intact") yield first;
+          yield second;
+          if (delivery === "repeated signature")
+            yield await append("third", "discovery");
+          closeReleased.resolve();
+          pollAllowed.resolve();
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       // The fake stream has no process handle to keep the unref'ed poll alive.
       const keepAlive = setInterval(() => {}, 1_000);
@@ -5953,11 +5618,13 @@ if __name__ == "__main__":
         await client.run(repository, {
           onProgress: (update) => updates.push(update),
         });
-        expect(updates.at(-1)).toEqual({
-          phase: delivery === "repeated signature" ? "discovery" : "validation",
-          filesCompleted: 4,
-          filesTotal: 8,
-        });
+        expect(updates.at(-1)).toEqual(
+          scanProgress(
+            delivery === "repeated signature" ? "discovery" : "validation",
+            4,
+            8,
+          ),
+        );
       } finally {
         clearInterval(keepAlive);
         pollAllowed.resolve();
@@ -5991,118 +5658,93 @@ if __name__ == "__main__":
       const parentRead = Promise.withResolvers<void>();
       const pollAllowed = Promise.withResolvers<void>();
       let pausePoll = scenario === "inventory phase";
-      const originalReaddir = fsPromises.readdir;
-      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-        ...args: Parameters<typeof originalReaddir>
-      ) => {
-        if (pausePoll && String(args[0]) === join(codexHome, "sessions"))
-          await pollAllowed.promise;
-        return originalReaddir(...args);
-      }) as typeof originalReaddir);
 
-      const receipt = (id: string, text: string) => ({
-        type: "response_item",
-        payload: {
-          type: "custom_tool_call_output",
-          call_id: id,
-          output: text,
-        },
-      });
+      const listing = holdSessionListing(
+        codexHome,
+        pollAllowed.promise,
+        () => pausePoll,
+      );
+
+      const receipt = (id: string, text: string) => customToolOutput(text, id);
       const command = (id: string, text: string, truncate = false) => ({
         saved: nativeCommand(id, truncate ? persistedCommandOutput : text, id),
         live: completedCommand(id, text) as ThreadEvent,
       });
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          const parent = await writeUsageSession(codexHome, "thread-1", {});
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            if (scenario !== "inventory phase") {
-              const worker = await writeUsageSession(
-                codexHome,
-                "worker-thread",
-                {},
-                { parent: "thread-1" },
-              );
-              const workerCount = scenario === "below worker" ? count : 8;
-              await appendFile(
-                worker,
-                JSON.stringify(
-                  receipt(
-                    "worker-reviewed",
-                    progressMarker("discovery", workerCount, workerCount),
-                  ),
-                ) + "\n",
-              );
-              await workerRead.promise;
-            }
-            pausePoll = true;
-            const commands =
-              scenario === "across frontier"
-                ? [
-                    command(
-                      "inventory",
-                      commandOutput(progressMarker("discovery", 0, 9)),
-                      true,
-                    ),
-                    command(
-                      "review",
-                      commandOutput(progressMarker("validation", count, 9)),
-                      true,
-                    ),
-                    command(
-                      "parent-boundary",
-                      progressMarker("discovery", 8, 8),
-                    ),
-                  ]
-                : [
-                    command(
-                      "parent-boundary",
-                      scenario === "below worker"
-                        ? truncated
-                          ? commandOutput(progressMarker("validation", 3, 7))
-                          : progressMarker("validation", 3, 7)
-                        : progressMarker("validation", 5, 8),
-                      truncated,
-                    ),
-                  ];
-            const inventories =
-              scenario === "across frontier"
-                ? []
-                : [
-                    receipt("old-inventory", progressMarker("discovery", 0, 7)),
-                    ...(scenario === "inventory phase"
-                      ? [
-                          receipt(
-                            "new-inventory",
-                            progressMarker("discovery", 0, 8),
-                          ),
-                        ]
-                      : []),
-                  ];
-            // All canonical records precede every corresponding SDK item. Only
-            // observer delivery/poll placement differs between paired controls.
-            await appendFile(
-              parent,
-              [...inventories, ...commands.map((item) => item.saved)]
-                .map((item) => JSON.stringify(item))
-                .join("\n") + "\n",
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        const parent = await writeUsageSession(codexHome, "thread-1", {});
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          if (scenario !== "inventory phase") {
+            const worker = await writeWorkerSession(codexHome);
+            const workerCount = scenario === "below worker" ? count : 8;
+            await appendRecord(
+              worker,
+              receipt(
+                "worker-reviewed",
+                progressMarker("discovery", workerCount, workerCount),
+              ),
             );
-            if (early) for (const item of commands) yield item.live;
-            pausePoll = false;
-            pollAllowed.resolve();
-            await parentRead.promise;
-            if (!early) for (const item of commands) yield item.live;
-            if (scenario === "inventory phase") {
-              const next = command("next", progressMarker("reporting", 6, 8));
-              await appendFile(parent, JSON.stringify(next.saved) + "\n");
-              yield next.live;
-            }
+            await workerRead.promise;
           }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+          pausePoll = true;
+          const commands =
+            scenario === "across frontier"
+              ? [
+                  command(
+                    "inventory",
+                    commandOutput(progressMarker("discovery", 0, 9)),
+                    true,
+                  ),
+                  command(
+                    "review",
+                    commandOutput(progressMarker("validation", count, 9)),
+                    true,
+                  ),
+                  command("parent-boundary", progressMarker("discovery", 8, 8)),
+                ]
+              : [
+                  command(
+                    "parent-boundary",
+                    scenario === "below worker"
+                      ? truncated
+                        ? commandOutput(progressMarker("validation", 3, 7))
+                        : progressMarker("validation", 3, 7)
+                      : progressMarker("validation", 5, 8),
+                    truncated,
+                  ),
+                ];
+          const inventories =
+            scenario === "across frontier"
+              ? []
+              : [
+                  receipt("old-inventory", progressMarker("discovery", 0, 7)),
+                  ...(scenario === "inventory phase"
+                    ? [
+                        receipt(
+                          "new-inventory",
+                          progressMarker("discovery", 0, 8),
+                        ),
+                      ]
+                    : []),
+                ];
+          // All canonical records precede every corresponding SDK item. Only
+          // observer delivery/poll placement differs between paired controls.
+          await appendRecords(parent, [
+            ...inventories,
+            ...commands.map((item) => item.saved),
+          ]);
+          if (early) for (const item of commands) yield item.live;
+          pausePoll = false;
+          pollAllowed.resolve();
+          await parentRead.promise;
+          if (!early) for (const item of commands) yield item.live;
+          if (scenario === "inventory phase") {
+            const next = command("next", progressMarker("reporting", 6, 8));
+            await appendRecord(parent, next.saved);
+            yield next.live;
+          }
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       // The fake stream has no process handle to keep the unref'ed poll alive.
       const keepAlive = setInterval(() => {}, 1_000);
@@ -6120,18 +5762,18 @@ if __name__ == "__main__":
         });
         expect(updates.at(-1)).toEqual(
           scenario === "below worker"
-            ? {
-                phase: count === 7 ? "preflight" : "validation",
-                filesCompleted: count === 7 ? 7 : 3,
-                filesTotal: 7,
-              }
+            ? scanProgress(
+                count === 7 ? "preflight" : "validation",
+                count === 7 ? 7 : 3,
+                7,
+              )
             : scenario === "across frontier"
-              ? {
-                  phase: count > 8 ? "validation" : "discovery",
-                  filesCompleted: Math.max(count, 8),
-                  filesTotal: 9,
-                }
-              : { phase: "reporting", filesCompleted: 6, filesTotal: 8 },
+              ? scanProgress(
+                  count > 8 ? "validation" : "discovery",
+                  Math.max(count, 8),
+                  9,
+                )
+              : scanProgress("reporting", 6, 8),
         );
       } finally {
         clearInterval(keepAlive);
@@ -6182,78 +5824,57 @@ if __name__ == "__main__":
         }) as typeof handle.read;
         return handle;
       }) as typeof originalOpen);
-      const originalReaddir = fsPromises.readdir;
-      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-        ...args: Parameters<typeof originalReaddir>
-      ) => {
-        if (pausePoll && String(args[0]) === join(codexHome, "sessions"))
-          await pollAllowed.promise;
-        return originalReaddir(...args);
-      }) as typeof originalReaddir);
 
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          const parent = await writeUsageSession(codexHome, "thread-1", {});
-          parentPath = parent;
-          const worker = await writeUsageSession(
-            codexHome,
-            "worker-thread",
-            {},
-            { parent: "thread-1" },
+      const listing = holdSessionListing(
+        codexHome,
+        pollAllowed.promise,
+        () => pausePoll,
+      );
+
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        const parent = await writeUsageSession(codexHome, "thread-1", {});
+        parentPath = parent;
+        const worker = await writeWorkerSession(codexHome);
+        const step = async (
+          id: string,
+          phase: ScanProgress["phase"],
+          count: number,
+          total: number,
+          truncate = false,
+        ): Promise<ThreadEvent> => {
+          const text = truncate
+            ? commandOutput(progressMarker(phase, count, total))
+            : progressMarker(phase, count, total);
+          // Every native record is durable before its corresponding SDK item;
+          // neither the old nor the new live inventory occurrence is omitted.
+          await appendRecord(
+            parent,
+            nativeCommand(id, truncate ? persistedCommandOutput : text, id),
           );
-          const step = async (
-            id: string,
-            phase: ScanProgress["phase"],
-            count: number,
-            total: number,
-            truncate = false,
-          ): Promise<ThreadEvent> => {
-            const text = truncate
-              ? commandOutput(progressMarker(phase, count, total))
-              : progressMarker(phase, count, total);
-            // Every native record is durable before its corresponding SDK item;
-            // neither the old nor the new live inventory occurrence is omitted.
-            await appendFile(
-              parent,
-              JSON.stringify(
-                nativeCommand(id, truncate ? persistedCommandOutput : text, id),
-              ) + "\n",
-            );
-            return completedCommand(id, text);
-          };
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            await appendFile(
-              worker,
-              JSON.stringify({
-                type: "response_item",
-                payload: {
-                  type: "custom_tool_call_output",
-                  call_id: "worker-reviewed",
-                  output: progressMarker(
-                    "validation",
-                    workerCount,
-                    workerCount,
-                  ),
-                },
-              }) + "\n",
-            );
-            await workerRead.promise;
-            pausePoll = !split;
-            yield await step("old-inventory", "discovery", 0, 7);
-            if (split) await oldRead.promise;
-            pausePoll = true;
-            yield await step("new-inventory", "discovery", 0, 8, truncated);
-            pausePoll = false;
-            pollAllowed.resolve();
-            await newRead.promise;
-            yield await step("review", "discovery", 5, 8);
-            yield await step("done", "validation", 8, 8);
-          }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+          return completedCommand(id, text);
+        };
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          await appendRecord(
+            worker,
+            customToolOutput(
+              progressMarker("validation", workerCount, workerCount),
+              "worker-reviewed",
+            ),
+          );
+          await workerRead.promise;
+          pausePoll = !split;
+          yield await step("old-inventory", "discovery", 0, 7);
+          if (split) await oldRead.promise;
+          pausePoll = true;
+          yield await step("new-inventory", "discovery", 0, 8, truncated);
+          pausePoll = false;
+          pollAllowed.resolve();
+          await newRead.promise;
+          yield await step("review", "discovery", 5, 8);
+          yield await step("done", "validation", 8, 8);
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       // The fake stream has no process handle to keep the unref'ed poll alive.
       const keepAlive = setInterval(() => {}, 1_000);
@@ -6270,11 +5891,7 @@ if __name__ == "__main__":
             if (payload?.item?.id === "new-inventory") newRead.resolve();
           },
         });
-        expect(updates.at(-1)).toEqual({
-          phase: "validation",
-          filesCompleted: 8,
-          filesTotal: 8,
-        });
+        expect(updates.at(-1)).toEqual(scanProgress("validation", 8, 8));
         if (!split)
           expect(updates.every((update) => update.filesTotal === 8)).toBe(true);
       } finally {
@@ -6299,59 +5916,41 @@ if __name__ == "__main__":
       const workerRead = Promise.withResolvers<void>();
       const parentRead = Promise.withResolvers<void>();
 
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          const parent = await writeUsageSession(codexHome, "thread-1", {});
-          // The inventory is already durable; its full SDK projection is delayed
-          // until after the provisional worker and lower parent count are polled.
-          await appendFile(
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        const parent = await writeUsageSession(codexHome, "thread-1", {});
+        // The inventory is already durable; its full SDK projection is delayed
+        // until after the provisional worker and lower parent count are polled.
+        await appendRecord(
+          parent,
+          nativeCommand("inventory", persistedCommandOutput),
+        );
+        const worker = await writeWorkerSession(codexHome);
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          const workerCount = eligibleWorker ? 7 : 8;
+          await appendRecord(
+            worker,
+            customToolOutput(
+              progressMarker("discovery", workerCount, workerCount),
+              "worker-review",
+            ),
+          );
+          await workerRead.promise;
+          await appendRecord(
             parent,
-            JSON.stringify(nativeCommand("inventory", persistedCommandOutput)) +
-              "\n",
+            customToolOutput(
+              progressMarker("validation", 4, 7),
+              "parent-review",
+            ),
           );
-          const worker = await writeUsageSession(
-            codexHome,
-            "worker-thread",
-            {},
-            { parent: "thread-1" },
+          await parentRead.promise;
+          yield completedCommand(
+            "inventory",
+            commandOutput(progressMarker("discovery", 0, 7)),
+            "live-inventory",
           );
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            const workerCount = eligibleWorker ? 7 : 8;
-            await appendFile(
-              worker,
-              JSON.stringify({
-                type: "response_item",
-                payload: {
-                  type: "custom_tool_call_output",
-                  call_id: "worker-review",
-                  output: progressMarker("discovery", workerCount, workerCount),
-                },
-              }) + "\n",
-            );
-            await workerRead.promise;
-            await appendFile(
-              parent,
-              JSON.stringify({
-                type: "response_item",
-                payload: {
-                  type: "custom_tool_call_output",
-                  call_id: "parent-review",
-                  output: progressMarker("validation", 4, 7),
-                },
-              }) + "\n",
-            );
-            await parentRead.promise;
-            yield completedCommand(
-              "inventory",
-              commandOutput(progressMarker("discovery", 0, 7)),
-              "live-inventory",
-            );
-          }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       // The fake stream has no process handle to keep the unref'ed poll alive.
       const keepAlive = setInterval(() => {}, 1_000);
@@ -6364,11 +5963,13 @@ if __name__ == "__main__":
             if (id === "parent-review") parentRead.resolve();
           },
         });
-        expect(updates.at(-1)).toEqual({
-          phase: eligibleWorker ? "preflight" : "validation",
-          filesCompleted: eligibleWorker ? 7 : 4,
-          filesTotal: 7,
-        });
+        expect(updates.at(-1)).toEqual(
+          scanProgress(
+            eligibleWorker ? "preflight" : "validation",
+            eligibleWorker ? 7 : 4,
+            7,
+          ),
+        );
       } finally {
         clearInterval(keepAlive);
         await client.close();
@@ -6456,17 +6057,7 @@ if __name__ == "__main__":
       ) => progressMarker(phase, filesCompleted, filesTotal);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? {
-                ...mockScanRegistration(args, input),
-                scopeFileCount: originalTotal,
-              }
-            : mockWorkbench(args, input),
+        runWorkbench: workbenchWithFileCount(originalTotal),
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const rollout = await writeUsageSession(codexHome, "thread-1", {});
@@ -6481,14 +6072,7 @@ if __name__ == "__main__":
               );
             }
             const saved: unknown[] = [
-              {
-                type: "response_item",
-                payload: {
-                  type: "custom_tool_call_output",
-                  call_id: "old-preview",
-                  output: marker(0, originalTotal),
-                },
-              },
+              customToolOutput(marker(0, originalTotal), "old-preview"),
             ];
             if (nativeCompletion)
               saved.push(
@@ -6506,37 +6090,25 @@ if __name__ == "__main__":
                   "native-original-inventory",
                 ),
               );
-            await appendFile(
+            await appendRecords(
               rollout,
-              saved
-                .slice(0, delayNative ? 1 : saved.length)
-                .map((event) => JSON.stringify(event))
-                .join("\n") + "\n",
+              saved.slice(0, delayNative ? 1 : saved.length),
             );
             await parentRead.promise;
-            const worker = await writeUsageSession(
-              codexHome,
-              "worker-thread",
-              {},
-              { parent: "thread-1" },
-            );
-            await appendFile(
+            const worker = await writeWorkerSession(codexHome);
+            await appendRecord(
               worker,
-              JSON.stringify({
-                type: "response_item",
-                payload: {
-                  type: "custom_tool_call_output",
-                  output: marker(
-                    workerCount,
-                    workerTotal,
-                    _scenario === "live inventory readmits pending worker" ||
-                      _scenario ===
-                        "pending worker coverage remains newer than inventory proof"
-                      ? "validation"
-                      : "discovery",
-                  ),
-                },
-              }) + "\n",
+              customToolOutput(
+                marker(
+                  workerCount,
+                  workerTotal,
+                  _scenario === "live inventory readmits pending worker" ||
+                    _scenario ===
+                      "pending worker coverage remains newer than inventory proof"
+                    ? "validation"
+                    : "discovery",
+                ),
+              ),
             );
             await workerRead.promise;
             if (_scenario === "live inventory readmits pending worker")
@@ -6545,23 +6117,10 @@ if __name__ == "__main__":
                 commandOutput(marker(0, correctedTotal)),
                 "restored-inventory",
               );
-            if (delayNative)
-              await appendFile(
-                rollout,
-                saved
-                  .slice(1)
-                  .map((event) => JSON.stringify(event))
-                  .join("\n") + "\n",
-              );
-            await appendFile(
+            if (delayNative) await appendRecords(rollout, saved.slice(1));
+            await appendRecord(
               rollout,
-              JSON.stringify({
-                type: "response_item",
-                payload: {
-                  type: "custom_tool_call_output",
-                  output: marker(2, correctedTotal),
-                },
-              }) + "\n",
+              customToolOutput(marker(2, correctedTotal)),
             );
           }
           return { events: completedEvents("thread-1", markers()) };
@@ -6598,21 +6157,18 @@ if __name__ == "__main__":
           expect(
             updates.some((update) => update.filesTotal === correctedTotal),
           ).toBe(true);
-          expect(updates.at(-1)).toEqual({
-            phase: "discovery",
-            filesCompleted: workerCount,
-            filesTotal: originalTotal,
-          });
+          expect(updates.at(-1)).toEqual(
+            scanProgress("discovery", workerCount, originalTotal),
+          );
           return;
         }
-        expect(updates.at(-1)).toEqual({
-          phase: "discovery",
-          filesCompleted: Math.max(
-            2,
-            workerTotal <= correctedTotal ? workerCount : 0,
+        expect(updates.at(-1)).toEqual(
+          scanProgress(
+            "discovery",
+            Math.max(2, workerTotal <= correctedTotal ? workerCount : 0),
+            correctedTotal,
           ),
-          filesTotal: correctedTotal,
-        });
+        );
         const corrected = updates.findIndex(
           (progress) => progress.filesTotal === correctedTotal,
         );
@@ -6628,11 +6184,9 @@ if __name__ == "__main__":
           ),
         ).toBe(true);
         if (workerTotal > correctedTotal) {
-          expect(updates.slice(proofIndex)).toContainEqual({
-            phase: "discovery",
-            filesCompleted: 0,
-            filesTotal: correctedTotal,
-          });
+          expect(updates.slice(proofIndex)).toContainEqual(
+            scanProgress("discovery", 0, correctedTotal),
+          );
         }
       } finally {
         clearInterval(keepAlive);
@@ -6649,51 +6203,30 @@ if __name__ == "__main__":
       const inventoryRead = Promise.withResolvers<void>();
       const completeRead = Promise.withResolvers<void>();
       const idleRead = Promise.withResolvers<void>();
-      const receipt = (id: string, count?: number) => ({
-        type: "response_item",
-        payload: {
-          type: "custom_tool_call_output",
-          call_id: id,
-          output:
-            count === undefined
-              ? "Inspection continues."
-              : "CODEX_SECURITY_SCAN_PROGRESS " +
-                JSON.stringify({
-                  phase: "discovery",
-                  filesCompleted: count,
-                  filesTotal: 9,
-                }),
-        },
-      });
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          const rollout = await writeUsageSession(codexHome, "thread-1", {});
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            if (split) {
-              await appendFile(
-                rollout,
-                JSON.stringify(receipt("inventory", 0)) + "\n",
-              );
-              await inventoryRead.promise;
-            }
-            await appendFile(
-              rollout,
-              [
-                ...(split ? [] : [receipt("inventory", 0)]),
-                receipt("complete", 7),
-              ]
-                .map((row) => JSON.stringify(row))
-                .join("\n") + "\n",
-            );
-            await completeRead.promise;
-            await appendFile(rollout, JSON.stringify(receipt("idle")) + "\n");
-            await idleRead.promise;
+      const receipt = (id: string, count?: number) =>
+        customToolOutput(
+          count === undefined
+            ? "Inspection continues."
+            : progressMarker("discovery", count, 9),
+          id,
+        );
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        const rollout = await writeUsageSession(codexHome, "thread-1", {});
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          if (split) {
+            await appendRecord(rollout, receipt("inventory", 0));
+            await inventoryRead.promise;
           }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+          await appendRecords(rollout, [
+            ...(split ? [] : [receipt("inventory", 0)]),
+            receipt("complete", 7),
+          ]);
+          await completeRead.promise;
+          await appendRecord(rollout, receipt("idle"));
+          await idleRead.promise;
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       // The fake stream has no process handle to keep the unref'ed poll alive.
       const keepAlive = setInterval(() => {}, 1_000);
@@ -6713,11 +6246,7 @@ if __name__ == "__main__":
             }
           },
         });
-        expect(updates.at(-1)).toEqual({
-          phase: "discovery",
-          filesCompleted: 7,
-          filesTotal: 9,
-        });
+        expect(updates.at(-1)).toEqual(scanProgress("discovery", 7, 9));
         const reviewed = updates.findIndex(
           (update) => update.filesCompleted === 7,
         );
@@ -6746,32 +6275,16 @@ if __name__ == "__main__":
       const correctedRead = Promise.withResolvers<void>();
       const marker = (count: number, total: number) =>
         progressMarker("discovery", count, total);
-      const receipt = (id: string, total: number) => ({
-        type: "response_item",
-        payload: {
-          type: "custom_tool_call_output",
-          call_id: id,
-          output: marker(0, total),
-        },
-      });
+      const receipt = (id: string, total: number) =>
+        customToolOutput(marker(0, total), id);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 9 }
-            : mockWorkbench(args, input),
+        runWorkbench: workbenchWithFileCount(9),
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const rollout = await writeUsageSession(codexHome, "thread-1", {});
           async function* events(): AsyncGenerator<ThreadEvent> {
-            await appendFile(
-              rollout,
-              JSON.stringify(receipt("stale", 8)) + "\n",
-            );
+            await appendRecord(rollout, receipt("stale", 8));
             await staleRead.promise;
             yield completedCommand(
               "inspect-source",
@@ -6779,22 +6292,17 @@ if __name__ == "__main__":
               "completed-review",
             );
             if (split) {
-              await appendFile(
-                rollout,
-                JSON.stringify(receipt("corrected", 9)) + "\n",
-              );
+              await appendRecord(rollout, receipt("corrected", 9));
               await correctedRead.promise;
             }
             const completion = nativeCommand(
               "inspect-source",
               persistedCommandOutput,
             );
-            await appendFile(
-              rollout,
-              [...(split ? [] : [receipt("corrected", 9)]), completion]
-                .map((row) => JSON.stringify(row))
-                .join("\n") + "\n",
-            );
+            await appendRecords(rollout, [
+              ...(split ? [] : [receipt("corrected", 9)]),
+              completion,
+            ]);
           }
           return { events: completedEvents("thread-1", events()) };
         }),
@@ -6810,11 +6318,7 @@ if __name__ == "__main__":
             if (id === "corrected") correctedRead.resolve();
           },
         });
-        expect(updates.at(-1)).toEqual({
-          phase: "discovery",
-          filesCompleted: 9,
-          filesTotal: 9,
-        });
+        expect(updates.at(-1)).toEqual(scanProgress("discovery", 9, 9));
       } finally {
         clearInterval(keepAlive);
         await client.close();
@@ -6829,54 +6333,38 @@ if __name__ == "__main__":
       const updates: ScanProgress[] = [];
       const marker = (completed: number, total: number) =>
         progressMarker("discovery", completed, total);
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          const rollout = await writeUsageSession(codexHome, "thread-1", {});
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            for (const [completed, total] of [
-              [0, 8],
-              [0, 9],
-              ...(count ? [[count, 9]] : []),
-            ])
-              yield completedCommand(
-                `report-progress ${completed} ${total}`,
-                commandOutput(marker(completed!, total!)),
-                `progress-${completed}-${total}`,
-              );
-            await appendFile(
-              rollout,
-              JSON.stringify(
-                nativeCommand(
-                  ["report-progress", "0", "8"],
-                  persistedCommandOutput,
-                ),
-              ) + "\n",
+      await using client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        const rollout = await writeUsageSession(codexHome, "thread-1", {});
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          for (const [completed, total] of [
+            [0, 8],
+            [0, 9],
+            ...(count ? [[count, 9]] : []),
+          ])
+            yield completedCommand(
+              `report-progress ${completed} ${total}`,
+              commandOutput(marker(completed!, total!)),
+              `progress-${completed}-${total}`,
             );
-          }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+          await appendRecord(
+            rollout,
+            nativeCommand(
+              ["report-progress", "0", "8"],
+              persistedCommandOutput,
+            ),
+          );
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
-      try {
-        await client.run(repository, {
-          onProgress: (update) => updates.push(update),
-        });
-        expect(updates.at(-1)).toEqual({
-          phase: "discovery",
-          filesCompleted: count,
-          filesTotal: 9,
-        });
-        const corrected = updates.findIndex(
-          (update) => update.filesTotal === 9,
-        );
-        expect(
-          updates.slice(corrected).every((update) => update.filesTotal === 9),
-        ).toBe(true);
-      } finally {
-        await client.close();
-      }
+      await client.run(repository, {
+        onProgress: (update) => updates.push(update),
+      });
+      expect(updates.at(-1)).toEqual(scanProgress("discovery", count, 9));
+      const corrected = updates.findIndex((update) => update.filesTotal === 9);
+      expect(
+        updates.slice(corrected).every((update) => update.filesTotal === 9),
+      ).toBe(true);
     },
   );
 
@@ -6893,14 +6381,7 @@ if __name__ == "__main__":
         progressMarker("discovery", completed, inventory);
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: oldTotal }
-            : mockWorkbench(args, input),
+        runWorkbench: workbenchWithFileCount(oldTotal),
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const rollout = await writeUsageSession(codexHome, "thread-1", {});
@@ -6912,29 +6393,20 @@ if __name__ == "__main__":
                 `live-${completed}`,
               );
             yield live(0);
-            await appendFile(
+            await appendRecord(
               rollout,
-              JSON.stringify({
-                type: "response_item",
-                payload: {
-                  type: "custom_tool_call_output",
-                  call_id: "old-preview",
-                  output: marker(0, oldTotal),
-                },
-              }) + "\n",
+              customToolOutput(marker(0, oldTotal), "old-preview"),
             );
             await previewRead.promise;
             yield live(count);
             for (const completed of [0, count])
-              await appendFile(
+              await appendRecord(
                 rollout,
-                JSON.stringify(
-                  nativeCommand(
-                    ["report-progress", String(completed)],
-                    persistedCommandOutput,
-                    `native-${completed}`,
-                  ),
-                ) + "\n",
+                nativeCommand(
+                  ["report-progress", String(completed)],
+                  persistedCommandOutput,
+                  `native-${completed}`,
+                ),
               );
           }
           return { events: completedEvents("thread-1", events()) };
@@ -6953,11 +6425,7 @@ if __name__ == "__main__":
               previewRead.resolve();
           },
         });
-        expect(updates.at(-1)).toEqual({
-          phase: "discovery",
-          filesCompleted: count,
-          filesTotal: total,
-        });
+        expect(updates.at(-1)).toEqual(scanProgress("discovery", count, total));
       } finally {
         clearInterval(keepAlive);
         await client.close();
@@ -7008,38 +6476,24 @@ if __name__ == "__main__":
         text,
         "live-command",
       );
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          const rollout = await writeUsageSession(codexHome, "thread-1", {});
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            if (liveFirst) yield event;
-            const saved: unknown[] = [
-              nativeCommand(
-                "scan-batch",
-                truncated ? persistedCommandOutput : text,
-                "native-batch",
-              ),
-            ];
-            if (preview)
-              saved.push({
-                type: "response_item",
-                payload: {
-                  type: "custom_tool_call_output",
-                  output: marker("discovery"),
-                },
-              });
-            await appendFile(
-              rollout,
-              saved.map((entry) => JSON.stringify(entry)).join("\n") + "\n",
-            );
-            await read.promise;
-            if (!liveFirst) yield event;
-          }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        const rollout = await writeUsageSession(codexHome, "thread-1", {});
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          if (liveFirst) yield event;
+          const saved: unknown[] = [
+            nativeCommand(
+              "scan-batch",
+              truncated ? persistedCommandOutput : text,
+              "native-batch",
+            ),
+          ];
+          if (preview) saved.push(customToolOutput(marker("discovery")));
+          await appendRecords(rollout, saved);
+          await read.promise;
+          if (!liveFirst) yield event;
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       // The fake stream has no process handle to keep the unref'ed poll alive.
       const keepAlive = setInterval(() => {}, 1_000);
@@ -7081,46 +6535,28 @@ if __name__ == "__main__":
     const workerRead = Promise.withResolvers<void>();
     const latest = Promise.withResolvers<void>();
     const marker = (phase: string) => progressMarker(phase, 8, 8);
-    const client = TestClient.withDependencies({
-      ...scanRuntimeDependencies(codexHome, scanDir),
-      runWorkbench: registerEightFileScan,
-      createCodex: codexFactory(async () => {
-        await copyCompletedScan(root);
-        const rollout = await writeUsageSession(codexHome, "thread-1", {});
-        const native = (id: string, phase: string) =>
-          JSON.stringify(
-            nativeCommand(["scan-phase", phase], marker(phase), id),
-          ) + "\n";
-        async function* events(): AsyncGenerator<ThreadEvent> {
-          await appendFile(rollout, native("first", "discovery"));
-          await first.promise;
-          const worker = await writeUsageSession(
-            codexHome,
-            "worker-thread",
-            {},
-            { parent: "thread-1" },
-          );
-          await appendFile(
-            worker,
-            JSON.stringify({
-              type: "response_item",
-              payload: {
-                type: "custom_tool_call_output",
-                output: marker("validation"),
-              },
-            }) + "\n",
-          );
-          await workerRead.promise;
-          await appendFile(rollout, native("latest", "validation"));
-          await latest.promise;
-          yield completedCommand(
-            "scan-phase discovery",
-            marker("discovery"),
-            "old-stream",
-          );
-        }
-        return { events: completedEvents("thread-1", events()) };
-      }),
+    const client = eightFileClient(codexHome, scanDir, async () => {
+      await copyCompletedScan(root);
+      const rollout = await writeUsageSession(codexHome, "thread-1", {});
+      const native = (id: string, phase: string) =>
+        JSON.stringify(
+          nativeCommand(["scan-phase", phase], marker(phase), id),
+        ) + "\n";
+      async function* events(): AsyncGenerator<ThreadEvent> {
+        await appendFile(rollout, native("first", "discovery"));
+        await first.promise;
+        const worker = await writeWorkerSession(codexHome);
+        await appendRecord(worker, customToolOutput(marker("validation")));
+        await workerRead.promise;
+        await appendFile(rollout, native("latest", "validation"));
+        await latest.promise;
+        yield completedCommand(
+          "scan-phase discovery",
+          marker("discovery"),
+          "old-stream",
+        );
+      }
+      return { events: completedEvents("thread-1", events()) };
     });
     // The fake stream has no process handle to keep the unref'ed poll alive.
     const keepAlive = setInterval(() => {}, 1_000);
@@ -7165,64 +6601,47 @@ if __name__ == "__main__":
       const initialRead = Promise.withResolvers<void>();
       const nextRead = Promise.withResolvers<void>();
       if (pollFirst) pollAllowed.resolve();
-      const originalReaddir = fsPromises.readdir;
-      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-        ...args: Parameters<typeof originalReaddir>
-      ) => {
-        if (String(args[0]) === join(codexHome, "sessions"))
-          await pollAllowed.promise;
-        return originalReaddir(...args);
-      }) as typeof originalReaddir);
+
+      const listing = holdSessionListing(codexHome, pollAllowed.promise);
       const marker = (phase: ScanProgress["phase"], count: number) =>
         progressMarker(phase, count, 9);
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          const parent = await writeUsageSession(codexHome, "thread-1", {});
-          const text = [
-            commandOutput(marker("discovery", 0)),
-            marker(firstPhase, 4),
-            marker(lastPhase, 4),
-          ];
-          await appendFile(
-            parent,
-            text
-              .map((output, index) =>
-                JSON.stringify(
-                  nativeCommand(
-                    `step-${index}`,
-                    index === 0 ? persistedCommandOutput : output,
-                    `step-${index}`,
-                  ),
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        const parent = await writeUsageSession(codexHome, "thread-1", {});
+        const text = [
+          commandOutput(marker("discovery", 0)),
+          marker(firstPhase, 4),
+          marker(lastPhase, 4),
+        ];
+        await appendFile(
+          parent,
+          text
+            .map((output, index) =>
+              JSON.stringify(
+                nativeCommand(
+                  `step-${index}`,
+                  index === 0 ? persistedCommandOutput : output,
+                  `step-${index}`,
                 ),
-              )
-              .join("\n") + "\n",
+              ),
+            )
+            .join("\n") + "\n",
+        );
+        const item = (index: number): ThreadEvent =>
+          completedCommand(`step-${index}`, text[index]!, `live-${index}`);
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          if (pollFirst) await initialRead.promise;
+          yield item(0);
+          yield item(1);
+          pollAllowed.resolve();
+          await appendRecord(
+            parent,
+            customToolOutput("Poll boundary", "next-poll"),
           );
-          const item = (index: number): ThreadEvent =>
-            completedCommand(`step-${index}`, text[index]!, `live-${index}`);
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            if (pollFirst) await initialRead.promise;
-            yield item(0);
-            yield item(1);
-            pollAllowed.resolve();
-            await appendFile(
-              parent,
-              JSON.stringify({
-                type: "response_item",
-                payload: {
-                  type: "custom_tool_call_output",
-                  call_id: "next-poll",
-                  output: "Poll boundary",
-                },
-              }) + "\n",
-            );
-            await nextRead.promise;
-            yield item(2);
-          }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+          await nextRead.promise;
+          yield item(2);
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       // The fake stream has no process handle to keep the unref'ed poll alive.
       const keepAlive = setInterval(() => {}, 1_000);
@@ -7238,11 +6657,7 @@ if __name__ == "__main__":
             if (payload?.call_id === "next-poll") nextRead.resolve();
           },
         });
-        expect(updates.at(-1)).toEqual({
-          phase: lastPhase,
-          filesCompleted: 4,
-          filesTotal: 9,
-        });
+        expect(updates.at(-1)).toEqual(scanProgress(lastPhase, 4, 9));
       } finally {
         clearInterval(keepAlive);
         pollAllowed.resolve();
@@ -7276,61 +6691,46 @@ if __name__ == "__main__":
       const parentRead = Promise.withResolvers<void>();
       const seen = new Set<string>();
 
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          const parent = await writeUsageSession(codexHome, "thread-1", {});
-          await appendFile(
-            parent,
-            JSON.stringify(nativeCommand("inventory", persistedCommandOutput)) +
-              "\n",
-          );
-          const appendWorkers = async () => {
-            for (const [index, count] of counts.entries()) {
-              const worker = await writeUsageSession(
-                codexHome,
-                `worker-${index}`,
-                {},
-                { parent: "thread-1" },
-              );
-              await appendFile(
-                worker,
-                JSON.stringify({
-                  type: "response_item",
-                  payload: {
-                    type: "custom_tool_call_output",
-                    call_id: `worker-${index}`,
-                    output: progressMarker("discovery", count, 9),
-                  },
-                }) + "\n",
-              );
-            }
-            await workersRead.promise;
-          };
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            if (pendingFirst) await appendWorkers();
-            await appendFile(
-              parent,
-              JSON.stringify({
-                type: "response_item",
-                payload: {
-                  type: "custom_tool_call_output",
-                  call_id: "parent-review",
-                  output: progressMarker("validation", 7, 8),
-                },
-              }) + "\n",
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        const parent = await writeUsageSession(codexHome, "thread-1", {});
+        await appendRecord(
+          parent,
+          nativeCommand("inventory", persistedCommandOutput),
+        );
+        const appendWorkers = async () => {
+          for (const [index, count] of counts.entries()) {
+            const worker = await writeWorkerSession(
+              codexHome,
+              `worker-${index}`,
             );
-            await parentRead.promise;
-            if (!pendingFirst) await appendWorkers();
-            yield completedCommand(
-              "inventory",
-              commandOutput(progressMarker("discovery", 0, 9)),
+            await appendRecord(
+              worker,
+              customToolOutput(
+                progressMarker("discovery", count, 9),
+                `worker-${index}`,
+              ),
             );
           }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+          await workersRead.promise;
+        };
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          if (pendingFirst) await appendWorkers();
+          await appendRecord(
+            parent,
+            customToolOutput(
+              progressMarker("validation", 7, 8),
+              "parent-review",
+            ),
+          );
+          await parentRead.promise;
+          if (!pendingFirst) await appendWorkers();
+          yield completedCommand(
+            "inventory",
+            commandOutput(progressMarker("discovery", 0, 9)),
+          );
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       // The fake stream has no process handle to keep the unref'ed poll alive.
       const keepAlive = setInterval(() => {}, 1_000);
@@ -7350,11 +6750,9 @@ if __name__ == "__main__":
           },
         });
         const workerCount = counts.reduce((sum, count) => sum + count, 0);
-        expect(updates.at(-1)).toEqual({
-          phase: "validation",
-          filesCompleted: Math.max(7, workerCount),
-          filesTotal: 9,
-        });
+        expect(updates.at(-1)).toEqual(
+          scanProgress("validation", Math.max(7, workerCount), 9),
+        );
       } finally {
         clearInterval(keepAlive);
         workersRead.resolve();
@@ -7373,78 +6771,35 @@ if __name__ == "__main__":
       const parentRead = Promise.withResolvers<void>();
       const expanded = Promise.withResolvers<void>();
       if (delayed) pollAllowed.resolve();
-      const originalReaddir = fsPromises.readdir;
-      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-        ...args: Parameters<typeof originalReaddir>
-      ) => {
-        if (String(args[0]) === join(codexHome, "sessions"))
-          await pollAllowed.promise;
-        return originalReaddir(...args);
-      }) as typeof originalReaddir);
 
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          const parent = await writeUsageSession(codexHome, "thread-1", {});
-          const parts = ["Review: ", progressMarker("validation", 3, 8)];
-          const records = [
-            ...[9, 8].map((total) =>
-              nativeCommand(`inventory-${total}`, persistedCommandOutput),
-            ),
-            {
-              type: "response_item",
-              payload: {
-                type: "custom_tool_call_output",
-                output: progressMarker("attack_path", 3, 9),
-              },
-            },
-            {
-              type: "event_msg",
-              payload: {
-                type: "item_completed",
-                item: {
-                  type: "AgentMessage",
-                  content: [{ type: "Text", text: parts.join("") }],
-                },
-              },
-            },
-            {
-              type: "response_item",
-              payload: {
-                type: "message",
-                role: "assistant",
-                id: "newer-review",
-                content: parts.map((text) => ({ type: "output_text", text })),
-              },
-            },
-          ];
-          await appendFile(
-            parent,
-            records.map((row) => JSON.stringify(row)).join("\n") + "\n",
-          );
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            if (delayed) await parentRead.promise;
-            for (const total of [9, 8]) {
-              yield completedCommand(
-                `inventory-${total}`,
-                commandOutput(progressMarker("discovery", 0, total)),
-              );
-              if (delayed && total === 9) await expanded.promise;
-            }
-            pollAllowed.resolve();
-            yield {
-              type: "item.completed",
-              item: {
-                type: "agent_message",
-                id: "newer-review",
-                text: parts.join(""),
-              },
-            };
+      const listing = holdSessionListing(codexHome, pollAllowed.promise);
+
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        const parent = await writeUsageSession(codexHome, "thread-1", {});
+        const parts = ["Review: ", progressMarker("validation", 3, 8)];
+        const records = [
+          ...[9, 8].map((total) =>
+            nativeCommand(`inventory-${total}`, persistedCommandOutput),
+          ),
+          customToolOutput(progressMarker("attack_path", 3, 9)),
+          nativeMessage(parts.join("")),
+          responseMessage(parts, "newer-review"),
+        ];
+        await appendRecords(parent, records);
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          if (delayed) await parentRead.promise;
+          for (const total of [9, 8]) {
+            yield completedCommand(
+              `inventory-${total}`,
+              commandOutput(progressMarker("discovery", 0, total)),
+            );
+            if (delayed && total === 9) await expanded.promise;
           }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+          pollAllowed.resolve();
+          yield completedMessage("newer-review", parts.join(""));
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       // The fake stream has no process handle to keep the unref'ed poll alive.
       const keepAlive = setInterval(() => {}, 1_000);
@@ -7460,11 +6815,7 @@ if __name__ == "__main__":
               parentRead.resolve();
           },
         });
-        expect(updates.at(-1)).toEqual({
-          phase: "validation",
-          filesCompleted: 3,
-          filesTotal: 8,
-        });
+        expect(updates.at(-1)).toEqual(scanProgress("validation", 3, 8));
       } finally {
         clearInterval(keepAlive);
         pollAllowed.resolve();
@@ -7492,96 +6843,56 @@ if __name__ == "__main__":
       const closeReleased = Promise.withResolvers<void>();
       const inventoryRead = Promise.withResolvers<void>();
       const workerRead = Promise.withResolvers<void>();
-      let parentPath = "";
-      let pauseClose = false;
-      const originalOpen = fsPromises.open;
+      const session = { path: "", pauseClose: false };
+
       const originalReaddir = fsPromises.readdir;
-      const opening = spyOn(fsPromises, "open").mockImplementation((async (
-        ...args: Parameters<typeof originalOpen>
-      ) => {
-        const handle = await originalOpen(...args);
-        if (String(args[0]) !== parentPath || !pauseClose) return handle;
-        const close = handle.close.bind(handle);
-        handle.close = async () => {
-          if (pauseClose) {
-            pauseClose = false;
-            closeEntered.resolve();
-            await closeReleased.promise;
-          }
-          await close();
-        };
-        return handle;
-      }) as typeof originalOpen);
+      const opening = holdSessionClose(session, closeEntered, closeReleased);
       const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
         ...args: Parameters<typeof originalReaddir>
       ) => {
         const entries = await originalReaddir(...args);
-        if (String(args[0]) === dirname(parentPath))
+        if (String(args[0]) === dirname(session.path))
           return entries.toSorted(
             (left, right) =>
-              Number(String(right.name) === basename(parentPath)) -
-              Number(String(left.name) === basename(parentPath)),
+              Number(String(right.name) === basename(session.path)) -
+              Number(String(left.name) === basename(session.path)),
           );
         return entries;
       }) as typeof originalReaddir);
       const marker = (phase: ScanProgress["phase"], count: number) =>
         progressMarker(phase, count, 9);
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          parentPath = await writeUsageSession(codexHome, "thread-1", {});
-          // Both paths exist before enumeration; this poll can read the newly
-          // appended worker receipt after its older parent snapshot closes.
-          const worker = await writeUsageSession(
-            codexHome,
-            "worker-thread",
-            {},
-            { parent: "thread-1" },
-          );
-          pauseClose = split;
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            if (split) {
-              await appendFile(parentPath, "\n");
-              await closeEntered.promise;
-            }
-            await appendFile(
-              parentPath,
-              [
-                {
-                  type: "response_item",
-                  payload: {
-                    type: "custom_tool_call_output",
-                    output: marker("discovery", 0),
-                  },
-                },
-                nativeCommand("review", persistedCommandOutput),
-              ]
-                .map((row) => JSON.stringify(row))
-                .join("\n") + "\n",
-            );
-            if (!split) await inventoryRead.promise;
-            yield completedCommand(
-              "review",
-              commandOutput(marker("validation", 7)),
-            );
-            await appendFile(
-              worker,
-              JSON.stringify({
-                type: "response_item",
-                payload: {
-                  type: "custom_tool_call_output",
-                  call_id: "worker-reviewed",
-                  output: marker("discovery", workerCount),
-                },
-              }) + "\n",
-            );
-            closeReleased.resolve();
-            await workerRead.promise;
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        session.path = await writeUsageSession(codexHome, "thread-1", {});
+        // Both paths exist before enumeration; this poll can read the newly
+        // appended worker receipt after its older parent snapshot closes.
+        const worker = await writeWorkerSession(codexHome);
+        session.pauseClose = split;
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          if (split) {
+            await appendFile(session.path, "\n");
+            await closeEntered.promise;
           }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+          await appendRecords(session.path, [
+            customToolOutput(marker("discovery", 0)),
+            nativeCommand("review", persistedCommandOutput),
+          ]);
+          if (!split) await inventoryRead.promise;
+          yield completedCommand(
+            "review",
+            commandOutput(marker("validation", 7)),
+          );
+          await appendRecord(
+            worker,
+            customToolOutput(
+              marker("discovery", workerCount),
+              "worker-reviewed",
+            ),
+          );
+          closeReleased.resolve();
+          await workerRead.promise;
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       // The fake stream has no process handle to keep the unref'ed poll alive.
       const keepAlive = setInterval(() => {}, 1_000);
@@ -7594,14 +6905,16 @@ if __name__ == "__main__":
           },
           onWorkerEvent: () => workerRead.resolve(),
         });
-        expect(updates.at(-1)).toEqual({
-          phase: split && workerCount > 7 ? "preflight" : "validation",
-          filesCompleted: Math.max(7, workerCount),
-          filesTotal: 9,
-        });
+        expect(updates.at(-1)).toEqual(
+          scanProgress(
+            split && workerCount > 7 ? "preflight" : "validation",
+            Math.max(7, workerCount),
+            9,
+          ),
+        );
       } finally {
         clearInterval(keepAlive);
-        pauseClose = false;
+        session.pauseClose = false;
         closeEntered.resolve();
         closeReleased.resolve();
         inventoryRead.resolve();
@@ -7627,79 +6940,33 @@ if __name__ == "__main__":
       const firstRead = Promise.withResolvers<void>();
       const closeEntered = Promise.withResolvers<void>();
       const closeReleased = Promise.withResolvers<void>();
-      let parentPath = "";
-      let pauseClose = false;
-      const originalOpen = fsPromises.open;
-      const opening = spyOn(fsPromises, "open").mockImplementation((async (
-        ...args: Parameters<typeof originalOpen>
-      ) => {
-        const handle = await originalOpen(...args);
-        if (String(args[0]) !== parentPath || !pauseClose) return handle;
-        const close = handle.close.bind(handle);
-        handle.close = async () => {
-          if (pauseClose) {
-            pauseClose = false;
-            closeEntered.resolve();
-            await closeReleased.promise;
-          }
-          await close();
-        };
-        return handle;
-      }) as typeof originalOpen);
+      const session = { path: "", pauseClose: false };
+
+      const opening = holdSessionClose(session, closeEntered, closeReleased);
       const marker = (phase: ScanProgress["phase"]) =>
         progressMarker(phase, 8, 8);
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          parentPath = await writeUsageSession(codexHome, "thread-1", {});
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            // Finish initial session association so this poll reads only its
-            // original snapshot, rather than replaying a newly associated file.
-            await metadataRead.promise;
-            pauseClose = split;
-            await appendFile(
-              parentPath,
-              JSON.stringify({
-                type: "response_item",
-                payload: {
-                  type: "custom_tool_call_output",
-                  call_id: "first-review",
-                  output: marker(firstPhase),
-                },
-              }) + "\n",
-            );
-            if (split) await closeEntered.promise;
-            else await firstRead.promise;
-            // The newer completion is durable before its SDK projection arrives,
-            // even when the older snapshot is still waiting for file.close.
-            await appendFile(
-              parentPath,
-              JSON.stringify({
-                type: "event_msg",
-                payload: {
-                  type: "item_completed",
-                  item: {
-                    type: "AgentMessage",
-                    content: [{ type: "Text", text: marker(nextPhase) }],
-                  },
-                },
-              }) + "\n",
-            );
-            yield {
-              type: "item.completed",
-              item: {
-                id: "next-review",
-                type: "agent_message",
-                text: marker(nextPhase),
-              },
-            };
-            closeReleased.resolve();
-            await firstRead.promise;
-          }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        session.path = await writeUsageSession(codexHome, "thread-1", {});
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          // Finish initial session association so this poll reads only its
+          // original snapshot, rather than replaying a newly associated file.
+          await metadataRead.promise;
+          session.pauseClose = split;
+          await appendRecord(
+            session.path,
+            customToolOutput(marker(firstPhase), "first-review"),
+          );
+          if (split) await closeEntered.promise;
+          else await firstRead.promise;
+          // The newer completion is durable before its SDK projection arrives,
+          // even when the older snapshot is still waiting for file.close.
+          await appendRecord(session.path, nativeMessage(marker(nextPhase)));
+          yield completedMessage("next-review", marker(nextPhase));
+          closeReleased.resolve();
+          await firstRead.promise;
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       // The fake stream has no process handle to keep the unref'ed poll alive.
       const keepAlive = setInterval(() => {}, 1_000);
@@ -7715,14 +6982,10 @@ if __name__ == "__main__":
               firstRead.resolve();
           },
         });
-        expect(updates.at(-1)).toEqual({
-          phase: nextPhase,
-          filesCompleted: 8,
-          filesTotal: 8,
-        });
+        expect(updates.at(-1)).toEqual(scanProgress(nextPhase, 8, 8));
       } finally {
         clearInterval(keepAlive);
-        pauseClose = false;
+        session.pauseClose = false;
         metadataRead.resolve();
         firstRead.resolve();
         closeEntered.resolve();
@@ -7772,108 +7035,70 @@ if __name__ == "__main__":
 
       const nextPhase =
         workerPhase === "discovery" ? "attack_path" : "validation";
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          const parent = await writeUsageSession(codexHome, "thread-1", {});
-          let worker = "";
-          const workerReceipt = (
-            id: string,
-            phase: ScanProgress["phase"],
-            total = 3,
-          ) => ({
-            type: "response_item",
-            payload: {
-              type: "custom_tool_call_output",
-              call_id: id,
-              output: progressMarker(phase, 3, total),
-            },
-          });
-          const appendWorker = async () => {
-            worker = await writeUsageSession(
-              codexHome,
-              "worker-thread",
-              {},
-              { parent: "thread-1" },
-            );
-            await appendFile(
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        const parent = await writeUsageSession(codexHome, "thread-1", {});
+        let worker = "";
+        const workerReceipt = (
+          id: string,
+          phase: ScanProgress["phase"],
+          total = 3,
+        ) => customToolOutput(progressMarker(phase, 3, total), id);
+        const appendWorker = async () => {
+          worker = await writeWorkerSession(codexHome);
+          await appendRecord(
+            worker,
+            workerReceipt("worker-review", workerPhase),
+          );
+          await workerRead.promise;
+        };
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          await metadataRead.promise;
+          await appendRecord(
+            parent,
+            nativeCommand("inventory", persistedCommandOutput),
+          );
+          if (workerFirst) await appendWorker();
+          await appendRecord(
+            parent,
+            nativeMessage(
+              progressMarker(parentPhase, 3, parentTotal),
+              "parent-review",
+            ),
+          );
+          await parentRead.promise;
+          if (!workerFirst) await appendWorker();
+          if (nextWorker !== "none") {
+            await appendRecord(
               worker,
-              JSON.stringify(workerReceipt("worker-review", workerPhase)) +
-                "\n",
+              workerReceipt(
+                "worker-next",
+                nextPhase,
+                nextWorker === "mismatch" ? 4 : 3,
+              ),
             );
-            await workerRead.promise;
-          };
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            await metadataRead.promise;
-            await appendFile(
-              parent,
-              JSON.stringify(
-                nativeCommand("inventory", persistedCommandOutput),
-              ) + "\n",
-            );
-            if (workerFirst) await appendWorker();
-            await appendFile(
-              parent,
-              JSON.stringify({
-                type: "event_msg",
-                payload: {
-                  type: "item_completed",
-                  item: {
-                    type: "AgentMessage",
-                    id: "parent-review",
-                    content: [
-                      {
-                        type: "Text",
-                        text: progressMarker(parentPhase, 3, parentTotal),
-                      },
-                    ],
-                  },
-                },
-              }) + "\n",
-            );
-            await parentRead.promise;
-            if (!workerFirst) await appendWorker();
-            if (nextWorker !== "none") {
-              await appendFile(
-                worker,
-                JSON.stringify(
-                  workerReceipt(
-                    "worker-next",
-                    nextPhase,
-                    nextWorker === "mismatch" ? 4 : 3,
-                  ),
-                ) + "\n",
-              );
-              await nextWorkerRead.promise;
-            }
-            // Both native parent completions precede their SDK projections.
-            // Let the full earlier inventory reconcile before its following item.
-            yield completedCommand(
-              "inventory",
-              commandOutput(progressMarker("discovery", 0, 7)),
-            );
-            await scopeChanged.promise;
-            yield {
-              type: "item.completed",
-              item: {
-                type: "agent_message",
-                id: "parent-review",
-                text: progressMarker(parentPhase, 3, parentTotal),
-              },
-            };
-            // A fresh worker receipt is still consumed without replacing the
-            // last admitted parent phase.
-            if (repeat)
-              await appendFile(
-                worker,
-                JSON.stringify(workerReceipt("worker-repeat", workerPhase)) +
-                  "\n",
-              );
+            await nextWorkerRead.promise;
           }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+          // Both native parent completions precede their SDK projections.
+          // Let the full earlier inventory reconcile before its following item.
+          yield completedCommand(
+            "inventory",
+            commandOutput(progressMarker("discovery", 0, 7)),
+          );
+          await scopeChanged.promise;
+          yield completedMessage(
+            "parent-review",
+            progressMarker(parentPhase, 3, parentTotal),
+          );
+          // A fresh worker receipt is still consumed without replacing the
+          // last admitted parent phase.
+          if (repeat)
+            await appendRecord(
+              worker,
+              workerReceipt("worker-repeat", workerPhase),
+            );
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       // The fake stream has no process handle to keep the unref'ed poll alive.
       const keepAlive = setInterval(() => {}, 1_000);
@@ -7896,11 +7121,7 @@ if __name__ == "__main__":
             if (payload?.call_id === "worker-next") nextWorkerRead.resolve();
           },
         });
-        expect(updates.at(-1)).toEqual({
-          phase: parentPhase,
-          filesCompleted: 3,
-          filesTotal: 7,
-        });
+        expect(updates.at(-1)).toEqual(scanProgress(parentPhase, 3, 7));
       } finally {
         clearInterval(keepAlive);
         metadataRead.resolve();
@@ -7930,102 +7151,63 @@ if __name__ == "__main__":
       const closeEntered = Promise.withResolvers<void>();
       const closeReleased = Promise.withResolvers<void>();
       const recovered = Promise.withResolvers<void>();
-      let parentPath = "";
-      let pauseClose = false;
-      const originalOpen = fsPromises.open;
-      const opening = spyOn(fsPromises, "open").mockImplementation((async (
-        ...args: Parameters<typeof originalOpen>
-      ) => {
-        const handle = await originalOpen(...args);
-        if (String(args[0]) !== parentPath || !pauseClose) return handle;
-        const close = handle.close.bind(handle);
-        handle.close = async () => {
-          if (pauseClose) {
-            pauseClose = false;
-            closeEntered.resolve();
-            await closeReleased.promise;
-          }
-          await close();
-        };
-        return handle;
-      }) as typeof originalOpen);
+      const session = { path: "", pauseClose: false };
 
-      const receipt = (id: string, output: string) => ({
-        type: "response_item",
-        payload: { type: "custom_tool_call_output", call_id: id, output },
-      });
+      const opening = holdSessionClose(session, closeEntered, closeReleased);
+
+      const receipt = (id: string, output: string) =>
+        customToolOutput(output, id);
       const completion = (command: string, output: string) =>
         nativeCommand(command, output);
       const live = (command: string, output: string): ThreadEvent =>
         completedCommand(command, output);
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          parentPath = await writeUsageSession(codexHome, "thread-1", {});
-          const inventory = receipt(
-            "inventory",
-            progressMarker("discovery", 0, 6),
-          );
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            await metadataRead.promise;
-            if (early) {
-              await appendFile(parentPath, JSON.stringify(inventory) + "\n");
-              await inventoryRead.promise;
-            }
-            const first = await writeUsageSession(
-              codexHome,
-              "first-worker",
-              {},
-              { parent: "thread-1" },
-            );
-            await appendFile(
-              first,
-              JSON.stringify(
-                receipt("first", progressMarker(workerPhase, 3, 3)),
-              ) + "\n",
-            );
-            await firstRead.promise;
-            const second = await writeUsageSession(
-              codexHome,
-              "second-worker",
-              {},
-              { parent: "thread-1" },
-            );
-            await appendFile(
-              second,
-              JSON.stringify(
-                receipt("second", progressMarker(workerPhase, 1, 8)),
-              ) + "\n",
-            );
-            await secondRead.promise;
-            if (!early) {
-              pauseClose = true;
-              await appendFile(parentPath, "\n");
-              await closeEntered.promise;
-            }
-            // Native rows precede their ordered SDK completions, but an earlier
-            // read can finish closing before it observes those appended rows.
-            const rows = [
-              ...(early ? [] : [inventory]),
-              completion("eligible", persistedCommandOutput),
-              completion("oversized", progressMarker(parentPhase, 4, 8)),
-            ];
-            await appendFile(
-              parentPath,
-              rows.map((row) => JSON.stringify(row)).join("\n") + "\n",
-            );
-            yield live(
-              "eligible",
-              commandOutput(progressMarker(parentPhase, 3, 6)),
-            );
-            yield live("oversized", progressMarker(parentPhase, 4, 8));
-            closeReleased.resolve();
-            await recovered.promise;
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        session.path = await writeUsageSession(codexHome, "thread-1", {});
+        const inventory = receipt(
+          "inventory",
+          progressMarker("discovery", 0, 6),
+        );
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          await metadataRead.promise;
+          if (early) {
+            await appendRecord(session.path, inventory);
+            await inventoryRead.promise;
           }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+          const first = await writeWorkerSession(codexHome, "first-worker");
+          await appendRecord(
+            first,
+            receipt("first", progressMarker(workerPhase, 3, 3)),
+          );
+          await firstRead.promise;
+          const second = await writeWorkerSession(codexHome, "second-worker");
+          await appendRecord(
+            second,
+            receipt("second", progressMarker(workerPhase, 1, 8)),
+          );
+          await secondRead.promise;
+          if (!early) {
+            session.pauseClose = true;
+            await appendFile(session.path, "\n");
+            await closeEntered.promise;
+          }
+          // Native rows precede their ordered SDK completions, but an earlier
+          // read can finish closing before it observes those appended rows.
+          const rows = [
+            ...(early ? [] : [inventory]),
+            completion("eligible", persistedCommandOutput),
+            completion("oversized", progressMarker(parentPhase, 4, 8)),
+          ];
+          await appendRecords(session.path, rows);
+          yield live(
+            "eligible",
+            commandOutput(progressMarker(parentPhase, 3, 6)),
+          );
+          yield live("oversized", progressMarker(parentPhase, 4, 8));
+          closeReleased.resolve();
+          await recovered.promise;
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       const keepAlive = setInterval(() => {}, 1_000);
       try {
@@ -8045,11 +7227,7 @@ if __name__ == "__main__":
             if (id === "second") secondRead.resolve();
           },
         });
-        expect(updates.at(-1)).toEqual({
-          phase: parentPhase,
-          filesCompleted: 3,
-          filesTotal: 6,
-        });
+        expect(updates.at(-1)).toEqual(scanProgress(parentPhase, 3, 6));
       } finally {
         clearInterval(keepAlive);
         metadataRead.resolve();
@@ -8118,130 +7296,100 @@ if __name__ == "__main__":
         "inventory",
         commandOutput(progressMarker("discovery", 0, 6)),
       );
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          const parent = await writeUsageSession(codexHome, "thread-1", {});
-          const appendReceipt = async (
-            file: string,
-            id: string,
-            output: string,
-          ) => {
-            await appendFile(
-              file,
-              JSON.stringify({
-                type: "response_item",
-                payload: {
-                  type: "custom_tool_call_output",
-                  call_id: id,
-                  output,
-                },
-              }) + "\n",
-            );
-            await receipts.get(id)!.promise;
-          };
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            await metadataRead.promise;
-            await appendFile(
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        const parent = await writeUsageSession(codexHome, "thread-1", {});
+        const appendReceipt = async (
+          file: string,
+          id: string,
+          output: string,
+        ) => {
+          await appendRecord(file, customToolOutput(output, id));
+          await receipts.get(id)!.promise;
+        };
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          await metadataRead.promise;
+          await appendRecord(
+            parent,
+            nativeCommand("inventory", persistedCommandOutput),
+          );
+          const restoredInventory: ThreadEvent = completedCommand(
+            "inventory",
+            commandOutput(progressMarker("discovery", 0, 8)),
+            "inventory-restored",
+          );
+          if (restoreScope)
+            await appendRecord(
               parent,
-              JSON.stringify(
-                nativeCommand("inventory", persistedCommandOutput),
-              ) + "\n",
+              nativeCommand("inventory", persistedCommandOutput),
             );
-            const restoredInventory: ThreadEvent = completedCommand(
-              "inventory",
-              commandOutput(progressMarker("discovery", 0, 8)),
-              "inventory-restored",
+          const finalInventory: ThreadEvent = completedCommand(
+            "inventory",
+            commandOutput(progressMarker("discovery", 0, 6)),
+            "inventory-final",
+          );
+          if (scenario === "cycle-scope")
+            await appendRecord(
+              parent,
+              nativeCommand("inventory", persistedCommandOutput),
             );
-            if (restoreScope)
-              await appendFile(
-                parent,
-                JSON.stringify(
-                  nativeCommand("inventory", persistedCommandOutput),
-                ) + "\n",
-              );
-            const finalInventory: ThreadEvent = completedCommand(
-              "inventory",
-              commandOutput(progressMarker("discovery", 0, 6)),
-              "inventory-final",
-            );
-            if (scenario === "cycle-scope")
-              await appendFile(
-                parent,
-                JSON.stringify(
-                  nativeCommand("inventory", persistedCommandOutput),
-                ) + "\n",
-              );
-            if (early) {
-              yield inventory;
-              await inventoryRead.promise;
-              if (restoreScope) yield restoredInventory;
-              if (scenario === "cycle-scope") yield finalInventory;
-            }
-            const first = await writeUsageSession(
-              codexHome,
-              "first-worker",
-              {},
-              { parent: "thread-1" },
-            );
-            await appendReceipt(
-              first,
-              "first",
-              progressMarker(workerPhase, 3, 3),
-            );
-            const second = await writeUsageSession(
-              codexHome,
-              "second-worker",
-              {},
-              { parent: "thread-1" },
-            );
-            await appendReceipt(
-              second,
-              "second",
-              progressMarker(workerPhase, 1, 8),
-            );
+          if (early) {
+            yield inventory;
+            await inventoryRead.promise;
+            if (restoreScope) yield restoredInventory;
+            if (scenario === "cycle-scope") yield finalInventory;
+          }
+          const first = await writeWorkerSession(codexHome, "first-worker");
+          await appendReceipt(
+            first,
+            "first",
+            progressMarker(workerPhase, 3, 3),
+          );
+          const second = await writeWorkerSession(codexHome, "second-worker");
+          await appendReceipt(
+            second,
+            "second",
+            progressMarker(workerPhase, 1, 8),
+          );
+          await appendReceipt(
+            parent,
+            "eligible",
+            progressMarker(parentPhase, parentCount, 6),
+          );
+          if (scenario === "newer-parent")
             await appendReceipt(
               parent,
-              "eligible",
-              progressMarker(parentPhase, parentCount, 6),
+              "newer",
+              progressMarker(newerPhase, parentCount, 6),
             );
-            if (scenario === "newer-parent")
-              await appendReceipt(
-                parent,
-                "newer",
-                progressMarker(newerPhase, parentCount, 6),
-              );
-            if (scenario !== "no-frontier")
-              await appendReceipt(
-                parent,
-                "oversized",
-                progressMarker(parentPhase, 4, 8),
-              );
-            if (scenario === "idle" || scenario === "newer-parent") {
-              // Each receipt requires another actual poll. Deferred facts must
-              // survive while the newer parent still fits the provisional scope.
+          if (scenario !== "no-frontier")
+            await appendReceipt(
+              parent,
+              "oversized",
+              progressMarker(parentPhase, 4, 8),
+            );
+          if (scenario === "idle" || scenario === "newer-parent") {
+            // Each receipt requires another actual poll. Deferred facts must
+            // survive while the newer parent still fits the provisional scope.
+            await appendReceipt(parent, "idle-1", "done");
+            await appendReceipt(parent, "idle-2", "done");
+          }
+          if (!early) yield inventory;
+          if (restoreScope) {
+            if (!early) {
+              await recovered.promise;
+              // Keep the temporarily ineligible accepted fact across a poll.
               await appendReceipt(parent, "idle-1", "done");
               await appendReceipt(parent, "idle-2", "done");
+              yield restoredInventory;
+              await restored.promise;
+              if (scenario === "cycle-scope") yield finalInventory;
             }
-            if (!early) yield inventory;
-            if (restoreScope) {
-              if (!early) {
-                await recovered.promise;
-                // Keep the temporarily ineligible accepted fact across a poll.
-                await appendReceipt(parent, "idle-1", "done");
-                await appendReceipt(parent, "idle-2", "done");
-                yield restoredInventory;
-                await restored.promise;
-                if (scenario === "cycle-scope") yield finalInventory;
-              }
-              if (scenario === "cycle-scope") await cycled.promise;
-              else await restored.promise;
-            } else await recovered.promise;
-          }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+            if (scenario === "cycle-scope") await cycled.promise;
+            else await restored.promise;
+          } else await recovered.promise;
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       const keepAlive = setInterval(() => {}, 1_000);
       try {
@@ -8289,7 +7437,7 @@ if __name__ == "__main__":
                   update.filesTotal === 6 && update.filesCompleted === 3,
               )
               .at(-1),
-          ).toEqual({ phase: parentPhase, filesCompleted: 3, filesTotal: 6 });
+          ).toEqual(scanProgress(parentPhase, 3, 6));
       } finally {
         clearInterval(keepAlive);
         metadataRead.resolve();
@@ -8326,14 +7474,7 @@ if __name__ == "__main__":
       );
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
-          args[0] === "register-cli-scan"
-            ? { ...mockScanRegistration(args, input), scopeFileCount: 6 }
-            : mockWorkbench(args, input),
+        runWorkbench: workbenchWithFileCount(6),
         createCodex: codexFactory(async () => {
           await copyCompletedScan(root);
           const parent = await writeUsageSession(codexHome, "thread-1", {});
@@ -8342,53 +7483,30 @@ if __name__ == "__main__":
             phase: ScanProgress["phase"],
             count: number,
             total: number,
-          ) => ({
-            type: "response_item",
-            payload: {
-              type: "custom_tool_call_output",
-              call_id: id,
-              output: progressMarker(phase, count, total),
-            },
-          });
+          ) => customToolOutput(progressMarker(phase, count, total), id);
           async function* events(): AsyncGenerator<ThreadEvent> {
             await metadataRead.promise;
-            await appendFile(
+            await appendRecord(
               parent,
-              JSON.stringify(
-                nativeCommand("inventory", persistedCommandOutput),
-              ) + "\n",
+              nativeCommand("inventory", persistedCommandOutput),
             );
             if (early) {
               yield inventory;
               await inventoryRead.promise;
             }
-            await appendFile(
+            await appendRecord(
               parent,
-              JSON.stringify(receipt("parent-review", parentPhase, 6, 6)) +
-                "\n",
+              receipt("parent-review", parentPhase, 6, 6),
             );
             await parentRead.promise;
-            const first = await writeUsageSession(
-              codexHome,
-              "first-worker",
-              {},
-              { parent: "thread-1" },
-            );
-            await appendFile(
+            const first = await writeWorkerSession(codexHome, "first-worker");
+            await appendRecord(
               first,
-              JSON.stringify(receipt("first-worker", firstPhase, 4, 4)) + "\n",
+              receipt("first-worker", firstPhase, 4, 4),
             );
             await firstRead.promise;
-            const last = await writeUsageSession(
-              codexHome,
-              "last-worker",
-              {},
-              { parent: "thread-1" },
-            );
-            await appendFile(
-              last,
-              JSON.stringify(receipt("last-worker", lastPhase, 5, 5)) + "\n",
-            );
+            const last = await writeWorkerSession(codexHome, "last-worker");
+            await appendRecord(last, receipt("last-worker", lastPhase, 5, 5));
             await lastRead.promise;
             // Both workers were accepted under the provisional inventory. Its
             // earlier full marker reveals their greater aggregate coverage.
@@ -8418,11 +7536,7 @@ if __name__ == "__main__":
             if (id === "last-worker") lastRead.resolve();
           },
         });
-        expect(updates.at(-1)).toEqual({
-          phase: parentPhase,
-          filesCompleted: 9,
-          filesTotal: 10,
-        });
+        expect(updates.at(-1)).toEqual(scanProgress(parentPhase, 9, 10));
       } finally {
         clearInterval(keepAlive);
         metadataRead.resolve();
@@ -8461,74 +7575,31 @@ if __name__ == "__main__":
       }) as typeof originalReaddir);
       const marker = (phase: ScanProgress["phase"]) =>
         progressMarker(phase, 8, 8);
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          parentPath = await writeUsageSession(codexHome, "thread-1", {});
-          const worker = await writeUsageSession(
-            codexHome,
-            "worker-thread",
-            {},
-            { parent: "thread-1" },
-          );
-          await appendFile(
-            worker,
-            JSON.stringify({
-              type: "response_item",
-              payload: {
-                type: "custom_tool_call_output",
-                output: marker("discovery"),
-              },
-            }) + "\n",
-          );
-          await appendFile(
-            parentPath,
-            JSON.stringify({
-              type: "event_msg",
-              payload: {
-                type: "item_completed",
-                item:
-                  kind === "command"
-                    ? {
-                        type: "CommandExecution",
-                        command: ["review-phase"],
-                        aggregated_output: marker("validation"),
-                      }
-                    : {
-                        type: "AgentMessage",
-                        content: [{ type: "Text", text: marker("validation") }],
-                      },
-              },
-            }) + "\n",
-          );
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            // Both sources are durable. Parent-first enumeration can lead live
-            // delivery even though the worker emitted its receipt earlier.
-            pollAllowed.resolve();
-            await workerRead.promise;
-            yield {
-              type: "item.completed",
-              item:
-                kind === "command"
-                  ? {
-                      id: "live-parent",
-                      type: "command_execution",
-                      command: "review-phase",
-                      aggregated_output: marker("validation"),
-                      status: "completed",
-                      exit_code: 0,
-                    }
-                  : {
-                      id: "live-parent",
-                      type: "agent_message",
-                      text: marker("validation"),
-                    },
-            };
-          }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        parentPath = await writeUsageSession(codexHome, "thread-1", {});
+        const worker = await writeWorkerSession(codexHome);
+        await appendRecord(worker, customToolOutput(marker("discovery")));
+        await appendRecord(
+          parentPath,
+          kind === "command"
+            ? nativeCommand("review-phase", marker("validation"))
+            : nativeMessage(marker("validation")),
+        );
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          // Both sources are durable. Parent-first enumeration can lead live
+          // delivery even though the worker emitted its receipt earlier.
+          pollAllowed.resolve();
+          await workerRead.promise;
+          yield kind === "command"
+            ? completedCommand(
+                "review-phase",
+                marker("validation"),
+                "live-parent",
+              )
+            : completedMessage("live-parent", marker("validation"));
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       // The fake stream has no process handle to keep the unref'ed poll alive.
       const keepAlive = setInterval(() => {}, 1_000);
@@ -8583,42 +7654,16 @@ if __name__ == "__main__":
       const earlierReviewRead = Promise.withResolvers<void>();
       const closeEntered = Promise.withResolvers<void>();
       const closeReleased = Promise.withResolvers<void>();
-      let parentPath = "";
-      let pauseClose = false;
-      const originalOpen = fsPromises.open;
-      const opening = spyOn(fsPromises, "open").mockImplementation((async (
-        ...args: Parameters<typeof originalOpen>
-      ) => {
-        const handle = await originalOpen(...args);
-        if (String(args[0]) !== parentPath || !pauseClose) return handle;
-        // The read itself remains real. Delay only close after the snapshot EOF,
-        // so a later native completion can be durable before SDK delivery while
-        // still absent from this poll's already-read snapshot.
-        const close = handle.close.bind(handle);
-        handle.close = async () => {
-          if (pauseClose) {
-            pauseClose = false;
-            closeEntered.resolve();
-            await closeReleased.promise;
-          }
-          await close();
-        };
-        return handle;
-      }) as typeof originalOpen);
+      const session = { path: "", pauseClose: false };
+
+      const opening = holdSessionClose(session, closeEntered, closeReleased);
 
       const native = (id: string, text: string) => {
         if (mode !== "paginated")
           return (
             JSON.stringify(
               mode === "legacy-tool" || id.endsWith("inventory")
-                ? {
-                    type: "response_item",
-                    payload: {
-                      type: "custom_tool_call_output",
-                      call_id: id,
-                      output: text,
-                    },
-                  }
+                ? customToolOutput(text, id)
                 : {
                     type: "event_msg",
                     payload: { type: "agent_message", id, message: text },
@@ -8627,75 +7672,49 @@ if __name__ == "__main__":
           );
         return JSON.stringify(nativeCommand(id, text, id)) + "\n";
       };
-      const live = (id: string, text: string): ThreadEvent => ({
-        type: "item.completed",
-        item:
-          mode === "legacy" && !id.endsWith("inventory")
-            ? { type: "agent_message", id, text }
-            : {
-                type: "command_execution",
-                id,
-                command: id,
-                aggregated_output: text,
-                status: "completed",
-                exit_code: 0,
-              },
-      });
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          parentPath = await writeUsageSession(codexHome, "thread-1", {});
-          const worker = await writeUsageSession(
-            codexHome,
-            "worker-thread",
-            {},
-            { parent: "thread-1" },
-          );
-          await appendFile(
-            worker,
-            JSON.stringify({
-              type: "response_item",
-              payload: {
-                type: "custom_tool_call_output",
-                call_id: "worker-count",
-                output: progressMarker("discovery", 1, 9),
-              },
-            }) + "\n",
-          );
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            await workerRead.promise;
-            const first = progressMarker("discovery", 0, 9);
-            await appendFile(parentPath, native("first-inventory", first));
-            yield live("first-inventory", first);
-            await workerAdmitted.promise;
-            if (reviewedEarlier) {
-              const earlier = progressMarker("validation", 3, 9);
-              await appendFile(parentPath, native("earlier-review", earlier));
-              yield live("earlier-review", earlier);
-              await earlierReviewRead.promise;
-            }
-            const inventory = progressMarker("discovery", 0, 7);
-            pauseClose = split;
-            await appendFile(
-              parentPath,
-              native("corrected-inventory", inventory),
-            );
-            if (split) await closeEntered.promise;
-            const review = progressMarker(
-              "validation",
-              7,
-              reviewedEarlier ? 9 : 7,
-            );
-            // Both records are persisted before their corresponding live items.
-            await appendFile(parentPath, native("final-review", review));
-            yield live("corrected-inventory", inventory);
-            yield live("final-review", review);
-            closeReleased.resolve();
+      const live = (id: string, text: string): ThreadEvent =>
+        mode === "legacy" && !id.endsWith("inventory")
+          ? completedMessage(id, text)
+          : completedCommand(id, text);
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        session.path = await writeUsageSession(codexHome, "thread-1", {});
+        const worker = await writeWorkerSession(codexHome);
+        await appendRecord(
+          worker,
+          customToolOutput(progressMarker("discovery", 1, 9), "worker-count"),
+        );
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          await workerRead.promise;
+          const first = progressMarker("discovery", 0, 9);
+          await appendFile(session.path, native("first-inventory", first));
+          yield live("first-inventory", first);
+          await workerAdmitted.promise;
+          if (reviewedEarlier) {
+            const earlier = progressMarker("validation", 3, 9);
+            await appendFile(session.path, native("earlier-review", earlier));
+            yield live("earlier-review", earlier);
+            await earlierReviewRead.promise;
           }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+          const inventory = progressMarker("discovery", 0, 7);
+          session.pauseClose = split;
+          await appendFile(
+            session.path,
+            native("corrected-inventory", inventory),
+          );
+          if (split) await closeEntered.promise;
+          const review = progressMarker(
+            "validation",
+            7,
+            reviewedEarlier ? 9 : 7,
+          );
+          // Both records are persisted before their corresponding live items.
+          await appendFile(session.path, native("final-review", review));
+          yield live("corrected-inventory", inventory);
+          yield live("final-review", review);
+          closeReleased.resolve();
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       // The fake stream has no process handle to keep the unref'ed poll alive.
       const keepAlive = setInterval(() => {}, 1_000);
@@ -8720,11 +7739,9 @@ if __name__ == "__main__":
               earlierReviewRead.resolve();
           },
         });
-        expect(updates.at(-1)).toEqual({
-          phase: "validation",
-          filesCompleted: 7,
-          filesTotal: reviewedEarlier ? 9 : 7,
-        });
+        expect(updates.at(-1)).toEqual(
+          scanProgress("validation", 7, reviewedEarlier ? 9 : 7),
+        );
         if (reviewedEarlier)
           expect(
             updates.every(
@@ -8734,7 +7751,7 @@ if __name__ == "__main__":
           ).toBe(true);
       } finally {
         clearInterval(keepAlive);
-        pauseClose = false;
+        session.pauseClose = false;
         workerRead.resolve();
         workerAdmitted.resolve();
         earlierReviewRead.resolve();
@@ -8781,120 +7798,58 @@ if __name__ == "__main__":
       const parentRead = Promise.withResolvers<void>();
       const workerRead = Promise.withResolvers<void>();
       if (!liveFirst) pollAllowed.resolve();
-      const originalReaddir = fsPromises.readdir;
-      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-        ...args: Parameters<typeof originalReaddir>
-      ) => {
-        if (String(args[0]) === join(codexHome, "sessions"))
-          await pollAllowed.promise;
-        return originalReaddir(...args);
-      }) as typeof originalReaddir);
+
+      const listing = holdSessionListing(codexHome, pollAllowed.promise);
 
       const receipt = (
         callId: string,
         phase: ScanProgress["phase"],
         count: number,
         total: number,
-      ) => ({
-        type: "response_item",
-        payload: {
-          type: "custom_tool_call_output",
-          call_id: callId,
-          output: progressMarker(phase, count, total),
-        },
-      });
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          const parent = await writeUsageSession(codexHome, "thread-1", {});
-          await appendFile(
-            parent,
-            [
-              nativeCommand("inventory", persistedCommandOutput),
-              receipt("parent-reviewed", parentPhase, parentCount, 9),
-            ]
-              .map((row) => JSON.stringify(row))
-              .join("\n") + "\n",
-          );
-          const inventory: ThreadEvent = completedCommand(
-            "inventory",
-            commandOutput(progressMarker("discovery", 0, 9)),
-          );
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            if (liveFirst) yield inventory;
-            await parentRead.promise;
-            const parts = [
-              "Review progress: ",
-              progressMarker(workerPhase, 8, 8),
-            ];
-            if (newerSource === "worker") {
-              const worker = await writeUsageSession(
-                codexHome,
-                "worker-thread",
-                {},
-                { parent: "thread-1" },
-              );
-              await appendFile(
-                worker,
-                JSON.stringify(receipt("worker-reviewed", workerPhase, 8, 8)) +
-                  "\n",
-              );
-            } else {
-              // Paginated persistence finalizes native text without separators,
-              // while the original response retains independently parsed parts.
-              await appendFile(
-                parent,
-                [
-                  {
-                    type: "event_msg",
-                    payload: {
-                      type: "item_completed",
-                      item: {
-                        type: "AgentMessage",
-                        content: [{ type: "Text", text: parts.join("") }],
-                      },
-                    },
-                  },
-                  {
-                    type: "response_item",
-                    payload: {
-                      type: "message",
-                      role: "assistant",
-                      id: "worker-reviewed",
-                      content: parts.map((text) => ({
-                        type: "output_text",
-                        text,
-                      })),
-                    },
-                  },
-                ]
-                  .map((row) => JSON.stringify(row))
-                  .join("\n") + "\n",
-              );
-            }
-            await workerRead.promise;
-            if (!liveFirst) yield inventory;
-            if (newerSource === "parent")
-              yield {
-                type: "item.completed",
-                item: {
-                  type: "agent_message",
-                  id: "newer-message",
-                  text: parts.join(""),
-                },
-              };
-            if (laterParent)
-              await appendFile(
-                parent,
-                JSON.stringify(
-                  receipt("parent-later", parentPhase, parentCount, 9),
-                ) + "\n",
-              );
+      ) => customToolOutput(progressMarker(phase, count, total), callId);
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        const parent = await writeUsageSession(codexHome, "thread-1", {});
+        await appendRecords(parent, [
+          nativeCommand("inventory", persistedCommandOutput),
+          receipt("parent-reviewed", parentPhase, parentCount, 9),
+        ]);
+        const inventory: ThreadEvent = completedCommand(
+          "inventory",
+          commandOutput(progressMarker("discovery", 0, 9)),
+        );
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          if (liveFirst) yield inventory;
+          await parentRead.promise;
+          const parts = [
+            "Review progress: ",
+            progressMarker(workerPhase, 8, 8),
+          ];
+          if (newerSource === "worker") {
+            const worker = await writeWorkerSession(codexHome);
+            await appendRecord(
+              worker,
+              receipt("worker-reviewed", workerPhase, 8, 8),
+            );
+          } else {
+            // Paginated persistence finalizes native text without separators,
+            // while the original response retains independently parsed parts.
+            await appendRecords(parent, [
+              nativeMessage(parts.join("")),
+              responseMessage(parts, "worker-reviewed"),
+            ]);
           }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+          await workerRead.promise;
+          if (!liveFirst) yield inventory;
+          if (newerSource === "parent")
+            yield completedMessage("newer-message", parts.join(""));
+          if (laterParent)
+            await appendRecord(
+              parent,
+              receipt("parent-later", parentPhase, parentCount, 9),
+            );
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       // The fake stream has no process handle to keep the unref'ed poll alive.
       const keepAlive = setInterval(() => {}, 1_000);
@@ -8972,62 +7927,37 @@ if __name__ == "__main__":
       const pollAllowed = Promise.withResolvers<void>();
       const receiptRead = Promise.withResolvers<void>();
       if (!liveFirst) pollAllowed.resolve();
-      const originalReaddir = fsPromises.readdir;
-      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-        ...args: Parameters<typeof originalReaddir>
-      ) => {
-        if (String(args[0]) === join(codexHome, "sessions"))
-          await pollAllowed.promise;
-        return originalReaddir(...args);
-      }) as typeof originalReaddir);
+
+      const listing = holdSessionListing(codexHome, pollAllowed.promise);
       const marker = (phase: ScanProgress["phase"], count: number) =>
         progressMarker(phase, count, laterInventory && count > 0 ? 8 : total);
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          const rollout = await writeUsageSession(codexHome, "thread-1", {});
-          // Both records are durable before live delivery. Slow polling is the
-          // only difference between the two schedules, as in the native writer.
-          const records = [
-            nativeCommand("inventory", persistedCommandOutput),
-            {
-              type: "response_item",
-              payload: {
-                type: "custom_tool_call_output",
-                call_id: "review-count",
-                output: marker(
-                  "validation",
-                  laterCount ? reviewed - 1 : reviewed,
-                ),
-              },
-            },
-          ];
-          if (laterInventory) records.reverse();
-          if (laterCount)
-            records.push({
-              type: "response_item",
-              payload: {
-                type: "custom_tool_call_output",
-                call_id: "later-count",
-                output: marker("validation", reviewed),
-              },
-            });
-          await appendFile(
-            rollout,
-            records.map((row) => JSON.stringify(row)).join("\n") + "\n",
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        const rollout = await writeUsageSession(codexHome, "thread-1", {});
+        // Both records are durable before live delivery. Slow polling is the
+        // only difference between the two schedules, as in the native writer.
+        const records = [
+          nativeCommand("inventory", persistedCommandOutput),
+          customToolOutput(
+            marker("validation", laterCount ? reviewed - 1 : reviewed),
+            "review-count",
+          ),
+        ];
+        if (laterInventory) records.reverse();
+        if (laterCount)
+          records.push(
+            customToolOutput(marker("validation", reviewed), "later-count"),
           );
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            if (!liveFirst) await receiptRead.promise;
-            yield completedCommand(
-              "inventory",
-              commandOutput(marker("discovery", 0)),
-            );
-            if (liveFirst) await receiptRead.promise;
-          }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+        await appendRecords(rollout, records);
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          if (!liveFirst) await receiptRead.promise;
+          yield completedCommand(
+            "inventory",
+            commandOutput(marker("discovery", 0)),
+          );
+          if (liveFirst) await receiptRead.promise;
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       // The fake stream has no process handle to keep the unref'ed poll alive.
       const keepAlive = setInterval(() => {}, 1_000);
@@ -9046,11 +7976,9 @@ if __name__ == "__main__":
               receiptRead.resolve();
           },
         });
-        expect(updates.at(-1)).toEqual({
-          phase: "validation",
-          filesCompleted: reviewed,
-          filesTotal: laterInventory ? 8 : total,
-        });
+        expect(updates.at(-1)).toEqual(
+          scanProgress("validation", reviewed, laterInventory ? 8 : total),
+        );
         const counted = updates.findIndex(
           (update) => update.filesCompleted === reviewed,
         );
@@ -9092,41 +8020,16 @@ if __name__ == "__main__":
         {},
         { cwd: scanDir },
       );
-      const worker = await writeUsageSession(
-        codexHome,
-        "worker-thread",
-        {},
-        { parent: "thread-1" },
-      );
+      const worker = await writeWorkerSession(codexHome);
       await appendFile(
         parent,
         [0, 4]
-          .map((count) =>
-            JSON.stringify({
-              type: "response_item",
-              payload: {
-                type: "custom_tool_call_output",
-                output: marker(count),
-              },
-            }),
-          )
+          .map((count) => JSON.stringify(customToolOutput(marker(count))))
           .join("\n") + "\n",
       );
-      await appendFile(
+      await appendRecord(
         worker,
-        JSON.stringify({
-          type: "event_msg",
-          payload: {
-            type: "agent_message",
-            message:
-              "CODEX_SECURITY_SCAN_PROGRESS " +
-              JSON.stringify({
-                phase: "validation",
-                filesCompleted: 1,
-                filesTotal: 1,
-              }),
-          },
-        }) + "\n",
+        legacyMessage(progressMarker("validation", 1, 1)),
       );
       const originalReaddir = fsPromises.readdir;
       const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
@@ -9151,11 +8054,7 @@ if __name__ == "__main__":
       };
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> =>
+        runWorkbench: async (_options, args, input): Promise<JsonObject> =>
           args[0] === "get-cli-scan-resume"
             ? {
                 ...mockScanRegistration(
@@ -9176,16 +8075,7 @@ if __name__ == "__main__":
             runStreamed: async () => {
               await copyCompletedScan(root);
               async function* events(): AsyncGenerator<ThreadEvent> {
-                await appendFile(
-                  parent,
-                  JSON.stringify({
-                    type: "response_item",
-                    payload: {
-                      type: "custom_tool_call_output",
-                      output: marker(5),
-                    },
-                  }) + "\n",
-                );
+                await appendRecord(parent, customToolOutput(marker(5)));
                 throw new Error("Synthetic stop after restored inventory");
               }
               return { events: completedEvents(id, events()) };
@@ -9202,11 +8092,7 @@ if __name__ == "__main__":
             onProgress: (update) => updates.push(update),
           }),
         ).rejects.toThrow("Synthetic stop after restored inventory");
-        expect(updates.at(-1)).toEqual({
-          phase: "discovery",
-          filesCompleted: 5,
-          filesTotal: total,
-        });
+        expect(updates.at(-1)).toEqual(scanProgress("discovery", 5, total));
         const reviewed = updates.findIndex(
           (update) => update.filesCompleted > 0,
         );
@@ -9241,14 +8127,12 @@ if __name__ == "__main__":
       const phaseRead = Promise.withResolvers<void>();
       const reviewRead = Promise.withResolvers<void>();
       let held = true;
-      const originalReaddir = fsPromises.readdir;
-      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-        ...args: Parameters<typeof originalReaddir>
-      ) => {
-        if (held && String(args[0]) === join(codexHome, "sessions"))
-          await pollAllowed.promise;
-        return originalReaddir(...args);
-      }) as typeof originalReaddir);
+
+      const listing = holdSessionListing(
+        codexHome,
+        pollAllowed.promise,
+        () => held,
+      );
       const command = (
         id: string,
         phase: ScanProgress["phase"],
@@ -9261,18 +8145,7 @@ if __name__ == "__main__":
         return {
           rows: [
             nativeCommand(argv, text, id),
-            ...(raw
-              ? [
-                  {
-                    type: "response_item",
-                    payload: {
-                      type: "custom_tool_call_output",
-                      call_id: id,
-                      output: text,
-                    },
-                  },
-                ]
-              : []),
+            ...(raw ? [customToolOutput(text, id)] : []),
           ],
           live: completedCommand(
             changed ? "printf [REDACTED_SECRET]" : argv.join(" "),
@@ -9281,39 +8154,34 @@ if __name__ == "__main__":
           ) as ThreadEvent,
         };
       };
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          const parent = await writeUsageSession(codexHome, "thread-1", {});
-          const first = command("initial", "discovery", 0, 10, projected);
-          const middle = command("middle", "discovery", 0, 9);
-          const inventory = command("inventory", "discovery", 0, 6, projected);
-          const phase = command("phase", "threat_model", 0, 6);
-          const review = command("review", "reporting", 6, 6);
-          const append = (rows: unknown[]) =>
-            appendFile(parent, jsonLines(rows) + "\n");
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            await append([
-              ...first.rows,
-              ...middle.rows,
-              ...inventory.rows,
-              ...phase.rows,
-            ]);
-            yield first.live;
-            held = false;
-            pollAllowed.resolve();
-            await phaseRead.promise;
-            yield middle.live;
-            await append(review.rows);
-            await reviewRead.promise;
-            yield inventory.live;
-            yield phase.live;
-            yield review.live;
-          }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        const parent = await writeUsageSession(codexHome, "thread-1", {});
+        const first = command("initial", "discovery", 0, 10, projected);
+        const middle = command("middle", "discovery", 0, 9);
+        const inventory = command("inventory", "discovery", 0, 6, projected);
+        const phase = command("phase", "threat_model", 0, 6);
+        const review = command("review", "reporting", 6, 6);
+        const append = (rows: unknown[]) => appendRecords(parent, rows);
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          await append([
+            ...first.rows,
+            ...middle.rows,
+            ...inventory.rows,
+            ...phase.rows,
+          ]);
+          yield first.live;
+          held = false;
+          pollAllowed.resolve();
+          await phaseRead.promise;
+          yield middle.live;
+          await append(review.rows);
+          await reviewRead.promise;
+          yield inventory.live;
+          yield phase.live;
+          yield review.live;
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       const keepAlive = setInterval(() => {}, 1_000);
       try {
@@ -9325,11 +8193,7 @@ if __name__ == "__main__":
             if (payload?.item?.id === "review") reviewRead.resolve();
           },
         });
-        expect(updates.at(-1)).toEqual({
-          phase: "reporting",
-          filesCompleted: 6,
-          filesTotal: 6,
-        });
+        expect(updates.at(-1)).toEqual(scanProgress("reporting", 6, 6));
       } finally {
         clearInterval(keepAlive);
         held = false;
@@ -9381,105 +8245,78 @@ if __name__ == "__main__":
         return handle;
       }) as typeof originalOpen);
       let held = true;
-      const originalReaddir = fsPromises.readdir;
-      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-        ...args: Parameters<typeof originalReaddir>
-      ) => {
-        if (held && String(args[0]) === join(codexHome, "sessions"))
-          await pollAllowed.promise;
-        return originalReaddir(...args);
-      }) as typeof originalReaddir);
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          const parent = await writeUsageSession(codexHome, "thread-1", {});
-          parentPath = parent;
-          const argv = ["printf", "sk-" + "a".repeat(32)];
-          const inventory = progressMarker("discovery", 0, 6);
-          const review = progressMarker(
-            "validation",
-            1,
-            scenario === "different review total" ? 7 : 6,
-          );
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            if (scenario === "newer inventory pending") {
-              const worker = await writeUsageSession(
-                codexHome,
-                "worker-thread",
-                {},
-                { parent: "thread-1" },
-              );
-              await appendFile(
-                worker,
-                jsonLines([
-                  {
-                    type: "response_item",
-                    payload: {
-                      type: "custom_tool_call_output",
-                      call_id: "worker",
-                      output: progressMarker("discovery", 1, 8),
-                    },
-                  },
-                ]) + "\n",
-              );
-              await appendFile(
-                parent,
-                jsonLines([
-                  nativeCommand("ready", "Synthetic ready.", "ready"),
-                ]) + "\n",
-              );
-              held = false;
-              pollAllowed.resolve();
-              await Promise.all([parentReady.promise, workerAdmitted.promise]);
-              pauseClose = true;
-            }
-            await appendFile(
-              parent,
-              jsonLines([
-                nativeCommand(
-                  argv,
-                  scenario === "complete output"
-                    ? inventory
-                    : persistedCommandOutput,
-                  "inventory",
-                ),
-                ...(scenario === "newer inventory" ||
-                scenario === "newer inventory pending"
-                  ? [
-                      nativeCommand(
-                        "newer",
-                        progressMarker("discovery", 0, expectedTotal),
-                        "newer",
-                      ),
-                    ]
-                  : []),
-                ...(scenario === "repeated output"
-                  ? [nativeCommand("other", persistedCommandOutput, "other")]
-                  : []),
-                nativeCommand("review", review, "review"),
-              ]) + "\n",
-            );
+
+      const listing = holdSessionListing(
+        codexHome,
+        pollAllowed.promise,
+        () => held,
+      );
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        const parent = await writeUsageSession(codexHome, "thread-1", {});
+        parentPath = parent;
+        const argv = ["printf", "sk-" + "a".repeat(32)];
+        const inventory = progressMarker("discovery", 0, 6);
+        const review = progressMarker(
+          "validation",
+          1,
+          scenario === "different review total" ? 7 : 6,
+        );
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          if (scenario === "newer inventory pending") {
+            const worker = await writeWorkerSession(codexHome);
+            await appendRecords(worker, [
+              customToolOutput(progressMarker("discovery", 1, 8), "worker"),
+            ]);
+            await appendRecords(parent, [
+              nativeCommand("ready", "Synthetic ready.", "ready"),
+            ]);
             held = false;
             pollAllowed.resolve();
-            if (scenario === "newer inventory pending")
-              await closeEntered.promise;
-            else await reviewRead.promise;
-            yield completedCommand(
-              scenario === "unchanged command"
-                ? argv.join(" ")
-                : "printf [REDACTED_SECRET]",
+            await Promise.all([parentReady.promise, workerAdmitted.promise]);
+            pauseClose = true;
+          }
+          await appendRecords(parent, [
+            nativeCommand(
+              argv,
               scenario === "complete output"
                 ? inventory
-                : commandOutput(inventory),
+                : persistedCommandOutput,
               "inventory",
-            ) as ThreadEvent;
-            yield completedCommand("review", review, "review") as ThreadEvent;
-            closeReleased.resolve();
-          }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+            ),
+            ...(scenario === "newer inventory" ||
+            scenario === "newer inventory pending"
+              ? [
+                  nativeCommand(
+                    "newer",
+                    progressMarker("discovery", 0, expectedTotal),
+                    "newer",
+                  ),
+                ]
+              : []),
+            ...(scenario === "repeated output"
+              ? [nativeCommand("other", persistedCommandOutput, "other")]
+              : []),
+            nativeCommand("review", review, "review"),
+          ]);
+          held = false;
+          pollAllowed.resolve();
+          if (scenario === "newer inventory pending")
+            await closeEntered.promise;
+          else await reviewRead.promise;
+          yield completedCommand(
+            scenario === "unchanged command"
+              ? argv.join(" ")
+              : "printf [REDACTED_SECRET]",
+            scenario === "complete output"
+              ? inventory
+              : commandOutput(inventory),
+            "inventory",
+          ) as ThreadEvent;
+          yield completedCommand("review", review, "review") as ThreadEvent;
+          closeReleased.resolve();
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       const keepAlive = setInterval(() => {}, 1_000);
       try {
@@ -9495,11 +8332,9 @@ if __name__ == "__main__":
             if (payload?.item?.id === "ready") parentReady.resolve();
           },
         });
-        expect(updates.at(-1)).toEqual({
-          phase: "validation",
-          filesCompleted: 1,
-          filesTotal: expectedTotal,
-        });
+        expect(updates.at(-1)).toEqual(
+          scanProgress("validation", 1, expectedTotal),
+        );
         const reviewed = updates.findIndex(
           (update) => update.filesCompleted > 0,
         );
@@ -9539,14 +8374,12 @@ if __name__ == "__main__":
       const currentRead = Promise.withResolvers<void>();
       const pollAllowed = Promise.withResolvers<void>();
       let holdPoll = true;
-      const originalReaddir = fsPromises.readdir;
-      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-        ...args: Parameters<typeof originalReaddir>
-      ) => {
-        if (holdPoll && String(args[0]) === join(codexHome, "sessions"))
-          await pollAllowed.promise;
-        return originalReaddir(...args);
-      }) as typeof originalReaddir);
+
+      const listing = holdSessionListing(
+        codexHome,
+        pollAllowed.promise,
+        () => holdPoll,
+      );
       let parentPath = "";
       let closes = 0;
       const originalOpen = fsPromises.open;
@@ -9568,85 +8401,56 @@ if __name__ == "__main__":
         };
         return handle;
       }) as typeof originalOpen);
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          parentPath = await writeUsageSession(codexHome, "thread-1", {});
-          await appendFile(
-            parentPath,
-            jsonLines([
-              nativeCommand("old", progressMarker("discovery", 0, 8), "old"),
-            ]) + "\n",
-          );
-          const workerPath = worker
-            ? await writeUsageSession(
-                codexHome,
-                "worker-thread",
-                {},
-                { parent: "thread-1" },
-              )
-            : undefined;
-          if (delivery !== "all-batch") {
-            holdPoll = false;
-            pollAllowed.resolve();
-          }
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            // Hold either the original read or the event-history replay after old EOF.
-            if (delivery !== "all-batch") await replayClose.promise;
-            const inventory = progressMarker("discovery", 0, 5);
-            const review = progressMarker("reporting", 1, 5);
-            const reviewRow = nativeCommand("review", review, "review");
-            await appendFile(
-              parentPath,
-              jsonLines([
-                nativeCommand(
-                  ["printf", "sk-" + "a".repeat(32)],
-                  truncated ? persistedCommandOutput : inventory,
-                  "current",
-                ),
-                ...(delivery === "all-batch" ? [reviewRow] : []),
-              ]) + "\n",
-            );
-            yield completedCommand(
-              "printf [REDACTED_SECRET]",
-              truncated ? commandOutput(inventory) : inventory,
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        parentPath = await writeUsageSession(codexHome, "thread-1", {});
+        await appendRecords(parentPath, [
+          nativeCommand("old", progressMarker("discovery", 0, 8), "old"),
+        ]);
+        const workerPath = worker
+          ? await writeWorkerSession(codexHome)
+          : undefined;
+        if (delivery !== "all-batch") {
+          holdPoll = false;
+          pollAllowed.resolve();
+        }
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          // Hold either the original read or the event-history replay after old EOF.
+          if (delivery !== "all-batch") await replayClose.promise;
+          const inventory = progressMarker("discovery", 0, 5);
+          const review = progressMarker("reporting", 1, 5);
+          const reviewRow = nativeCommand("review", review, "review");
+          await appendRecords(parentPath, [
+            nativeCommand(
+              ["printf", "sk-" + "a".repeat(32)],
+              truncated ? persistedCommandOutput : inventory,
               "current",
-            ) as ThreadEvent;
-            // Admit the live inventory before publishing oversized worker coverage;
-            // directory enumeration must not decide this fixture's precondition.
-            expect(updates.at(-1)).toEqual({
-              phase: "discovery",
-              filesCompleted: 0,
-              filesTotal: 5,
-            });
-            if (workerPath !== undefined) {
-              await appendFile(
-                workerPath,
-                jsonLines([
-                  {
-                    type: "response_item",
-                    payload: {
-                      type: "custom_tool_call_output",
-                      call_id: "worker",
-                      output: progressMarker("discovery", 6, 8),
-                    },
-                  },
-                ]) + "\n",
-              );
-            }
-            if (delivery !== "all-batch") {
-              releaseReplay.resolve();
-              await currentRead.promise;
-              await appendFile(parentPath, jsonLines([reviewRow]) + "\n");
-            }
-            yield completedCommand("review", review, "review") as ThreadEvent;
-            holdPoll = false;
-            pollAllowed.resolve();
+            ),
+            ...(delivery === "all-batch" ? [reviewRow] : []),
+          ]);
+          yield completedCommand(
+            "printf [REDACTED_SECRET]",
+            truncated ? commandOutput(inventory) : inventory,
+            "current",
+          ) as ThreadEvent;
+          // Admit the live inventory before publishing oversized worker coverage;
+          // directory enumeration must not decide this fixture's precondition.
+          expect(updates.at(-1)).toEqual(scanProgress("discovery", 0, 5));
+          if (workerPath !== undefined) {
+            await appendRecords(workerPath, [
+              customToolOutput(progressMarker("discovery", 6, 8), "worker"),
+            ]);
           }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+          if (delivery !== "all-batch") {
+            releaseReplay.resolve();
+            await currentRead.promise;
+            await appendRecords(parentPath, [reviewRow]);
+          }
+          yield completedCommand("review", review, "review") as ThreadEvent;
+          holdPoll = false;
+          pollAllowed.resolve();
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       const keepAlive = setInterval(() => {}, 1_000);
       try {
@@ -9659,11 +8463,7 @@ if __name__ == "__main__":
             if (payload?.item?.id === "current") currentRead.resolve();
           },
         });
-        expect(updates.at(-1)).toEqual({
-          phase: "reporting",
-          filesCompleted: 1,
-          filesTotal: 5,
-        });
+        expect(updates.at(-1)).toEqual(scanProgress("reporting", 1, 5));
         const current = updates.findIndex(
           (update) => update.filesCompleted === 0 && update.filesTotal === 5,
         );
@@ -9707,60 +8507,40 @@ if __name__ == "__main__":
       const pollAllowed = Promise.withResolvers<void>();
       const savedRead = Promise.withResolvers<void>();
       let holdPoll = true;
-      const originalReaddir = fsPromises.readdir;
-      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-        ...args: Parameters<typeof originalReaddir>
-      ) => {
-        if (holdPoll && String(args[0]) === join(codexHome, "sessions"))
-          await pollAllowed.promise;
-        return originalReaddir(...args);
-      }) as typeof originalReaddir);
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          const parent = await writeUsageSession(codexHome, "thread-1", {});
-          const old = progressMarker("discovery", 3, 8);
-          const current = progressMarker("validation", 3, 8);
-          await appendFile(
-            parent,
-            jsonLines([
-              nativeCommand(["printf", "sk-" + "a".repeat(32)], old, "old"),
-              nativeCommand("validate", current, "current"),
-              ...(rawCopy
-                ? [
-                    {
-                      type: "response_item",
-                      payload: {
-                        type: "custom_tool_call_output",
-                        call_id: "current",
-                        output: current,
-                      },
-                    },
-                  ]
-                : []),
-            ]) + "\n",
-          );
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            if (pollAhead) {
-              holdPoll = false;
-              pollAllowed.resolve();
-              await savedRead.promise;
-            }
-            yield completedCommand(
-              changedDisplay
-                ? "printf [REDACTED_SECRET]"
-                : "printf sk-" + "a".repeat(32),
-              old,
-              "item_0",
-            );
-            yield completedCommand("validate", current, "item_1");
+
+      const listing = holdSessionListing(
+        codexHome,
+        pollAllowed.promise,
+        () => holdPoll,
+      );
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        const parent = await writeUsageSession(codexHome, "thread-1", {});
+        const old = progressMarker("discovery", 3, 8);
+        const current = progressMarker("validation", 3, 8);
+        await appendRecords(parent, [
+          nativeCommand(["printf", "sk-" + "a".repeat(32)], old, "old"),
+          nativeCommand("validate", current, "current"),
+          ...(rawCopy ? [customToolOutput(current, "current")] : []),
+        ]);
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          if (pollAhead) {
             holdPoll = false;
             pollAllowed.resolve();
+            await savedRead.promise;
           }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+          yield completedCommand(
+            changedDisplay
+              ? "printf [REDACTED_SECRET]"
+              : "printf sk-" + "a".repeat(32),
+            old,
+            "item_0",
+          );
+          yield completedCommand("validate", current, "item_1");
+          holdPoll = false;
+          pollAllowed.resolve();
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       const keepAlive = setInterval(() => {}, 1_000);
       try {
@@ -9779,11 +8559,7 @@ if __name__ == "__main__":
               savedRead.resolve();
           },
         });
-        expect(updates.at(-1)).toEqual({
-          phase: "validation",
-          filesCompleted: 3,
-          filesTotal: 8,
-        });
+        expect(updates.at(-1)).toEqual(scanProgress("validation", 3, 8));
       } finally {
         holdPoll = false;
         pollAllowed.resolve();
@@ -9795,11 +8571,7 @@ if __name__ == "__main__":
     },
   );
 
-  const progress = (
-    phase: ScanProgress["phase"],
-    filesCompleted: number,
-    filesTotal: number,
-  ): ScanProgress => ({ phase, filesCompleted, filesTotal });
+  const progress = scanProgress;
   const inventory = (total: number) => progress("discovery", 0, total);
   const progressText = (value: ProgressScenarioValue) =>
     typeof value === "string"
@@ -9990,191 +8762,168 @@ if __name__ == "__main__":
         progressMarker("discovery", 0, total);
       const expected: ScanProgress =
         scenario === "unwritten growth" || scenario === "close growth"
-          ? { phase: "discovery", filesCompleted: 5, filesTotal: 9 }
+          ? scanProgress("discovery", 5, 9)
           : scenario === "unwritten phase"
-            ? { phase: "validation", filesCompleted: 3, filesTotal: 8 }
+            ? scanProgress("validation", 3, 8)
             : scenario.startsWith("live scope")
-              ? { phase: "validation", filesCompleted: 1, filesTotal: 8 }
-              : {
-                  phase: "discovery",
-                  filesCompleted: 0,
-                  filesTotal: scenario.endsWith("shrink") ? 8 : 5,
-                };
-      await using client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          const { parentPath, workerPath } =
-            await rollouts.writeSessions(codexHome);
-          const save = (command: string, output: string) =>
-            appendFile(
-              parentPath,
-              jsonLines([nativeCommand(command, output, command)]) + "\n",
-            );
-          const receipt = (path: string, output: string) =>
-            appendFile(
-              path,
-              jsonLines([
-                {
-                  type: "response_item",
-                  payload: {
-                    type: "custom_tool_call_output",
-                    call_id: "synthetic-progress",
-                    output,
-                  },
-                },
-              ]) + "\n",
-            );
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            const tracker = rollouts.tracker!;
-            expect(tracker).toBeDefined();
-            await tracker.stop();
-            if (scenario.startsWith("close")) {
-              const total = scenario === "close growth" ? 9 : 8;
-              await save("old-first", inventory(total));
-              const older =
-                jsonLines([
-                  nativeCommand(
-                    "old-last",
-                    inventory(total === 9 ? 8 : 9),
-                    "old-last",
-                  ),
-                ]) + "\n";
-              // Cover both an incomplete older row at EOF and a whole older
-              // row appended during close, before the new live callback.
-              const split = pollFirst ? Math.floor(older.length / 2) : 0;
-              if (split !== 0)
-                await appendFile(parentPath, older.slice(0, split));
-              const closing = Promise.withResolvers<void>();
-              const release = Promise.withResolvers<void>();
-              const originalOpen = fsPromises.open;
-              let intercept = true;
-              const opening = spyOn(fsPromises, "open").mockImplementation(
-                async (...args: Parameters<typeof originalOpen>) => {
-                  const handle = await originalOpen(...args);
-                  if (String(args[0]) === parentPath && intercept) {
-                    intercept = false;
-                    const close = handle.close.bind(handle);
-                    handle.close = async () => {
-                      await appendFile(parentPath, older.slice(split));
-                      closing.resolve();
-                      await release.promise;
-                      await close();
-                    };
-                  }
-                  return handle;
-                },
-              );
-              const pending = tracker.refresh();
-              try {
-                await closing.promise;
-                yield completedCommand(
-                  "current",
-                  inventory(total),
-                  "live-current",
+              ? scanProgress("validation", 1, 8)
+              : scanProgress(
+                  "discovery",
+                  0,
+                  scenario.endsWith("shrink") ? 8 : 5,
                 );
-              } finally {
-                release.resolve();
-                await pending;
-                opening.mockRestore();
-              }
-            } else if (scenario.startsWith("unwritten")) {
-              const current =
-                scenario === "unwritten phase"
-                  ? progressMarker("validation", 3, 8)
-                  : inventory(scenario === "unwritten growth" ? 9 : 8);
-              await save("old-first", current);
-              await save(
-                "old-last",
-                scenario === "unwritten phase"
-                  ? progressMarker("reporting", 3, 8)
-                  : inventory(scenario === "unwritten growth" ? 8 : 9),
+      await using client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        const { parentPath, workerPath } =
+          await rollouts.writeSessions(codexHome);
+        const save = (command: string, output: string) =>
+          appendRecords(parentPath, [nativeCommand(command, output, command)]);
+        const receipt = (path: string, output: string) =>
+          appendRecords(path, [customToolOutput(output, "synthetic-progress")]);
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          const tracker = rollouts.tracker!;
+          expect(tracker).toBeDefined();
+          await tracker.stop();
+          if (scenario.startsWith("close")) {
+            const total = scenario === "close growth" ? 9 : 8;
+            await save("old-first", inventory(total));
+            const older =
+              jsonLines([
+                nativeCommand(
+                  "old-last",
+                  inventory(total === 9 ? 8 : 9),
+                  "old-last",
+                ),
+              ]) + "\n";
+            // Cover both an incomplete older row at EOF and a whole older
+            // row appended during close, before the new live callback.
+            const split = pollFirst ? Math.floor(older.length / 2) : 0;
+            if (split !== 0)
+              await appendFile(parentPath, older.slice(0, split));
+            const closing = Promise.withResolvers<void>();
+            const release = Promise.withResolvers<void>();
+            const originalOpen = fsPromises.open;
+            let intercept = true;
+            const opening = spyOn(fsPromises, "open").mockImplementation(
+              async (...args: Parameters<typeof originalOpen>) => {
+                const handle = await originalOpen(...args);
+                if (String(args[0]) === parentPath && intercept) {
+                  intercept = false;
+                  const close = handle.close.bind(handle);
+                  handle.close = async () => {
+                    await appendFile(parentPath, older.slice(split));
+                    closing.resolve();
+                    await release.promise;
+                    await close();
+                  };
+                }
+                return handle;
+              },
+            );
+            const pending = tracker.refresh();
+            try {
+              await closing.promise;
+              yield completedCommand(
+                "current",
+                inventory(total),
+                "live-current",
               );
-              if (pollFirst) await tracker.refresh();
-              // Earlier live callbacks were dropped. This different command
-              // has not been persisted, even though its output repeats a row.
-              yield completedCommand("current", current, "live-current");
-            } else if (scenario.startsWith("live scope")) {
-              const display = (command: string) =>
-                scenario.includes("changed") ? `${command} displayed` : command;
-              await save("first", inventory(9));
-              yield completedCommand(display("first"), inventory(9));
+            } finally {
+              release.resolve();
+              await pending;
+              opening.mockRestore();
+            }
+          } else if (scenario.startsWith("unwritten")) {
+            const current =
+              scenario === "unwritten phase"
+                ? progressMarker("validation", 3, 8)
+                : inventory(scenario === "unwritten growth" ? 9 : 8);
+            await save("old-first", current);
+            await save(
+              "old-last",
+              scenario === "unwritten phase"
+                ? progressMarker("reporting", 3, 8)
+                : inventory(scenario === "unwritten growth" ? 8 : 9),
+            );
+            if (pollFirst) await tracker.refresh();
+            // Earlier live callbacks were dropped. This different command
+            // has not been persisted, even though its output repeats a row.
+            yield completedCommand("current", current, "live-current");
+          } else if (scenario.startsWith("live scope")) {
+            const display = (command: string) =>
+              scenario.includes("changed") ? `${command} displayed` : command;
+            await save("first", inventory(9));
+            yield completedCommand(display("first"), inventory(9));
+            await tracker.refresh();
+            await receipt(workerPath, progressMarker("attack_path", 5, 9));
+            await tracker.refresh();
+            expect(updates.at(-1)).toEqual(scanProgress("discovery", 5, 9));
+            // Every parent callback arrives, but none needs an unchanged
+            // command display or a later message to replace worker coverage.
+            const batch = scenario.endsWith("batch");
+            const commands = [
+              ["current", inventory(8)],
+              ["review", progressMarker("validation", 1, 8)],
+            ] as const;
+            if (batch && pollFirst) {
+              for (const [command, output] of commands)
+                await save(command, output);
               await tracker.refresh();
-              await receipt(workerPath, progressMarker("attack_path", 5, 9));
-              await tracker.refresh();
-              expect(updates.at(-1)).toEqual({
-                phase: "discovery",
-                filesCompleted: 5,
-                filesTotal: 9,
-              });
-              // Every parent callback arrives, but none needs an unchanged
-              // command display or a later message to replace worker coverage.
-              const batch = scenario.endsWith("batch");
-              const commands = [
-                ["current", inventory(8)],
-                ["review", progressMarker("validation", 1, 8)],
-              ] as const;
-              if (batch && pollFirst) {
-                for (const [command, output] of commands)
-                  await save(command, output);
+            }
+            for (const [command, output] of commands) {
+              if (pollFirst && !batch) {
+                await save(command, output);
                 await tracker.refresh();
               }
-              for (const [command, output] of commands) {
-                if (pollFirst && !batch) {
-                  await save(command, output);
-                  await tracker.refresh();
-                }
-                yield completedCommand(display(command), output);
-                if (!pollFirst) await save(command, output);
-                if (!batch) await tracker.refresh();
-              }
-            } else {
-              const middle = scenario === "delayed raw inventory" ? 9 : 8;
-              await save("first", inventory(8));
-              await save("middle", inventory(middle));
-              await save("current", inventory(5));
-              if (scenario === "delayed raw inventory")
-                await receipt(parentPath, inventory(5));
-              else await save("last", inventory(5));
-              if (pollFirst) await tracker.refresh();
-              yield completedCommand(
-                "first displayed",
-                inventory(8),
-                "live-first",
-              );
-              await tracker.refresh();
-              yield completedCommand(
-                "middle displayed",
-                inventory(middle),
-                "live-middle",
-              );
-              yield completedCommand("current", inventory(5), "live-current");
-              if (deliverLast) {
-                if (scenario === "delayed raw inventory")
-                  await save("last", inventory(5));
-                yield completedCommand("last", inventory(5), "live-last");
-              }
+              yield completedCommand(display(command), output);
+              if (!pollFirst) await save(command, output);
+              if (!batch) await tracker.refresh();
             }
+          } else {
+            const middle = scenario === "delayed raw inventory" ? 9 : 8;
+            await save("first", inventory(8));
+            await save("middle", inventory(middle));
+            await save("current", inventory(5));
+            if (scenario === "delayed raw inventory")
+              await receipt(parentPath, inventory(5));
+            else await save("last", inventory(5));
+            if (pollFirst) await tracker.refresh();
+            yield completedCommand(
+              "first displayed",
+              inventory(8),
+              "live-first",
+            );
             await tracker.refresh();
-            await tracker.refresh();
-            if (scenario !== "unwritten phase")
-              await receipt(
-                workerPath,
-                progressMarker(
-                  "attack_path",
-                  scenario.startsWith("delayed") ||
-                    scenario.startsWith("live scope")
-                    ? 6
-                    : 5,
-                  scenario === "delayed repeated inventory" ? 8 : 9,
-                ),
-              );
-            await tracker.refresh();
-            await tracker.stop();
+            yield completedCommand(
+              "middle displayed",
+              inventory(middle),
+              "live-middle",
+            );
+            yield completedCommand("current", inventory(5), "live-current");
+            if (deliverLast) {
+              if (scenario === "delayed raw inventory")
+                await save("last", inventory(5));
+              yield completedCommand("last", inventory(5), "live-last");
+            }
           }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+          await tracker.refresh();
+          await tracker.refresh();
+          if (scenario !== "unwritten phase")
+            await receipt(
+              workerPath,
+              progressMarker(
+                "attack_path",
+                scenario.startsWith("delayed") ||
+                  scenario.startsWith("live scope")
+                  ? 6
+                  : 5,
+                scenario === "delayed repeated inventory" ? 8 : 9,
+              ),
+            );
+          await tracker.refresh();
+          await tracker.stop();
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       await client.run(repository, {
         onProgress: (update) => updates.push(update),
@@ -10642,14 +9391,7 @@ if __name__ == "__main__":
       },
       async writeSessions(codexHome: string) {
         parentPath = await writeUsageSession(codexHome, "thread-1", {});
-        workerPath = await writeUsageSession(
-          codexHome,
-          "worker-thread",
-          {},
-          {
-            parent: "thread-1",
-          },
-        );
+        workerPath = await writeWorkerSession(codexHome);
         return { parentPath, workerPath };
       },
       [Symbol.dispose]() {
@@ -10693,17 +9435,7 @@ if __name__ == "__main__":
     using rollouts = observeProgressRollouts(workerFirst);
     await using client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
-      runWorkbench: async (
-        _options: unknown,
-        args: readonly string[],
-        input?: string,
-      ): Promise<JsonObject> =>
-        args[0] === "register-cli-scan"
-          ? {
-              ...mockScanRegistration(args, input),
-              scopeFileCount: initialScope,
-            }
-          : mockWorkbench(args, input),
+      runWorkbench: workbenchWithFileCount(initialScope),
       createCodex: codexFactory(async () => {
         await copyCompletedScan(root);
         const { parentPath, workerPath } =
@@ -10744,50 +9476,18 @@ if __name__ == "__main__":
                 `item-${index}`,
               );
             else if (step[0] === "save-response")
-              await appendFile(
-                parentPath,
-                jsonLines([
-                  {
-                    type: "response_item",
-                    payload: {
-                      type: "message",
-                      role: "assistant",
-                      content: [
-                        { type: "output_text", text: progressText(step[2]) },
-                      ],
-                    },
-                  },
-                ]) + "\n",
-              );
+              await appendRecords(parentPath, [
+                responseMessage(progressText(step[2])),
+              ]);
             else if (step[0] === "live-message")
-              yield {
-                type: "item.completed",
-                item: {
-                  id: `item-${index}`,
-                  type: "agent_message",
-                  text: progressText(step[2]),
-                },
-              };
+              yield completedMessage(`item-${index}`, progressText(step[2]));
             else if (step[0] === "save-message")
-              await appendFile(
-                parentPath,
-                jsonLines([
-                  {
-                    type: "event_msg",
-                    payload: {
-                      type: "item_completed",
-                      item: {
-                        type: "AgentMessage",
-                        id:
-                          step[1] === undefined ? undefined : `native-${index}`,
-                        content: [
-                          { type: "Text", text: progressText(step[2]) },
-                        ],
-                      },
-                    },
-                  },
-                ]) + "\n",
-              );
+              await appendRecords(parentPath, [
+                nativeMessage(
+                  progressText(step[2]),
+                  step[1] === undefined ? undefined : `native-${index}`,
+                ),
+              ]);
             else if (step[0] === "live")
               yield completedCommand(
                 step[1],
@@ -10795,38 +9495,24 @@ if __name__ == "__main__":
                 `item-${index}`,
               );
             else if (step[0] === "save" || step[0] === "save-quiet")
-              await appendFile(
-                parentPath,
-                jsonLines([
-                  nativeCommand(
-                    step[1],
-                    progressText(step[2]),
-                    `native-${index}`,
-                  ),
-                ]) + "\n",
-              );
+              await appendRecords(parentPath, [
+                nativeCommand(
+                  step[1],
+                  progressText(step[2]),
+                  `native-${index}`,
+                ),
+              ]);
             else
-              await appendFile(
+              await appendRecords(
                 step[0] === "additional-worker"
-                  ? await writeUsageSession(
+                  ? await writeWorkerSession(
                       codexHome,
                       "followup-worker-thread",
-                      {},
-                      { parent: "thread-1" },
                     )
                   : step[0] === "receipt"
                     ? parentPath
                     : workerPath,
-                jsonLines([
-                  {
-                    type: "response_item",
-                    payload: {
-                      type: "custom_tool_call_output",
-                      call_id: `worker-${index}`,
-                      output: progressText(step[1]),
-                    },
-                  },
-                ]) + "\n",
+                [customToolOutput(progressText(step[1]), `worker-${index}`)],
               );
             if (
               partition === "each" &&
@@ -13004,12 +11690,8 @@ if __name__ == "__main__":
       const updates: ScanProgress[] = [];
       using rollouts = observeProgressRollouts(workerFirst);
       const initial: ScanProgress = scenario.endsWith("phase")
-        ? { phase: "validation", filesCompleted: 3, filesTotal: 8 }
-        : {
-            phase: "discovery",
-            filesCompleted: 0,
-            filesTotal: scenario.endsWith("shrink") ? 9 : 8,
-          };
+        ? scanProgress("validation", 3, 8)
+        : scanProgress("discovery", 0, scenario.endsWith("shrink") ? 9 : 8);
       const expected: ScanProgress =
         scenario === "pending phase"
           ? initial
@@ -13024,98 +11706,76 @@ if __name__ == "__main__":
         );
       const display = (command: string) =>
         changedDisplay ? `${command} displayed` : command;
-      await using client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          const { parentPath, workerPath } =
-            await rollouts.writeSessions(codexHome);
-          const save = (command: string, output: string) =>
-            appendFile(
-              parentPath,
-              jsonLines([nativeCommand(command, output, command)]) + "\n",
+      await using client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        const { parentPath, workerPath } =
+          await rollouts.writeSessions(codexHome);
+        const save = (command: string, output: string) =>
+          appendRecords(parentPath, [nativeCommand(command, output, command)]);
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          const tracker = rollouts.tracker!;
+          expect(tracker).toBeDefined();
+          // Control polling through the real tracker while keeping the API's
+          // source, inventory, and count admission callback in the loop.
+          await tracker.stop();
+          if (scenario.startsWith("pending")) {
+            yield completedCommand(
+              display("first"),
+              text(initial),
+              "live-first",
             );
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            const tracker = rollouts.tracker!;
-            expect(tracker).toBeDefined();
-            // Control polling through the real tracker while keeping the API's
-            // source, inventory, and count admission callback in the loop.
-            await tracker.stop();
-            if (scenario.startsWith("pending")) {
-              yield completedCommand(
-                display("first"),
-                text(initial),
-                "live-first",
-              );
-              await save("first", text(initial));
-              await tracker.refresh();
-              yield completedCommand(
-                display("last"),
-                text(initial),
-                "live-last",
-              );
-              await tracker.refresh();
-              await save(
-                "middle",
-                scenario === "pending phase"
-                  ? progressMarker("reporting", 3, 8)
-                  : progressMarker("discovery", 0, 9),
-              );
-              await tracker.refresh();
-              await save("last", text(initial));
-              if (scenario === "pending phase") {
-                await save("anchor", "Batch finished.");
-                yield completedCommand(
-                  "anchor",
-                  "Batch finished.",
-                  "live-anchor",
-                );
-              }
-              await tracker.refresh();
-            } else {
-              await save(
-                "initial",
-                scenario.startsWith("omitted")
-                  ? persistedCommandOutput
-                  : text(initial),
-              );
+            await save("first", text(initial));
+            await tracker.refresh();
+            yield completedCommand(display("last"), text(initial), "live-last");
+            await tracker.refresh();
+            await save(
+              "middle",
+              scenario === "pending phase"
+                ? progressMarker("reporting", 3, 8)
+                : progressMarker("discovery", 0, 9),
+            );
+            await tracker.refresh();
+            await save("last", text(initial));
+            if (scenario === "pending phase") {
               await save("anchor", "Batch finished.");
-              await tracker.refresh();
-              yield completedCommand(
-                display("initial"),
-                scenario.startsWith("omitted")
-                  ? commandOutput(text(initial))
-                  : text(initial),
-                "live-initial",
-              );
               yield completedCommand(
                 "anchor",
                 "Batch finished.",
                 "live-anchor",
               );
-              await save("final", text(expected));
             }
-            if (scenario.endsWith("shrink") || scenario === "pending inventory")
-              await appendFile(
-                workerPath,
-                jsonLines([
-                  {
-                    type: "response_item",
-                    payload: {
-                      type: "custom_tool_call_output",
-                      call_id: "worker-progress",
-                      output: progressMarker("attack_path", 5, 9),
-                    },
-                  },
-                ]) + "\n",
-              );
             await tracker.refresh();
+          } else {
+            await save(
+              "initial",
+              scenario.startsWith("omitted")
+                ? persistedCommandOutput
+                : text(initial),
+            );
+            await save("anchor", "Batch finished.");
             await tracker.refresh();
-            await tracker.stop();
+            yield completedCommand(
+              display("initial"),
+              scenario.startsWith("omitted")
+                ? commandOutput(text(initial))
+                : text(initial),
+              "live-initial",
+            );
+            yield completedCommand("anchor", "Batch finished.", "live-anchor");
+            await save("final", text(expected));
           }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+          if (scenario.endsWith("shrink") || scenario === "pending inventory")
+            await appendRecords(workerPath, [
+              customToolOutput(
+                progressMarker("attack_path", 5, 9),
+                "worker-progress",
+              ),
+            ]);
+          await tracker.refresh();
+          await tracker.refresh();
+          await tracker.stop();
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       await client.run(repository, {
         onProgress: (update) => updates.push(update),
@@ -13155,61 +11815,37 @@ if __name__ == "__main__":
             Number(String(left.name) === first),
         );
       }) as typeof originalReaddir);
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          parentPath = await writeUsageSession(codexHome, "thread-1", {});
-          workerPath = await writeUsageSession(
-            codexHome,
-            "worker-thread",
-            {},
-            { parent: "thread-1" },
-          );
-          const initial = progressMarker("discovery", 0, 8);
-          const larger = progressMarker("discovery", 0, 9);
-          await appendFile(
-            parentPath,
-            jsonLines([nativeCommand("initial", initial, "initial")]) + "\n",
-          );
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            yield completedCommand("initial changed", initial, "live-initial");
-            holdPoll = false;
-            pollAllowed.resolve();
-            await initialRead.promise;
-            await appendFile(
-              parentPath,
-              jsonLines([
-                nativeCommand("larger", larger, "larger"),
-                nativeCommand("final", initial, "final"),
-              ]) + "\n",
-            );
-            await appendFile(
-              workerPath,
-              jsonLines([
-                {
-                  type: "response_item",
-                  payload: {
-                    type: "custom_tool_call_output",
-                    call_id: "worker-progress",
-                    output: progressMarker("attack_path", 5, 9),
-                  },
-                },
-              ]) + "\n",
-            );
-            await Promise.all([finalRead.promise, workerRead.promise]);
-            expect(updates.at(-1)).toEqual({
-              phase: "discovery",
-              filesCompleted: 0,
-              filesTotal: 8,
-            });
-            yield completedCommand("larger changed", larger, "live-larger");
-            await workerSeen.promise;
-            yield completedCommand("final", initial, "live-final");
-          }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        parentPath = await writeUsageSession(codexHome, "thread-1", {});
+        workerPath = await writeWorkerSession(codexHome);
+        const initial = progressMarker("discovery", 0, 8);
+        const larger = progressMarker("discovery", 0, 9);
+        await appendRecords(parentPath, [
+          nativeCommand("initial", initial, "initial"),
+        ]);
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          yield completedCommand("initial changed", initial, "live-initial");
+          holdPoll = false;
+          pollAllowed.resolve();
+          await initialRead.promise;
+          await appendRecords(parentPath, [
+            nativeCommand("larger", larger, "larger"),
+            nativeCommand("final", initial, "final"),
+          ]);
+          await appendRecords(workerPath, [
+            customToolOutput(
+              progressMarker("attack_path", 5, 9),
+              "worker-progress",
+            ),
+          ]);
+          await Promise.all([finalRead.promise, workerRead.promise]);
+          expect(updates.at(-1)).toEqual(scanProgress("discovery", 0, 8));
+          yield completedCommand("larger changed", larger, "live-larger");
+          await workerSeen.promise;
+          yield completedCommand("final", initial, "live-final");
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       const keepAlive = setInterval(() => {}, 1_000);
       try {
@@ -13233,11 +11869,7 @@ if __name__ == "__main__":
             if (payload.call_id === "worker-progress") workerRead.resolve();
           },
         });
-        expect(updates.at(-1)).toEqual({
-          phase: "discovery",
-          filesCompleted: 0,
-          filesTotal: 8,
-        });
+        expect(updates.at(-1)).toEqual(scanProgress("discovery", 0, 8));
       } finally {
         holdPoll = false;
         pollAllowed.resolve();
@@ -13309,75 +11941,56 @@ if __name__ == "__main__":
         };
         return handle;
       }) as typeof originalOpen);
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          parentPath = await writeUsageSession(codexHome, "thread-1", {});
-          workerPath = await writeUsageSession(
-            codexHome,
-            "worker-thread",
-            {},
-            { parent: "thread-1" },
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        parentPath = await writeUsageSession(codexHome, "thread-1", {});
+        workerPath = await writeWorkerSession(codexHome);
+        const inventory = progressMarker("discovery", 0, 9);
+        const current = nativeCommand(
+          ["printf", "sk-" + "a".repeat(32)],
+          inventory,
+          "current",
+        );
+        const other = nativeCommand(
+          "other-inventory",
+          progressMarker("discovery", 0, 8),
+          "other",
+        );
+        const workerReceipt = (count: number) =>
+          customToolOutput(
+            progressMarker("attack_path", count, 9),
+            `worker-${count}`,
           );
-          const inventory = progressMarker("discovery", 0, 9);
-          const current = nativeCommand(
-            ["printf", "sk-" + "a".repeat(32)],
+        await appendRecords(
+          parentPath,
+          scenario === "older-snapshot" ? [other] : [current, other],
+        );
+        await appendRecords(workerPath, [workerReceipt(5)]);
+        holdPoll = false;
+        pollAllowed.resolve();
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          await closeEntered.promise;
+          if (scenario === "older-snapshot")
+            await appendRecords(parentPath, [current]);
+          yield completedCommand(
+            changedDisplay
+              ? "printf [REDACTED_SECRET]"
+              : "printf sk-" + "a".repeat(32),
             inventory,
-            "current",
+            "item_current",
           );
-          const other = nativeCommand(
-            "other-inventory",
-            progressMarker("discovery", 0, 8),
-            "other",
-          );
-          const workerReceipt = (count: number) => ({
-            type: "response_item",
-            payload: {
-              type: "custom_tool_call_output",
-              call_id: `worker-${count}`,
-              output: progressMarker("attack_path", count, 9),
-            },
-          });
-          await appendFile(
-            parentPath,
-            jsonLines(
-              scenario === "older-snapshot" ? [other] : [current, other],
-            ) + "\n",
-          );
-          await appendFile(workerPath, jsonLines([workerReceipt(5)]) + "\n");
-          holdPoll = false;
-          pollAllowed.resolve();
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            await closeEntered.promise;
-            if (scenario === "older-snapshot")
-              await appendFile(parentPath, jsonLines([current]) + "\n");
-            yield completedCommand(
-              changedDisplay
-                ? "printf [REDACTED_SECRET]"
-                : "printf sk-" + "a".repeat(32),
-              inventory,
-              "item_current",
-            );
-            expect(updates.at(-1)).toEqual({
-              phase: "discovery",
-              filesCompleted: 0,
-              filesTotal: 9,
-            });
-            closeReleased.resolve();
-            await currentRead.promise;
-            const total = scenario === "older-snapshot" ? 9 : 8;
-            const review = progressMarker("validation", 5, total);
-            await appendFile(
-              parentPath,
-              jsonLines([nativeCommand("review", review, "review")]) + "\n",
-            );
-            yield completedCommand("review", review, "item_review");
-            await appendFile(workerPath, jsonLines([workerReceipt(6)]) + "\n");
-          }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+          expect(updates.at(-1)).toEqual(scanProgress("discovery", 0, 9));
+          closeReleased.resolve();
+          await currentRead.promise;
+          const total = scenario === "older-snapshot" ? 9 : 8;
+          const review = progressMarker("validation", 5, total);
+          await appendRecords(parentPath, [
+            nativeCommand("review", review, "review"),
+          ]);
+          yield completedCommand("review", review, "item_review");
+          await appendRecords(workerPath, [workerReceipt(6)]);
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       const keepAlive = setInterval(() => {}, 1_000);
       try {
@@ -13393,8 +12006,8 @@ if __name__ == "__main__":
         });
         expect(updates.at(-1)).toEqual(
           scenario === "older-snapshot"
-            ? { phase: "validation", filesCompleted: 6, filesTotal: 9 }
-            : { phase: "validation", filesCompleted: 5, filesTotal: 8 },
+            ? scanProgress("validation", 6, 9)
+            : scanProgress("validation", 5, 8),
         );
         if (scenario === "older-snapshot") {
           const accepted = updates.findIndex(
@@ -13429,102 +12042,63 @@ if __name__ == "__main__":
       const smallerSeen = Promise.withResolvers<void>();
       const latestRead = Promise.withResolvers<void>();
       let holdPoll = true;
-      const originalReaddir = fsPromises.readdir;
-      const listing = spyOn(fsPromises, "readdir").mockImplementation((async (
-        ...args: Parameters<typeof originalReaddir>
-      ) => {
-        if (holdPoll && String(args[0]) === join(codexHome, "sessions"))
-          await pollAllowed.promise;
-        return originalReaddir(...args);
-      }) as typeof originalReaddir);
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          const parent = await writeUsageSession(codexHome, "thread-1", {});
-          const worker = await writeUsageSession(
-            codexHome,
-            "worker-thread",
-            {},
-            { parent: "thread-1" },
+
+      const listing = holdSessionListing(
+        codexHome,
+        pollAllowed.promise,
+        () => holdPoll,
+      );
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        const parent = await writeUsageSession(codexHome, "thread-1", {});
+        const worker = await writeWorkerSession(codexHome);
+        const inventory = progressMarker("discovery", 0, 9);
+        const workerReceipt = (count: number) =>
+          customToolOutput(
+            progressMarker("attack_path", count, 9),
+            `worker-${count}`,
           );
-          const inventory = progressMarker("discovery", 0, 9);
-          const workerReceipt = (count: number) => ({
-            type: "response_item",
-            payload: {
-              type: "custom_tool_call_output",
-              call_id: `worker-${count}`,
-              output: progressMarker("attack_path", count, 9),
-            },
-          });
-          await appendFile(
-            parent,
-            jsonLines([
-              nativeCommand(
-                ["printf", "sk-" + "a".repeat(32)],
-                inventory,
-                "initial-nine",
-              ),
-            ]) + "\n",
+        await appendRecords(parent, [
+          nativeCommand(
+            ["printf", "sk-" + "a".repeat(32)],
+            inventory,
+            "initial-nine",
+          ),
+        ]);
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          yield completedCommand(
+            changedDisplay
+              ? "printf [REDACTED_SECRET]"
+              : "printf sk-" + "a".repeat(32),
+            inventory,
+            "item_initial_nine",
           );
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            yield completedCommand(
-              changedDisplay
-                ? "printf [REDACTED_SECRET]"
-                : "printf sk-" + "a".repeat(32),
-              inventory,
-              "item_initial_nine",
-            );
-            await appendFile(worker, jsonLines([workerReceipt(5)]) + "\n");
-            holdPoll = false;
-            pollAllowed.resolve();
-            await workerSeen.promise;
-            // A later exact message bounds the changed command's source
-            // interval without assigning an equal-output inventory occurrence.
-            const anchor = "Inventory batch finished.";
-            await appendFile(
-              parent,
-              jsonLines([
-                {
-                  type: "event_msg",
-                  payload: {
-                    type: "item_completed",
-                    item: {
-                      type: "AgentMessage",
-                      id: "inventory-anchor",
-                      content: [{ type: "Text", text: anchor }],
-                    },
-                  },
-                },
-              ]) + "\n",
-            );
-            yield {
-              type: "item.completed",
-              item: { type: "agent_message", id: "item_anchor", text: anchor },
-            };
-            await appendFile(
-              parent,
-              jsonLines([
-                nativeCommand(
-                  "later-eight",
-                  progressMarker("discovery", 0, 8),
-                  "later-eight",
-                ),
-              ]) + "\n",
-            );
-            await smallerSeen.promise;
-            await appendFile(
-              parent,
-              jsonLines([
-                nativeCommand("latest-nine", inventory, "latest-nine"),
-              ]) + "\n",
-            );
-            await latestRead.promise;
-            await appendFile(worker, jsonLines([workerReceipt(6)]) + "\n");
-          }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+          await appendRecords(worker, [workerReceipt(5)]);
+          holdPoll = false;
+          pollAllowed.resolve();
+          await workerSeen.promise;
+          // A later exact message bounds the changed command's source
+          // interval without assigning an equal-output inventory occurrence.
+          const anchor = "Inventory batch finished.";
+          await appendRecords(parent, [
+            nativeMessage(anchor, "inventory-anchor"),
+          ]);
+          yield completedMessage("item_anchor", anchor);
+          await appendRecords(parent, [
+            nativeCommand(
+              "later-eight",
+              progressMarker("discovery", 0, 8),
+              "later-eight",
+            ),
+          ]);
+          await smallerSeen.promise;
+          await appendRecords(parent, [
+            nativeCommand("latest-nine", inventory, "latest-nine"),
+          ]);
+          await latestRead.promise;
+          await appendRecords(worker, [workerReceipt(6)]);
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       const keepAlive = setInterval(() => {}, 1_000);
       try {
@@ -13548,11 +12122,7 @@ if __name__ == "__main__":
               latestRead.resolve();
           },
         });
-        expect(updates.at(-1)).toEqual({
-          phase: "discovery",
-          filesCompleted: 6,
-          filesTotal: 9,
-        });
+        expect(updates.at(-1)).toEqual(scanProgress("discovery", 6, 9));
         const smaller = updates.findIndex(
           (update) =>
             update.phase === "discovery" &&
@@ -13593,39 +12163,18 @@ if __name__ == "__main__":
     );
     const native = (id: string) =>
       nativeCommand("scan-inventory", persistedCommandOutput, id);
-    await appendFile(
-      rollout,
-      [
-        native("historical"),
-        {
-          type: "event_msg",
-          payload: {
-            type: "item_completed",
-            item: {
-              type: "AgentMessage",
-              id: "historical-phase",
-              content: [
-                { type: "Text", text: progressMarker("threat_model", 0, 8) },
-              ],
-            },
-          },
-        },
-      ]
-        .map((event) => JSON.stringify(event))
-        .join("\n") + "\n",
-    );
+    await appendRecords(rollout, [
+      native("historical"),
+      nativeMessage(progressMarker("threat_model", 0, 8), "historical-phase"),
+    ]);
     const recipe = {
       repository,
       target: { kind: "repository", paths: [] },
       repositoryRevision: "deadbeef",
     };
-    const client = TestClient.withDependencies({
+    await using client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
-      runWorkbench: async (
-        _options: unknown,
-        args: readonly string[],
-        input?: string,
-      ): Promise<JsonObject> =>
+      runWorkbench: async (_options, args, input): Promise<JsonObject> =>
         args[0] === "get-cli-scan-resume"
           ? {
               ...mockScanRegistration(
@@ -13655,13 +12204,9 @@ if __name__ == "__main__":
                 rollout,
                 JSON.stringify(native("current")) +
                   "\n" +
-                  JSON.stringify({
-                    type: "response_item",
-                    payload: {
-                      type: "custom_tool_call_output",
-                      output: progressMarker("discovery", 1, 9),
-                    },
-                  }) +
+                  JSON.stringify(
+                    customToolOutput(progressMarker("discovery", 1, 9)),
+                  ) +
                   "\n",
               );
               throw new Error("Synthetic stop after resumed progress");
@@ -13671,23 +12216,15 @@ if __name__ == "__main__":
         }),
       }),
     });
-    try {
-      await expect(
-        client.run(repository, {
-          mode: "deep",
-          outputDir: scanDir,
-          resumeScanId: "scan_example_001",
-          onProgress: (progress) => updates.push(progress),
-        }),
-      ).rejects.toThrow("Synthetic stop after resumed progress");
-      expect(updates.at(-1)).toEqual({
-        phase: "discovery",
-        filesCompleted: 1,
-        filesTotal: 9,
-      });
-    } finally {
-      await client.close();
-    }
+    await expect(
+      client.run(repository, {
+        mode: "deep",
+        outputDir: scanDir,
+        resumeScanId: "scan_example_001",
+        onProgress: (progress) => updates.push(progress),
+      }),
+    ).rejects.toThrow("Synthetic stop after resumed progress");
+    expect(updates.at(-1)).toEqual(scanProgress("discovery", 1, 9));
   });
 
   test("matches a progress command after an identical retained non-progress completion", async () => {
@@ -13697,52 +12234,35 @@ if __name__ == "__main__":
 
     const native = (id: string) =>
       nativeCommand("scan-inventory", persistedCommandOutput, id);
-    const client = TestClient.withDependencies({
-      ...scanRuntimeDependencies(codexHome, scanDir),
-      runWorkbench: registerEightFileScan,
-      createCodex: codexFactory(async () => {
-        await copyCompletedScan(root);
-        const rollout = await writeUsageSession(codexHome, "thread-1", {});
+    const client = eightFileClient(codexHome, scanDir, async () => {
+      await copyCompletedScan(root);
+      const rollout = await writeUsageSession(codexHome, "thread-1", {});
+      await appendRecords(rollout, [
+        native("first-command"),
+        customToolOutput(
+          progressMarker("threat_model", 0, 8),
+          "prior-tool-progress",
+        ),
+      ]);
+      async function* events(): AsyncGenerator<ThreadEvent> {
+        await historyRead.promise;
+        for (const [index, text] of [
+          commandOutput("no progress marker"),
+          commandOutput(progressMarker("discovery", 0, 9)),
+        ].entries()) {
+          yield completedCommand("scan-inventory", text, `command-${index}`);
+        }
         await appendFile(
           rollout,
-          [
-            native("first-command"),
-            {
-              type: "response_item",
-              payload: {
-                type: "custom_tool_call_output",
-                call_id: "prior-tool-progress",
-                output: progressMarker("threat_model", 0, 8),
-              },
-            },
-          ]
-            .map((event) => JSON.stringify(event))
-            .join("\n") + "\n",
+          JSON.stringify(native("second-command")) +
+            "\n" +
+            JSON.stringify(
+              customToolOutput(progressMarker("discovery", 1, 9)),
+            ) +
+            "\n",
         );
-        async function* events(): AsyncGenerator<ThreadEvent> {
-          await historyRead.promise;
-          for (const [index, text] of [
-            commandOutput("no progress marker"),
-            commandOutput(progressMarker("discovery", 0, 9)),
-          ].entries()) {
-            yield completedCommand("scan-inventory", text, `command-${index}`);
-          }
-          await appendFile(
-            rollout,
-            JSON.stringify(native("second-command")) +
-              "\n" +
-              JSON.stringify({
-                type: "response_item",
-                payload: {
-                  type: "custom_tool_call_output",
-                  output: progressMarker("discovery", 1, 9),
-                },
-              }) +
-              "\n",
-          );
-        }
-        return { events: completedEvents("thread-1", events()) };
-      }),
+      }
+      return { events: completedEvents("thread-1", events()) };
     });
     // The fake stream has no process handle to keep the unref'ed poll alive.
     const keepAlive = setInterval(() => {}, 1_000);
@@ -13758,11 +12278,7 @@ if __name__ == "__main__":
             historyRead.resolve();
         },
       });
-      expect(updates.at(-1)).toEqual({
-        phase: "discovery",
-        filesCompleted: 1,
-        filesTotal: 9,
-      });
+      expect(updates.at(-1)).toEqual(scanProgress("discovery", 1, 9));
     } finally {
       clearInterval(keepAlive);
       await client.close();
@@ -13801,59 +12317,35 @@ if __name__ == "__main__":
               ? "function_call_output"
               : "custom_tool_call_output",
           call_id: id,
-          output:
-            "CODEX_SECURITY_SCAN_PROGRESS " +
-            JSON.stringify({ phase, filesCompleted: count, filesTotal: total }),
+          output: progressMarker(phase, count, total),
         },
       });
-      const append = (file: string, row: unknown) =>
-        appendFile(file, JSON.stringify(row) + "\n");
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          await writeUsageSession(codexHome, "thread-1", {});
-          const first = await writeUsageSession(
-            codexHome,
-            "worker-first",
-            {},
-            { parent: "thread-1" },
+      const append = (file: string, row: unknown) => appendRecord(file, row);
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        await writeUsageSession(codexHome, "thread-1", {});
+        const first = await writeWorkerSession(codexHome, "worker-first");
+        const second = await writeWorkerSession(codexHome, "worker-second");
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          await append(first, receipt("first", firstPhase, 2, 2));
+          await firstRead.promise;
+          await append(second, receipt("second", secondPhase, 1, 6));
+          await secondRead.promise;
+          // Notifications may share their call ID; each appended output is
+          // still a fresh receipt with the same worker-local coverage.
+          await append(
+            first,
+            receipt(
+              kind === "notification" ? "first" : "next",
+              firstPhase,
+              2,
+              2,
+            ),
           );
-          const second = await writeUsageSession(
-            codexHome,
-            "worker-second",
-            {},
-            { parent: "thread-1" },
-          );
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            await append(first, receipt("first", firstPhase, 2, 2));
-            await firstRead.promise;
-            await append(second, receipt("second", secondPhase, 1, 6));
-            await secondRead.promise;
-            // Notifications may share their call ID; each appended output is
-            // still a fresh receipt with the same worker-local coverage.
-            await append(
-              first,
-              receipt(
-                kind === "notification" ? "first" : "next",
-                firstPhase,
-                2,
-                2,
-              ),
-            );
-            await append(first, {
-              type: "response_item",
-              payload: {
-                type: "custom_tool_call_output",
-                call_id: "observed-last",
-                output: "done",
-              },
-            });
-            await lastRead.promise;
-          }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+          await append(first, customToolOutput("done", "observed-last"));
+          await lastRead.promise;
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       const keepAlive = setInterval(() => {}, 1_000);
       try {
@@ -13869,8 +12361,8 @@ if __name__ == "__main__":
         // The final receipt was consumed, but unchanged parent-phase coverage
         // is deduplicated even when the worker's own phase changes.
         expect(updates.filter((p) => p.filesCompleted > 0)).toEqual([
-          { phase: "preflight", filesCompleted: 2, filesTotal: 8 },
-          { phase: "preflight", filesCompleted: 3, filesTotal: 8 },
+          scanProgress("preflight", 2, 8),
+          scanProgress("preflight", 3, 8),
         ]);
       } finally {
         clearInterval(keepAlive);
@@ -13952,57 +12444,39 @@ if __name__ == "__main__":
       const marker = (phase: string) => progressMarker(phase, 8, 8);
       const completion = (id: string, phase: string) =>
         nativeCommand(id, marker(phase), id);
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          parentPath = await writeUsageSession(codexHome, "thread-1", {});
-          const worker = await writeUsageSession(
-            codexHome,
-            "worker-thread",
-            {},
-            { parent: "thread-1" },
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        parentPath = await writeUsageSession(codexHome, "thread-1", {});
+        const worker = await writeWorkerSession(codexHome);
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          await metadata.promise;
+          await workerMetadata.promise;
+          // Finish initial association before holding a fresh poll, so the
+          // buffered worker receipt and parent EOF belong to the same pass.
+          holdListing = true;
+          await listingEntered.promise;
+          await appendRecord(worker, customToolOutput(marker("attack_path")));
+          await appendRecord(
+            parentPath,
+            completion("old-discovery", "discovery"),
           );
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            await metadata.promise;
-            await workerMetadata.promise;
-            // Finish initial association before holding a fresh poll, so the
-            // buffered worker receipt and parent EOF belong to the same pass.
-            holdListing = true;
-            await listingEntered.promise;
-            await appendFile(
-              worker,
-              JSON.stringify({
-                type: "response_item",
-                payload: {
-                  type: "custom_tool_call_output",
-                  output: marker("attack_path"),
-                },
-              }) + "\n",
-            );
-            await appendFile(
-              parentPath,
-              JSON.stringify(completion("old-discovery", "discovery")) + "\n",
-            );
-            pauseClose = split;
-            if (split) {
-              listingReleased.resolve();
-              await closeEntered.promise;
-            }
-            // Discovery was omitted from live delivery. Both completed commands
-            // are durably appended before validation reaches the live stream.
-            await appendFile(
-              parentPath,
-              JSON.stringify(completion("new-validation", "validation")) + "\n",
-            );
-            yield completedCommand("new-validation", marker("validation"));
-            release.resolve();
+          pauseClose = split;
+          if (split) {
             listingReleased.resolve();
-            await validationRead.promise;
+            await closeEntered.promise;
           }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+          // Discovery was omitted from live delivery. Both completed commands
+          // are durably appended before validation reaches the live stream.
+          await appendRecord(
+            parentPath,
+            completion("new-validation", "validation"),
+          );
+          yield completedCommand("new-validation", marker("validation"));
+          release.resolve();
+          listingReleased.resolve();
+          await validationRead.promise;
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       const keepAlive = setInterval(() => {}, 1_000);
       try {
@@ -14023,11 +12497,7 @@ if __name__ == "__main__":
               validationRead.resolve();
           },
         });
-        expect(updates.at(-1)).toEqual({
-          phase: "validation",
-          filesCompleted: 8,
-          filesTotal: 8,
-        });
+        expect(updates.at(-1)).toEqual(scanProgress("validation", 8, 8));
       } finally {
         clearInterval(keepAlive);
         release.resolve();
@@ -14054,49 +12524,17 @@ if __name__ == "__main__":
         : (["discovery"] as const);
       const workerText = workerPhases.map(marker).join("\n");
       const parentPhase = multiple ? "attack_path" : "validation";
-      const client = TestClient.withDependencies({
-        ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: registerEightFileScan,
-        createCodex: codexFactory(async () => {
-          await copyCompletedScan(root);
-          await writeUsageSession(codexHome, "thread-1", {});
-          const worker = await writeUsageSession(
-            codexHome,
-            "worker-thread",
-            {},
-            { parent: "thread-1" },
-          );
-          await appendFile(
-            worker,
-            JSON.stringify({
-              type: "event_msg",
-              payload: { type: "agent_message", message: workerText },
-            }) + "\n",
-          );
-          async function* events(): AsyncGenerator<ThreadEvent> {
-            await workerRead.promise;
-            yield {
-              type: "item.completed",
-              item: {
-                type: "agent_message",
-                id: "parent-validation",
-                text: marker(parentPhase),
-              },
-            };
-            await appendFile(
-              worker,
-              JSON.stringify({
-                type: "response_item",
-                payload: {
-                  type: "message",
-                  role: "assistant",
-                  content: [{ type: "output_text", text: workerText }],
-                },
-              }) + "\n",
-            );
-          }
-          return { events: completedEvents("thread-1", events()) };
-        }),
+      const client = eightFileClient(codexHome, scanDir, async () => {
+        await copyCompletedScan(root);
+        await writeUsageSession(codexHome, "thread-1", {});
+        const worker = await writeWorkerSession(codexHome);
+        await appendRecord(worker, legacyMessage(workerText));
+        async function* events(): AsyncGenerator<ThreadEvent> {
+          await workerRead.promise;
+          yield completedMessage("parent-validation", marker(parentPhase));
+          await appendRecord(worker, responseMessage(workerText));
+        }
+        return { events: completedEvents("thread-1", events()) };
       });
       // The fake stream has no process handle to keep the unref'ed poll alive.
       const keepAlive = setInterval(() => {}, 1_000);
@@ -14142,12 +12580,7 @@ if __name__ == "__main__":
                 for await (const event of completedEvents()) {
                   yield event;
                   if (event.type === "turn.started") {
-                    await writeUsageSession(
-                      codexHome,
-                      "worker-thread",
-                      {},
-                      { parent: "thread-1" },
-                    );
+                    await writeWorkerSession(codexHome);
                     // The fake stream has no executor transport to keep the
                     // event loop alive while the tracker polls its new worker.
                     const timeout = setTimeout(
@@ -14230,11 +12663,7 @@ if __name__ == "__main__":
     let feedback = "";
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
-      runWorkbench: async (
-        _options: unknown,
-        args: readonly string[],
-        input?: string,
-      ): Promise<JsonObject> => {
+      runWorkbench: async (_options, args, input): Promise<JsonObject> => {
         commands.push(args);
         if (args[0] === "get-scan-feedback") {
           return {
@@ -14322,11 +12751,7 @@ if __name__ == "__main__":
           installedRoot: pluginRoot,
         },
       }),
-      runWorkbench: async (
-        _options: unknown,
-        args: readonly string[],
-        input?: string,
-      ): Promise<JsonObject> => {
+      runWorkbench: async (_options, args, input): Promise<JsonObject> => {
         commands.push(args[0]!);
         return args[0] === "register-cli-scan"
           ? mockScanRegistration(args, input)
@@ -14354,11 +12779,7 @@ if __name__ == "__main__":
       let prompt = "";
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> => {
+        runWorkbench: async (_options, args, input): Promise<JsonObject> => {
           if (args[0] === "register-cli-scan") {
             return { ...mockScanRegistration(args, input), scanId };
           }
@@ -15035,11 +13456,7 @@ if __name__ == "__main__":
       const { repository, codexHome, scanDir } = await scanDirectories();
       const client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> => {
+        runWorkbench: async (_options, args, input): Promise<JsonObject> => {
           return args[0] === "get-scan-feedback"
             ? feedback
             : mockWorkbench(args, input);
@@ -15059,7 +13476,7 @@ if __name__ == "__main__":
     const usages: unknown[] = [];
     const observerErrors: string[] = [];
     const commands: Array<readonly string[]> = [];
-    const client = new TestClient(
+    await using client = new TestClient(
       {
         codexOverrides: {
           model: "gpt-6-astra",
@@ -15074,44 +13491,40 @@ if __name__ == "__main__":
         createCodex: completedCodex(root),
       },
     );
-    try {
-      await expect(
-        client.preflight(repository, { maxCostUsd: 1 }),
-      ).rejects.toThrow("cost limit is not available for the configured model");
-      await expect(client.preflight(repository)).resolves.toMatchObject({
-        model: "gpt-6-astra",
-        modelProvider: "gcp",
-      });
-      const result = await client.run(repository, {
-        onUsage: async (usage) => {
-          usages.push(usage);
-          await Promise.resolve();
-          throw new Error("synthetic usage observer");
-        },
-        onObserverError: (observer) => observerErrors.push(observer),
-      });
-      expect(result.cost).toBeNull();
-      expect(usages).toEqual([
-        expect.objectContaining({ input_tokens: 10, output_tokens: 3 }),
-      ]);
-      expect(observerErrors).toEqual(["onUsage"]);
-      const completion = commands.find((args) => args[0] === "complete-scan");
-      const costIndex = completion?.indexOf("--cost-json") ?? -1;
-      expect(costIndex).toBeGreaterThan(0);
-      const receipt = JSON.parse(completion![costIndex + 1]!);
-      expect(receipt).toMatchObject({
-        usage: {
-          coverage: "complete",
-          threadCount: 1,
-          inputTokens: 10,
-          outputTokens: 3,
-          totalTokens: 13,
-        },
-      });
-      expect(receipt.cost).toBeUndefined();
-    } finally {
-      await client.close();
-    }
+    await expect(
+      client.preflight(repository, { maxCostUsd: 1 }),
+    ).rejects.toThrow("cost limit is not available for the configured model");
+    await expect(client.preflight(repository)).resolves.toMatchObject({
+      model: "gpt-6-astra",
+      modelProvider: "gcp",
+    });
+    const result = await client.run(repository, {
+      onUsage: async (usage) => {
+        usages.push(usage);
+        await Promise.resolve();
+        throw new Error("synthetic usage observer");
+      },
+      onObserverError: (observer) => observerErrors.push(observer),
+    });
+    expect(result.cost).toBeNull();
+    expect(usages).toEqual([
+      expect.objectContaining({ input_tokens: 10, output_tokens: 3 }),
+    ]);
+    expect(observerErrors).toEqual(["onUsage"]);
+    const completion = commands.find((args) => args[0] === "complete-scan");
+    const costIndex = completion?.indexOf("--cost-json") ?? -1;
+    expect(costIndex).toBeGreaterThan(0);
+    const receipt = JSON.parse(completion![costIndex + 1]!);
+    expect(receipt).toMatchObject({
+      usage: {
+        coverage: "complete",
+        threadCount: 1,
+        inputTokens: 10,
+        outputTokens: 3,
+        totalTokens: 13,
+      },
+    });
+    expect(receipt.cost).toBeUndefined();
   });
   const prices = [
     { model: "gpt-6-astra", provider: "openai", min: 0.000232, max: 0.000429 },
@@ -15252,7 +13665,7 @@ if __name__ == "__main__":
       await writeFile(join(repository, "notes.md"), "fixture");
       const turns: Array<{ prompt: string; paths: string[] }> = [];
       const warnings: string[] = [];
-      const client = TestClient.withDependencies({
+      await using client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         canRunDirectDeepScan: () => false,
         readDeepScanParentConfig: async () =>
@@ -15268,22 +13681,18 @@ if __name__ == "__main__":
             return { events: completedEvents() };
           })(),
       });
-      try {
-        await expect(
-          client.run(repository, {
-            mode: "deep",
-            target,
-            postScanPrompt,
-            onWarning: (warning) => warnings.push(warning),
-          }),
-        ).rejects.toThrow("native configuration failed");
-        expect(warnings).toEqual([]);
-        expect(turns).toEqual(
-          postScanPrompt ? [{ prompt: postScanPrompt, paths: target }] : [],
-        );
-      } finally {
-        await client.close();
-      }
+      await expect(
+        client.run(repository, {
+          mode: "deep",
+          target,
+          postScanPrompt,
+          onWarning: (warning) => warnings.push(warning),
+        }),
+      ).rejects.toThrow("native configuration failed");
+      expect(warnings).toEqual([]);
+      expect(turns).toEqual(
+        postScanPrompt ? [{ prompt: postScanPrompt, paths: target }] : [],
+      );
     },
   );
 
@@ -15306,7 +13715,7 @@ if __name__ == "__main__":
       events: completedEvents(threadId),
     }));
     const thread = { id: threadId, runStreamed };
-    const client = TestClient.withDependencies({
+    await using client = new TestClient(BUDGET_TEST_CONFIG, {
       ...scanRuntimeDependencies(codexHome, scanDir),
       canRunDirectDeepScan: () => false,
       readDeepScanParentConfig: readConfig,
@@ -15330,21 +13739,17 @@ if __name__ == "__main__":
         return mockWorkbench(args, input);
       },
     });
-    try {
-      await expect(
-        client.run(repository, {
-          mode: "deep",
-          resumeScanId: scanId,
-          outputDir: scanDir,
-          maxCostUsd: 0.004,
-          postScanPrompt: "Summarize the failed scan.",
-        }),
-      ).rejects.toBeInstanceOf(ScanCostLimitExceededError);
-      expect(readConfig).not.toHaveBeenCalled();
-      expect(runStreamed).not.toHaveBeenCalled();
-    } finally {
-      await client.close();
-    }
+    await expect(
+      client.run(repository, {
+        mode: "deep",
+        resumeScanId: scanId,
+        outputDir: scanDir,
+        maxCostUsd: 0.004,
+        postScanPrompt: "Summarize the failed scan.",
+      }),
+    ).rejects.toBeInstanceOf(ScanCostLimitExceededError);
+    expect(readConfig).not.toHaveBeenCalled();
+    expect(runStreamed).not.toHaveBeenCalled();
   });
 
   test.each([
@@ -15369,12 +13774,7 @@ if __name__ == "__main__":
         createCodex: codexFactory(async (prompt: string) => {
           prompts.push(prompt);
           await writeUsageSession(codexHome, "thread-1", {});
-          await writeUsageSession(
-            codexHome,
-            `worker-${prompts.length}`,
-            {},
-            { parent: "thread-1" },
-          );
+          await writeWorkerSession(codexHome, `worker-${prompts.length}`);
           if (prompts.length === 1 && !scanFails) {
             await copyCompletedScan(root);
             const coveragePath = join(scanDir, "coverage.json");
@@ -15568,10 +13968,11 @@ if __name__ == "__main__":
               };
               async function* events(): AsyncGenerator<ThreadEvent> {
                 yield { type: "thread.started", thread_id: "scan-thread" };
-                await writeUsageSession(codexHome, "scan-thread", {
-                  input_tokens: 900,
-                  output_tokens: 0,
-                });
+                await writeUsageSession(
+                  codexHome,
+                  "scan-thread",
+                  basicUsage(900, 0),
+                );
                 await (signal.aborted ? undefined : once(signal, "abort"));
                 await operationRelease.promise;
                 signal.throwIfAborted();
@@ -15672,14 +14073,15 @@ if __name__ == "__main__":
         async runStreamed() {
           async function* events(): AsyncGenerator<ThreadEvent> {
             yield { type: "thread.started", thread_id: "scan-thread" };
-            const path = await writeUsageSession(codexHome, "scan-thread", {
-              input_tokens: 800,
-              output_tokens: 0,
-            });
+            const path = await writeUsageSession(
+              codexHome,
+              "scan-thread",
+              basicUsage(800, 0),
+            );
             await writeUsageSession(
               codexHome,
               "worker-thread",
-              { input_tokens: 100, output_tokens: 0 },
+              basicUsage(100, 0),
               { parent: "scan-thread", parentField: "parent_thread_id" },
             );
             measured = 900;
@@ -15689,23 +14091,14 @@ if __name__ == "__main__":
             await secondApproval;
             measured = 2_600;
             await copyCompletedScan(root);
-            yield {
-              type: "turn.completed",
-              usage: {
-                input_tokens: 2_500,
-                cached_input_tokens: 0,
-                cache_write_input_tokens: 0,
-                output_tokens: 0,
-                reasoning_output_tokens: 0,
-              },
-            };
+            yield completedTurn({ input_tokens: 2_500, output_tokens: 0 });
           }
           return { events: events() };
         },
       };
     });
     let budgetSignal: AbortSignal | undefined;
-    const client = TestClient.withDependencies({
+    const client = new TestClient(BUDGET_TEST_CONFIG, {
       ...scanRuntimeDependencies(codexHome, scanDir),
       runWorkbench: recordingWorkbench(commands, () =>
         measuredScanUsage(measured, 0, 0),
@@ -15774,7 +14167,7 @@ if __name__ == "__main__":
         if (cost.inputTokens === 950) nextCost.resolve();
       });
       let budgetSignal: AbortSignal | undefined;
-      const client = TestClient.withDependencies({
+      const client = new TestClient(BUDGET_TEST_CONFIG, {
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (_options, args, input) => {
           commands.push(args);
@@ -15790,23 +14183,15 @@ if __name__ == "__main__":
           async (_input: string, { signal }: { signal: AbortSignal }) => {
             async function* events(): AsyncGenerator<ThreadEvent> {
               yield { type: "thread.started", thread_id: "scan-thread" };
-              const path = await writeUsageSession(codexHome, "scan-thread", {
-                input_tokens: 900,
-                output_tokens: 0,
-              });
+              const path = await writeUsageSession(
+                codexHome,
+                "scan-thread",
+                basicUsage(900, 0),
+              );
               await requestStarted.promise;
               if (scenario === "completed") {
                 await copyCompletedScan(root);
-                yield {
-                  type: "turn.completed",
-                  usage: {
-                    input_tokens: 900,
-                    cached_input_tokens: 0,
-                    cache_write_input_tokens: 0,
-                    output_tokens: 0,
-                    reasoning_output_tokens: 0,
-                  },
-                };
+                yield completedTurn({ input_tokens: 900, output_tokens: 0 });
                 return;
               }
               await appendUsage(path, 950);
@@ -15917,12 +14302,12 @@ if __name__ == "__main__":
         return { events: events() };
       },
     );
-    const cost = estimateScanCost("gpt-5.6-sol", {
+    const cost = estimateScanCost(BUDGET_TEST_CONFIG.codexOverrides.model, {
       input_tokens: 1_250,
       cached_input_tokens: 200,
       output_tokens: 30,
     })!;
-    const client = TestClient.withDependencies({
+    const client = new TestClient(BUDGET_TEST_CONFIG, {
       ...scanRuntimeDependencies(codexHome, scanDir),
       runWorkbench: recordingWorkbench(commands, {
         ...measuredScanUsage(1_250, 200, 30),
@@ -16054,13 +14439,9 @@ if __name__ == "__main__":
           return { events: events() };
         },
       );
-      const client = TestClient.withDependencies({
+      const client = new TestClient(BUDGET_TEST_CONFIG, {
         ...scanRuntimeDependencies(codexHome, scanDir),
-        runWorkbench: async (
-          _options: unknown,
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> => {
+        runWorkbench: async (_options, args, input): Promise<JsonObject> => {
           commands.push(args);
           if (args[0] === "register-cli-scan") {
             expect(JSON.parse(input!)).toMatchObject({
@@ -16310,9 +14691,9 @@ if __name__ == "__main__":
           },
         })),
         runWorkbench: async (
-          workbenchOptions: Parameters<typeof runWorkbench>[0],
-          args: readonly string[],
-          input?: string,
+          workbenchOptions,
+          args,
+          input,
         ): Promise<JsonObject> => {
           workbenchGit =
             workbenchOptions.environment["CODEX_SECURITY_GIT"] ?? "";
@@ -16322,33 +14703,29 @@ if __name__ == "__main__":
           recipe = JSON.parse(input!).recipe;
           return mockScanRegistration(args, input);
         },
-        createCodex: (options: CodexOptions) => ({
-          startThread: () => ({
-            id: null,
-            async runStreamed(input: string) {
-              prompt = input;
-              expect(options.env?.["CODEX_SECURITY_GIT"]).toBe(expectedGit);
-              expect(options.env?.["PATH"]?.split(delimiter)).not.toContain(
-                knowledgeBaseBin,
+        createCodex: (options: CodexOptions) =>
+          codexWithStream(async (input: string) => {
+            prompt = input;
+            expect(options.env?.["CODEX_SECURITY_GIT"]).toBe(expectedGit);
+            expect(options.env?.["PATH"]?.split(delimiter)).not.toContain(
+              knowledgeBaseBin,
+            );
+            expect(options.env?.["GIT_SSH_COMMAND"]).toBe(
+              "synthetic-ssh --fixture",
+            );
+            if (kind === "standalone-file")
+              expect(options.env?.["PATH"]?.split(delimiter)).toContain(
+                trustedBin,
               );
-              expect(options.env?.["GIT_SSH_COMMAND"]).toBe(
-                "synthetic-ssh --fixture",
-              );
-              if (kind === "standalone-file")
-                expect(options.env?.["PATH"]?.split(delimiter)).toContain(
-                  trustedBin,
-                );
-              knowledgeDirectory =
-                options.env?.["CODEX_SECURITY_KNOWLEDGE_BASE"] ?? "";
-              const [document] = await readdir(knowledgeDirectory);
-              expect(
-                await readFile(join(knowledgeDirectory, document!), "utf8"),
-              ).toBe(context);
-              await copyCompletedScan(root);
-              return { events: completedEvents() };
-            },
+            knowledgeDirectory =
+              options.env?.["CODEX_SECURITY_KNOWLEDGE_BASE"] ?? "";
+            const [document] = await readdir(knowledgeDirectory);
+            expect(
+              await readFile(join(knowledgeDirectory, document!), "utf8"),
+            ).toBe(context);
+            await copyCompletedScan(root);
+            return { events: completedEvents() };
           }),
-        }),
       });
 
       const result = await client.run(repository, {
@@ -16390,17 +14767,13 @@ if __name__ == "__main__":
     let prompt = "";
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
-      createCodex: (options: CodexOptions) => ({
-        startThread: () => ({
-          id: null,
-          async runStreamed(input: string) {
-            prompt = input;
-            knowledgeDirectory =
-              options.env?.["CODEX_SECURITY_KNOWLEDGE_BASE"] ?? "";
-            throw new Error("scan failed");
-          },
+      createCodex: (options: CodexOptions) =>
+        codexWithStream(async (input: string) => {
+          prompt = input;
+          knowledgeDirectory =
+            options.env?.["CODEX_SECURITY_KNOWLEDGE_BASE"] ?? "";
+          throw new Error("scan failed");
         }),
-      }),
     });
 
     await expect(
@@ -16430,11 +14803,7 @@ if __name__ == "__main__":
       resolvePluginPython: async () => python!,
       prepareOutputDir: async () => scanDir,
       repositoryRevision: async () => "deadbeef",
-      runWorkbench: async (
-        options: Parameters<typeof runWorkbench>[0],
-        args: readonly string[],
-        input?: string,
-      ): Promise<JsonObject> => {
+      runWorkbench: async (options, args, input): Promise<JsonObject> => {
         commands.push(args);
         const result = await runWorkbench(options, args, input);
         if (args[0] === "fail-scan") {
@@ -16495,11 +14864,7 @@ if __name__ == "__main__":
         resolvePluginPython: async () => python!,
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
-        runWorkbench: async (
-          options: Parameters<typeof runWorkbench>[0],
-          args: readonly string[],
-          input?: string,
-        ): Promise<JsonObject> => {
+        runWorkbench: async (options, args, input): Promise<JsonObject> => {
           commands.push(args);
           return await runWorkbench(options, args, input);
         },
@@ -16544,19 +14909,14 @@ if __name__ == "__main__":
       prepareRuntime: async () => preparedRuntime(codexHome),
       resolvePluginPython: async () => "/managed/python",
       repositoryRevision: async () => "deadbeef",
-      createCodex: (options: CodexOptions) => ({
-        startThread: () => ({
-          id: null,
-          async runStreamed() {
-            const scanDir = options.env?.["CODEX_SECURITY_SCAN_DIR"];
-            if (scanDir === undefined)
-              throw new Error("missing scan directory");
-            await cp(EXAMPLE, scanDir, { recursive: true });
-            await writeFile(join(scanDir, "report.md"), "# Scan report\n");
-            return { events: completedEvents() };
-          },
+      createCodex: (options: CodexOptions) =>
+        codexWithStream(async () => {
+          const scanDir = options.env?.["CODEX_SECURITY_SCAN_DIR"];
+          if (scanDir === undefined) throw new Error("missing scan directory");
+          await cp(EXAMPLE, scanDir, { recursive: true });
+          await writeFile(join(scanDir, "report.md"), "# Scan report\n");
+          return { events: completedEvents() };
         }),
-      }),
     });
 
     const result = await client.run(repository);
@@ -16571,10 +14931,8 @@ if __name__ == "__main__":
   });
 
   test("rejects state directories overlapping the selected repository", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
+    const { root, repository } = await repositoryDirectories();
     const linkedState = join(root, "linked-state");
-    await mkdir(repository);
     await symlink(
       root,
       linkedState,
@@ -16622,13 +14980,13 @@ if __name__ == "__main__":
   });
 
   test.each([
-    ["OpenAI", undefined, "OPENAI_API_KEY", "gpt-5.6-sol", undefined],
+    ["OpenAI", undefined, "OPENAI_API_KEY", "gpt-6.1-sol", undefined],
     ...EXTERNAL_PROVIDER_CASES,
     [
       "managed custom",
       "synthetic.gateway",
       "OPENAI_API_KEY",
-      "gpt-5.6-sol",
+      "gpt-6.1-sol",
       {
         name: "Synthetic",
         wire_api: "responses",
@@ -16706,26 +15064,20 @@ if __name__ == "__main__":
               );
             }
           },
-          createCodex: (options: CodexOptions) => ({
-            startThread: () => ({
-              id: null,
-              async runStreamed() {
-                expect(options.env?.["CODEX_HOME"]).toBe(codexHome);
-                expect(options.apiKey).toBe(
-                  provider === undefined
-                    ? "synthetic-transient-key"
-                    : undefined,
-                );
-                const path = await writeUsageSession(
-                  codexHome,
-                  `persistent-thread-${sessions.size + 1}`,
-                  { input_tokens: 1 },
-                );
-                sessions.set(path, await readFile(path, "utf8"));
-                throw new Error("persistent session recorded");
-              },
+          createCodex: (options: CodexOptions) =>
+            codexWithStream(async () => {
+              expect(options.env?.["CODEX_HOME"]).toBe(codexHome);
+              expect(options.apiKey).toBe(
+                provider === undefined ? "synthetic-transient-key" : undefined,
+              );
+              const path = await writeUsageSession(
+                codexHome,
+                `persistent-thread-${sessions.size + 1}`,
+                { input_tokens: 1 },
+              );
+              sessions.set(path, await readFile(path, "utf8"));
+              throw new Error("persistent session recorded");
             }),
-          }),
         },
       );
 
@@ -16769,7 +15121,7 @@ if __name__ == "__main__":
     const clients = await Promise.all(
       (
         [
-          ["OPENAI_API_KEY", "gpt-5.6-sol", undefined],
+          ["OPENAI_API_KEY", "gpt-6.1-sol", undefined],
           ["OPENROUTER_API_KEY", "anthropic/claude-sonnet-4.5", "openrouter"],
         ] as const
       ).map(async ([apiKey, model, provider], index) => {
@@ -16823,28 +15175,23 @@ if __name__ == "__main__":
                   model_providers: { [provider]: OPENROUTER_CODEX_PROVIDER },
                 });
               }
-              return {
-                startThread: () => ({
-                  id: null,
-                  async runStreamed() {
-                    if (++scansStarted === 2) concurrentScans.resolve();
-                    await concurrentScans.promise;
-                    const workerConfig = parseToml(
-                      await readFile(
-                        options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
-                        "utf8",
-                      ),
-                    );
-                    expect(workerConfig["model_provider"]).toBe(provider);
-                    if (provider !== undefined) {
-                      expect(workerConfig["model_providers"]).toEqual({
-                        [provider]: OPENROUTER_CODEX_PROVIDER,
-                      });
-                    }
-                    throw new Error("parallel API-key scan reached");
-                  },
-                }),
-              };
+              return codexWithStream(async () => {
+                if (++scansStarted === 2) concurrentScans.resolve();
+                await concurrentScans.promise;
+                const workerConfig = parseToml(
+                  await readFile(
+                    options.env!["CODEX_SECURITY_CONFIG_PATH"]!,
+                    "utf8",
+                  ),
+                );
+                expect(workerConfig["model_provider"]).toBe(provider);
+                if (provider !== undefined) {
+                  expect(workerConfig["model_providers"]).toEqual({
+                    [provider]: OPENROUTER_CODEX_PROVIDER,
+                  });
+                }
+                throw new Error("parallel API-key scan reached");
+              });
             },
           },
         );
@@ -16873,10 +15220,8 @@ if __name__ == "__main__":
   });
 
   test("rejects custom Deep plugins without isolated worker configuration", async () => {
-    const root = await temporaryDirectory();
-    const repository = join(root, "repository");
+    const { root, repository } = await repositoryDirectories();
     const pluginRoot = join(root, "custom-plugin");
-    await mkdir(repository);
     await cp(PLUGIN_ROOT, pluginRoot, { recursive: true });
     const mcpPath = join(pluginRoot, ".mcp.json");
     const mcpConfiguration = JSON.parse(await readFile(mcpPath, "utf8"));
@@ -16886,21 +15231,17 @@ if __name__ == "__main__":
     );
     await writeFile(mcpPath, JSON.stringify(mcpConfiguration));
     const createCodex = mock(throwing("Codex should not start"));
-    const client = new TestClient(
+    await using client = new TestClient(
       { pluginPath: pluginRoot },
       {
         environment: { CODEX_SECURITY_STATE_DIR: join(root, "state") },
         createCodex,
       },
     );
-    try {
-      await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
-        "Update the custom plugin or use the bundled plugin",
-      );
-      expect(createCodex).not.toHaveBeenCalled();
-    } finally {
-      await client.close();
-    }
+    await expect(client.run(repository, { mode: "deep" })).rejects.toThrow(
+      "Update the custom plugin or use the bundled plugin",
+    );
+    expect(createCodex).not.toHaveBeenCalled();
   });
 
   test("rejects a shell-visible plugin root inside CODEX_HOME", async () => {
@@ -16984,79 +15325,73 @@ if __name__ == "__main__":
               );
               return mockWorkbench(args, input);
             },
-            createCodex: (options) => ({
-              startThread: () => ({
-                id: null,
-                async runStreamed() {
-                  if (++starts === 2) started.resolve();
-                  await started.promise;
-                  expect(
-                    options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"],
-                  ).toBe(preparedRuntime(codexHome).deepScanConfigPath);
-                  expect(options.env?.["CODEX_SECURITY_CONFIG_PATH"]).toBe(
-                    configPath,
+            createCodex: (options) =>
+              codexWithStream(async () => {
+                if (++starts === 2) started.resolve();
+                await started.promise;
+                expect(
+                  options.env?.["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"],
+                ).toBe(preparedRuntime(codexHome).deepScanConfigPath);
+                expect(options.env?.["CODEX_SECURITY_CONFIG_PATH"]).toBe(
+                  configPath,
+                );
+                expect(options.env?.["CODEX_SQLITE_HOME"]).toBe(sqliteHome);
+                paths.add(configPath);
+                const saved = resolveCodexProfile(
+                  parseToml(await readFile(configPath, "utf8")) as JsonObject,
+                );
+                const effective = resolveCodexProfile(
+                  options.config as JsonObject,
+                );
+                expect(saved["skills"]).toEqual(effective["skills"]);
+                expect(effective["sqlite_home"]).toBe(
+                  index === 0 ? "sqlite" : sqliteHome,
+                );
+                const snapshot = parseToml(
+                  await readFile(
+                    options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
+                    "utf8",
+                  ),
+                );
+                expect(
+                  (snapshot["worker_runtime"] as JsonObject)["skills"],
+                ).toEqual(effective["skills"]);
+                expect(
+                  (snapshot["worker_runtime"] as JsonObject)[
+                    "synthetic_native"
+                  ],
+                ).toEqual({ root: index, selected: `scan-${index}` });
+                for (const key of [
+                  "experimental_compact_prompt_file",
+                  "model_catalog_json",
+                ]) {
+                  const file = (snapshot["worker_runtime"] as JsonObject)[key];
+                  expect(file).toBe(nativeFile);
+                  expect(await readFile(file as string, "utf8")).toBe(
+                    JSON.stringify({ models: [] }),
                   );
-                  expect(options.env?.["CODEX_SQLITE_HOME"]).toBe(sqliteHome);
-                  paths.add(configPath);
-                  const saved = resolveCodexProfile(
-                    parseToml(await readFile(configPath, "utf8")) as JsonObject,
-                  );
-                  const effective = resolveCodexProfile(
-                    options.config as JsonObject,
-                  );
-                  expect(saved["skills"]).toEqual(effective["skills"]);
-                  expect(effective["sqlite_home"]).toBe(
-                    index === 0 ? "sqlite" : sqliteHome,
-                  );
-                  const snapshot = parseToml(
-                    await readFile(
-                      options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
-                      "utf8",
-                    ),
-                  );
-                  expect(
-                    (snapshot["worker_runtime"] as JsonObject)["skills"],
-                  ).toEqual(effective["skills"]);
-                  expect(
-                    (snapshot["worker_runtime"] as JsonObject)[
-                      "synthetic_native"
-                    ],
-                  ).toEqual({ root: index, selected: `scan-${index}` });
-                  for (const key of [
-                    "experimental_compact_prompt_file",
-                    "model_catalog_json",
-                  ]) {
-                    const file = (snapshot["worker_runtime"] as JsonObject)[
-                      key
-                    ];
-                    expect(file).toBe(nativeFile);
-                    expect(await readFile(file as string, "utf8")).toBe(
-                      JSON.stringify({ models: [] }),
-                    );
-                  }
-                  expect(
-                    (snapshot["worker_runtime"] as JsonObject)["sqlite_home"],
-                  ).toBe(sqliteHome);
-                  const selections = (saved["skills"] as JsonObject)[
-                    "config"
-                  ] as JsonObject[];
-                  expect(selections).toContainEqual(customSkill);
-                  expect(selections).toContainEqual({
-                    path: join(
-                      installedRoot,
-                      "skills",
-                      "security-scan",
-                      "SKILL.md",
-                    ),
-                    enabled: false,
-                  });
-                  expect(JSON.stringify(selections)).not.toContain(
-                    `unrelated-${1 - index}`,
-                  );
-                  throw new Error("worker skill configuration captured");
-                },
+                }
+                expect(
+                  (snapshot["worker_runtime"] as JsonObject)["sqlite_home"],
+                ).toBe(sqliteHome);
+                const selections = (saved["skills"] as JsonObject)[
+                  "config"
+                ] as JsonObject[];
+                expect(selections).toContainEqual(customSkill);
+                expect(selections).toContainEqual({
+                  path: join(
+                    installedRoot,
+                    "skills",
+                    "security-scan",
+                    "SKILL.md",
+                  ),
+                  enabled: false,
+                });
+                expect(JSON.stringify(selections)).not.toContain(
+                  `unrelated-${1 - index}`,
+                );
+                throw new Error("worker skill configuration captured");
               }),
-            }),
           },
         );
         return { client, repository };
@@ -17105,7 +15440,7 @@ if __name__ == "__main__":
       };
       const before = structuredClone(codexOverrides);
       let reachedScan = false;
-      const client = new TestClient(
+      await using client = new TestClient(
         { codexOverrides },
         {
           ...scanRuntimeDependencies(codexHome, scanDir),
@@ -17114,76 +15449,61 @@ if __name__ == "__main__":
             deepScanConfigPath,
             plugin: { ...preparedRuntime(codexHome).plugin, installedRoot },
           })),
-          createCodex: (options) => ({
-            startThread: () => ({
-              id: null,
-              async runStreamed(prompt: string) {
-                reachedScan = true;
-                const workflow =
-                  mode === "deep" ? "deep-security-scan" : "security-scan";
+          createCodex: (options) =>
+            codexWithStream(async (prompt: string) => {
+              reachedScan = true;
+              const workflow =
+                mode === "deep" ? "deep-security-scan" : "security-scan";
+              expect(prompt).toContain(
+                shellEnvironmentReference(
+                  "CODEX_SECURITY_PLUGIN_ROOT",
+                  `/skills/${workflow}/SKILL.md`,
+                ),
+              );
+              expect(prompt).not.toContain("$codex-security:");
+              if (mode === "deep")
                 expect(prompt).toContain(
                   shellEnvironmentReference(
                     "CODEX_SECURITY_PLUGIN_ROOT",
-                    `/skills/${workflow}/SKILL.md`,
+                    "/skills/<skill-name>/SKILL.md",
                   ),
                 );
-                expect(prompt).not.toContain("$codex-security:");
-                if (mode === "deep")
-                  expect(prompt).toContain(
-                    shellEnvironmentReference(
-                      "CODEX_SECURITY_PLUGIN_ROOT",
-                      "/skills/<skill-name>/SKILL.md",
-                    ),
-                  );
-                expect(options.env?.["CODEX_SECURITY_PLUGIN_ROOT"]).toBe(
-                  PLUGIN_ROOT,
-                );
-                const config = resolveCodexProfile(
-                  options.config as JsonObject,
-                );
-                const entries = (config["skills"] as JsonObject)[
-                  "config"
-                ] as JsonObject[];
-                expect(entries).toContainEqual(unrelated);
-                for (const entry of await readdir(join(PLUGIN_ROOT, "skills"), {
-                  withFileTypes: true,
-                })) {
-                  if (entry.isDirectory())
-                    expect(entries).toContainEqual({
-                      path: join(
-                        installedRoot,
-                        "skills",
-                        entry.name,
-                        "SKILL.md",
-                      ),
-                      enabled: false,
-                    });
-                }
-                expect(config["mcp_servers"]).toBeUndefined();
-                if (mode === "deep") {
-                  const worker = parseToml(
-                    await readFile(
-                      options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
-                      "utf8",
-                    ),
-                  )["worker_runtime"] as JsonObject;
-                  expect(worker["skills"]).toEqual(config["skills"]);
-                }
-                throw new Error("readable workflow captured");
-              },
+              expect(options.env?.["CODEX_SECURITY_PLUGIN_ROOT"]).toBe(
+                PLUGIN_ROOT,
+              );
+              const config = resolveCodexProfile(options.config as JsonObject);
+              const entries = (config["skills"] as JsonObject)[
+                "config"
+              ] as JsonObject[];
+              expect(entries).toContainEqual(unrelated);
+              for (const entry of await readdir(join(PLUGIN_ROOT, "skills"), {
+                withFileTypes: true,
+              })) {
+                if (entry.isDirectory())
+                  expect(entries).toContainEqual({
+                    path: join(installedRoot, "skills", entry.name, "SKILL.md"),
+                    enabled: false,
+                  });
+              }
+              expect(config["mcp_servers"]).toBeUndefined();
+              if (mode === "deep") {
+                const worker = parseToml(
+                  await readFile(
+                    options.env!["CODEX_SECURITY_DEEP_SCAN_CONFIG_PATH"]!,
+                    "utf8",
+                  ),
+                )["worker_runtime"] as JsonObject;
+                expect(worker["skills"]).toEqual(config["skills"]);
+              }
+              throw new Error("readable workflow captured");
             }),
-          }),
         },
       );
-      try {
-        await expect(client.run(repository, { mode })).rejects.toThrow(
-          "readable workflow captured",
-        );
-        expect(reachedScan).toBe(true);
-        expect(codexOverrides).toEqual(before);
-      } finally {
-        await client.close();
-      }
+      await expect(client.run(repository, { mode })).rejects.toThrow(
+        "readable workflow captured",
+      );
+      expect(reachedScan).toBe(true);
+      expect(codexOverrides).toEqual(before);
     },
   );
 
@@ -17320,27 +15640,23 @@ if __name__ == "__main__":
       { pluginPath: pluginRoot },
       {
         ...dependencies,
-        createCodex: (options) => ({
-          startThread: () => ({
-            id: null,
-            async runStreamed(prompt: string) {
-              expect(prompt).toContain("references/scoped-paths.md");
-              expect(options.env?.["PATH"]?.split(delimiter)).toContain(
-                callerTools,
-              );
-              const output = join(scanDir, "scoped-source-input.jsonl");
-              expect(existsSync(output)).toBe(false);
-              runSelectedHelper(options.env!);
-              expect(
-                (await readFile(output, "utf8"))
-                  .trimEnd()
-                  .split("\n")
-                  .map((row) => JSON.parse(row).path),
-              ).toEqual(["src/a.py", "src/keep.tmp"]);
-              throw new Error("scoped inventory captured");
-            },
+        createCodex: (options) =>
+          codexWithStream(async (prompt: string) => {
+            expect(prompt).toContain("references/scoped-paths.md");
+            expect(options.env?.["PATH"]?.split(delimiter)).toContain(
+              callerTools,
+            );
+            const output = join(scanDir, "scoped-source-input.jsonl");
+            expect(existsSync(output)).toBe(false);
+            runSelectedHelper(options.env!);
+            expect(
+              (await readFile(output, "utf8"))
+                .trimEnd()
+                .split("\n")
+                .map((row) => JSON.parse(row).path),
+            ).toEqual(["src/a.py", "src/keep.tmp"]);
+            throw new Error("scoped inventory captured");
           }),
-        }),
       },
     );
     const progress: ScanProgress[] = [];
@@ -17386,85 +15702,71 @@ if __name__ == "__main__":
       }
       const progress: ScanProgress[] = [];
       let scanId = "";
-      const client = new TestClient(
+      await using client = new TestClient(
         { pluginPath: pluginRoot },
         {
           ...dependencies,
-          createCodex: (options) => ({
-            startThread: () => ({
-              id: null,
-              async runStreamed() {
-                const env = options.env!;
-                scanId = env["CODEX_SECURITY_SCAN_ID"]!;
-                expect(progress[0]).toEqual({
-                  phase: "threat_model",
-                  filesCompleted: 0,
-                  filesTotal: registration,
-                });
-                expect(await historyTotal()).toBe(registration);
-                runSelectedHelper({
-                  ...env,
-                  CODEX_SECURITY_REPOSITORY:
-                    env["CODEX_SECURITY_REPOSITORY"] + sep + ".",
-                });
-                const rows = await readJsonLines<{ path: string }>(
-                  join(scanDir, "scoped-source-input.jsonl"),
-                );
-                expect(rows.map((row) => row.path)).toEqual(["src/a.py"]);
-                async function* events(): AsyncGenerator<ThreadEvent> {
-                  yield { type: "turn.started" };
-                  if (parentMarker) {
-                    for (const filesCompleted of [0, 1]) {
-                      const update = {
-                        phase:
-                          filesCompleted === 0 ? "discovery" : "validation",
-                        filesCompleted,
-                        filesTotal: 1,
-                      };
-                      yield completedCommand(
-                        "review scoped paths",
-                        "CODEX_SECURITY_SCAN_PROGRESS " +
-                          JSON.stringify(update),
-                        update.phase,
-                      );
-                      expect(progress.at(-1)).toMatchObject(update);
-                    }
+          createCodex: (options) =>
+            codexWithStream(async () => {
+              const env = options.env!;
+              scanId = env["CODEX_SECURITY_SCAN_ID"]!;
+              expect(progress[0]).toEqual(
+                scanProgress("threat_model", 0, registration),
+              );
+              expect(await historyTotal()).toBe(registration);
+              runSelectedHelper({
+                ...env,
+                CODEX_SECURITY_REPOSITORY:
+                  env["CODEX_SECURITY_REPOSITORY"] + sep + ".",
+              });
+              const rows = await readJsonLines<{ path: string }>(
+                join(scanDir, "scoped-source-input.jsonl"),
+              );
+              expect(rows.map((row) => row.path)).toEqual(["src/a.py"]);
+              async function* events(): AsyncGenerator<ThreadEvent> {
+                yield { type: "turn.started" };
+                if (parentMarker) {
+                  for (const filesCompleted of [0, 1]) {
+                    const update = scanProgress(
+                      filesCompleted === 0 ? "discovery" : "validation",
+                      filesCompleted,
+                      1,
+                    );
+                    yield completedCommand(
+                      "review scoped paths",
+                      "CODEX_SECURITY_SCAN_PROGRESS " + JSON.stringify(update),
+                      update.phase,
+                    );
+                    expect(progress.at(-1)).toMatchObject(update);
                   }
-                  yield {
-                    type: "turn.failed",
-                    error: { message: "sandbox inventory captured" },
-                  };
                 }
-                return { events: events() };
-              },
+                yield {
+                  type: "turn.failed",
+                  error: { message: "sandbox inventory captured" },
+                };
+              }
+              return { events: events() };
             }),
-          }),
         },
       );
-      try {
-        await expect(
-          client.run(repository, {
-            target: ["src", "src/a.py"],
-            onProgress: (update) => {
-              progress.push(update);
-            },
-          }),
-        ).rejects.toThrow("sandbox inventory captured");
-        expect(progress.at(-1)?.filesTotal).toBe(
-          parentMarker ? 1 : registration,
-        );
-        const detail = await runWorkbench(workbench, [
-          "get-scan",
-          "--scan-id",
-          scanId,
-        ]);
-        expect(detail["scan"]).toMatchObject({
-          progress: { coverage: { filesTotal: 1 } },
-        });
-        expect(await historyTotal()).toBe(1);
-      } finally {
-        await client.close();
-      }
+      await expect(
+        client.run(repository, {
+          target: ["src", "src/a.py"],
+          onProgress: (update) => {
+            progress.push(update);
+          },
+        }),
+      ).rejects.toThrow("sandbox inventory captured");
+      expect(progress.at(-1)?.filesTotal).toBe(parentMarker ? 1 : registration);
+      const detail = await runWorkbench(workbench, [
+        "get-scan",
+        "--scan-id",
+        scanId,
+      ]);
+      expect(detail["scan"]).toMatchObject({
+        progress: { coverage: { filesTotal: 1 } },
+      });
+      expect(await historyTotal()).toBe(1);
     },
   );
 
@@ -17480,61 +15782,50 @@ if __name__ == "__main__":
         runSelectedHelper,
         historyTotal,
       } = await scopedInventoryFixture();
-      const client = new TestClient(
+      await using client = new TestClient(
         { pluginPath: pluginRoot },
         {
           ...dependencies,
-          createCodex: (options) => ({
-            startThread: () => ({
-              id: null,
-              async runStreamed() {
-                expect(await historyTotal()).toBe(3);
-                const env = options.env!;
-                const output = join(scanDir, "scoped-source-input.jsonl");
-                const receipt = join(
-                  scanDir,
-                  "scoped-source-input.receipt.json",
-                );
-                const wrongScopes = join(root, "other-scopes.json");
-                await writeFile(wrongScopes, JSON.stringify(["src/a.py"]));
-                if (problem === "different scope file") {
-                  runSelectedHelper(env, wrongScopes);
-                  expect(existsSync(receipt)).toBe(false);
-                } else {
-                  await writeFile(output, '{"pa');
-                }
-                async function* events(): AsyncGenerator<ThreadEvent> {
-                  yield {
-                    type: "item.completed",
-                    item: {
-                      id: "prepare",
-                      type: "command_execution",
-                      command: "make-repo-scope-input",
-                      aggregated_output: `Wrote 1 scoped paths to ${output}`,
-                      status:
-                        problem === "partial output" ? "failed" : "completed",
-                      exit_code: problem === "partial output" ? 1 : 0,
-                    },
-                  };
-                  yield {
-                    type: "turn.failed",
-                    error: { message: "inventory stopped" },
-                  };
-                }
-                return { events: events() };
-              },
+          createCodex: (options) =>
+            codexWithStream(async () => {
+              expect(await historyTotal()).toBe(3);
+              const env = options.env!;
+              const output = join(scanDir, "scoped-source-input.jsonl");
+              const receipt = join(scanDir, "scoped-source-input.receipt.json");
+              const wrongScopes = join(root, "other-scopes.json");
+              await writeFile(wrongScopes, JSON.stringify(["src/a.py"]));
+              if (problem === "different scope file") {
+                runSelectedHelper(env, wrongScopes);
+                expect(existsSync(receipt)).toBe(false);
+              } else {
+                await writeFile(output, '{"pa');
+              }
+              async function* events(): AsyncGenerator<ThreadEvent> {
+                yield {
+                  type: "item.completed",
+                  item: {
+                    id: "prepare",
+                    type: "command_execution",
+                    command: "make-repo-scope-input",
+                    aggregated_output: `Wrote 1 scoped paths to ${output}`,
+                    status:
+                      problem === "partial output" ? "failed" : "completed",
+                    exit_code: problem === "partial output" ? 1 : 0,
+                  },
+                };
+                yield {
+                  type: "turn.failed",
+                  error: { message: "inventory stopped" },
+                };
+              }
+              return { events: events() };
             }),
-          }),
         },
       );
-      try {
-        await expect(
-          client.run(repository, { target: ["src", "src/keep.tmp"] }),
-        ).rejects.toThrow("inventory stopped");
-        expect(await historyTotal()).toBe(3);
-      } finally {
-        await client.close();
-      }
+      await expect(
+        client.run(repository, { target: ["src", "src/keep.tmp"] }),
+      ).rejects.toThrow("inventory stopped");
+      expect(await historyTotal()).toBe(3);
     },
   );
 
@@ -17556,7 +15847,7 @@ if __name__ == "__main__":
         "core.excludesFile",
         exclusions,
       ]);
-      const client = new TestClient(
+      await using client = new TestClient(
         {
           codexOverrides:
             source === "dotted override"
@@ -17579,60 +15870,50 @@ if __name__ == "__main__":
           prepareRuntime: runtimePreparer(codexHome, () => ({
             environment: { PATH: process.env["PATH"] ?? "" },
           })),
-          createCodex: (options) => ({
-            startThread: () => ({
-              id: null,
-              async runStreamed(prompt: string) {
-                expect(prompt).toContain("references/scoped-paths.md");
-                const output = join(scanDir, "scoped-source-input.jsonl");
-                expect(existsSync(output)).toBe(false);
-                const config = resolveCodexProfile(
-                  options.config as JsonObject,
-                );
-                const shellPolicy = config["shell_environment_policy"] as
-                  JsonObject | undefined;
-                const shellEnv = shellPolicy?.["set"] as
-                  Record<string, string> | undefined;
-                const globalConfig =
-                  config["shell_environment_policy.set.GIT_CONFIG_GLOBAL"] ??
-                  shellEnv?.["GIT_CONFIG_GLOBAL"];
-                expect(globalConfig).toBe(gitConfig);
-                execFileSync(
-                  nodeCommand().command,
-                  [
-                    join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
-                    "make-repo-scope-input",
-                    "--repo",
-                    repository,
-                    "--scopes-file",
-                    options.env!["CODEX_SECURITY_TARGET_PATHS_FILE"]!,
-                    "--out",
-                    output,
-                  ],
-                  {
-                    env: {
-                      ...process.env,
-                      ...options.env,
-                      GIT_CONFIG_GLOBAL: globalConfig as string,
-                    },
+          createCodex: (options) =>
+            codexWithStream(async (prompt: string) => {
+              expect(prompt).toContain("references/scoped-paths.md");
+              const output = join(scanDir, "scoped-source-input.jsonl");
+              expect(existsSync(output)).toBe(false);
+              const config = resolveCodexProfile(options.config as JsonObject);
+              const shellPolicy = config["shell_environment_policy"] as
+                JsonObject | undefined;
+              const shellEnv = shellPolicy?.["set"] as
+                Record<string, string> | undefined;
+              const globalConfig =
+                config["shell_environment_policy.set.GIT_CONFIG_GLOBAL"] ??
+                shellEnv?.["GIT_CONFIG_GLOBAL"];
+              expect(globalConfig).toBe(gitConfig);
+              execFileSync(
+                nodeCommand().command,
+                [
+                  join(PLUGIN_ROOT, "mcp", "helpers.mjs"),
+                  "make-repo-scope-input",
+                  "--repo",
+                  repository,
+                  "--scopes-file",
+                  options.env!["CODEX_SECURITY_TARGET_PATHS_FILE"]!,
+                  "--out",
+                  output,
+                ],
+                {
+                  env: {
+                    ...process.env,
+                    ...options.env,
+                    GIT_CONFIG_GLOBAL: globalConfig as string,
                   },
-                );
-                expect(JSON.parse(await readFile(output, "utf8"))).toEqual({
-                  path: "src/included.ts",
-                });
-                throw new Error("profile scoped inventory captured");
-              },
+                },
+              );
+              expect(JSON.parse(await readFile(output, "utf8"))).toEqual({
+                path: "src/included.ts",
+              });
+              throw new Error("profile scoped inventory captured");
             }),
-          }),
         },
       );
-      try {
-        await expect(
-          client.run(repository, { target: ["src"] }),
-        ).rejects.toThrow("profile scoped inventory captured");
-      } finally {
-        await client.close();
-      }
+      await expect(client.run(repository, { target: ["src"] })).rejects.toThrow(
+        "profile scoped inventory captured",
+      );
     },
   );
 
@@ -17648,7 +15929,7 @@ if __name__ == "__main__":
         await writeFile(policy, "Initial policy.");
         await writeFile(outside, outsideContent);
       }
-      const client = TestClient.withDependencies({
+      await using client = TestClient.withDependencies({
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (_options, args, input) => {
           const result = mockWorkbench(args, input);
@@ -17693,22 +15974,18 @@ if __name__ == "__main__":
             throw new Error("policy resolution captured");
           })(),
       });
-      try {
-        await expect(
-          client.run(repository, {
-            onScanRegistered() {
-              if (change === "external link") {
-                unlinkSync(policy);
-                symlinkSync(outside, policy, "file");
-              } else {
-                writeFileSync(policy, addedContent);
-              }
-            },
-          }),
-        ).rejects.toThrow("policy resolution captured");
-      } finally {
-        await client.close();
-      }
+      await expect(
+        client.run(repository, {
+          onScanRegistered() {
+            if (change === "external link") {
+              unlinkSync(policy);
+              symlinkSync(outside, policy, "file");
+            } else {
+              writeFileSync(policy, addedContent);
+            }
+          },
+        }),
+      ).rejects.toThrow("policy resolution captured");
     },
   );
 
@@ -17754,20 +16031,15 @@ if __name__ == "__main__":
     );
     let prompt = "";
     const createCodex = mock((options: CodexOptions) => {
-      return {
-        startThread: () => ({
-          id: null,
-          async runStreamed(input: string) {
-            prompt = input;
-            const pathsFile = options.env?.["CODEX_SECURITY_TARGET_PATHS_FILE"];
-            if (typeof pathsFile !== "string") {
-              throw new Error("missing target paths file");
-            }
-            await copyFile(pathsFile, capturedTargetPathsFile);
-            throw new Error("prompt captured");
-          },
-        }),
-      };
+      return codexWithStream(async (input: string) => {
+        prompt = input;
+        const pathsFile = options.env?.["CODEX_SECURITY_TARGET_PATHS_FILE"];
+        if (typeof pathsFile !== "string") {
+          throw new Error("missing target paths file");
+        }
+        await copyFile(pathsFile, capturedTargetPathsFile);
+        throw new Error("prompt captured");
+      });
     });
     const client = new TestClient(
       {
@@ -17921,15 +16193,17 @@ if __name__ == "__main__":
       expect(windowsCommand).toBeDefined();
       expect(prompt).toContain(windowsCommand!.replaceAll("\r\n", "\n"));
     }
-    const fileInstructions = await readFile(
-      join(PLUGIN_ROOT, "skills/security-scan/references/sdk-files.md"),
-      "utf8",
-    );
     const commandFence =
       process.platform === "win32"
         ? /^`{3}powershell\r?\n([\s\S]*?)\r?\n`{3}/m
         : /^`{3}sh\r?\n([\s\S]*?)\r?\n`{3}/m;
-    const bindScopeCommand = fileInstructions.match(commandFence)![1]!;
+    const scopeCommand = (topic: string) =>
+      execFileSync(
+        Bun.which("node")!,
+        [join(PLUGIN_ROOT, "scripts", "skill_runtime.mjs"), topic],
+        { encoding: "utf8" },
+      ).match(commandFence)![1]!;
+    const bindScopeCommand = scopeCommand("scope-binding");
     expect(prompt).toContain("references/scoped-paths.md");
     expect(prompt).toContain("resolve-security-md");
     expect(prompt).not.toContain(policyDirectory);
@@ -17998,11 +16272,7 @@ if __name__ == "__main__":
       );
     };
     expect(existsSync(scopedSourceInput)).toBe(false);
-    const scopedInstructions = await readFile(
-      join(PLUGIN_ROOT, "skills/security-scan/references/scoped-paths.md"),
-      "utf8",
-    );
-    const makeScopeCommand = scopedInstructions.match(commandFence)![1]!;
+    const makeScopeCommand = scopeCommand("scope-inventory");
     runScopedHelper(makeScopeCommand);
     const scopedSourceInputContents = await readFile(scopedSourceInput, "utf8");
     expect(
@@ -18083,7 +16353,7 @@ if __name__ == "__main__":
         "Path(args.out).write_text(''.join(json.dumps({'path': scope}) + '\\n' for scope in scopes))",
       ].join("\n"),
     );
-    const client = new TestClient(
+    await using client = new TestClient(
       { pluginPath: pluginRoot },
       {
         prepareRuntime: async () => {
@@ -18100,48 +16370,40 @@ if __name__ == "__main__":
         resolvePluginPython: async () => python,
         prepareOutputDir: async () => scanDir,
         repositoryRevision: async () => "deadbeef",
-        createCodex: (options: CodexOptions) => ({
-          startThread: () => ({
-            id: null,
-            async runStreamed(prompt: string) {
-              const command =
-                /Scan target paths:.* using (.+)\. Before finalization/u.exec(
-                  prompt,
-                )?.[1];
-              expect(command).toContain("/scripts/generate_rank_input.py");
-              expect(command).not.toContain("--helper make-repo-scope-input");
-              const shell =
-                process.platform === "win32"
-                  ? Bun.which("powershell.exe")!
-                  : "/bin/sh";
-              execFileSync(
-                shell,
-                process.platform === "win32"
-                  ? ["-NoProfile", "-NonInteractive", "-Command", command!]
-                  : ["-c", command!],
-                { env: { ...process.env, ...options.env }, stdio: "pipe" },
-              );
-              expect(
-                JSON.parse(
-                  await readFile(
-                    join(scanDir, "scoped-source-input.jsonl"),
-                    "utf8",
-                  ),
+        createCodex: (options: CodexOptions) =>
+          codexWithStream(async (prompt: string) => {
+            const command =
+              /Scan target paths:.* using (.+)\. Before finalization/u.exec(
+                prompt,
+              )?.[1];
+            expect(command).toContain("/scripts/generate_rank_input.py");
+            expect(command).not.toContain("--helper make-repo-scope-input");
+            const shell =
+              process.platform === "win32"
+                ? Bun.which("powershell.exe")!
+                : "/bin/sh";
+            execFileSync(
+              shell,
+              process.platform === "win32"
+                ? ["-NoProfile", "-NonInteractive", "-Command", command!]
+                : ["-c", command!],
+              { env: { ...process.env, ...options.env }, stdio: "pipe" },
+            );
+            expect(
+              JSON.parse(
+                await readFile(
+                  join(scanDir, "scoped-source-input.jsonl"),
+                  "utf8",
                 ),
-              ).toEqual({ path: "source [1].ts" });
-              throw new Error("legacy scope prepared");
-            },
+              ),
+            ).toEqual({ path: "source [1].ts" });
+            throw new Error("legacy scope prepared");
           }),
-        }),
       },
     );
-    try {
-      await expect(
-        client.run(repository, { target: ["source [1].ts"] }),
-      ).rejects.toThrow("legacy scope prepared");
-    } finally {
-      await client.close();
-    }
+    await expect(
+      client.run(repository, { target: ["source [1].ts"] }),
+    ).rejects.toThrow("legacy scope prepared");
   });
 
   test("removes scoped target files after a scan settles", async () => {
@@ -18150,21 +16412,17 @@ if __name__ == "__main__":
     let targetPathsFile: string | null = null;
     const client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
-      createCodex: (options: CodexOptions) => ({
-        startThread: () => ({
-          id: null,
-          async runStreamed() {
-            const path = options.env?.["CODEX_SECURITY_TARGET_PATHS_FILE"];
-            if (typeof path !== "string") {
-              throw new Error("missing target paths file");
-            }
-            targetPathsFile = path;
-            expect(existsSync(path)).toBe(true);
-            await copyCompletedScan(root);
-            return { events: completedEvents() };
-          },
+      createCodex: (options: CodexOptions) =>
+        codexWithStream(async () => {
+          const path = options.env?.["CODEX_SECURITY_TARGET_PATHS_FILE"];
+          if (typeof path !== "string") {
+            throw new Error("missing target paths file");
+          }
+          targetPathsFile = path;
+          expect(existsSync(path)).toBe(true);
+          await copyCompletedScan(root);
+          return { events: completedEvents() };
         }),
-      }),
     });
 
     await expect(
@@ -18264,6 +16522,7 @@ if __name__ == "__main__":
       }),
     ).rejects.toThrow("prompt captured");
     expect(prompt()).toContain("do not finalize or seal them");
+    expect(prompt()).toMatch(/scan\.mode[^.]*"branch_diff"/u);
     expect(prompt()).not.toContain("complete_codex_security_scan");
 
     await expect(
@@ -18404,19 +16663,15 @@ if __name__ == "__main__":
       resolvePluginPython: async () => "/managed/python",
       prepareOutputDir: async () => scanDir,
       repositoryRevision: async () => "deadbeef",
-      createCodex: (options) => ({
-        startThread: () => ({
-          id: null,
-          async runStreamed() {
-            childPath = execFileSync(
-              process.execPath,
-              ["-e", "console.log(process.env.PATH)"],
-              { env: options.env, encoding: "utf8" },
-            ).trim();
-            throw new Error("child environment captured");
-          },
+      createCodex: (options) =>
+        codexWithStream(async () => {
+          childPath = execFileSync(
+            process.execPath,
+            ["-e", "console.log(process.env.PATH)"],
+            { env: options.env, encoding: "utf8" },
+          ).trim();
+          throw new Error("child environment captured");
         }),
-      }),
     });
     try {
       await expect(
@@ -18612,7 +16867,7 @@ if __name__ == "__main__":
     };
     const originalEnvironment = { ...runtimeEnvironment };
     const createCodex = mock(completedCodex(root));
-    const client = TestClient.withDependencies({
+    await using client = TestClient.withDependencies({
       environment: callerEnvironment,
       ...scanRuntimeDependencies(codexHome, scanDir),
       prepareRuntime: runtimePreparer(codexHome, () => ({
@@ -18620,45 +16875,41 @@ if __name__ == "__main__":
       })),
       createCodex,
     });
-    try {
-      if (scenario === "bulk campaign") {
-        await withProtectedExecutableRoots([repository], () =>
-          client.run(repository),
-        );
-      } else {
-        await client.run(repository);
-      }
-      const options = createCodex.mock.lastCall?.[0] ?? null;
-      expect(options?.codexPathOverride).toBe(
-        process.platform === "win32"
-          ? win32.toNamespacedPath(executable)
-          : scenario === "bulk campaign"
-            ? executable
-            : undefined,
+    if (scenario === "bulk campaign") {
+      await withProtectedExecutableRoots([repository], () =>
+        client.run(repository),
       );
-      expect(options?.env?.["CODEX_CLI_PATH"]).toBe(executable);
-      const pathValues = Object.fromEntries(
-        Object.entries(options?.env ?? {}).filter(
-          ([key]) => key.toLowerCase() === "path",
-        ),
-      );
-      const expectedEntries = scenario === "no PATH" ? [] : [otherTools];
-      if (
-        (scenario !== "mixed-case alias" &&
-          scenario !== "no PATH" &&
-          scenario !== "missing tools") ||
-        (process.platform === "win32" && hasTools)
-      )
-        expectedEntries.unshift(toolsDirectory);
-      expect(pathValues).toEqual({ PATH: expectedEntries.join(delimiter) });
-      expect(runtimeEnvironment).toEqual(originalEnvironment);
-      expect(callerEnvironment).toEqual({
-        OPENAI_API_KEY: "ambient-key",
-        ...(scenario === "blank override" ? { CODEX_CLI_PATH: "   " } : {}),
-      });
-    } finally {
-      await client.close();
+    } else {
+      await client.run(repository);
     }
+    const options = createCodex.mock.lastCall?.[0] ?? null;
+    expect(options?.codexPathOverride).toBe(
+      process.platform === "win32"
+        ? win32.toNamespacedPath(executable)
+        : scenario === "bulk campaign"
+          ? executable
+          : undefined,
+    );
+    expect(options?.env?.["CODEX_CLI_PATH"]).toBe(executable);
+    const pathValues = Object.fromEntries(
+      Object.entries(options?.env ?? {}).filter(
+        ([key]) => key.toLowerCase() === "path",
+      ),
+    );
+    const expectedEntries = scenario === "no PATH" ? [] : [otherTools];
+    if (
+      (scenario !== "mixed-case alias" &&
+        scenario !== "no PATH" &&
+        scenario !== "missing tools") ||
+      (process.platform === "win32" && hasTools)
+    )
+      expectedEntries.unshift(toolsDirectory);
+    expect(pathValues).toEqual({ PATH: expectedEntries.join(delimiter) });
+    expect(runtimeEnvironment).toEqual(originalEnvironment);
+    expect(callerEnvironment).toEqual({
+      OPENAI_API_KEY: "ambient-key",
+      ...(scenario === "blank override" ? { CODEX_CLI_PATH: "   " } : {}),
+    });
   });
 
   test("authenticates without initializing the plugin runtime", async () => {
@@ -18800,7 +17051,7 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
       const fakeCommand = nodeCodex(fakeCodex);
 
       const advisories: Array<string | undefined> = [];
-      const client = TestClient.withDependencies({
+      await using client = TestClient.withDependencies({
         environment: {
           CODEX_HOME: codexHome,
           CODEX_SECURITY_STATE_DIR: join(root, "state"),
@@ -18823,30 +17074,26 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
         }),
       });
 
-      try {
-        await expect(
-          client.run(repository, { auth: "chatgpt" }),
-        ).rejects.toThrow("managed keyring scan reached");
-        if (credential === "ChatGPT") {
-          await writeFile(activeLogin, "an API key");
-          await expect(client.account()).resolves.toEqual({
-            authenticated: true,
-            details: "Logged in using an API key",
-          });
-        }
-        await expect(client.run(repository)).rejects.toThrow(
-          "managed keyring scan reached",
-        );
-        expect(advisories[0] !== undefined).toBe(credential === "ChatGPT");
-        expect(advisories[1]).toBeDefined();
-        if (credential === "ChatGPT") expect(advisories[1]).toBe(advisories[0]);
-        expect(await readFile(join(root, "status-calls"), "utf8")).toBe(
-          credential === "ChatGPT" ? "11" : "1",
-        );
-        expect(existsSync(join(codexHome, "auth.json"))).toBe(false);
-      } finally {
-        await client.close();
+      await expect(client.run(repository, { auth: "chatgpt" })).rejects.toThrow(
+        "managed keyring scan reached",
+      );
+      if (credential === "ChatGPT") {
+        await writeFile(activeLogin, "an API key");
+        await expect(client.account()).resolves.toEqual({
+          authenticated: true,
+          details: "Logged in using an API key",
+        });
       }
+      await expect(client.run(repository)).rejects.toThrow(
+        "managed keyring scan reached",
+      );
+      expect(advisories[0] !== undefined).toBe(credential === "ChatGPT");
+      expect(advisories[1]).toBeDefined();
+      if (credential === "ChatGPT") expect(advisories[1]).toBe(advisories[0]);
+      expect(await readFile(join(root, "status-calls"), "utf8")).toBe(
+        credential === "ChatGPT" ? "11" : "1",
+      );
+      expect(existsSync(join(codexHome, "auth.json"))).toBe(false);
     },
   );
 
@@ -18982,7 +17229,7 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
     );
     const fake = nodeCodex(fakeCodex);
     const createCodex = mock(throwing("scan reached"));
-    const client = TestClient.withDependencies({
+    await using client = TestClient.withDependencies({
       environment: {
         CODEX_HOME: ambientHome,
         OPENAI_API_KEY: "synthetic-key",
@@ -18995,17 +17242,13 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
       resolveCodexCommand: () => fake.command,
       createCodex,
     });
-    try {
-      await expect(client.run(repository)).rejects.toThrow("scan reached");
-      await runtime.setCodexSecurityCredentialLogout(codexHome, true);
-      await expect(
-        client.run(repository, { auth: "chatgpt" }),
-      ).rejects.toBeInstanceOf(AuthenticationRequiredError);
-      expect(createCodex).toHaveBeenCalledTimes(1);
-      expect(existsSync(join(codexHome, "auth.json"))).toBe(false);
-    } finally {
-      await client.close();
-    }
+    await expect(client.run(repository)).rejects.toThrow("scan reached");
+    await runtime.setCodexSecurityCredentialLogout(codexHome, true);
+    await expect(
+      client.run(repository, { auth: "chatgpt" }),
+    ).rejects.toBeInstanceOf(AuthenticationRequiredError);
+    expect(createCodex).toHaveBeenCalledTimes(1);
+    expect(existsSync(join(codexHome, "auth.json"))).toBe(false);
   });
 
   test.each(["standard", "deep"] as const)(
@@ -19019,7 +17262,7 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
         REMOVED_SETTING: "first-value",
       };
       const observed: CodexOptions[] = [];
-      const client = new TestClient(
+      await using client = new TestClient(
         { pluginPath: PLUGIN_ROOT },
         {
           environment,
@@ -19032,33 +17275,29 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
           },
         },
       );
-      try {
-        await expect(client.run(repository, { mode })).rejects.toThrow(
-          "environment captured",
-        );
-        environment["OPENAI_API_KEY"] = "synthetic-second-key";
-        environment["AWS_REGION"] = "synthetic-second-region";
-        delete environment["REMOVED_SETTING"];
-        environment["ADDED_SETTING"] = "second-value";
-        await expect(client.run(repository, { mode })).rejects.toThrow(
-          "environment captured",
-        );
-        expect(observed.map((value) => value.apiKey)).toEqual([
-          "synthetic-first-key",
-          "synthetic-second-key",
-        ]);
-        expect(observed[1]?.env).toMatchObject({
-          AWS_REGION: "synthetic-second-region",
-          ADDED_SETTING: "second-value",
-        });
-        expect(observed[1]?.env).not.toHaveProperty("REMOVED_SETTING");
-        expect(observed[0]?.env).toMatchObject({
-          AWS_REGION: "synthetic-first-region",
-          REMOVED_SETTING: "first-value",
-        });
-      } finally {
-        await client.close();
-      }
+      await expect(client.run(repository, { mode })).rejects.toThrow(
+        "environment captured",
+      );
+      environment["OPENAI_API_KEY"] = "synthetic-second-key";
+      environment["AWS_REGION"] = "synthetic-second-region";
+      delete environment["REMOVED_SETTING"];
+      environment["ADDED_SETTING"] = "second-value";
+      await expect(client.run(repository, { mode })).rejects.toThrow(
+        "environment captured",
+      );
+      expect(observed.map((value) => value.apiKey)).toEqual([
+        "synthetic-first-key",
+        "synthetic-second-key",
+      ]);
+      expect(observed[1]?.env).toMatchObject({
+        AWS_REGION: "synthetic-second-region",
+        ADDED_SETTING: "second-value",
+      });
+      expect(observed[1]?.env).not.toHaveProperty("REMOVED_SETTING");
+      expect(observed[0]?.env).toMatchObject({
+        AWS_REGION: "synthetic-first-region",
+        REMOVED_SETTING: "first-value",
+      });
     },
   );
 
@@ -19297,36 +17536,8 @@ if ([basename(process.argv[1]), ...process.argv.slice(2)].join(" ") !== "login s
                         runStreamed: async (
                           ...args: Parameters<typeof thread.runStreamed>
                         ) => {
-                          if (thread.id === null) {
-                            await copyCompletedScan(root);
-                            if (mode === "deep") {
-                              const coveragePath = join(
-                                scanDir,
-                                "coverage.json",
-                              );
-                              const coverage = JSON.parse(
-                                await readFile(coveragePath, "utf8"),
-                              );
-                              coverage.mode = "deep_repository";
-                              const coverageBytes = JSON.stringify(coverage);
-                              await writeFile(coveragePath, coverageBytes);
-                              const manifestPath = join(
-                                scanDir,
-                                "scan-manifest.json",
-                              );
-                              const manifest = JSON.parse(
-                                await readFile(manifestPath, "utf8"),
-                              );
-                              manifest.scan.artifacts.find(
-                                (artifact: { path: string }) =>
-                                  artifact.path === "coverage.json",
-                              ).sha256 = hash("sha256", coverageBytes);
-                              await writeFile(
-                                manifestPath,
-                                JSON.stringify(manifest),
-                              );
-                            }
-                          }
+                          if (thread.id === null)
+                            await copyCompletedScan(root, mode);
                           return thread.runStreamed(...args);
                         },
                       };

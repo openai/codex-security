@@ -52,6 +52,30 @@ async function reseal(scanDir: string): Promise<void> {
   await writeJson(manifestPath, manifest);
 }
 
+async function editableContract() {
+  const scanDir = await copyExample();
+  const paths = {
+    manifest: join(scanDir, "scan-manifest.json"),
+    findings: join(scanDir, "findings.json"),
+    coverage: join(scanDir, "coverage.json"),
+  };
+  const documents = {
+    manifest: await readJson(paths.manifest),
+    findings: await readJson(paths.findings),
+    coverage: await readJson(paths.coverage),
+  };
+  return {
+    scanDir,
+    ...documents,
+    findingsPath: paths.findings,
+    coveragePath: paths.coverage,
+    async saveAndSeal(...changed: (keyof typeof documents)[]) {
+      for (const name of changed) await writeJson(paths[name], documents[name]);
+      await reseal(scanDir);
+    },
+  };
+}
+
 function pythonExport(scanDir: string) {
   return runPython(pythonExecutable() ?? "python", [
     join(PLUGIN_ROOT, "scripts", "finalize_scan_contract.py"),
@@ -109,11 +133,8 @@ describe("canonical scan contract", () => {
     "inverted range",
     "backslash remote",
   ])("both readers reject %s in a sealed contract", async (variant) => {
-    const scanDir = await copyExample();
-    const findingsPath = join(scanDir, "findings.json");
-    const findings = await readJson(findingsPath);
-    const manifestPath = join(scanDir, "scan-manifest.json");
-    const manifest = await readJson(manifestPath);
+    const { scanDir, manifest, findings, saveAndSeal } =
+      await editableContract();
     if (variant === "duplicate finding")
       findings["findings"].push(structuredClone(findings["findings"][0]));
     if (variant === "blank title") findings["findings"][0].title = "   ";
@@ -124,9 +145,7 @@ describe("canonical scan contract", () => {
       });
     if (variant === "backslash remote")
       manifest["scan"].target.remote = "https://example.com/repository\\path";
-    await writeJson(findingsPath, findings);
-    await writeJson(manifestPath, manifest);
-    await reseal(scanDir);
+    await saveAndSeal("findings", "manifest");
     const result = runPython(pythonExecutable() ?? "python", [
       "-c",
       "import sys; from pathlib import Path; sys.path.insert(0, sys.argv[1]); from finalize_scan_contract import _prepare_scan_finalization; _prepare_scan_finalization(Path(sys.argv[2]))",
@@ -368,9 +387,8 @@ describe("canonical scan contract", () => {
   });
 
   test("preserves schema-valid sealed finding details", async () => {
-    const scanDir = await copyExample();
-    const findingsPath = join(scanDir, "findings.json");
-    const findings = await readJson(findingsPath);
+    const { scanDir, findings, findingsPath, saveAndSeal } =
+      await editableContract();
     const validation = {
       evidence: "single proof",
       counterEvidence: [],
@@ -380,8 +398,7 @@ describe("canonical scan contract", () => {
     };
     findings["findings"][0]["validation"] = validation;
     findings["findings"][0]["code_evidence"] = null;
-    await writeJson(findingsPath, findings);
-    await reseal(scanDir);
+    await saveAndSeal("findings");
 
     const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
 
@@ -391,9 +408,8 @@ describe("canonical scan contract", () => {
   });
 
   test("preserves valid details while normalizing malformed legacy siblings", async () => {
-    const scanDir = await copyExample();
-    const findingsPath = join(scanDir, "findings.json");
-    const findings = await readJson(findingsPath);
+    const { scanDir, findings, findingsPath, saveAndSeal } =
+      await editableContract();
     const validation = {
       evidence: "single proof",
       counterEvidence: [],
@@ -407,8 +423,7 @@ describe("canonical scan contract", () => {
     findings["findings"][0]["attackPath"] = {
       steps: { first: "upload" },
     };
-    await writeJson(findingsPath, findings);
-    await reseal(scanDir);
+    await saveAndSeal("findings");
 
     const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
 
@@ -419,15 +434,13 @@ describe("canonical scan contract", () => {
   });
 
   test("preserves empty union lists while normalizing malformed siblings", async () => {
-    const scanDir = await copyExample();
-    const findingsPath = join(scanDir, "findings.json");
-    const findings = await readJson(findingsPath);
+    const { scanDir, findings, findingsPath, saveAndSeal } =
+      await editableContract();
     findings["findings"][0]["validation"] = { evidence: [] };
     findings["findings"][0]["attackPath"] = {
       steps: { first: "upload" },
     };
-    await writeJson(findingsPath, findings);
-    await reseal(scanDir);
+    await saveAndSeal("findings");
 
     const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
 
@@ -437,9 +450,8 @@ describe("canonical scan contract", () => {
   });
 
   test("normalizes pre-typed sealed finding details without changing the artifact", async () => {
-    const scanDir = await copyExample();
-    const findingsPath = join(scanDir, "findings.json");
-    const findings = await readJson(findingsPath);
+    const { scanDir, findings, findingsPath, saveAndSeal } =
+      await editableContract();
     const legacyValidation = {
       evidence: { kind: "trace" },
       counterEvidence: [null, "The mitigation was checked."],
@@ -455,8 +467,7 @@ describe("canonical scan contract", () => {
     findings["findings"][0]["code_evidence"] = [
       { id: "legacy-source", code: "legacy_source()" },
     ];
-    await writeJson(findingsPath, findings);
-    await reseal(scanDir);
+    await saveAndSeal("findings");
 
     const originalBytes = await readFile(findingsPath);
     const result = await loadContractWithScanDirectory(scanDir, {
@@ -487,12 +498,10 @@ describe("canonical scan contract", () => {
   });
 
   test("rejects malformed canonical root-cause details", async () => {
-    const scanDir = await copyExample();
-    const findingsPath = join(scanDir, "findings.json");
-    const findings = await readJson(findingsPath);
+    const { scanDir, findings, findingsPath, saveAndSeal } =
+      await editableContract();
     findings["findings"][0]["rootCause"] = { summary: [] };
-    await writeJson(findingsPath, findings);
-    await reseal(scanDir);
+    await saveAndSeal("findings");
 
     await expect(
       loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
@@ -522,9 +531,8 @@ describe("canonical scan contract", () => {
   test.each(["rootCause", "root_cause"])(
     "reads legacy %s evidence references in both readers without rewriting the seal",
     async (section) => {
-      const scanDir = await copyExample();
-      const findingsPath = join(scanDir, "findings.json");
-      const findings = await readJson(findingsPath);
+      const { scanDir, findings, findingsPath, saveAndSeal } =
+        await editableContract();
       findings["findings"][0]["code_evidence"] = [
         { id: "synthetic-evidence", code: "handler()" },
       ];
@@ -532,8 +540,7 @@ describe("canonical scan contract", () => {
         summary: "Synthetic root cause.",
         evidenceRefs: [null, "synthetic-evidence", 3],
       };
-      await writeJson(findingsPath, findings);
-      await reseal(scanDir);
+      await saveAndSeal("findings");
       const bytes = await readFile(findingsPath);
       const exported = pythonExport(scanDir);
       expect(exported.exitCode, new TextDecoder().decode(exported.stderr)).toBe(
@@ -549,12 +556,9 @@ describe("canonical scan contract", () => {
   );
 
   test("rejects duplicate sealed findings in both readers", async () => {
-    const scanDir = await copyExample();
-    const findingsPath = join(scanDir, "findings.json");
-    const findings = await readJson(findingsPath);
+    const { scanDir, findings, saveAndSeal } = await editableContract();
     findings["findings"].push(structuredClone(findings["findings"][0]));
-    await writeJson(findingsPath, findings);
-    await reseal(scanDir);
+    await saveAndSeal("findings");
     expect(pythonExport(scanDir).exitCode).not.toBe(0);
     await expect(
       loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
@@ -576,17 +580,15 @@ describe("canonical scan contract", () => {
   ] as const)(
     "agrees with Python on required finding text %s %j",
     async (field, text, valid) => {
-      const scanDir = await copyExample();
-      const findingsPath = join(scanDir, "findings.json");
-      const findings = await readJson(findingsPath);
+      const { scanDir, findings, findingsPath, saveAndSeal } =
+        await editableContract();
       const finding = findings["findings"][0];
       finding["severity"]["score"] = 5;
       finding["severity"]["scoringSystem"] = "synthetic";
       const parts = field.split(".");
       const object = parts.length === 1 ? finding : finding[parts[0]!];
       object[parts.at(-1)!] = text;
-      await writeJson(findingsPath, findings);
-      await reseal(scanDir);
+      await saveAndSeal("findings");
       const exported = pythonExport(scanDir);
       expect(exported.exitCode === 0).toBe(valid);
       const loaded = loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
@@ -652,12 +654,10 @@ describe("canonical scan contract", () => {
   );
 
   test("loads an empty legacy root cause without changing the artifact", async () => {
-    const scanDir = await copyExample();
-    const findingsPath = join(scanDir, "findings.json");
-    const findings = await readJson(findingsPath);
+    const { scanDir, findings, findingsPath, saveAndSeal } =
+      await editableContract();
     findings["findings"][0]["root_cause"] = "";
-    await writeJson(findingsPath, findings);
-    await reseal(scanDir);
+    await saveAndSeal("findings");
 
     const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
 
@@ -756,14 +756,11 @@ describe("canonical scan contract", () => {
   });
 
   test("loads valid JSON nested beyond the previous depth limit", async () => {
-    const scanDir = await copyExample();
-    const path = join(scanDir, "findings.json");
-    const findings = await readJson(path);
+    const { scanDir, findings, saveAndSeal } = await editableContract();
     let nested: unknown = "value";
     for (let depth = 0; depth < 258; depth += 1) nested = [nested];
     findings["findings"][0]["extensions"] = { nested };
-    await writeJson(path, findings);
-    await reseal(scanDir);
+    await saveAndSeal("findings");
 
     await expect(
       loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
@@ -920,20 +917,12 @@ describe("canonical scan contract", () => {
   });
 
   test("accepts Unix-valid source and scope path components", async () => {
-    const scanDir = await copyExample();
-    const manifestPath = join(scanDir, "scan-manifest.json");
-    const findingsPath = join(scanDir, "findings.json");
-    const coveragePath = join(scanDir, "coverage.json");
-    const manifest = await readJson(manifestPath);
-    const findings = await readJson(findingsPath);
-    const coverage = await readJson(coveragePath);
+    const { scanDir, manifest, findings, coverage, saveAndSeal } =
+      await editableContract();
     findings["findings"][0]["locations"][0]["path"] = "src/app.ts:fixture";
     manifest["scan"]["scope"]["includePaths"] = ["src/CON.py"];
     coverage["includePaths"] = ["src/CON.py"];
-    await writeJson(findingsPath, findings);
-    await writeJson(coveragePath, coverage);
-    await writeJson(manifestPath, manifest);
-    await reseal(scanDir);
+    await saveAndSeal("findings", "coverage", "manifest");
 
     await expect(
       loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
@@ -943,20 +932,12 @@ describe("canonical scan contract", () => {
   test.each([" ", "  ", "\u00a0"])(
     "preserves literal whitespace repository path %j in the contract",
     async (path) => {
-      const scanDir = await copyExample();
-      const manifestPath = join(scanDir, "scan-manifest.json");
-      const findingsPath = join(scanDir, "findings.json");
-      const coveragePath = join(scanDir, "coverage.json");
-      const manifest = await readJson(manifestPath);
-      const findings = await readJson(findingsPath);
-      const coverage = await readJson(coveragePath);
+      const { scanDir, manifest, findings, coverage, saveAndSeal } =
+        await editableContract();
       manifest["scan"]["scope"]["includePaths"] = [path];
       coverage["includePaths"] = [path];
       findings["findings"][0]["locations"][0]["path"] = path;
-      await writeJson(manifestPath, manifest);
-      await writeJson(findingsPath, findings);
-      await writeJson(coveragePath, coverage);
-      await reseal(scanDir);
+      await saveAndSeal("manifest", "findings", "coverage");
 
       const contract = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
       expect(contract.manifest.scan.scope.includePaths).toEqual([path]);
@@ -986,14 +967,12 @@ describe("canonical scan contract", () => {
       "\u0085",
       "\ufeff",
     ];
-    const scanDir = await copyExample();
-    const coveragePath = join(scanDir, "coverage.json");
-    const coverage = await readJson(coveragePath);
+    const { scanDir, coverage, coveragePath, saveAndSeal } =
+      await editableContract();
     coverage["deferred"] = [
       { id: "review", reason: "Review is incomplete.", paths },
     ];
-    await writeJson(coveragePath, coverage);
-    await reseal(scanDir);
+    await saveAndSeal("coverage");
     const sealedBytes = await readFile(coveragePath);
 
     await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
@@ -1018,9 +997,7 @@ describe("canonical scan contract", () => {
       "src/\routside.ts",
       "src/\u2028/../outside.ts",
     ]) {
-      const scanDir = await copyExample();
-      const coveragePath = join(scanDir, "coverage.json");
-      const coverage = await readJson(coveragePath);
+      const { scanDir, coverage, saveAndSeal } = await editableContract();
       coverage["deferred"] = [
         { id: "earlier", reason: "Follow up.", paths: ["src/earlier.ts"] },
         {
@@ -1029,8 +1006,7 @@ describe("canonical scan contract", () => {
           paths: ["src/valid.ts", path],
         },
       ];
-      await writeJson(coveragePath, coverage);
-      await reseal(scanDir);
+      await saveAndSeal("coverage");
 
       await expect(
         loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
@@ -1045,13 +1021,10 @@ describe("canonical scan contract", () => {
   test.each([-1, 0])(
     "agrees with Python on a finding end-line offset of %i",
     async (offset) => {
-      const scanDir = await copyExample();
-      const findingsPath = join(scanDir, "findings.json");
-      const findings = await readJson(findingsPath);
+      const { scanDir, findings, saveAndSeal } = await editableContract();
       const location = findings["findings"][0]["locations"][0];
       location["endLine"] = location["startLine"] + offset;
-      await writeJson(findingsPath, findings);
-      await reseal(scanDir);
+      await saveAndSeal("findings");
 
       expect(pythonExport(scanDir).exitCode === 0).toBe(offset === 0);
       const loaded = loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
@@ -1214,9 +1187,8 @@ describe("canonical scan contract", () => {
   ] as const)(
     "validates canonical code-evidence path %j",
     async (path, valid) => {
-      const scanDir = await copyExample();
-      const findingsPath = join(scanDir, "findings.json");
-      const findings = await readJson(findingsPath);
+      const { scanDir, findings, findingsPath, saveAndSeal } =
+        await editableContract();
       findings["findings"][0]["codeEvidence"] = [
         {
           id: "source",
@@ -1227,8 +1199,7 @@ describe("canonical scan contract", () => {
           explanation: "Synthetic repository evidence.",
         },
       ];
-      await writeJson(findingsPath, findings);
-      await reseal(scanDir);
+      await saveAndSeal("findings");
       const saved = await readFile(findingsPath);
       const loaded = loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
       const exported = pythonExport(scanDir);
@@ -1367,18 +1338,10 @@ describe("canonical scan contract", () => {
     ];
 
     for (const [_name, mutate, expected] of cases) {
-      const scanDir = await copyExample();
-      const manifestPath = join(scanDir, "scan-manifest.json");
-      const findingsPath = join(scanDir, "findings.json");
-      const coveragePath = join(scanDir, "coverage.json");
-      const manifest = await readJson(manifestPath);
-      const findings = await readJson(findingsPath);
-      const coverage = await readJson(coveragePath);
+      const { scanDir, manifest, findings, coverage, saveAndSeal } =
+        await editableContract();
       mutate(manifest, findings, coverage);
-      await writeJson(findingsPath, findings);
-      await writeJson(coveragePath, coverage);
-      await writeJson(manifestPath, manifest);
-      await reseal(scanDir);
+      await saveAndSeal("findings", "coverage", "manifest");
       await expect(
         loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
       ).rejects.toThrow(expected);
@@ -1386,11 +1349,8 @@ describe("canonical scan contract", () => {
   });
 
   test("accepts distinct finding siblings and Unicode target identities", async () => {
-    const scanDir = await copyExample();
-    const manifestPath = join(scanDir, "scan-manifest.json");
-    const findingsPath = join(scanDir, "findings.json");
-    const manifest = await readJson(manifestPath);
-    const findings = await readJson(findingsPath);
+    const { scanDir, manifest, findings, saveAndSeal } =
+      await editableContract();
     manifest["scan"]["target"]["targetId"] = "target_仓库_😀";
     const first = findings["findings"][0];
     const second = structuredClone(first);
@@ -1399,9 +1359,7 @@ describe("canonical scan contract", () => {
     setFindingIdentity(manifest["scan"], first);
     setFindingIdentity(manifest["scan"], second);
     findings["findings"].push(second);
-    await writeJson(manifestPath, manifest);
-    await writeJson(findingsPath, findings);
-    await reseal(scanDir);
+    await saveAndSeal("manifest", "findings");
 
     const loaded = await loadContract(scanDir, { pluginRoot: PLUGIN_ROOT });
     expect(loaded.findings.findings).toHaveLength(2);
@@ -1495,11 +1453,8 @@ describe("canonical scan contract", () => {
     async () => {
       for (const kind of ["writeup", "hardening"] as const) {
         for (const symlinked of [false, true]) {
-          const scanDir = await copyExample();
-          const manifestPath = join(scanDir, "scan-manifest.json");
-          const findingsPath = join(scanDir, "findings.json");
-          const manifest = await readJson(manifestPath);
-          const findings = await readJson(findingsPath);
+          const { scanDir, manifest, findings, saveAndSeal } =
+            await editableContract();
           const relativePath =
             kind === "writeup"
               ? "findings/report/report.md"
@@ -1509,9 +1464,7 @@ describe("canonical scan contract", () => {
           } else {
             manifest["scan"]["hardening"] = { portfolioPath: relativePath };
           }
-          await writeJson(manifestPath, manifest);
-          await writeJson(findingsPath, findings);
-          await reseal(scanDir);
+          await saveAndSeal("manifest", "findings");
           if (symlinked) {
             const external = join(scanDir, "external.md");
             const referenced = join(scanDir, relativePath);
@@ -1532,11 +1485,8 @@ describe("canonical scan contract", () => {
   );
 
   test("accepts regular derived artifacts and a schema-valid scope summary", async () => {
-    const scanDir = await copyExample();
-    const manifestPath = join(scanDir, "scan-manifest.json");
-    const findingsPath = join(scanDir, "findings.json");
-    const manifest = await readJson(manifestPath);
-    const findings = await readJson(findingsPath);
+    const { scanDir, manifest, findings, saveAndSeal } =
+      await editableContract();
     manifest["scan"]["scope"]["summary"] = "\u0085";
     manifest["scan"]["hardening"] = {
       portfolioPath: "hardening/hardening.md",
@@ -1551,9 +1501,7 @@ describe("canonical scan contract", () => {
       join(scanDir, "findings", "report", "report.md"),
       "report\n",
     );
-    await writeJson(manifestPath, manifest);
-    await writeJson(findingsPath, findings);
-    await reseal(scanDir);
+    await saveAndSeal("manifest", "findings");
     await expect(
       loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
     ).resolves.toBeDefined();
@@ -1697,18 +1645,10 @@ describe("canonical scan contract", () => {
           )
         : cases;
     for (const [_name, mutate] of selectedCases) {
-      const scanDir = await copyExample();
-      const manifestPath = join(scanDir, "scan-manifest.json");
-      const findingsPath = join(scanDir, "findings.json");
-      const coveragePath = join(scanDir, "coverage.json");
-      const manifest = await readJson(manifestPath);
-      const findings = await readJson(findingsPath);
-      const coverage = await readJson(coveragePath);
+      const { scanDir, manifest, findings, coverage, saveAndSeal } =
+        await editableContract();
       mutate(manifest, findings, coverage);
-      await writeJson(manifestPath, manifest);
-      await writeJson(findingsPath, findings);
-      await writeJson(coveragePath, coverage);
-      await reseal(scanDir);
+      await saveAndSeal("manifest", "findings", "coverage");
       await expect(
         loadContract(scanDir, { pluginRoot: PLUGIN_ROOT }),
       ).resolves.toBeDefined();
@@ -1730,18 +1670,13 @@ describe("canonical scan contract", () => {
   });
 
   test("accepts directory scans without requiring a Git repository", async () => {
-    const scanDir = await copyExample();
-    const manifestPath = join(scanDir, "scan-manifest.json");
-    const coveragePath = join(scanDir, "coverage.json");
-    const manifest = await readJson(manifestPath);
-    const coverage = await readJson(coveragePath);
+    const { scanDir, manifest, coverage, saveAndSeal } =
+      await editableContract();
     manifest["scan"]["target"]["kind"] = "directory_snapshot";
     delete manifest["scan"]["target"]["revision"];
     delete manifest["scan"]["target"]["remote"];
     coverage["inventoryStrategy"] = "directory";
-    await writeJson(manifestPath, manifest);
-    await writeJson(coveragePath, coverage);
-    await reseal(scanDir);
+    await saveAndSeal("manifest", "coverage");
 
     for (const repositoryRevision of [null, "deadbeef"]) {
       await expect(
@@ -1771,12 +1706,9 @@ describe("canonical scan contract", () => {
   });
 
   test("rejects diff targets for repository scans", async () => {
-    const scanDir = await copyExample();
-    const manifestPath = join(scanDir, "scan-manifest.json");
-    const manifest = await readJson(manifestPath);
+    const { scanDir, manifest, saveAndSeal } = await editableContract();
     manifest["scan"]["target"]["kind"] = "git_diff";
-    await writeJson(manifestPath, manifest);
-    await reseal(scanDir);
+    await saveAndSeal("manifest");
 
     await expect(
       loadContract(scanDir, {
@@ -1790,18 +1722,13 @@ describe("canonical scan contract", () => {
   });
 
   test("binds requested path scope, mode, and plugin version", async () => {
-    const scanDir = await copyExample();
-    const manifestPath = join(scanDir, "scan-manifest.json");
-    const manifest = await readJson(manifestPath);
+    const { scanDir, manifest, coverage, saveAndSeal } =
+      await editableContract();
     manifest["scan"]["scope"]["includePaths"] = ["src"];
-    await writeJson(manifestPath, manifest);
-    const coveragePath = join(scanDir, "coverage.json");
-    const coverage = await readJson(coveragePath);
     coverage["mode"] = "scoped_path";
     coverage["inventoryStrategy"] = "scoped_path";
     coverage["includePaths"] = ["src"];
-    await writeJson(coveragePath, coverage);
-    await reseal(scanDir);
+    await saveAndSeal("manifest", "coverage");
 
     const target: NormalizedTarget = { kind: "paths", paths: ["src"] };
     await expect(
