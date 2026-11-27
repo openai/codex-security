@@ -132,7 +132,9 @@ import {
 import { loadContract, sha256Text } from "./contract.js";
 import type { DeepScanDiagnostic } from "./deep-scan.js";
 import {
+  formatComponentCounts,
   formatDeepScanReviews,
+  formatItemCount,
   type DeepScanProgress,
 } from "./scan-progress.js";
 import { asRecord, isRecord as isJsonObject } from "./record.js";
@@ -745,10 +747,6 @@ function publicationDestination(
     ...(linearApiKey === undefined ? {} : { linearApiKey }),
     ...(assigneeId === undefined ? {} : { assigneeId }),
   };
-}
-
-function formatItemCount(count: number, singular: string): string {
-  return count === 1 ? `1 ${singular}` : `${count} ${singular}s`;
 }
 
 function publicationScanAge(timestamp: string, now: number): string {
@@ -6649,7 +6647,7 @@ export async function main(
               dashboard?.finishComponents(result);
               stopDashboard();
               errorOutput.write(
-                `Component scans: ${result.completed} complete, ${result.failed} failed.\n${result.sourceFindingCount} findings → ${result.findingCount} groups${result.deduplication?.status === "failed" ? " (matching failed)" : result.deduplication?.status === "skipped" ? " (matching skipped under total cost limit)" : ""}.\nReport: ${errorMessage(result.reportPath)}\n`,
+                `Component scans: ${result.completed} complete, ${result.failed} failed.\n${formatComponentCounts(result)}${result.deduplication?.status === "failed" ? " (matching failed)" : result.deduplication?.status === "skipped" ? " (matching skipped under total cost limit)" : ""}.\nReport: ${errorMessage(result.reportPath)}\n`,
               );
               if (result.retryPlanPath !== undefined)
                 errorOutput.write(

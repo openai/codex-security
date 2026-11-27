@@ -1464,26 +1464,28 @@ describe("live scan dashboard", () => {
     dashboard.updateComponent({
       ...receipts[0]!,
       status: "completed",
-      findingCount: 3,
+      findingCount: 1,
       scanId: "scan-api",
     });
     dashboard.showComponents("Combining duplicate findings");
     expect(frame()).toContain("1 complete · 1 running · 1 queued");
-    expect(frame()).toContain("3 findings before deduplication");
+    expect(frame()).toContain("1 finding before deduplication");
+    input.emit("data", "\u001B[A\rd");
+    expect(frame()).toContain("Complete · 1 finding before deduplication");
     dashboard.finishComponents({
       total: 3,
       completed: 2,
       failed: 1,
       planPath: "/synthetic/plan.json",
       sourceFindingCount: 3,
-      findingCount: 2,
+      findingCount: 1,
       deduplication: {
         status: "failed",
         confirmedGroups: 1,
         uncertainPairs: 0,
       },
     });
-    expect(frame()).toContain("3 findings → 2 groups · matching failed");
+    expect(frame()).toContain("3 findings → 1 group · matching failed");
     expect(frame()).toContain("Finished with errors");
     expect(timers).toBe(1);
     dashboard.stop();

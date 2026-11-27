@@ -33,7 +33,11 @@ import {
   type ScanPricingContext,
   type ScanTokenUsage,
 } from "./cost-model.js";
-import { formatDeepScanReviews } from "./scan-progress.js";
+import {
+  formatComponentCounts,
+  formatDeepScanReviews,
+  formatItemCount,
+} from "./scan-progress.js";
 import type { ScanActivity } from "./scan-activity.js";
 import {
   ACCOUNT_LIMITS_UNAVAILABLE,
@@ -499,7 +503,7 @@ export class ScanDashboard {
         dashboard.setStage(status);
         dashboard.note(
           receipt.error ??
-            `${status} · ${receipt.findingCount ?? 0} findings before deduplication`,
+            `${status} · ${formatItemCount(receipt.findingCount ?? 0, "finding")} before deduplication`,
         );
       }
     }
@@ -1040,8 +1044,8 @@ export class ScanDashboard {
     );
     const findings =
       this.#componentResult === null
-        ? `${rawFindings} findings before deduplication`
-        : `${this.#componentResult.sourceFindingCount} findings → ${this.#componentResult.findingCount} groups${this.#componentResult.deduplication?.status === "failed" ? " · matching failed" : ""}`;
+        ? `${formatItemCount(rawFindings, "finding")} before deduplication`
+        : `${formatComponentCounts(this.#componentResult)}${this.#componentResult.deduplication?.status === "failed" ? " · matching failed" : ""}`;
     const divider = `  ${"─".repeat(Math.max(0, width - 4))}`;
     return this.#formatFrame([
       `  CODEX SECURITY  ·  COMPONENTS  ·  ${basename(this.#options.repository)}`,

@@ -919,6 +919,7 @@ test.each([
       presentation === "dashboard",
     );
     expect(stderr.text()).toContain("Report:");
+    expect(stderr.text()).toContain("1 finding → 1 group.");
     expect(stderr.text().includes("$0.00123")).toBe(costFlags.length > 0);
     if (costFlags.length === 0)
       expect(stderr.text()).not.toMatch(/\bCOST\b|\bCost:/u);
