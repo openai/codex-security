@@ -260,3 +260,31 @@ test("repeated observations are compared once without dropping distinct attack o
   ]);
   assert.deepEqual(matches.get(1), new Set([0]));
 });
+
+test("an input length error from the model request also splits the comparison", async () => {
+  const result: ScanUnion = { scanId: "fixture", findings: [] };
+  let whole = 0;
+  await mergeBatch(
+    result,
+    [worker("first", ["A", "B", "C"])],
+    "/tmp",
+    async (prompt: string) => {
+      const rows: Row[] = JSON.parse(prompt.split("\n").at(-1)!);
+      if (rows.length > 2) {
+        whole++;
+        throw new Error(
+          "Input exceeds the maximum length of 1048576 characters (actual 5,047,254)",
+        );
+      }
+      return grade(rows, (row) =>
+        rows.some(({ title }) => title === "A") ? "common" : row.title,
+      );
+    },
+    () => {},
+  );
+  assert.equal(whole, 1);
+  assert.deepEqual(
+    result.findings.map(({ title }) => title),
+    ["A", "C"],
+  );
+});
