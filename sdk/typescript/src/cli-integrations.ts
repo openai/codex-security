@@ -220,7 +220,7 @@ function integrationGroups(
         const result = await registerMcp(
           cliName,
           options,
-          cliOptions.mcp!.command!,
+          cliOptions.mcp ? (cliOptions.mcp.command ?? "") : "",
           projectScope(options),
         );
         if (plain)
