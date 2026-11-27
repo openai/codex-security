@@ -109,6 +109,9 @@ export function errorMessage(error: unknown): string {
 export function exceedsContext(error: unknown) {
   return (
     asRecord(error)?.code === "context_length_exceeded" ||
+    /\binput exceeds the maximum length of [\d,]+ characters\b/i.test(
+      errorMessage(error),
+    ) ||
     /\b(?:context_length_exceeded|context (?:length|window) exceeded|maximum context length is|exceeds? (?:the |this model's |the model's )?context (?:length|window)|(?:ran out of room in|exceeded) (?:the |this model's |the model's )?context window)\b/i.test(
       errorMessage(error),
     )
