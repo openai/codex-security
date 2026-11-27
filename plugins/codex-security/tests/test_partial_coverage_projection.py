@@ -106,6 +106,61 @@ def test_parent_candidate_outcome_compares_headless_worker_chronology(
 
 
 @pytest.mark.parametrize(
+    ("provenance_attempt", "closes_worker_task"),
+    [(1, True), (True, False), (False, False), (1.0, False), ("1", False), (None, False)],
+)
+def test_parent_candidate_provenance_requires_integer_attempt(
+    workbench_db, publication_scan, stop_scan, provenance_attempt, closes_worker_task
+):
+    scan = publication_scan()
+    result = scan.add_worker()
+    worker_id = result.parent.name
+    candidate = "pending-candidate"
+    surface = review_surface("worker-surface", "Worker follow-up", candidate_id=candidate)
+    task = {"id": "worker-task", "candidateId": candidate, "reason": "Validate worker evidence."}
+    draft = scan.worker_draft(completeness="partial", surfaces=[surface], deferred=[task])
+    write_result_draft(result, draft, mtime_ns=300)
+    checkpoint = write_checkpoint(result.parent / "checkpoints", draft, mtime_ns=300)
+    head = select_checkpoint(result.parent, checkpoint, mtime_ns=300)
+    originals = {path: path.read_bytes() for path in (result, checkpoint, head)}
+    (scan.scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
+    parent = scan.scan_dir / "coverage.json"
+    parent.write_text(
+        json.dumps(
+            {
+                **scan.coverage,
+                "surfaces": [
+                    {
+                        **surface,
+                        "id": "parent-rejection",
+                        "label": "Parent reviewed candidate",
+                        "disposition": "rejected",
+                        "provenance": {
+                            "workerId": worker_id,
+                            "attempt": provenance_attempt,
+                            "candidateId": candidate,
+                            "sourceId": surface["id"],
+                        },
+                    }
+                ],
+                "reviews": [{"workerId": worker_id, "attempt": 1, "completeness": "partial"}],
+            }
+        )
+    )
+    os.utime(parent, ns=(400, 400))
+    stop_scan(scan, False)
+    scan.recover()
+    coverage = read_review_state(workbench_db, scan.scan_dir)
+    pending = [row for row in coverage["deferred"] if row.get("reason") == task["reason"]]
+    assert len(pending) == int(not closes_worker_task)
+    assert any(
+        row.get("label") == surface["label"] and row.get("disposition") == "needs_follow_up"
+        for row in coverage["surfaces"]
+    ) is (not closes_worker_task)
+    assert all(path.read_bytes() == contents for path, contents in originals.items())
+
+
+@pytest.mark.parametrize(
     "parent_surfaces", ["missing", "projected", "renamed", "second-only", "no-parent", "edited"]
 )
 @pytest.mark.parametrize("tagged_surface", [False, True])
