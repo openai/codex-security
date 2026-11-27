@@ -519,6 +519,7 @@ describe("CLI", () => {
           manifest: { scan: { status: "completed" } },
           validation: { status: "failed", message },
         });
+        expect(stderr.text()).toMatch(/Validating 1 scan finding$/mu);
         expect(stderr.text()).not.toContain("\u001b");
         expect(stderr.text()).not.toContain("\u0007");
         expect(stderr.text()).toContain(

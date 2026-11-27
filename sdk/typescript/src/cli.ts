@@ -13256,7 +13256,7 @@ async function executeScan(
           stopPresentation();
           try {
             progress?.stage(
-              `Validating ${validationInputs.length} scan findings`,
+              `Validating ${formatItemCount(validationInputs.length, "scan finding")}`,
             );
           } catch {}
           try {
