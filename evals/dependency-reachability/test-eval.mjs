@@ -76,7 +76,7 @@ process.exitCode = 7;\n`,
   );
 });
 
-test("the probe measures the affected and fixed releases and withholds exactly one binding field", async () => {
+test("the probe distinguishes fixed, affected, and unattributed stack frames", async () => {
   const { fixtures, outcomes } = await summaryFixtures(root);
   assert.deepEqual(
     outcomes.map(({ after }) => after),
@@ -89,16 +89,15 @@ test("the probe measures the affected and fixed releases and withholds exactly o
   assert.deepEqual(positive.files.sinks, unbound.files.sinks);
   assert.deepEqual(positive.files.sources, unbound.files.sources);
   const full = structuredClone(positive.docs.stacks);
-  delete full.queries[0].groups[0].observations[0].bindings[0].sourceSha;
+  const [sum, ...callers] = full.captures[0].stacks[0].frames;
+  assert.equal(sum.name, "sum");
+  assert.equal(sum.package.version, "0.2.0");
+  assert.equal(fixed.observation.frames[0].package.version, "0.2.1");
+  assert(callers.some((frame) => frame.name === "parseBatch"));
+  delete sum.sourceRevision;
   assert.deepEqual(full, unbound.docs.stacks);
-  assert.equal(
-    positive.observation.frames[positive.observation.sourceIndex].name,
-    "parseBatch",
-  );
-  assert.equal(
-    positive.observation.frames[positive.observation.sinkIndex].name,
-    "sum",
-  );
+  delete sum.package;
+  assert.deepEqual(full, fixtures["missing-version"].docs.stacks);
   assert.deepEqual(git(positive.repo, "ls-files").split("\n"), [
     "sample-summary/index.cjs",
     "sample-summary/package.json",

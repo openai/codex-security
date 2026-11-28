@@ -7,5 +7,5 @@
 /.stryker-tmp/
 /private_release/dist/
 /*.tsbuildinfo
-/schemas/dependency-stack-inputs-v1.schema.json
-/schemas/stack-investigation-report-v1.schema.json
+/schemas/dependency-stack-inputs-v2.schema.json
+/schemas/stack-investigation-report-v2.schema.json

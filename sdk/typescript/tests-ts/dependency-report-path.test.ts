@@ -9,35 +9,26 @@ import {
 } from "./support/dependency-report-fixtures.js";
 
 const sha = "a".repeat(40);
-const digest = "sha256:" + "1".repeat(64);
 const path = "src/codec.ts";
-const sourceBinding = {
-  package: "example",
-  version: sha,
-  sourceSha: sha,
-  provenance: "image metadata",
-  imageDigest: digest,
-};
 function sample() {
   const section = prepareDependencyReport(stackReport()).sections[0]!;
   const finding = section.prepared!.findings.find(
-    (f) => f.kind === "stack" && f.assessment.observation,
+    (f) => f.kind === "stack" && f.assessment.stack,
   )!;
   if (finding.kind !== "stack") throw new Error("Expected sample");
-  const observation = finding.assessment.observation!;
+  const observation = finding.assessment.stack!;
   observation.frames.push(
     { rawIndex: 6, frame: { name: "outside", type: "function" } },
     {
       rawIndex: 2,
       frame: {
         name: "handle",
+        sourceRevision: sha,
         type: "function",
         location: "/app.runfiles/_main/src/codec.ts:3",
       },
     },
   );
-  observation.bindings.push({ ...sourceBinding });
-  finding.assessment.scope.image_digest = digest;
   return {
     finding,
     observation,
@@ -45,16 +36,14 @@ function sample() {
     run: () => inspectPath(finding, section.stack!.target),
   };
 }
-test("matches the saved caller line, not the third-party sink; preserves raw gaps and range", () => {
+test("matches the saved caller line, not the third-party sink; preserves original frame positions", () => {
   const { run } = sample();
   const { frames, initialIndex } = run();
-  expect(
-    frames.map((f) => [f.role, f.rawIndex, f.inRange, f.omittedBefore]),
-  ).toEqual([
-    ["call", 6, false, 0],
-    ["source", 4, true, 1],
-    ["call_site", 2, true, 1],
-    ["sink", 0, true, 1],
+  expect(frames.map((f) => [f.role, f.rawIndex, f.omittedBefore])).toEqual([
+    ["call", 6, 0],
+    ["call", 4, 1],
+    ["call_site", 2, 1],
+    ["sink", 0, 1],
   ]);
   expect(frames[initialIndex]).toMatchObject({
     rawIndex: 2,
@@ -69,28 +58,13 @@ test("matches the saved caller line, not the third-party sink; preserves raw gap
   });
   expect(frames[3]?.code).toBeUndefined();
 });
-test("refuses a stale image or revision, missing or conflicting bindings, and bindings for other frames", () => {
+test("a missing or stale frame revision cannot borrow the revision of a sibling", () => {
   const { run, observation } = sample();
-  const code = () => run().frames.find((f) => f.rawIndex === 2)?.code;
-  const other = { ...sourceBinding, sourceSha: "d".repeat(40) };
-  for (const bindings of [
-    [],
-    [other],
-    [sourceBinding, other],
-    [{ ...sourceBinding, imageDigest: "sha256:" + "2".repeat(64) }],
-    [{ ...sourceBinding, frameIndices: [0] }],
-    [
-      sourceBinding,
-      {
-        package: "dependency",
-        provenance: "sample",
-        version: "1",
-        frameIndices: [2],
-      },
-    ],
-  ]) {
-    observation.bindings = bindings;
-    expect(code()).toBeUndefined();
+  const caller = observation.frames.find((f) => f.rawIndex === 2)!.frame;
+  observation.frames[0]!.frame.sourceRevision = sha;
+  for (const revision of [undefined, "d".repeat(40)]) {
+    caller.sourceRevision = revision;
+    expect(run().frames.find((f) => f.rawIndex === 2)?.code).toBeUndefined();
   }
 });
 test("exact path and line required; no basename or arbitrary suffix matches", () => {

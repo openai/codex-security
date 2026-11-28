@@ -42,7 +42,7 @@ including file names that begin with a dash.
 
 ## Experimental dependency investigations
 
-Run `cs exploitability check` from a Git checkout to assess a CVE or package. For a CVE, you can also [review captured stacks](#check-captured-stacks) for a workload and time window. To work offline without model review, use `cs exploitability run`.
+Run `cs exploitability check` from a Git checkout to assess a CVE or package. For a CVE, you can also [review captured stacks](#check-captured-stacks) from a debugger, a crash dump or a profiler. To work offline without model review, use `cs exploitability run`.
 
 Enable these commands in your shell. They are hidden and disabled by default.
 
@@ -111,7 +111,7 @@ cs exploitability check CVE-2019-10744 --format html --report-file review.html
 
 `--format html` saves a self-contained browser report and prints its path. The default filename is `exploitability_report_<timestamp>.html` in the current directory, with a UTC timestamp. Reports are saved atomically and never overwrite existing files.
 
-Select a call site in the browser to inspect the verdict, conditions and source excerpts. **Expand all** shows the excerpts together. **Focus** enlarges the call path. HTML and Markdown mark gaps in sampled stacks and show matching source when available. In Markdown, citations outside the stack appear under **Source review**.
+Select a call site in the browser to inspect the verdict, conditions and source excerpts. **Expand all** shows the excerpts together. **Focus** enlarges the call path. HTML and Markdown mark gaps in captured stacks and show matching source when available. In Markdown, citations outside the stack appear under **Source review**.
 
 #### Follow progress
 
@@ -125,13 +125,134 @@ The selected Codex profile can supply a model or provider name. For dependency c
 
 ### Check captured stacks
 
-With no analyzer configuration, `check` runs every analyzer that has its required inputs. A CVE by itself runs the repository analyzer. Supply a capture directory to also run the stacks analyzer.
+A stack records which functions were active together. It can come from a debugger, a crash dump, or a profiler. Each entry in `captures` describes one collection or search. The CVE comes from `check`, so the same `stacks.json` can be reused for other CVEs.
 
-```sh
-cs exploitability check CVE-2099-0001 --analyzer-input stacks=./capture
+#### Start with one backtrace
+
+Create a directory named `capture` and save this as `capture/stacks.json`.
+
+```json
+{
+  "format": "codex-security.stacks/v2",
+  "captures": [
+    {
+      "stacks": [
+        { "frames": [{ "name": "defaultsDeep" }, { "name": "loadConfig" }] }
+      ]
+    }
+  ]
+}
 ```
 
-To reuse a capture directory or restrict which analyzers can run, list them in `project.yaml`. To run stacks alone, omit `repository` from this example.
+Read the frames from the leaf out. Here `loadConfig` called `defaultsDeep`. Frame 0 is the active function and frame 1 is its caller. The name alone cannot identify the package copy or show who controlled the input. Expect an `unknown` result for this stack.
+
+```sh
+cs exploitability check CVE-2019-10744 --analyzer-input stacks=./capture --format json
+```
+
+By default, a CVE alone runs the repository analyzer. Supplying this directory runs both analyzers. The command pins the checkout being inspected. The capture can come from a different build, so the checkout's revision alone cannot establish which source ran.
+
+#### Identify the package that supplied a frame
+
+If a debugger can tie the active frame to a loaded library, record its package, version and provenance on that frame. Here is a replacement `stacks.json`.
+
+```json
+{
+  "format": "codex-security.stacks/v2",
+  "captures": [
+    {
+      "origin": "debugger backtrace",
+      "stacks": [
+        {
+          "labels": { "process": "worker" },
+          "frames": [
+            {
+              "name": "defaultsDeep",
+              "package": {
+                "name": "lodash",
+                "version": "4.17.21",
+                "provenance": "loaded module path and package manifest"
+              }
+            },
+            { "name": "loadConfig", "location": "config.js", "line": 12 }
+          ]
+        }
+      ]
+    }
+  ]
+}
+```
+
+The [public advisory](https://osv.dev/vulnerability/GHSA-jf85-cpcp-j695) covers several packages, each with its own fixed version. For this example, save the entry for the npm package `lodash` as `capture/sinks.json`. That gives the analyzer a specific function and version range to check.
+
+```json
+{
+  "format": "codex-security.stack-sinks/v2",
+  "cve": "CVE-2019-10744",
+  "sinks": [
+    {
+      "id": "lodash-defaults",
+      "function": "defaultsDeep",
+      "package": "lodash",
+      "versionScheme": "semver",
+      "affectedVersions": ["<4.17.12"],
+      "preconditions": []
+    }
+  ]
+}
+```
+
+Run the same command again. A citation tying `defaultsDeep` to Lodash 4.17.21 supports `ruled_out` for this call because that version is outside the affected range. Other copies still need their own evidence. Omit `package` if all you have is an inventory of installed packages. A process label identifies context. Use `sourceRevision` on a frame only when you know which revision produced that code.
+
+#### Keep search results separate
+
+Use one capture per query, even when a search returns no stacks. An empty `stacks` array requires a query. A raw backtrace needs no query.
+
+```json
+{
+  "format": "codex-security.stacks/v2",
+  "captures": [
+    {
+      "query": {
+        "selectors": { "function": "defaultsDeep" },
+        "coverage": "partial"
+      },
+      "stacks": [
+        { "frames": [{ "name": "defaultsDeep" }, { "name": "loadConfig" }] }
+      ]
+    },
+    {
+      "query": {
+        "selectors": { "function": "mergeWith" },
+        "window": {
+          "start": "2026-01-01T09:00:00Z",
+          "end": "2026-01-01T09:05:00Z"
+        },
+        "coverage": "complete"
+      },
+      "stacks": []
+    }
+  ]
+}
+```
+
+The first search returned a call and may have missed others. The second returned everything matching its request in the given window and found no stacks. Coverage describes the search over collected data. It cannot establish that a function never ran. Omitted coverage means `unknown`. If two searches return identical frames, keep each result with its query. They may refer to the same execution.
+
+#### Choose the input path
+
+Use `--analyzer-input stacks=PATH` with a file, a directory or a quoted glob.
+
+| Input                                | What the analyzer reads                                                                                                                                 |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `stacks=./profiles/debug.json`       | One v2 capture document. Only directory inputs load catalogs.                                                                                           |
+| `stacks=./capture`                   | Every `.json` file directly in the directory. `sources.json` and `sinks.json` are optional catalogs. `manifest.json` selects replay of prepared inputs. |
+| `'stacks=./profiles/**/stacks.json'` | Matching capture files across directories. Quote the whole argument so the CLI expands the pattern. It does not discover neighboring catalogs.          |
+
+The analyzer reads distinct paths in sorted order, keeping captures and stacks in their original order. Supply regular files and directories. The CLI rejects symlink inputs. Identical traces in separate files stay separate. An empty match or an invalid capture stops the check. Keep unrelated JSON and saved reports out of a capture directory. A glob must match captures only, so avoid patterns that include `sources.json`, `sinks.json` or `manifest.json`.
+
+#### Configure which analyzers run
+
+To reuse a capture or limit which analyzers run, list them in `project.yaml`. Omit `repository` here to run stacks alone.
 
 ```yaml
 exploitability:
@@ -142,28 +263,27 @@ exploitability:
 ```
 
 ```sh
-# Run both analyzers using the configured capture.
-cs exploitability check CVE-2099-0001 --config project.yaml --format json --report-file report.json
-
-# Use a different capture for this run. Both analyzers still run.
-cs exploitability check CVE-2099-0001 --config project.yaml --analyzer-input stacks=./other-capture
+cs exploitability check CVE-2019-10744 --config project.yaml
+cs exploitability check CVE-2019-10744 --config project.yaml --analyzer-input stacks=./other-capture
 ```
 
-Use `--config` or set `CODEX_SECURITY_PROJECT_CONFIG` to select the project file. The CLI resolves `stacks.input` relative to the config file and `--analyzer-input NAME=PATH` relative to the working directory. An override can supply a missing input or replace one. If your config lists analyzers, you can only override those listed. Duplicate overrides for the same analyzer are errors.
+Use `--config` or `CODEX_SECURITY_PROJECT_CONFIG` to select a file. `stacks.input` accepts the same file, directory or glob, relative to that file. `--analyzer-input stacks=PATH` resolves relative to the working directory and overrides it for this run. If your config lists analyzers, only those listed can run. Duplicate overrides are errors.
 
-Without a capture, `stacks` is skipped. If that leaves no analyzer to run, the command reports the missing input. A supplied capture must be valid and applies to a single CVE. Omit it for package or hypothesis checks.
+Without a capture, the CLI skips `stacks`. If that leaves no analyzer to run, the command reports the missing input. An invalid capture stops the check. Supply a capture only with a single CVE. For a package or a hypothesis, omit the capture.
 
-Check out the commit in the capture. The directory must contain `sources.json`, `sinks.json` and `stacks.json` from the installed package's `@openai/codex-security/schemas/dependency-stack-inputs-v1.schema.json`. The sink file must include the catalog advisory for the requested CVE. These filenames replace the former `--sources`, `--sinks` and `--stacks` flags.
+#### Check the evidence
 
-If the directory also contains `manifest.json`, the CLI verifies the packet and reuses its saved advisory and caller scope. A changed file, conflicting scope, wrong CVE or mismatched commit stops the check before either investigation starts. The CLI never ignores an invalid manifest.
+A single v2 capture document is enough to start. The CLI rejects v1 capture files and v1 prepared directories. Start a new investigation for v2 inputs. Optional `sources.json` (`codex-security.stack-sources/v2`) and `sinks.json` (`codex-security.stack-sinks/v2`) catalogs identify entry points and affected operations. The CVE in a sink catalog must match the command. For the input schema, see `@openai/codex-security/schemas/dependency-stack-inputs-v2.schema.json`.
 
-For a fresh capture, set `exploitability.scope.instructions` to specify which callers and assumptions to consider. The investigator and reviewer apply those instructions. The stack report records them as `callerScope`. See `@openai/codex-security/schemas/stack-investigation-report-v1.schema.json` for its fields.
+For fresh inputs, `exploitability.scope.instructions` tells the investigator and reviewer which callers to consider. The report records it as `callerScope`. Public advisory lookup sends advisory identifiers to OSV and GitHub. These requests exclude the stack data. Without a sink catalog, the analyzer can infer affected functions only if public records identify a single package and list the affected functions. If the lookup fails, the report records `advisoryLookupError`. With no usable advisory or catalog, the analyzer leaves the stack unresolved.
 
-When preparing a fresh capture, the CLI can look up missing advisory details on OSV and GitHub without sending stack data. If lookup fails, the report records `advisoryLookupError` and uses the catalog preconditions. To reuse a prior analysis, include its `advisoryDetails` and `triggerAnalysis` in `sinks.json`. The CLI verifies the hashes and quoted passages. Use a trusted snapshot, since hashes cannot authenticate its producer.
+If a directory contains `manifest.json`, pass the directory itself. Selecting its files individually or with a glob is an error. Before replay, the CLI verifies the saved inputs, caller scope, CVE and checkout revision. An invalid manifest stops the check.
 
-A read-only reviewer checks the stack assessment against the captured calls, source and advisory conditions. After two unsuccessful correction passes, the check fails. On approval, `review` records the draft digest and reasons for each decision.
+A read-only reviewer checks each assessment against the source, advisory and captured frames. On approval, `review` records the draft digest and the reasons for each decision.
 
-With one analyzer, JSON contains its report directly. With both, read `analyzers.repository.uses` and `analyzers.stacks.assessments`. Each verdict applies to its own evidence. A path can be `potentially_exploitable` in the repository even if the capture found no matches. A complete search with no matches leaves that work item `unknown` because it only describes the sampled workload and time window.
+With one analyzer, JSON contains its report directly. With both, JSON includes the requested `subject`, `analyzers.repository.uses` and `analyzers.stacks.assessments`. Each stack has a work item, such as `captures/0/stacks/0` for the first stack above. An empty search gets one work item, such as `captures/1` in the two-query example. Across several files, capture indices continue in file order. Use the assessment’s `sourceFile` to find the original filename, digest and capture position within that file.
+
+The repository can identify a potentially exploitable call even if the capture contains no match. Zero matches in a complete search yield `no_match`. An empty search with partial or unknown coverage yields `no_coverage`. Both leave the work item’s verdict `unknown`. See `@openai/codex-security/schemas/stack-investigation-report-v2.schema.json` for stack report fields.
 
 ### Investigate stacks offline
 
@@ -177,7 +297,7 @@ cs exploitability run record-observations --state "$STATE" --json-stdin < observ
 cs exploitability run next --state "$STATE"
 ```
 
-`init` creates or reopens an investigation. Supply the CVE, advisory and endpoints in `advisory.json` as they become available. If you already have a prepared directory with `manifest.json`, pass `--inputs <directory>` to `init`. For a fresh capture, give the three-file directory to `check --analyzer-input stacks=<directory>` for independent review. Packet preparation is internal to the CLI.
+`init` creates or reopens an investigation. Supply the CVE, advisory and endpoints in `advisory.json` as they become available. If you already have a prepared directory with `manifest.json`, pass `--inputs <directory>` to `init`. For independent review of a fresh capture, use `check CVE --analyzer-input stacks=PATH`. Packet preparation is internal to the CLI.
 
 #### Import runtime evidence
 
@@ -194,21 +314,15 @@ cs exploitability run next --state "$STATE"
 }
 ```
 
-Put the returned receipt ID in `observations.json`. Cite it when an assessment relies on the result. The import preserves the payload and the operation you named. It cannot verify that the provider ran the operation.
+For a saved result, put `{ "receiptId": "<returned receipt ID>" }` in `observations.json`. `record-observations` imports that exact result. It also accepts a complete `codex-security.stacks/v2` document directly. Graph providers can return `codex-security-graph-evidence/v1` through a receipt. The CLI translates their root-first frames into leaf-first order. Repeating an identical import returns the previous work item IDs. To import identical documents as separate events, give each call a distinct `operationId`.
 
-```json
-{ "receiptId": "<returned receipt ID>" }
-```
+For file imports, the CLI stores the parsed JSON, declared provenance and verified file digest. Keep the original file for byte-level audits. The receipt identifies the saved evidence. It cannot authenticate the provider or prove the query ran.
 
-`record-observations` reads a query or a `queries` array from the receipt. Any `queries` supplied separately must match exactly. A `codex-security-graph-evidence/v1` result must identify the query, scope, window and sink selectors. Graph results number frames from the root. The CLI renumbers them from the leaf so package bindings and report citations refer to the same function. A runtime selector with a `line` requires a `location`.
-
-- Observed stacks and successful searches with zero matches require a receipt. Zero matches also require complete coverage. For graph evidence, this means status `empty_matches`, `coverage.result_complete: true` and `limits.truncated: false`.
-- A `no_coverage` query needs no receipt. A stack group marked `no_indexed_match` gets status `no_coverage` and verdict `unknown`. Its work item appears in `coverage.noCoverage`.
-- To rule out a vulnerability based on version, cite a fixed package copy for each matched sink frame. The producer’s binding must include the original zero-based `frameIndices`. Index 0 identifies the innermost frame. An image inventory alone cannot establish which copy ran.
+To rule out a vulnerability by version, cite the package on each matched frame. The first frame's package is at `["stack", "frames", 0, "package"]` in its work item. A package in an inventory alone cannot identify which copy ran.
 
 #### Complete the assessment
 
-1. Use `next` to read the outstanding work item’s frames, original indices, bindings and receipt.
+1. Use `next` to read the outstanding work item’s frames, package attribution and receipt.
 2. Save supported facts with `record-claims` and retrieve references with `query-claims`.
 3. Submit verdicts with `record-assessments`. For `unknown` on a matched stack with consistent scope, supply one `questionChecks` entry per open question. Include the question, what you inspected, supporting claim revisions and the missing evidence.
 4. Check `summarize-coverage`, then run `cs exploitability run finalize --state "$STATE"`. Add `--format md` or `--format html` to change the output format.

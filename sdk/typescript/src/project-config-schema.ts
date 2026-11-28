@@ -40,7 +40,7 @@ export const dependencyAnalyzersSchema = z
         input: nonempty
           .regex(/\S/u)
           .optional()
-          .describe("Capture directory, relative to this config file."),
+          .describe("Capture file, directory or glob, relative to this config file."),
       })
       .optional()
       .describe("Investigate a captured stack when input is supplied."),
@@ -106,7 +106,7 @@ export const ProjectConfigInputSchema = z.strictObject({
       analyzers: dependencyAnalyzersSchema
         .optional()
         .describe(
-          "Omit to enable all analyzers. An explicit map enables only the named analyzers. Stacks runs only when given a capture directory.",
+          "Omit to enable all analyzers. An explicit map enables only the named analyzers. Stacks runs only when given input.",
         ),
       evidence_sources: z
         .array(

@@ -98,13 +98,13 @@ export function gradeStack(report, fixture, { reviewed }) {
     fixture;
   assert.equal(
     report.schemaVersion,
-    "codex-security.pipeline-stacks.report/v1",
+    "codex-security.pipeline-stacks.report/v2",
   );
   assert.equal(report.cve, summaryCve);
   assert.deepEqual(report.target, target);
   assert(report.runId && report.attemptId && report.toolRevision);
   const material = {
-    format: "codex-security.stack-manifest/v1",
+    format: "codex-security.stack-manifest/v2",
     cve: summaryCve,
     target,
     advisory,
@@ -126,13 +126,12 @@ export function gradeStack(report, fixture, { reviewed }) {
     outstanding: [],
     noMatch: [],
     noCoverage: [],
-    truncated: [],
-    truncationUnknown: [],
+    incompleteSearch: [],
     scopeConflicts: [],
   });
   assert.equal(report.assessments.length, 1);
   const [a] = report.assessments;
-  assert.equal(a.workItemId, "request/service/sample");
+  assert.equal(a.workItemId, "captures/0/stacks/0");
   if (reviewed) {
     assert.equal(
       report.review?.draftDigest,
@@ -147,40 +146,43 @@ export function gradeStack(report, fixture, { reviewed }) {
   } else {
     assert.equal(report.review, null, "offline finalization");
   }
-  assert.deepEqual(a.scope, scope);
-  assert.deepEqual(a.queryScope, scope);
-  assert.equal(a.status, "observed");
-  assert.equal(a.truncated, false);
-  assert.equal(a.observation.stackHash, observation.stackHash);
-  assert.equal(a.observation.sinkIndex, observation.sinkIndex);
-  assert.equal(a.observation.sourceIndex, observation.sourceIndex);
-  assert.deepEqual(a.observation.sinkMatches, [{ sinkId: "sum", rawIndex: 0 }]);
-  assert.deepEqual(a.observation.bindings, observation.bindings ?? []);
-  const indices = a.observation.frames.map((entry) => {
-    assert.deepEqual(
-      entry.frame,
-      observation.frames[entry.rawIndex],
-      "original captured frame",
-    );
-    return entry.rawIndex;
-  });
-  assert(
-    indices.includes(observation.sourceIndex) &&
-      indices.includes(observation.sinkIndex),
-  );
+  const capture = docs.stacks.captures[0];
+  const match = { sinkId: "sum", rawIndex: 0 };
+  const attributed = Boolean(observation.frames[0].package);
   const item = {
     id: a.workItemId,
-    queryId: "request",
-    groupId: "service",
-    scope,
-    queryScope: scope,
-    scopeConflicts: [],
-    origin: docs.stacks.origin,
-    selectors: docs.stacks.queries[0].selectors,
+    captureIndex: 0,
+    stackIndex: 0,
+    origin: capture.origin,
     status: "observed",
-    truncated: false,
-    observation,
+    scopeConflicts: [],
+    sinkMatches: attributed ? [match] : [],
+    leads: attributed ? [] : [match],
+    stack: observation,
   };
+  assert.equal(a.captureIndex, 0);
+  assert.equal(a.stackIndex, 0);
+  assert.equal(a.status, item.status);
+  assert.equal(a.origin, item.origin);
+  assert.deepEqual(a.sinkMatches, item.sinkMatches);
+  assert.deepEqual(a.leads, item.leads);
+  assert.deepEqual(a.stack.labels, scope);
+  assert.equal(a.stack.observedAt, observation.observedAt);
+  const indices = a.stack.frames.map(({ rawIndex, frame }) => {
+    assert.deepEqual(
+      frame,
+      observation.frames[rawIndex],
+      "original captured frame",
+    );
+    return rawIndex;
+  });
+  const caller = observation.frames.findIndex(
+    (frame) => frame.name === "parseBatch" && frame.location === "server.cjs",
+  );
+  assert(
+    caller > 0 && indices.includes(caller) && indices.includes(0),
+    "caller and sink frame citations",
+  );
   const validate = sourceReader(repo, target.sha);
   const pending = [...a.supportingClaims];
   const selected = new Set();
@@ -196,13 +198,13 @@ export function gradeStack(report, fixture, { reviewed }) {
       assert.equal(receipt.server, "stack-packet");
       assert.equal(receipt.originalPayloadSha256, files.stacks.sha256);
       const { tool, ...origin } = receipt.origin;
-      assert.ok(["next", "read-stacks"].includes(tool), "capture operation");
+      assert.equal(tool, "next", "capture operation");
       assert.deepEqual(origin, {
         arguments: {
           inputDigest: report.inputDigest,
           workItemId: item.id,
-          queryId: "request",
-          groupId: "service",
+          captureIndex: 0,
+          stackIndex: 0,
         },
       });
       let expected = item;
@@ -223,21 +225,24 @@ export function gradeStack(report, fixture, { reviewed }) {
     positive: ["exploitable"],
     fixed: ["ruled_out"],
     unbound: ["unknown", "potentially_exploitable"],
-    "missing-version": ["unknown", "potentially_exploitable"],
+    "missing-version": ["unknown"],
   };
   assert(
     expected[variant].includes(report.verdict),
     "scoped verdict for " + variant,
   );
   if (variant === "fixed" || variant === "positive") {
-    assert(
-      receipts.some(
-        (r) =>
-          JSON.stringify(r.selection?.record) ===
-          JSON.stringify(["observation", "bindings", 0]),
-      ),
-      "cited running package/build binding",
+    const paths = new Set(
+      receipts.map((r) => JSON.stringify(r.selection?.record)),
     );
+    const frame = ["stack", "frames", 0];
+    const cites = (...parts) => paths.has(JSON.stringify([...frame, ...parts]));
+    assert(cites() || cites("package"), "cited running frame package");
+    if (variant === "positive")
+      assert(
+        cites() || cites("sourceRevision"),
+        "cited source revision for the captured copy",
+      );
   }
   if (variant === "positive") {
     const control = exactClaim(report.claims, a.attackerControlClaim);
