@@ -26,7 +26,7 @@ import {
   reviewScopes,
   reportedDeployment,
   reportedUse,
-  verifyProposedUse,
+  validateDraftFinding,
   type Claim,
   type Proposal,
 } from "../src/exploitability/analyzers/repository/claims";
@@ -187,7 +187,7 @@ test("reviewed trace, service and input citations keep their revision through pu
   ];
   f.use.proof.sink!.argument = "request.body";
   await expect(
-    verifyProposedUse(f.path, scope, f.use, signal, true),
+    validateDraftFinding(f.path, scope, f.use, signal, true),
   ).rejects.toThrow(/trace/u);
   site.path = "app.js";
   const evidence = [
@@ -1058,7 +1058,13 @@ test("withdrawn approvals leave the verdict group before the next progress updat
   });
   f.use.evidence[0]!.endLine = 4;
   const scope = reviewScopes([f.discovery])[0]!;
-  const verified = await verifyProposedUse(f.path, scope, f.use, signal, true);
+  const verified = await validateDraftFinding(
+    f.path,
+    scope,
+    f.use,
+    signal,
+    true,
+  );
   const premise = { id: "guard", revision: 1, hash: "a".repeat(64) };
   const output: Record<string, unknown>[] = [];
   const progress = createDependencyVerdictProgress(
@@ -1459,7 +1465,7 @@ test("only unambiguous returned facts can bind a selected copy and independent c
   const scope = reviewScopes([f.discovery])[0]!;
   const { positive: asserted, records } = deploymentFor(f, "example");
   const verify = (use: Proposal["uses"][number], evidence = records) =>
-    verifyProposedUse(f.path, scope, use, signal, true, evidence);
+    validateDraftFinding(f.path, scope, use, signal, true, evidence);
   const [running, access] = asserted.observations;
   const releaseOnly = await verify({
     ...f.use,
@@ -1515,7 +1521,7 @@ test("only unambiguous returned facts can bind a selected copy and independent c
     ),
   ).rejects.toThrow("this running service");
   await expect(
-    verifyProposedUse(f.path, scope, asserted, signal, false, records),
+    validateDraftFinding(f.path, scope, asserted, signal, false, records),
   ).rejects.toThrow("excludes version");
 });
 
@@ -1546,7 +1552,7 @@ test("resource citations use delivered text and reject echoed URIs and truncated
         ? { contents: response.contents }
         : { content: [{ type: "text", text: JSON.stringify(response) }] },
     };
-    return verifyProposedUse(f.path, scope, asserted, signal, true, [
+    return validateDraftFinding(f.path, scope, asserted, signal, true, [
       { ...record, sha256: dependencyRecordHash(record) },
       records[1]!,
     ]);
@@ -1588,7 +1594,7 @@ test("a reviewed exclusion cannot contradict the cited advisory conditions", asy
     })),
   };
   await expect(
-    verifyProposedUse(f.path, scope, excluded, signal, true),
+    validateDraftFinding(f.path, scope, excluded, signal, true),
   ).rejects.toThrow("disproved advisory condition");
   const proof = {
     ...f.use.proof,
@@ -1598,7 +1604,7 @@ test("a reviewed exclusion cannot contradict the cited advisory conditions", asy
     })),
   };
   const verify = (use: typeof f.use) =>
-    verifyProposedUse(f.path, scope, { ...use, proof }, signal, true);
+    validateDraftFinding(f.path, scope, { ...use, proof }, signal, true);
   await expect(verify(f.use)).rejects.toThrow("disproved necessary condition");
   expect((await verify(excluded)).verdict).toBe("ruled_out");
 });
@@ -1692,7 +1698,7 @@ test("a runtime display name shared by two packages cannot establish either depl
   const scopes = reviewScopes([f.discovery]);
   const verify = (index: number, name: string) => {
     const { positive, records } = deploymentFor(f, name);
-    return verifyProposedUse(
+    return validateDraftFinding(
       f.path,
       scopes[index]!,
       positive,
@@ -1727,7 +1733,7 @@ test("an unnamed root manifest binds a service through its observed revision and
   const { positive, records } = deploymentFor(f, "example");
   const verify = (...running: string[]) => {
     const callSite = { path: "receiver.py", line: 2 };
-    return verifyProposedUse(
+    return validateDraftFinding(
       f.path,
       scope,
       {
@@ -1773,29 +1779,61 @@ test("an unnamed root manifest binds a service through its observed revision and
   ).rejects.toThrow("this running service");
 });
 
-test("an unverified handoff can leave the version unknown despite a local lockfile", async () => {
-  await using f = await fixture();
+test("a gap in local input flow keeps the selected version, a missing receiver does not inherit it", async () => {
+  await using f = await fixture({
+    "send.js": "await fetch(workerUrl, { body: request.body });\n",
+  });
   const scope = {
     ...reviewScopes([f.discovery])[0]!,
     selectedVersion: "1.0.0",
   };
-  const use: Proposal["uses"][number] = {
+  const verify = (use: Proposal["uses"][number]) =>
+    validateDraftFinding(f.path, scope, use, signal);
+  const local: Proposal["uses"][number] = {
     ...f.use,
-    version: null,
     verdict: "unknown",
+    reason: "The parser is known, but the input source is unclear.",
+    trace: [
+      {
+        kind: "handoff",
+        label: "Pass the body to parse",
+        site: { path: "app.js", line: 2 },
+      },
+      { kind: "gap", label: "The source of request.body is unknown." },
+    ],
+    remainingQuestions: ["Who controls request.body?"],
+  };
+  await expect(verify({ ...local, version: null })).rejects.toThrow(
+    "selected dependency version",
+  );
+  const checked = await verify(local);
+  expect(reportedDeployment(checked).place.dependencySelection).toBe("1.0.0");
+
+  const receiver: Proposal["uses"][number] = {
+    ...local,
+    version: null,
+    reason: "The worker's implementation is outside this checkout.",
+    evidence: [
+      { path: "send.js", startLine: 1, endLine: 1, supports: ["context"] },
+    ],
     proof: { conditions: [] },
-    trace: [{ kind: "gap", label: "Receiver is outside the checkout." }],
+    trace: [
+      {
+        kind: "handoff",
+        label: "Forward to worker",
+        site: { path: "send.js", line: 1 },
+      },
+      { kind: "gap", label: "Receiver is outside the checkout." },
+    ],
     remainingQuestions: ["Which copy does the receiver load?"],
   };
-  const verify = (candidate: typeof use) =>
-    verifyProposedUse(f.path, scope, candidate, signal);
-  expect((await verify(use)).version).toBeNull();
-  await expect(verify({ ...use, version: "2.0.0" })).rejects.toThrow(
+  expect((await verify(receiver)).version).toBeNull();
+  await expect(verify({ ...receiver, version: "2.0.0" })).rejects.toThrow(
     "selected dependency version",
   );
-  await expect(verify({ ...use, trace: [] })).rejects.toThrow(
-    "selected dependency version",
-  );
+  await expect(
+    verify({ ...receiver, trace: receiver.trace?.slice(-1) }),
+  ).rejects.toThrow("selected dependency version");
 });
 
 test("an embedded component has its own selected version, deployment and deciding citations", async () => {
@@ -1840,7 +1878,7 @@ test("an embedded component has its own selected version, deployment and decidin
     candidate: typeof use,
     sample?: (prompt: string) => Promise<string | undefined>,
   ) =>
-    verifyProposedUse(
+    validateDraftFinding(
       f.path,
       scope,
       candidate,
@@ -1860,7 +1898,7 @@ test("an embedded component has its own selected version, deployment and decidin
   };
   const verified = await verify(use, classify);
   await expect(
-    verifyProposedUse(
+    validateDraftFinding(
       f.path,
       { ...scope, selectedVersion: "2.0.3" },
       use,
@@ -1961,7 +1999,7 @@ test("an investigator tool cannot substitute for a running deployment and proven
     ],
   };
   await expect(
-    verifyProposedUse(f.path, scope, invented, signal, true, [
+    validateDraftFinding(f.path, scope, invented, signal, true, [
       own,
       records[1]!,
     ]),
@@ -1999,7 +2037,7 @@ test("an investigator tool cannot substitute for a running deployment and proven
     ],
   };
   const verify = (u: Proposal["uses"][number]) =>
-    verifyProposedUse(f.path, scope, u, signal, true, [rec, records[1]!]);
+    validateDraftFinding(f.path, scope, u, signal, true, [rec, records[1]!]);
   // Findings may cite an explicitly bound item receipt even when it did not
   // establish runtime or access and is absent from the observations array.
   const configured = {
