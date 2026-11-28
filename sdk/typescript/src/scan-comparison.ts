@@ -15,8 +15,7 @@ import { z } from "zod";
 import { characterCount, MAX_CODEX_INPUT_CHARACTERS } from "./codex-prompt.js";
 import {
   scanCodexHome,
-  scanAuthentication,
-  selectedScanEnvironment,
+  scanHelperEnvironment,
   definedEnvironment,
   type CodexSecuritySurface,
   type ScanAuthMode,
@@ -48,11 +47,13 @@ import {
 } from "./config.js";
 import { CodexSecurityError, ConfigurationError } from "./errors.js";
 import { codexSecurityRequestContext } from "./request-metadata.js";
+import { resolveScanCyberAccessProgram } from "./scan-cyber-access.js";
 import {
   createProfileCodex,
   createProviderProfile,
   preflightReadOnlyProfileCodex,
   providerPreflightCommand,
+  workspacePolicyConfig,
 } from "./provider-profile.js";
 import {
   compactFinding,
@@ -63,12 +64,15 @@ import {
 } from "./finding-catalogue.js";
 import {
   codexSecurityCredentialHome,
+  environmentWithGit,
   executablePathForSpawn,
   prepareCodexSecurityCredentialHome,
   resolveCodexCommand,
   runCodexCommand,
   type CodexCommand,
 } from "./runtime.js";
+import { gitMarkerRoot } from "./targets.js";
+import { inspectTrustedExecutable } from "./trusted-executable.js";
 import {
   CODEX_SECURITY_THREAD_SOURCES,
   type CodexSecurityThreadSource,
@@ -195,7 +199,20 @@ interface ReadOnlyCodex {
   };
 }
 
+interface ReadOnlyCodexRuntime {
+  surface: CodexSecuritySurface;
+  command: string;
+  threadSource: ReadOnlyCodexThreadSource;
+}
+
+/** @internal */
+export type StartReadOnlyThread = () => {
+  run(prompt: string): Promise<string>;
+};
+
 export interface ReadOnlyCodexOptions {
+  /** @internal Repository being scanned when this helper plans or matches components. */
+  componentRepository?: string;
   /** @internal Authentication already selected by the calling scan. */
   auth?: ScanAuthMode;
   /** @internal Cyber access program already selected by the calling scan. */
@@ -369,11 +386,6 @@ export async function matchScanFindingsInternal(
       }
     }
   }
-  const { thread, cleanup } = await startReadOnlyCodexThread(options, {
-    ...runtimeOptions,
-    command: "compare",
-    threadSource: CODEX_SECURITY_THREAD_SOURCES.scanComparison,
-  });
   const remainingPages = new Set(pages.keys());
   remainingPages.delete(0);
   const evidenceCursors = new Map<string, EvidenceCursor>();
@@ -392,23 +404,16 @@ export async function matchScanFindingsInternal(
       }),
     );
   };
-  const turnOptions = {
-    // Native structured output requires every field; saved results can omit related.
-    outputSchema: z.toJSONSchema(matchingTurnSchema.required(), {
-      target: "draft-7",
-    }),
-    cyberAccessProgram: options.cyberAccessProgram,
-    signal: options.signal,
-  };
-  let prompt = comparisonPrompt(pages[0]!, 0, pages.length, crossModeSites);
-  progress("catalogue", 1);
-  try {
+  const compare = async (startThread: StartReadOnlyThread) => {
+    const thread = startThread();
+    let prompt = comparisonPrompt(pages[0]!, 0, pages.length, crossModeSites);
+    progress("catalogue", 1);
     for (;;) {
       options.signal?.throwIfAborted();
-      const turn = await thread.run(prompt, turnOptions);
+      const finalResponse = await thread.run(prompt);
       let response: unknown;
       try {
-        response = JSON.parse(turn.finalResponse);
+        response = JSON.parse(finalResponse);
       } catch (error) {
         throw new CodexSecurityError("Scan comparison returned invalid JSON.", {
           cause: error,
@@ -580,21 +585,30 @@ export async function matchScanFindingsInternal(
       progress("complete");
       return expanded.comparison;
     }
-  } finally {
-    await cleanup?.();
-  }
+  };
+  return await withReadOnlyCodex(
+    options,
+    {
+      ...runtimeOptions,
+      command: "compare",
+      threadSource: CODEX_SECURITY_THREAD_SOURCES.scanComparison,
+    },
+    // Native structured output requires every field; saved results can omit related.
+    z.toJSONSchema(matchingTurnSchema.required(), { target: "draft-7" }),
+    compare,
+  );
 }
 
-async function startReadOnlyCodexThread(
+/** @internal Prepare one read-only client. Each new thread starts with an empty conversation. */
+export async function withReadOnlyCodex<T>(
   options: ReadOnlyCodexOptions,
-  runtimeOptions: Parameters<typeof runReadOnlyCodex>[3] & {
+  runtimeOptions: ReadOnlyCodexRuntime & {
     nativeProviderEnvironment?: Record<string, string>;
   },
-): Promise<{
-  thread: ReturnType<ReadOnlyCodex["startThread"]>;
-  cleanup?: () => Promise<void>;
-}> {
-  const source = {
+  outputSchema: unknown,
+  use: (startThread: StartReadOnlyThread) => Promise<T>,
+): Promise<T> {
+  let source: NodeJS.ProcessEnv = {
     ...(options.environment ?? process.env),
     CODEX_HOME: scanCodexHome(options.environment ?? process.env),
   };
@@ -619,8 +633,32 @@ async function startReadOnlyCodexThread(
     workingDirectory: options.workingDirectory ?? process.cwd(),
     skipGitRepoCheck: true,
   };
-  if (options.codex !== undefined) {
-    return { thread: options.codex.startThread(threadOptions) };
+  const useClient = (
+    client: ReadOnlyCodex,
+    cyberAccessProgram?: CyberAccessProgram,
+  ) => {
+    const turnOptions = {
+      outputSchema,
+      cyberAccessProgram,
+      signal: options.signal,
+    };
+    return use(() => {
+      const thread = client.startThread(threadOptions);
+      return {
+        run: async (prompt) =>
+          (await thread.run(prompt, turnOptions)).finalResponse,
+      };
+    });
+  };
+  if (options.codex !== undefined)
+    return useClient(options.codex, options.cyberAccessProgram);
+  const { componentRepository } = options;
+  if (componentRepository !== undefined) {
+    const root =
+      (await gitMarkerRoot(componentRepository, options.signal, "outermost")) ??
+      componentRepository;
+    const git = await inspectTrustedExecutable("git", source, root);
+    source = environmentWithGit(source, git);
   }
   const homeConfig = await readCodexHomeConfig(source, options.signal);
   const homeExecutionConfig = resolveCodexProfile(homeConfig);
@@ -696,8 +734,9 @@ async function startReadOnlyCodexThread(
     options.auth,
   );
   const command = resolveCodexCommand(environment);
-  const codexOptions: CodexOptions = {
-    configOverrides: [requestContext.configOverride],
+  const configOverrides: string[] = [requestContext.configOverride];
+  const codexOptions = {
+    configOverrides,
     codexPathOverride: executablePathForSpawn(command.command),
     env: environment,
     // The SDK forwards its apiKey option as CODEX_API_KEY for Codex exec.
@@ -739,7 +778,11 @@ async function startReadOnlyCodexThread(
         exclude: ["CODEX_HOME", "*KEY*", "*SECRET*", "*TOKEN*"],
       },
     } as NonNullable<CodexOptions["config"]>,
-  };
+  } satisfies CodexOptions;
+  const projectKey =
+    (modelProvider ?? "openai") === "openai" ? codexOptions.apiKey : undefined;
+  // Native exec uses the saved login for workspace policy even with a project key.
+  if (projectKey) delete codexOptions.config["chatgpt_base_url"];
   const providers = resolveCodexProfile(providerSettings)["model_providers"];
   const ownProfile =
     options.nativeProfile === undefined &&
@@ -756,7 +799,14 @@ async function startReadOnlyCodexThread(
     if (profile !== undefined) {
       delete threadOptions.sandboxMode;
       const permissions = await preflightReadOnlyProfileCodex(
-        codexOptions,
+        {
+          ...codexOptions,
+          ...(projectKey && {
+            apiKey: undefined,
+            env: withoutOpenAiApiKeys(environment),
+          }),
+          config: workspacePolicyConfig(codexOptions.config, projectKey),
+        },
         {
           extends: ":read-only",
           filesystem: {
@@ -781,6 +831,31 @@ async function startReadOnlyCodexThread(
         ...environment,
       };
     }
+    let cyberAccessProgram = options.cyberAccessProgram;
+    if (
+      cyberAccessProgram === undefined &&
+      componentRepository !== undefined &&
+      model !== undefined
+    ) {
+      // The helper may use a different credential home than the caller.
+      // Only send configuration that this Codex process actually receives.
+      cyberAccessProgram = await resolveScanCyberAccessProgram({
+        command,
+        cwd: threadOptions.workingDirectory!,
+        environment: {
+          ...codexOptions.env,
+          ...(codexOptions.apiKey && { CODEX_API_KEY: codexOptions.apiKey }),
+        },
+        config: {
+          ...(codexOptions.config as JsonObject),
+          responses_api_metadata: requestContext.metadata,
+          ...(isRecord(providers) ? { model_providers: providers } : {}),
+        },
+        model,
+        nativeProfile: profile !== undefined,
+        signal: options.signal ?? new AbortController().signal,
+      });
+    }
     const codex =
       profile === undefined
         ? new Codex(codexOptions)
@@ -789,13 +864,9 @@ async function startReadOnlyCodexThread(
             profile.name,
             requestedPermissionProfile,
           );
-    return {
-      thread: codex.startThread(threadOptions),
-      ...(ownProfile === undefined ? {} : { cleanup: ownProfile.cleanup }),
-    };
-  } catch (error) {
+    return await useClient(codex, cyberAccessProgram);
+  } finally {
     await ownProfile?.cleanup();
-    throw error;
   }
 }
 
@@ -803,26 +874,14 @@ export async function runReadOnlyCodex(
   prompt: string,
   outputSchema: unknown,
   options: ReadOnlyCodexOptions,
-  runtimeOptions: {
-    surface: CodexSecuritySurface;
-    command: string;
-    threadSource: ReadOnlyCodexThreadSource;
-  },
+  runtimeOptions: ReadOnlyCodexRuntime,
 ): Promise<string> {
-  const { thread, cleanup } = await startReadOnlyCodexThread(
+  return withReadOnlyCodex(
     options,
     runtimeOptions,
+    outputSchema,
+    (startThread) => startThread().run(prompt),
   );
-  try {
-    const turn = await thread.run(prompt, {
-      outputSchema,
-      cyberAccessProgram: options.cyberAccessProgram,
-      signal: options.signal,
-    });
-    return turn.finalResponse;
-  } finally {
-    await cleanup?.();
-  }
 }
 
 export async function disabledMcpServers(
@@ -1294,14 +1353,10 @@ export async function comparisonEnvironment(
   prepareCredentialHome: typeof prepareCodexSecurityCredentialHome = prepareCodexSecurityCredentialHome,
   config?: JsonObject,
   nativeKey?: string,
-  auth: ScanAuthMode = "api-key",
+  auth?: ScanAuthMode,
 ): Promise<Record<string, string>> {
   signal?.throwIfAborted();
-  const environment = Object.fromEntries(
-    Object.entries(source).filter(
-      (entry): entry is [string, string] => entry[1] !== undefined,
-    ),
-  );
+  let environment = definedEnvironment(source);
   const home = configuredCodexHome(environment);
   for (const key of Object.keys(environment)) {
     const name = process.platform === "win32" ? key.toUpperCase() : key;
@@ -1309,17 +1364,22 @@ export async function comparisonEnvironment(
       environment[key] = home;
     }
   }
-  if (nativeKey !== undefined && config !== undefined) {
-    const provider = scanModelProvider(config);
-    scanAuthentication(environment, auth, provider, false, false, nativeKey);
+  const effectiveConfig =
+    config ?? (await readCodexHomeConfig(environment, signal));
+  if (hasCommandAuth(effectiveConfig)) {
+    return withoutOpenAiApiKeys(environment);
+  }
+  const provider = scanModelProvider(effectiveConfig) ?? "openai";
+  if (
+    nativeKey !== undefined ||
+    (auth === "api-key" && provider === "openai")
+  ) {
     return definedEnvironment(
-      selectedScanEnvironment(environment, auth, provider, nativeKey, config),
+      scanHelperEnvironment(environment, auth, effectiveConfig),
     );
   }
-  if (
-    hasCommandAuth(config ?? (await readCodexHomeConfig(environment, signal)))
-  ) {
-    return withoutOpenAiApiKeys(environment);
+  if (auth === "chatgpt" && !isExternalModelProvider(provider)) {
+    environment = withoutOpenAiApiKeys(environment);
   }
   if (environmentEntry(environment, "CODEX_SECURITY_SCAN_ID") !== undefined) {
     return environment;

@@ -10,7 +10,11 @@ import type {
   ThreatModel,
 } from "./models.js";
 import { estimateScanCost, type ScanCost } from "./cost.js";
-import { meetsSeverity, severityThresholdRank } from "./scan-settings.js";
+import {
+  meetsSeverity,
+  severityThresholdRank,
+  type ScanSettings,
+} from "./scan-settings.js";
 
 export interface TurnResultMetadata {
   id?: string;
@@ -48,6 +52,8 @@ export interface ScanResultOptions {
   scanDir: string;
   threadId: string;
   turnResult: TurnResultMetadata;
+  /** @internal Preserve the scan's program for subsequent workflow steps. */
+  requestedCyberAccessProgram?: ScanSettings["cyberAccessProgram"];
   /** Cost saved when this scan completed. */
   recordedCost?: Readonly<ScanCost>;
   sarifPath?: string | null;
@@ -65,6 +71,8 @@ export class ScanResult {
   public readonly scanDir: string;
   public readonly threadId: string;
   public readonly turnResult: Readonly<TurnResultMetadata>;
+  /** @internal Also available when a durable workflow reuses a completed scan. */
+  public requestedCyberAccessProgram?: ScanSettings["cyberAccessProgram"];
   public readonly cost: Readonly<ScanCost> | null;
   public readonly sarifPath: string | null;
   public readonly threatModelPath: string | null;
@@ -86,6 +94,7 @@ export class ScanResult {
     this.scanDir = options.scanDir;
     this.threadId = options.threadId;
     this.turnResult = options.turnResult;
+    this.requestedCyberAccessProgram = options.requestedCyberAccessProgram;
     this.repositoryFindings = options.repositoryFindings;
     this.ownerSuggestionsPath = options.ownerSuggestionsPath;
     this.ownerSuggestionsError = options.ownerSuggestionsError;

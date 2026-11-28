@@ -347,9 +347,54 @@ export function selectedScanProfile(
   return isObject(configuredProfile) ? configuredProfile : undefined;
 }
 
+/** @internal */
+export const scanCyberFeatures = [
+  "cli_daybreak",
+  "api_key_model_discovery",
+  "api_key_cyber_access_programs",
+];
+
+// TOML emits literal scalar flags before nested tables. Fold these per layer
+// so inline profiles win and workers can forward a single features table.
+function normalizeCyberSettings(layer: JsonObject): void {
+  for (const name of scanCyberFeatures) {
+    const key = `features.${name}`;
+    const value = layer[key];
+    if (typeof value !== "boolean") continue;
+    const features = isObject(layer["features"]) ? layer["features"] : {};
+    features[name] ??= value;
+    layer["features"] = features;
+    delete layer[key];
+  }
+  // Keep literal OpenAI catalog overrides in the private provider table,
+  // including on replay. The SDK would otherwise emit their URLs as flags.
+  const leaf = layer["model_providers.openai.model_catalog_url"];
+  const table = layer["model_providers.openai"];
+  if (
+    typeof leaf === "string" ||
+    (isObject(table) && typeof table["model_catalog_url"] === "string")
+  ) {
+    const providers = isObject(layer["model_providers"])
+      ? layer["model_providers"]
+      : {};
+    const provider = providers["openai"];
+    providers["openai"] = {
+      ...(isObject(provider) ? provider : {}),
+      ...(typeof leaf === "string" && { model_catalog_url: leaf }),
+      ...(isObject(table) && table),
+    };
+    layer["model_providers"] = providers;
+    delete layer["model_providers.openai"];
+    delete layer["model_providers.openai.model_catalog_url"];
+  }
+}
+
 export function resolveCodexProfile(config: JsonObject): JsonObject {
   const normalized = parse(serializeCodexConfig(config)) as JsonObject;
-  const resolved = deepMerge(normalized, selectedScanProfile(normalized) ?? {});
+  const selected = selectedScanProfile(normalized) ?? {};
+  normalizeCyberSettings(normalized);
+  normalizeCyberSettings(selected);
+  const resolved = deepMerge(normalized, selected);
   delete resolved["profile"];
   delete resolved["profiles"];
   return resolved;
@@ -483,12 +528,14 @@ export async function mergedCodexConfig(
   const overrides = structuredClone(config.codexOverrides ?? {});
   validateOverrides(overrides);
   normalizeLegacyWindowsSandboxOverride(overrides);
+  normalizeCyberSettings(overrides);
   const nativeProfile = await readCodexFileProfile(overrides, profileHome);
   const profiles = overrides["profiles"];
   if (isObject(profiles)) {
     for (const profile of Object.values(profiles)) {
       if (isObject(profile)) {
         normalizeLegacyWindowsSandboxOverride(profile);
+        normalizeCyberSettings(profile);
       }
     }
   }
@@ -500,6 +547,7 @@ export async function mergedCodexConfig(
       defaults,
       await readCodexAuthConfig(profileHome, purpose === "login"),
     );
+  normalizeCyberSettings(nativeProfile);
   const effectiveOverrides = deepMerge(nativeProfile, overrides);
   validateNativeMultiAgentV2Overrides(effectiveOverrides);
   if (scanModelProvider(effectiveOverrides) === "amazon-bedrock") {

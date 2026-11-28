@@ -57,7 +57,7 @@ type RuntimeConfigReadOptions = Pick<
   readonly providerConfigOverrides?: readonly string[];
 };
 
-type PreflightContext = "helper" | "parent-config";
+type PreflightContext = "helper" | "parent-config" | "scan-catalog";
 
 /** Read native effective settings, including managed provider requirements, without a turn. */
 export async function readDeepScanRuntimeConfig(
@@ -309,7 +309,7 @@ export async function preflightDeepScanWorkerPermissionProfile(
   });
 }
 
-async function withPreflightClient<T>(
+export async function withPreflightClient<T>(
   options: RuntimeConfigReadOptions,
   operation: (client: AppServerPreflightClient) => Promise<T>,
 ): Promise<T> {
@@ -688,6 +688,8 @@ function profileCollisionError(context?: "helper"): DeepScanNonRetryableError {
 }
 
 function failedOperation(context?: PreflightContext): string {
+  if (context === "scan-catalog")
+    return "Could not read the scan model catalog";
   return context === "parent-config"
     ? "Could not read the Deep Scan parent configuration"
     : `${subject(context)} cannot safely verify its read-only worker permission profile`;
@@ -695,7 +697,7 @@ function failedOperation(context?: PreflightContext): string {
 
 function malformedPreflightError(context?: PreflightContext): Error {
   return new Error(
-    context === "parent-config"
+    context === "parent-config" || context === "scan-catalog"
       ? `${failedOperation(context)}. Codex returned an invalid app-server response.`
       : `${failedOperation(context)} with this Codex configuration. ${subject(context)} did not run.`,
   );
@@ -751,7 +753,7 @@ function codexExecutableExitError(
   signal: NodeJS.Signals | null,
 ): Error {
   const operation =
-    options.context === "parent-config"
+    options.context === "parent-config" || options.context === "scan-catalog"
       ? "the configuration read"
       : "permission-profile verification";
   const detail =
@@ -777,7 +779,7 @@ function codexExecutableFailureMessage(
   detail: string,
 ): string {
   const { context, codexPath } = options;
-  if (context === "parent-config")
+  if (context === "parent-config" || context === "scan-catalog")
     return `${failedOperation(context)}. Codex executable ${JSON.stringify(codexPath)} ${detail}.`;
   return `${executableFailurePrefix(options)} ${detail}. Check that the named executable runs with --version, and check CODEX_CLI_PATH/PATH, then retry. ${subject(context)} did not run.`;
 }
@@ -805,6 +807,7 @@ export function deepScanPermissionProfileFallbackError(
 }
 
 function subject(context?: PreflightContext): string {
+  if (context === "scan-catalog") return "The scan";
   return context === "helper" ? "Read-only Codex helper" : "Deep Scan";
 }
 
@@ -815,9 +818,11 @@ function isAbortError(error: unknown): boolean {
 function abortError(reason: unknown, context?: PreflightContext): Error {
   if (reason instanceof Error) return reason;
   return new DOMException(
-    context === "parent-config"
-      ? "Deep Scan parent configuration read aborted."
-      : "Deep Scan worker permission profile preflight aborted.",
+    context === "scan-catalog"
+      ? "Scan model catalog read aborted."
+      : context === "parent-config"
+        ? "Deep Scan parent configuration read aborted."
+        : "Deep Scan worker permission profile preflight aborted.",
     "AbortError",
   );
 }
