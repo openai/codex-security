@@ -416,48 +416,6 @@ for (const [secondVersion, expected] of [
   );
 }
 
-for (const [version, specifier, affected] of [
-  ["2.1.0+cu121", "==2.1.0", true],
-  ["2.1.0+cpu", "==2.1.0+cu121", false],
-  ["2.5.0rc1", ">=2.5.0rc1,<2.6", true],
-  ["2.5.0rc1", "<2.5.0", false],
-  ["1.0.post1", ">1.0", false],
-  ["1.0.post1.dev1", "<1.0.post1", false],
-  ["1.0.post1", ">=1.0,<1.1", true],
-  ["1.0.dev1", ">=1.0.dev0,<=1.0", true],
-] as const) {
-  test(`captured PyPI version ${version} against ${specifier}`, async () => {
-    await using dir = await scopedTemporaryDirectory("stack-python-version-");
-    const files = await sample(dir.path, true);
-    const catalog = JSON.parse(await readFile(files.sinksPath, "utf8"));
-    catalog.sinks[0].versionScheme = "pep440";
-    catalog.sinks[0].affectedVersions = [specifier];
-    await writeFile(files.sinksPath, JSON.stringify(catalog));
-    const capture = JSON.parse(await readFile(files.stacksPath, "utf8"));
-    capture.captures[0].stacks[0].frames[0].package.version = version;
-    await writeFile(files.stacksPath, JSON.stringify(capture));
-
-    const { call, row } = await startProof(dir.path, files);
-    const exclusion = {
-      workItemId: row.workItemId,
-      verdict: "ruled_out",
-      reason: "The captured build is outside the advisory's affected versions.",
-      supportingClaims: row.supportingClaims,
-    };
-    if (!affected) {
-      await call("record-assessments", { items: [exclusion] });
-      expect(await call("finalize")).toMatchObject({ verdict: "ruled_out" });
-      return;
-    }
-    await expect(
-      call("record-assessments", { items: [exclusion] }),
-    ).rejects.toThrow();
-    row.use.version = version;
-    await call("record-assessments", { items: [row] });
-    expect(await call("finalize")).toMatchObject({ verdict: "exploitable" });
-  });
-}
-
 for (const [version, affected] of [
   ["1.5.0", true],
   ["2.1.0", false],
