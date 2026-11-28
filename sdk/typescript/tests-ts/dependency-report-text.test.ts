@@ -91,3 +91,29 @@ test("Markdown annotates a caller only when its revision matches the cited code"
   expect(render(raw.target.sha)).toContain("return decode(bytes);");
   expect(render("d".repeat(40))).not.toContain("return decode(bytes);");
 });
+
+test("Markdown keeps underscores in saved report text literal", () => {
+  const render = (reason: string) =>
+    renderDependencyReportMarkdown(
+      JSON.parse(
+        JSON.stringify(repositoryReport(variantReport()), (key, value) =>
+          key === "reason" && typeof value === "string" ? reason : value,
+        ),
+      ),
+    );
+  expect(
+    render(
+      "A __proto__ key reaches merge_deep; _only_ the admin route is guarded.",
+    ),
+  ).toContain(
+    "A \\_\\_proto\\_\\_ key reaches merge_deep; \\_only\\_ the admin route is guarded.",
+  );
+  // GitHub keeps a backslash inside a bare link.
+  expect(
+    render(
+      "See https://example.com/_next/__debug__/, ftp://example.com/_a_ and www.example.com/a_b_.",
+    ),
+  ).toContain(
+    "See https://example.com/_next/__debug__/, ftp://example.com/_a_ and www.example.com/a_b_.",
+  );
+});
