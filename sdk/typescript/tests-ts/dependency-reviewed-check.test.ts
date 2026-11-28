@@ -1508,7 +1508,10 @@ test("resource citations use delivered text and reject echoed URIs and truncated
 });
 
 test("a reviewed exclusion cannot contradict the cited advisory conditions", async () => {
-  await using f = await fixture();
+  await using f = await fixture({
+    "app.js":
+      'import parse from "fixture-parser";\nparse(request.body, { mode: "safe" });\n',
+  });
   const scope = reviewScopes([f.discovery])[0]!;
   const excluded = {
     ...f.use,
@@ -1525,13 +1528,23 @@ test("a reviewed exclusion cannot contradict the cited advisory conditions", asy
     ...f.use.proof,
     conditions: f.use.proof.conditions.map((c) => ({
       ...c,
+      label: "The parser runs in raw mode",
+      explanation: "The caller fixes the mode to safe.",
       status: "ruled_out" as const,
     })),
   };
   const verify = (use: typeof f.use) =>
-    validateDraftFinding(f.path, scope, { ...use, proof }, signal, true);
+    validateDraftFinding(f.path, scope, { ...use, proof }, signal);
   await expect(verify(f.use)).rejects.toThrow("disproved necessary condition");
-  expect((await verify(excluded)).verdict).toBe("ruled_out");
+  const unbound = {
+    ...excluded,
+    version: null,
+    evidence: excluded.evidence.filter((ref) => ref.path === "app.js"),
+  };
+  await expect(verify({ ...unbound, verdict: "unknown" })).rejects.toThrow(
+    "disproved necessary condition",
+  );
+  expect((await verify(unbound)).verdict).toBe("ruled_out");
 });
 
 test("an operational failure records earlier checks and leaves the remaining advisories pending", async () => {
