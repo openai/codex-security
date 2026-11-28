@@ -8,8 +8,10 @@ import {
   readFinalStackReport,
 } from "../src/dependency-stack-run.js";
 import type { DependencyClaimReference } from "../src/dependency-stack-claims.js";
-import { readStackPacket } from "../src/dependency-stack-packet.js";
-import { prepareStackPacket } from "../src/stack-packet.js";
+import {
+  prepareStackPacket,
+  readStackPacket,
+} from "../src/dependency-stack-packet.js";
 import { git } from "./git-fixture.js";
 import { dependencies } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";

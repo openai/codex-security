@@ -35,11 +35,6 @@
     },
     "./schemas/project-config.schema.json": "./schemas/project-config.schema.json",
     "./schemas/hosted-scan-v2.fixture.json": "./schemas/hosted-scan-v2.fixture.json",
-    "./stack-packet": {
-      "types": "./dist/stack-packet.d.ts",
-      "import": "./dist/stack-packet.js",
-      "default": "./dist/stack-packet.js"
-    },
     "./schemas/dependency-stack-inputs-v1.schema.json": "./schemas/dependency-stack-inputs-v1.schema.json",
     "./schemas/stack-investigation-report-v1.schema.json": "./schemas/stack-investigation-report-v1.schema.json"
   },

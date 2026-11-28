@@ -35,6 +35,7 @@ test("command schema exposes complete and blocked reports as direct output alter
     anyOf.find((branch: { required?: string[] }) =>
       required.every((field) => branch.required?.includes(field)),
     );
+  expect(variant("subject", "analyzers")).toBeDefined();
   expect(variant("cve", "uses")).toBeDefined();
   expect(variant("checks", "package")).toBeDefined();
   const stacks = anyOf.filter((branch: { required?: string[] }) =>
@@ -98,6 +99,56 @@ async function commitFixture(path: string) {
     "fixture",
   );
 }
+
+test("check rejects invalid analyzer choices before launching an investigation", async () => {
+  await using repo = await scopedTemporaryDirectory(
+    "dependency-analyzer-options-",
+  );
+  await commitFixture(repo.path);
+  const config = join(repo.path, "project.json");
+  let launches = 0;
+  const deps = dependencies({
+    currentDirectory: repo.path,
+    environment: { CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY: "1" },
+    onCodex() {
+      launches++;
+      return 1;
+    },
+  });
+  for (const [analyzers, inputs, problem] of [
+    [{}, [], /at least 1|fewer than 1|at least one/i],
+    [{ other: {} }, [], /additional properties|unknown/i],
+    [{ stacks: {} }, [], /No analyzer has input/],
+    [{ repository: {} }, ["stacks=unused"], /unknown or disabled/],
+    [undefined, ["repository=unused"], /takes no input path/],
+    [undefined, ["stacks"], /NAME=PATH/],
+    [undefined, ["stacks=a", "stacks=b"], /Duplicate --analyzer-input/],
+    [undefined, ["stacks=missing-capture"], /missing-capture|does not exist/],
+  ] as const) {
+    const stdout = capture(),
+      stderr = capture();
+    if (analyzers)
+      await writeFile(
+        config,
+        JSON.stringify({ exploitability: { analyzers } }),
+      );
+    const code = await main(
+      [
+        "exploitability",
+        "check",
+        "CVE-2099-1000",
+        ...(analyzers ? ["--config", config] : []),
+        ...inputs.flatMap((value) => ["--analyzer-input", value]),
+      ],
+      stdout.stream,
+      stderr.stream,
+      deps,
+    );
+    expect(code).not.toBe(0);
+    expect(stderr.text() + stdout.text()).toMatch(problem);
+  }
+  expect(launches).toBe(0);
+});
 
 test("a reviewed check calls only selected evidence sources and reviews the original replies", async () => {
   await using repo = await scopedTemporaryDirectory("dependency-evidence-cli-");

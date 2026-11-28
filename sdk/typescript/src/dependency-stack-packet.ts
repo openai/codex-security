@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, rm, writeFile } from "node:fs/promises";
+import { lstat, mkdir, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { z } from "zod";
 import {
@@ -518,12 +518,20 @@ async function decodeFiles(
       }
     }
   }
-  const actual = await repositoryRevision(repository, signal);
-  if (actual !== stacks.target.sha)
-    throw new Error(
-      `Target checkout HEAD is ${actual ?? "unavailable"}, expected ${stacks.target.sha}.`,
-    );
+  await checkTargetRevision(repository, stacks.target.sha, signal);
   return { sources, sinks, stacks };
+}
+
+async function checkTargetRevision(
+  repository: string,
+  expected: string,
+  signal?: AbortSignal,
+) {
+  const actual = await repositoryRevision(repository, signal);
+  if (actual !== expected)
+    throw new Error(
+      `Target checkout HEAD is ${actual ?? "unavailable"}, expected ${expected}.`,
+    );
 }
 
 type AdvisorySnapshot = Pick<
@@ -637,32 +645,83 @@ function manifestFields(
   return fields;
 }
 
-export async function prepareStackPacket(options: {
+interface PacketOptions {
   cve: string;
   callerScope?: string;
-  sourcesPath: string;
-  sinksPath: string;
-  stacksPath: string;
-  inputsDir: string;
   repository: string;
   toolRevision: string;
   runId?: string;
   attemptId?: string;
   signal?: AbortSignal;
-}): Promise<StackPacket> {
-  // The public packet API and run init must remain usable without any model
-  // or network access. Only high-level checks opt in to fresh resolution.
-  return prepareStackCheckPacket(options);
 }
 
-export async function prepareStackCheckPacket(
-  options: Parameters<typeof prepareStackPacket>[0],
+type PacketWriter = (
+  inputsDir: string,
+  host?: StackAdvisoryHost,
+) => Promise<StackPacket>;
+
+// Fixture builders can freeze inputs offline by omitting the advisory host.
+export async function prepareStackPacket(
+  options: PacketOptions & {
+    sourcesPath: string;
+    sinksPath: string;
+    stacksPath: string;
+    inputsDir: string;
+  },
   host?: StackAdvisoryHost,
 ): Promise<StackPacket> {
   const bytes = await loadFiles(
     (role) => options[`${role}Path`],
     options.repository,
   );
+  const write = await rawPacketWriter(bytes, options);
+  return write(options.inputsDir, host);
+}
+
+// Keep validated bytes in memory until the analyzer starts. In particular, a
+// second analyzer can run between preflight and the creation of the work area.
+export async function prepareStackInput(
+  options: PacketOptions & { input: string },
+): Promise<PacketWriter> {
+  const { input, repository, signal } = options;
+  const manifestPath = join(input, "manifest.json");
+  const metadata = await lstat(manifestPath, { bigint: true }).catch(
+    (error: NodeJS.ErrnoException) => {
+      if (error.code !== "ENOENT") throw error;
+      return undefined;
+    },
+  );
+  if (!metadata) {
+    const bytes = await loadFiles(
+      (role) => join(input, role + ".json"),
+      repository,
+    );
+    return rawPacketWriter(bytes, options);
+  }
+  // A present manifest always selects replay, including when it fails validation.
+  const snapshot = await readSavedPacket(input, repository, signal, metadata);
+  const { manifest } = snapshot.packet;
+  if (manifest.cve !== options.cve)
+    throw new Error(
+      `The saved packet describes ${manifest.cve}, expected ${options.cve}.`,
+    );
+  if (
+    options.callerScope !== undefined &&
+    options.callerScope !== manifest.callerScope
+  )
+    throw new Error(
+      "Configured caller scope conflicts with the saved stack packet.",
+    );
+  return async (inputsDir) => {
+    await checkTargetRevision(repository, manifest.target.sha, signal);
+    return writePacket(inputsDir, snapshot, signal);
+  };
+}
+
+async function rawPacketWriter(
+  bytes: Bytes,
+  options: PacketOptions,
+): Promise<PacketWriter> {
   const documents = await decodeFiles(
     bytes,
     cveId.parse(options.cve),
@@ -675,44 +734,64 @@ export async function prepareStackCheckPacket(
     sinks: fileIdentity(bytes.sinks),
     stacks: fileIdentity(bytes.stacks),
   };
-  // Verify that the supplied snapshot survives manifest parsing before any
-  // lookup or analysis. Reopening the packet performs the same comparison.
-  let fields = manifestFields(documents, options, files, documents.sinks);
-  if (host) {
-    const snapshot = await resolveSnapshot(
-      documents.sinks,
-      host,
+  const initial = manifestFields(documents, options, files, documents.sinks);
+  return async (inputsDir, host) => {
+    options.signal?.throwIfAborted();
+    if (host)
+      await checkTargetRevision(
+        options.repository,
+        documents.stacks.target.sha,
+        options.signal,
+      );
+    const fields = host
+      ? manifestFields(
+          documents,
+          options,
+          files,
+          await resolveSnapshot(documents.sinks, host, options.signal),
+        )
+      : initial;
+    options.signal?.throwIfAborted();
+    const manifest = stackManifestSchema.parse({
+      ...fields,
+      inputDigest: hash(canonicalJson(fields)),
+      runId: options.runId ?? randomUUID(),
+      attemptId: options.attemptId ?? randomUUID(),
+    });
+    return writePacket(
+      inputsDir,
+      { bytes, packet: { manifest, ...documents } },
       options.signal,
     );
-    options.signal?.throwIfAborted();
-    fields = manifestFields(documents, options, files, snapshot);
-  }
-  const manifest = stackManifestSchema.parse({
-    ...fields,
-    inputDigest: hash(canonicalJson(fields)),
-    runId: options.runId ?? randomUUID(),
-    attemptId: options.attemptId ?? randomUUID(),
-  });
-  await mkdir(options.inputsDir, { mode: 0o700 });
+  };
+}
+
+async function writePacket(
+  inputsDir: string,
+  {
+    packet,
+    bytes,
+    manifestBytes,
+  }: { packet: StackPacket; bytes: Bytes; manifestBytes?: Buffer },
+  signal?: AbortSignal,
+): Promise<StackPacket> {
+  signal?.throwIfAborted();
+  await mkdir(inputsDir, { mode: 0o700 });
   try {
-    for (const role of roles) {
-      await writeFile(join(options.inputsDir, role + ".json"), bytes[role], {
-        flag: "wx",
-        mode: 0o400,
-        signal: options.signal,
-      });
-    }
+    const options = { flag: "wx", mode: 0o400, signal };
+    for (const role of roles)
+      await writeFile(join(inputsDir, role + ".json"), bytes[role], options);
     // Publish the manifest after all of the original documents are present.
     await writeFile(
-      join(options.inputsDir, "manifest.json"),
-      JSON.stringify(manifest, null, 2) + "\n",
-      { flag: "wx", mode: 0o400, signal: options.signal },
+      join(inputsDir, "manifest.json"),
+      manifestBytes ?? JSON.stringify(packet.manifest, null, 2) + "\n",
+      options,
     );
   } catch (error) {
-    await rm(options.inputsDir, { recursive: true, force: true });
+    await rm(inputsDir, { recursive: true, force: true });
     throw error;
   }
-  return { manifest, ...documents };
+  return packet;
 }
 
 export async function readStackPacket(
@@ -720,11 +799,23 @@ export async function readStackPacket(
   repository: string,
   signal?: AbortSignal,
 ): Promise<StackPacket> {
-  const read = await readRegularInputFileBytes(
+  return (await readSavedPacket(inputsDir, repository, signal)).packet;
+}
+
+async function readSavedPacket(
+  inputsDir: string,
+  repository: string,
+  signal?: AbortSignal,
+  metadata?: Parameters<typeof readRegularInputFileBytes>[2],
+) {
+  const manifestBytes = await readRegularInputFileBytes(
     join(resolve(inputsDir), "manifest.json"),
     repository,
+    metadata,
   );
-  const manifest = stackManifestSchema.parse(parseJson(read, "manifest.json"));
+  const manifest = stackManifestSchema.parse(
+    parseJson(manifestBytes, "manifest.json"),
+  );
   const bytes = await loadFiles(
     (role) => join(inputsDir, role + ".json"),
     repository,
@@ -747,7 +838,7 @@ export async function readStackPacket(
     throw new Error(
       "Manifest does not match the supplied investigation inputs.",
     );
-  return { manifest, ...documents };
+  return { packet: { manifest, ...documents }, bytes, manifestBytes };
 }
 
 /** Published schema for the four independently versioned packet documents. */

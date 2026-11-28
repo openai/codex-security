@@ -8,7 +8,6 @@ const distModules = [
   "dependency-stack-packet",
   "dependency-stack-run",
   "dependency-stack-runtime-receipts",
-  "stack-packet",
 
   "batch-cost",
   "scan-executor",

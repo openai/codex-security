@@ -42,7 +42,7 @@ including file names that begin with a dash.
 
 ## Experimental dependency investigations
 
-Run `cs exploitability check` from a Git checkout to assess a CVE or package. If you have captured call stacks, you can limit a CVE check to the observed workload and time window. To work offline without model review, use `cs exploitability run`.
+Run `cs exploitability check` from a Git checkout to assess a CVE or package. For a CVE, you can also [review captured stacks](#check-captured-stacks) for a workload and time window. To work offline without model review, use `cs exploitability run`.
 
 Enable these commands in your shell. They are hidden and disabled by default.
 
@@ -54,14 +54,14 @@ cs exploitability --help
 ### Reviewed repository and package checks
 
 ```sh
-cs exploitability check CVE-2019-10744 --json --report-file repository.json
+cs exploitability check CVE-2019-10744 --format json --report-file repository.json
 cs exploitability check npm:lodash --progress-events progress.jsonl
 cs exploitability check npm:example-parser --vuln-description "Suspected failure to validate the declared input length."
 ```
 
 A package check returns one entry in `checks` per public advisory. Use `--vuln-description` with a package to check a single hypothesis. The investigator traces callers and package versions at the checked-out commit. An independent reviewer checks the claims and selects the evidence supporting each verdict.
 
-A positive verdict requires evidence that the affected build ran, the caller had access and the advisory conditions held for that use. A lockfile can identify a build’s dependencies. You may need a deployment inventory to show which build ran.
+An `exploitable` verdict requires evidence that the affected build ran, the caller had access and the advisory conditions held for that use. A lockfile can identify a build’s dependencies. You may need a deployment inventory to show which build ran.
 
 An `unknown` verdict is a completed assessment that identifies missing evidence. If an advisory is blocked or fails review, the package check continues, returns completed and blocked outcomes in order and exits with status 2. An execution error stops the check and lists the advisories left to assess.
 
@@ -101,7 +101,7 @@ An MCP citation identifies the response by `receiptId` and `originalPayloadSha25
 
 ### Choose a report format
 
-By default, `check` prints a summary. Use `--json` for the structured result or `--format md` for Markdown. With any of these formats, `--report-file PATH` saves the JSON. **Requires more information** means `unknown` in JSON.
+By default, `check` prints a summary. Use `--format json` (or `--json`) for the structured result or `--format md` for Markdown. With any of these formats, `--report-file PATH` saves the JSON. **Requires more information** means `unknown` in JSON.
 
 ```sh
 cs exploitability check CVE-2019-10744 --format html --report-file review.html
@@ -113,37 +113,53 @@ Select a call site in the browser to inspect the verdict, conditions and source 
 
 #### Follow progress
 
-`check` writes progress to stderr. With `--json`, stdout contains only the report or blocked outcome. Provisional verdicts can change during review.
+`check` writes progress to stderr. When both analyzers run, their progress events identify the analyzer. Provisional verdicts can change during review.
+
+For automation, capture `--format json` stdout even on exit 2. A blocked investigation can return completed results, the reason for the block and any pending work without creating the requested report file. When both analyzers run, check `analyzers` and `pendingAnalyzers`. An `unknown` verdict is a completed assessment.
 
 `--progress-events FILE` streams JSON Lines to a new file on a best-effort basis. Each event includes `schemaVersion` (1), `elapsedMs`, `subject` and `type`. Match `activity_started` and `activity_finished` by `id`. Finished searches can include `searchedPaths`. The `reviewed` event can include `previousVerdict`. `access_program` identifies the selected program or reports `unconfirmed`. `report_ready` gives verdict and limitation counts and any saved report path. `finished` records the command outcome.
 
 ### Check captured stacks
 
-Check out the commit named in the capture. Supply one CVE and all three files from the [stack input schema](../schemas/dependency-stack-inputs-v1.schema.json). The sink file must include the catalog advisory.
+With no analyzer configuration, `check` runs every analyzer that has its required inputs. A CVE by itself runs the repository analyzer. Supply a capture directory to also run the stacks analyzer.
 
 ```sh
-cs exploitability check CVE-2099-0001 \
-  --sources sources.json --sinks sinks.json --stacks stacks.json --report-file report.json
+cs exploitability check CVE-2099-0001 --analyzer-input stacks=./capture
 ```
 
-To specify which callers and assumptions to consider, set `exploitability.scope.instructions` in a project file and pass `--config project.yaml`. The input packet and report save the instructions as `callerScope`. Both the investigator and reviewer apply them.
+To reuse a capture directory or restrict which analyzers can run, list them in `project.yaml`. To run stacks alone, omit `repository` from this example.
 
-The CLI queries OSV for the CVE and its aliases and can fetch missing GHSA records from GitHub. These lookups exclude stack data. In the [report](../schemas/stack-investigation-report-v1.schema.json), `advisoryDetails` contains the public records, their hashes and available revisions. `triggerAnalysis` lists the necessary conditions derived for each sink and quotes the supporting advisory passages. If lookup fails, the CLI records `advisoryLookupError` and uses the catalog preconditions. Invalid trigger analysis stops the check.
-
-The investigator checks the supplied and derived conditions against captured calls and source at the recorded commit. A fresh, read-only reviewer checks every verdict after each submission. The CLI allows two correction passes and exits with an error if review is invalid or follow-up remains unresolved. On approval, `review` records the draft digest and reasons for each decision.
-
-#### Reuse advisory records
-
-For the same catalog and capture, copy the records and conditions into a new sink file.
+```yaml
+exploitability:
+  analyzers:
+    repository: {}
+    stacks:
+      input: ./capture
+```
 
 ```sh
-jq -e --slurpfile r report.json '
-  select($r[0].advisoryDetails and $r[0].triggerAnalysis)
-  | . + ($r[0] | {advisoryDetails, triggerAnalysis})
-' sinks.json > sinks-replay.json
+# Run both analyzers using the configured capture.
+cs exploitability check CVE-2099-0001 --config project.yaml --format json --report-file report.json
+
+# Use a different capture for this run. Both analyzers still run.
+cs exploitability check CVE-2099-0001 --config project.yaml --analyzer-input stacks=./other-capture
 ```
 
-Pass `--sinks sinks-replay.json` and choose a new report path. The CLI validates the hashes and quotes, then repeats the caller investigation and review. Supply only `advisoryDetails` to derive conditions again. Use a trusted snapshot. Matching hashes cannot authenticate its producer.
+Use `--config` or set `CODEX_SECURITY_PROJECT_CONFIG` to select the project file. The CLI resolves `stacks.input` relative to the config file and `--analyzer-input NAME=PATH` relative to the working directory. An override can supply a missing input or replace one. If your config lists analyzers, you can only override those listed. Duplicate overrides for the same analyzer are errors.
+
+Without a capture, `stacks` is skipped. If that leaves no analyzer to run, the command reports the missing input. A supplied capture must be valid and applies to a single CVE. Omit it for package or hypothesis checks.
+
+Check out the commit in the capture. The directory must contain `sources.json`, `sinks.json` and `stacks.json` from the installed package's `@openai/codex-security/schemas/dependency-stack-inputs-v1.schema.json`. The sink file must include the catalog advisory for the requested CVE. These filenames replace the former `--sources`, `--sinks` and `--stacks` flags.
+
+If the directory also contains `manifest.json`, the CLI verifies the packet and reuses its saved advisory and caller scope. A changed file, conflicting scope, wrong CVE or mismatched commit stops the check before either investigation starts. The CLI never ignores an invalid manifest.
+
+For a fresh capture, set `exploitability.scope.instructions` to specify which callers and assumptions to consider. The investigator and reviewer apply those instructions. The stack report records them as `callerScope`. See `@openai/codex-security/schemas/stack-investigation-report-v1.schema.json` for its fields.
+
+When preparing a fresh capture, the CLI can look up missing advisory details on OSV and GitHub without sending stack data. If lookup fails, the report records `advisoryLookupError` and uses the catalog preconditions. To reuse a prior analysis, include its `advisoryDetails` and `triggerAnalysis` in `sinks.json`. The CLI verifies the hashes and quoted passages. Use a trusted snapshot, since hashes cannot authenticate its producer.
+
+A read-only reviewer checks the stack assessment against the captured calls, source and advisory conditions. After two unsuccessful correction passes, the check fails. On approval, `review` records the draft digest and reasons for each decision.
+
+With one analyzer, JSON contains its report directly. With both, read `analyzers.repository.uses` and `analyzers.stacks.assessments`. Each verdict applies to its own evidence. A path can be `potentially_exploitable` in the repository even if the capture found no matches. A complete search with no matches leaves that work item `unknown` because it only describes the sampled workload and time window.
 
 ### Investigate stacks offline
 
@@ -157,7 +173,7 @@ cs exploitability run record-observations --state "$STATE" --json-stdin < observ
 cs exploitability run next --state "$STATE"
 ```
 
-`init` creates or reopens an investigation. Supply the CVE, advisory and endpoints in `advisory.json` as they become available. To start with a complete packet, prepare it with `prepareStackPacket` from `@openai/codex-security/stack-packet` and add `--inputs <packet-directory>` to `init`.
+`init` creates or reopens an investigation. Supply the CVE, advisory and endpoints in `advisory.json` as they become available. If you already have a prepared directory with `manifest.json`, pass `--inputs <directory>` to `init`. For a fresh capture, give the three-file directory to `check --analyzer-input stacks=<directory>` for independent review. Packet preparation is internal to the CLI.
 
 #### Import runtime evidence
 

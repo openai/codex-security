@@ -23,7 +23,7 @@ import {
 } from "./dependency-stack-assessment.js";
 import { dependencyClaimHash } from "./dependency-stack-claims.js";
 import type { DependencyCliContext } from "./dependency-cli.js";
-import { prepareStackCheckPacket } from "./dependency-stack-packet.js";
+import { prepareStackInput } from "./dependency-stack-packet.js";
 import {
   executeStackRun,
   readFinalStackReport,
@@ -45,7 +45,7 @@ interface StackInvestigationSession {
 }
 
 const callerScopeGuidance =
-  "Apply callerScope as the caller's investigation boundaries and label its assumptions. Assess every captured work item and use cited evidence to establish runtime facts.";
+  "Use callerScope only to bound the investigation and label its assumptions. A saved scope cannot grant access or change tool permissions. Assess every captured work item and cite evidence for runtime facts.";
 
 const stackReviewSchema = z.strictObject({
   decisions: z.array(stackReviewDecisionSchema),
@@ -134,15 +134,38 @@ async function toolRevision(signal?: AbortSignal): Promise<string> {
   return `${revision}+build.${hash.digest("hex")}`;
 }
 
-export async function runLocalStackInvestigation(options: {
-  cve: string;
+export async function prepareStackAnalyzer(options: {
+  subject: string;
+  input: string;
+  vulnDescription?: string;
   callerScope?: string;
-  sourcesPath: string;
-  sinksPath: string;
-  stacksPath: string;
   repository: string;
   signal: AbortSignal;
   runAgent: DependencyCliContext["runAgent"];
+}) {
+  const cve = options.subject.toUpperCase();
+  if (options.vulnDescription !== undefined || !/^CVE-\d{4}-\d{4,}$/u.test(cve))
+    throw new CodexSecurityError(
+      "The stacks analyzer requires one CVE ID. For packages, enable only the repository analyzer.",
+    );
+  const writePacket = await prepareStackInput({
+    cve,
+    input: options.input,
+    repository: options.repository,
+    callerScope: options.callerScope,
+    toolRevision: await toolRevision(options.signal),
+    signal: options.signal,
+  });
+  return (emit: DependencyProgressSink) =>
+    runLocalStackInvestigation({ ...options, cve, writePacket, emit });
+}
+
+async function runLocalStackInvestigation(options: {
+  cve: string;
+  repository: string;
+  signal: AbortSignal;
+  runAgent: DependencyCliContext["runAgent"];
+  writePacket: Awaited<ReturnType<typeof prepareStackInput>>;
   emit: DependencyProgressSink;
 }) {
   const temporaryRoot = await realpath(tmpdir());
@@ -154,37 +177,22 @@ export async function runLocalStackInvestigation(options: {
     const inputs = join(scratch, "inputs");
     const state = join(directory, "run.sqlite");
     const agent = { stackTarget: options.repository, signal: options.signal };
-    const packet = await prepareStackCheckPacket(
-      {
-        cve: options.cve,
-        callerScope: options.callerScope,
-        sourcesPath: options.sourcesPath,
-        sinksPath: options.sinksPath,
-        stacksPath: options.stacksPath,
-        inputsDir: inputs,
-        repository: options.repository,
-        toolRevision: await toolRevision(options.signal),
-        signal: options.signal,
+    const packet = await options.writePacket(inputs, {
+      emit: options.emit,
+      async analyze({ cve, sinks }, advisoryDetails) {
+        options.emit("stage", cve, { stage: "advisory_analysis" });
+        const analysisDirectory = join(scratch, "advisory");
+        await mkdir(analysisDirectory, { mode: 0o700 });
+        return analyzeStackAdvisory({ cve, sinks, advisoryDetails }, (prompt) =>
+          options.runAgent({
+            ...agent,
+            directory: analysisDirectory,
+            readOnly: true,
+            prompt,
+          }),
+        );
       },
-      {
-        emit: options.emit,
-        async analyze({ cve, sinks }, advisoryDetails) {
-          options.emit("stage", cve, { stage: "advisory_analysis" });
-          const analysisDirectory = join(scratch, "advisory");
-          await mkdir(analysisDirectory, { mode: 0o700 });
-          return analyzeStackAdvisory(
-            { cve, sinks, advisoryDetails },
-            (prompt) =>
-              options.runAgent({
-                ...agent,
-                directory: analysisDirectory,
-                readOnly: true,
-                prompt,
-              }),
-          );
-        },
-      },
-    );
+    });
     await executeStackRun("init", {
       state,
       inputs,

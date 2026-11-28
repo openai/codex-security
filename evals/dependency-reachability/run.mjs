@@ -8,9 +8,8 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { invokeCli, writeCliLogs } from "./cli.mjs";
@@ -97,10 +96,11 @@ async function runJson(repo, args, input) {
   return JSON.parse(result.stdout.toString("utf8"));
 }
 async function initialize(fixture) {
-  const sdkEntry = createRequire(pathToFileURL(cli)).resolve(
-    "@openai/codex-security/stack-packet",
+  const { prepareStackPacket } = await import(
+    pathToFileURL(
+      join(dirname(cli), "..", "dist", "dependency-stack-packet.js"),
+    ).href
   );
-  const { prepareStackPacket } = await import(pathToFileURL(sdkEntry).href);
   const attempt = await mkdtemp(join(scratch, "attempt-"));
   const inputs = join(attempt, "inputs"),
     state = join(attempt, "state.sqlite");
@@ -278,16 +278,17 @@ try {
           : mixed
             ? reviewedCve
             : summaryCve;
-      const args = ["check", subject];
-      if (!mixed) {
-        for (const role of ["sources", "sinks", "stacks"])
-          args.push("--" + role, join(fixture.input, role + ".json"));
-      }
+      const config = join(answerDir, "project.json");
+      const args = ["check", subject, "--config", config];
       let transcript;
-      if (id.startsWith("mixed-evidence")) {
+      if (!mixed) {
+        await jsonFile(config, {
+          exploitability: { analyzers: { stacks: {} } },
+        });
+        args.push("--analyzer-input", "stacks=" + fixture.input);
+      } else if (id.startsWith("mixed-evidence")) {
         const records = join(answerDir, "records.json");
         transcript = join(answerDir, "calls.jsonl");
-        const config = join(answerDir, "project.json");
         await writeFile(transcript, "", { mode: 0o600 });
         await jsonFile(records, {
           notes: {
@@ -321,8 +322,7 @@ try {
             },
           },
         });
-        args.push("--config", config);
-      }
+      } else await jsonFile(config, {});
       if (values.model) args.push("--model", values.model);
       args.push("--json", "--report-file", reportFile);
       assert.equal(git(fixture.repo, "status", "--porcelain"), "");

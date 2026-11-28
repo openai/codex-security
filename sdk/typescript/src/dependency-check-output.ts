@@ -40,6 +40,9 @@ export class DependencyInvestigationBlockedError extends CodexSecurityError {
         package?: DependencyPackage;
         checks?: unknown[];
         pendingAdvisories?: (string | null)[];
+        subject?: string;
+        analyzers?: Record<string, unknown>;
+        pendingAnalyzers?: string[];
       },
     cause: unknown,
   ) {
@@ -60,6 +63,57 @@ export type DependencyProgressSink = (
   subject?: string,
   details?: Record<string, unknown>,
 ) => void;
+
+export interface PreparedAnalyzer {
+  name: string;
+  run: (emit: DependencyProgressSink) => Promise<unknown>;
+}
+
+export async function runPreparedAnalyzers(
+  plans: readonly PreparedAnalyzer[],
+  subject: string,
+  emit: DependencyProgressSink,
+  signal: AbortSignal,
+) {
+  if (!plans.length)
+    throw new CodexSecurityError(
+      "No analyzer has input. Supply --analyzer-input stacks=DIR or enable the repository analyzer.",
+    );
+  if (plans.length === 1) return plans[0]!.run(emit);
+
+  const analyzers: Record<string, unknown> = {};
+  for (const [index, { name, run }] of plans.entries()) {
+    signal.throwIfAborted();
+    const progress: DependencyProgressSink = (type, target, details) =>
+      emit(type, target, { ...details, analyzer: name });
+    try {
+      analyzers[name] = await run(progress);
+    } catch (error) {
+      signal.throwIfAborted();
+      const blocked: BlockedCheck =
+        error instanceof DependencyInvestigationBlockedError
+          ? error.outcome
+          : {
+              status: "blocked",
+              code: "INVESTIGATION_BLOCKED",
+              reason: errorMessage(error),
+            };
+      analyzers[name] = blocked;
+      throw new DependencyInvestigationBlockedError(
+        {
+          subject,
+          analyzers,
+          status: "blocked",
+          code: "INVESTIGATION_BLOCKED",
+          reason: `${name}: ${blocked.reason}`,
+          pendingAnalyzers: plans.slice(index + 1).map((plan) => plan.name),
+        },
+        error,
+      );
+    }
+  }
+  return { subject, analyzers };
+}
 
 const defaultStages: Record<string, string> = {
   advisory: "advisory_lookup",
@@ -184,8 +238,15 @@ function reportSummary(report: unknown) {
     unknown: 0,
   };
   let limitations = 0;
-  const checks = asRecord(report)?.["checks"];
-  for (const check of Array.isArray(checks) ? checks : [report]) {
+  const root = asRecord(report);
+  const checks = root?.["checks"];
+  const analyzers = asRecord(root?.["analyzers"]);
+  const results = analyzers
+    ? Object.values(analyzers)
+    : Array.isArray(checks)
+      ? checks
+      : [report];
+  for (const check of results) {
     if (!isRecord(check)) continue;
     if (Array.isArray(check["limitations"]))
       limitations += check["limitations"].length;
@@ -294,7 +355,11 @@ export async function withDependencyCheckOutput<T>(
       try {
         const label = progressLine(type, details ?? {});
         if (label)
-          options.display(formatSecurityPolicyText(`${subject} · ${label}`));
+          options.display(
+            formatSecurityPolicyText(
+              progressParts(subject, details?.["analyzer"], label),
+            ),
+          );
       } catch {}
     }
     if (fd === undefined || failedProgress) return;
@@ -322,7 +387,12 @@ export async function withDependencyCheckOutput<T>(
     const phase = defaultStages[type];
     writeEvent(type, subject, details);
     if (phase)
-      writeEvent("stage", subject, { stage: details?.["stage"] ?? phase });
+      writeEvent("stage", subject, {
+        stage: details?.["stage"] ?? phase,
+        ...(typeof details?.["analyzer"] === "string" && {
+          analyzer: details["analyzer"],
+        }),
+      });
   }
   try {
     // A case-insensitive volume may alias differently spelled new file names.

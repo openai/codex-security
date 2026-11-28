@@ -381,6 +381,33 @@
           },
           "additionalProperties": false
         },
+        "analyzers": {
+          "description": "Omit to enable all analyzers. An explicit map enables only the named analyzers. Stacks runs only when given a capture directory.",
+          "type": "object",
+          "properties": {
+            "repository": {
+              "description": "Investigate callers and dependency copies in the checkout.",
+              "type": "object",
+              "properties": {},
+              "additionalProperties": false
+            },
+            "stacks": {
+              "description": "Investigate a captured stack when input is supplied.",
+              "type": "object",
+              "properties": {
+                "input": {
+                  "description": "Capture directory, relative to this config file.",
+                  "type": "string",
+                  "minLength": 1,
+                  "pattern": "\\S"
+                }
+              },
+              "additionalProperties": false
+            }
+          },
+          "additionalProperties": false,
+          "minProperties": 1
+        },
         "evidence_sources": {
           "description": "MCP servers the investigator can query during a reviewed dependency check.",
           "type": "array",

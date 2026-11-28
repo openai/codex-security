@@ -536,21 +536,27 @@ function sectionBody(section: Section, heading: string) {
   );
 }
 
+function markdownTarget(target: Report["target"]) {
+  return target
+    ? `Repository ${code(target.repository)} · Analyzed commit ${code(target.sha)}`
+    : "Checkout not recorded";
+}
+
 export function renderPreparedDependencyReportMarkdown(report: Report): string {
   const sections = report.sections.map((section) => {
     const hasHeading =
       report.sections.length !== 1 || section.title !== report.title;
     return blocks(
       hasHeading && "## " + prose(section.title),
+      section.analyzer?.target && markdownTarget(section.analyzer.target),
       sectionBody(section, hasHeading ? "###" : "##"),
+      section.analyzer?.contextHint,
     );
   });
   return (
     blocks(
       "# " + prose(report.title),
-      report.target
-        ? `Repository ${code(report.target.repository)} · Analyzed commit ${code(report.target.sha)}`
-        : "Checkout not recorded",
+      !report.sections[0]?.analyzer && markdownTarget(report.target),
       report.description && prose(report.description),
       sections.length === 0
         ? "No advisory checks recorded."
@@ -599,9 +605,15 @@ export function summarizeDependencyReport(report: Report): string {
     );
   for (const section of report.sections) {
     if (section.title !== report.title) lines.push("", section.title);
+    if (section.analyzer?.target) {
+      const { repository, sha } = section.analyzer.target;
+      lines.push(`Repository ${repository} · Analyzed commit ${sha}`);
+    }
     if (section.pending) {
       lines.push(
-        "Not investigated · Package investigation stopped before this advisory.",
+        section.analyzer
+          ? "Not started."
+          : "Not investigated · Package investigation stopped before this advisory.",
       );
       continue;
     }
@@ -689,6 +701,8 @@ export function summarizeDependencyReport(report: Report): string {
     }
     for (const note of section.check?.limitations ?? [])
       lines.push("  Gap: " + note);
+    if (section.analyzer?.contextHint)
+      lines.push("", section.analyzer.contextHint);
   }
   if (report.contextHint) lines.push("", report.contextHint);
   return lines.map((line) => formatSecurityPolicyText(line)).join("\n");

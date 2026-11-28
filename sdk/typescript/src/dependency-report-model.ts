@@ -75,6 +75,7 @@ export type Finding = Entry &
   );
 export type Section = {
   title: string;
+  analyzer?: { target?: DependencyTarget; contextHint?: string };
   check?: Check;
   blocked?: Blocked;
   pending?: boolean;
@@ -113,6 +114,51 @@ function readReport(value: unknown): Report {
     (value["answer"] !== undefined || value["data"] !== undefined)
       ? (value["answer"] ?? value["data"])
       : value;
+  if (!isRecord(raw) || !isRecord(raw["analyzers"]))
+    return readSingleReport(raw);
+
+  const subject = z.string().parse(raw["subject"]);
+  const sections: Section[] = [];
+  const titles = {
+    repository: "Repository analyzer",
+    stacks: "Stacks analyzer",
+  };
+  const name = z.enum(["repository", "stacks"]);
+  for (const [key, value] of Object.entries(raw["analyzers"])) {
+    const id = name.parse(key);
+    const report = readSingleReport(value);
+    const section = report.sections[0];
+    const cve = section?.blocked ? section.blocked.cve : report.title;
+    if (
+      !section ||
+      report.sections.length !== 1 ||
+      report.context.endsWith(" package") ||
+      (!section.blocked && Boolean(section.stack) !== (id === "stacks")) ||
+      (cve !== undefined && cve.toUpperCase() !== subject.toUpperCase())
+    )
+      throw new Error(`Unexpected report for ${id} analyzer of ${subject}.`);
+    sections.push({
+      ...section,
+      title: titles[id],
+      analyzer: { target: report.target },
+    });
+  }
+  const pending = z.array(name).optional().parse(raw["pendingAnalyzers"]);
+  for (const id of pending ?? []) {
+    if (sections.some((s) => s.title === titles[id]))
+      throw new Error(`Duplicate result for ${id} analyzer.`);
+    sections.push({
+      title: titles[id],
+      analyzer: {},
+      pending: true,
+      blocked: dependencyInvestigationBlockedSchema.parse(raw),
+    });
+  }
+  if (!sections.length) throw new Error("No analyzer results recorded.");
+  return { title: subject, context: "Analyzer results", sections };
+}
+
+function readSingleReport(raw: unknown): Report {
   const stack = readStackReport(raw);
   if (stack)
     return {
@@ -463,8 +509,8 @@ export function prepareDependencyReport(value: unknown): Report {
         (f) => f.kind !== "coverage" && f.item.verdict === "unknown",
       )
     )
-      report.contextHint = section.stack
-        ? "If you know who controls the input, add that detail to the matching entry in --sources and rerun cs exploitability check."
+      (section.analyzer ?? report).contextHint = section.stack
+        ? "To clarify who controls the input, update the matching entry in sources.json and prepare a new capture."
         : "To clarify who controls the input, describe the callers in exploitability.scope.instructions and rerun with --config project.yaml. These instructions replace the default caller scope.";
     const claims = new Map(section.check?.claims?.map((c) => [claimKey(c), c]));
     for (const finding of [...findings, ...dismissed]) {

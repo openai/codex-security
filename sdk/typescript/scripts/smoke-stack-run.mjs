@@ -78,7 +78,8 @@ export async function smokeStackRun({
   for (const [name, value] of Object.entries(documents))
     await writeFile(join(root, name + ".json"), JSON.stringify(value));
   const { prepareStackPacket } = await import(
-    pathToFileURL(join(installedRoot, "dist", "stack-packet.js")).href
+    pathToFileURL(join(installedRoot, "dist", "dependency-stack-packet.js"))
+      .href
   );
   const inputsDir = join(root, "packet");
   await prepareStackPacket({

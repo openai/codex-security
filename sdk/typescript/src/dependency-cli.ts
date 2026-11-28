@@ -3,6 +3,7 @@ import { environmentEntry } from "./auth.js";
 import { resolveConfigPath } from "./config-path.js";
 import {
   dependencyCheckOutputSchema,
+  dependencyReachabilityReportSchema,
   dependencyPackageCheckOutputSchema,
   dependencyScopedBlockedSchema,
 } from "./dependency-reachability.js";
@@ -10,6 +11,8 @@ import {
   withDependencyCheckOutput,
   writeDependencyReportFile,
   DependencyInvestigationBlockedError,
+  runPreparedAnalyzers,
+  type PreparedAnalyzer,
 } from "./dependency-check-output.js";
 import { stackInvestigationReportSchema } from "./dependency-stack-assessment.js";
 import { formatSecurityPolicyText } from "./security-policy.js";
@@ -20,6 +23,7 @@ import {
 } from "./dependency-report-text.js";
 import { CodexSecurityError } from "./errors.js";
 import { readProjectConfig } from "./project-config.js";
+import { dependencyAnalyzersSchema } from "./project-config-schema.js";
 import { enclosingGitWorktreeRoot, normalizeRepository } from "./targets.js";
 import type { InvestigationToolFactory } from "./dependency-investigation-session.js";
 import type { ScanTokenUsage } from "./cost-model.js";
@@ -95,6 +99,46 @@ const blockedPackage = dependencyPackageCheckOutputSchema
   })
   .passthrough();
 
+const combinedReport = z.object({
+  subject: text,
+  analyzers: z.strictObject({
+    repository: z
+      .union([dependencyReachabilityReportSchema, blocked])
+      .optional(),
+    stacks: z.union([stackInvestigationReportSchema, blocked]).optional(),
+  }),
+  ...blocked.partial().shape,
+  pendingAnalyzers: z.array(dependencyAnalyzersSchema.keyof()).optional(),
+});
+
+const completeReports = z.union([
+  ...dependencyCheckOutputSchema.options,
+  stackInvestigationReportSchema,
+  combinedReport,
+]);
+
+function analyzerOverrides(
+  values: string[],
+  enabled: readonly string[],
+  cwd: string,
+) {
+  const inputs = new Map<string, string>();
+  for (const value of values) {
+    const separator = value.indexOf("=");
+    if (separator < 1 || !value.slice(separator + 1).trim())
+      throw new CodexSecurityError("Use --analyzer-input NAME=PATH.");
+    const name = value.slice(0, separator);
+    if (!enabled.includes(name))
+      throw new CodexSecurityError(
+        `Analyzer "${name}" is unknown or disabled in exploitability.analyzers.`,
+      );
+    if (inputs.has(name))
+      throw new CodexSecurityError(`Duplicate --analyzer-input for ${name}.`);
+    inputs.set(name, resolveConfigPath(cwd, value.slice(separator + 1)));
+  }
+  return inputs;
+}
+
 /** HTML is a file, never a document dumped to stdout. All other formats keep
  * --report-file independent of the terminal and preserve the canonical JSON. */
 function dependencyReportDestination(
@@ -144,8 +188,8 @@ function registerDependencyCheck(
 ) {
   group.command("check", {
     description:
-      "Investigate a CVE or package in this checkout, optionally using a supplied stack capture.",
-    hint: "Read the summary on stdout, use --format md for the full text or --json for the structured result. --format html saves a browser view and prints its path.",
+      "Investigate a CVE or package with every enabled analyzer that has input.",
+    hint: "By default, analyze the repository and any supplied capture. Use --analyzer-input stacks=DIR for a capture, or configure exploitability.analyzers. Use --format json or --format md for the full result. --format html saves a browser view and prints its path.",
     alias: { config: "c" },
     destructive: false,
     mcp: false,
@@ -155,17 +199,12 @@ function registerDependencyCheck(
       ),
     }),
     options: z.object({
-      sources: text
-        .optional()
-        .describe("Path to the supplied source endpoint document."),
-      sinks: text
-        .optional()
+      analyzerInput: z
+        .array(text)
+        .default([])
         .describe(
-          "Path to the sink endpoints and catalog advisory. The CLI looks up public advisory details unless supplied.",
+          "Set an enabled analyzer's input for this run (NAME=PATH). Use stacks=DIR for captured stacks.",
         ),
-      stacks: text
-        .optional()
-        .describe("Path to the observed stacks and target revision."),
       model: text.optional().describe("Investigator model."),
       effort: text.optional().describe("Investigator reasoning effort."),
       config: text
@@ -186,29 +225,13 @@ function registerDependencyCheck(
       reportFile: reportFileOption,
     }),
     output: z.union([
-      ...dependencyCheckOutputSchema.options,
-      stackInvestigationReportSchema,
+      ...completeReports.options,
       dependencyScopedBlockedSchema,
       blockedPackage,
       blocked,
       z.string(),
     ]),
     async run({ args, options, format, formatExplicit }) {
-      const { sources, sinks, stacks } = options;
-      const captured =
-        sources !== undefined || sinks !== undefined || stacks !== undefined;
-      if (captured && (!sources || !sinks || !stacks))
-        throw new CodexSecurityError(
-          "Supply --sources, --sinks and --stacks together for one CVE.",
-        );
-      if (
-        captured &&
-        (!/^CVE-\d{4}-\d{4,}$/iu.test(args.subject) ||
-          options.vulnDescription !== undefined)
-      )
-        throw new CodexSecurityError(
-          "Captured stack investigations require one CVE ID with its advisory in --sinks.",
-        );
       const cwd = context.currentDirectory();
       return context
         .withSignal(async (signal) => {
@@ -260,41 +283,75 @@ function registerDependencyCheck(
                 : undefined;
               const check = project?.input.exploitability;
               const scope = check?.scope;
-              if (sources && sinks && stacks) {
-                const { runLocalStackInvestigation } =
-                  await import("./dependency-stack-launcher.js");
-                return runLocalStackInvestigation({
-                  cve: args.subject.toUpperCase(),
-                  callerScope: scope?.instructions,
-                  repository,
-                  signal,
-                  sourcesPath: resolveConfigPath(cwd, sources),
-                  sinksPath: resolveConfigPath(cwd, sinks),
-                  stacksPath: resolveConfigPath(cwd, stacks),
-                  emit,
-                  runAgent: (request) =>
-                    context.runAgent({ ...request, ...settings }),
-                });
-              }
-              const { runReviewedDependencyCheck } =
-                await import("./dependency-reviewed-check.js");
-              const reviewed = await runReviewedDependencyCheck(
-                {
-                  directory: repository,
-                  subject: args.subject,
-                  vulnDescription: options.vulnDescription,
-                  scope: scope?.instructions,
-                  excludePaths: scope?.exclude_paths,
-                  sources: check?.sources,
-                  sinks: check?.sinks,
-                  evidenceSources: check?.evidence_sources,
-                  onProgress: emit,
-                  signal,
-                  ...settings,
-                },
-                { runAgent: context.runAgent },
+              // Config limits eligibility. Only analyzers whose inputs are
+              // available prepare a run. Validate them all before the first call.
+              const configured = check?.analyzers;
+              const names = dependencyAnalyzersSchema.keyof().options;
+              const enabled = configured
+                ? (Object.keys(configured) as (typeof names)[number][])
+                : names;
+              const overrides = analyzerOverrides(
+                options.analyzerInput,
+                enabled,
+                cwd,
               );
-              return dependencyCheckOutputSchema.parse(reviewed);
+              const prepare = {
+                async repository(
+                  input?: string,
+                ): Promise<PreparedAnalyzer["run"]> {
+                  if (input)
+                    throw new CodexSecurityError(
+                      "The repository analyzer uses the checkout and takes no input path.",
+                    );
+                  const { runReviewedDependencyCheck } =
+                    await import("./dependency-reviewed-check.js");
+                  return (onProgress) =>
+                    runReviewedDependencyCheck(
+                      {
+                        directory: repository,
+                        subject: args.subject,
+                        vulnDescription: options.vulnDescription,
+                        scope: scope?.instructions,
+                        excludePaths: scope?.exclude_paths,
+                        sources: check?.sources,
+                        sinks: check?.sinks,
+                        evidenceSources: check?.evidence_sources,
+                        onProgress,
+                        signal,
+                        ...settings,
+                      },
+                      { runAgent: context.runAgent },
+                    );
+                },
+                async stacks(override?: string) {
+                  const path = configured?.stacks?.input;
+                  const input =
+                    override ??
+                    (path &&
+                      resolveConfigPath(project?.directory ?? cwd, path));
+                  if (!input) return;
+                  const { prepareStackAnalyzer } =
+                    await import("./dependency-stack-launcher.js");
+                  return prepareStackAnalyzer({
+                    subject: args.subject,
+                    input,
+                    vulnDescription: options.vulnDescription,
+                    callerScope: scope?.instructions,
+                    repository,
+                    signal,
+                    runAgent: (request) =>
+                      context.runAgent({ ...request, ...settings }),
+                  });
+                },
+              };
+              const plans: PreparedAnalyzer[] = [];
+              for (const name of enabled) {
+                const run = await prepare[name](overrides.get(name));
+                if (run) plans.push({ name, run });
+              }
+              return completeReports.parse(
+                await runPreparedAnalyzers(plans, args.subject, emit, signal),
+              );
             },
           );
           return presentDependencyResult(result, context, format, {

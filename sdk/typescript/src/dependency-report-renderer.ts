@@ -304,15 +304,19 @@ function advisoryHeader(report: Report, section: Section): string {
   const overview =
     details.find((d) => d.overview)?.overview ?? report.description;
   const isPackage = report.context.endsWith(" package");
-  const id = section.blocked?.cve ?? section.title;
+  const id = section.analyzer
+    ? report.title
+    : (section.blocked?.cve ?? section.title);
   const title = summary || id;
   const eyebrow = join([
+    section.analyzer && section.title,
     isPackage ? report.title : undefined,
     title !== id ? id : undefined,
   ]);
   return `<header class="advisory-head">
    ${eyebrow ? `<p class="eyebrow">${esc(eyebrow)}</p>` : ""}
    <h1>${prose(title)}</h1>
+   ${section.analyzer?.target ? checkout(section.analyzer.target) : ""}
    ${overview && overview !== title ? `<p class="overview">${prose(overview)}</p>` : ""}
    ${advisoryDetails(section, details, urls)}
  </header>`;
@@ -503,7 +507,9 @@ function content(section: Section, e: Entry) {
   const f = e.finding;
   if (!f) {
     if (section.pending)
-      return "<h2>Investigation pending</h2><p>The package check stopped before it assessed this advisory.</p>";
+      return section.analyzer
+        ? "<h2>Analyzer not started</h2>"
+        : "<h2>Investigation pending</h2><p>The package check stopped before it assessed this advisory.</p>";
     if (section.blocked) {
       const b = section.blocked;
       return `<h2>Investigation blocked</h2>${[b.reason, b.affectedScope, b.scopeImpact, b.unblockCondition].map(para).join("")}`;
@@ -554,7 +560,7 @@ export function renderPreparedDependencyReport(report: Report): string {
       return `<section class="advisory" data-section id="check-${i + 1}">
   ${advisoryHeader(report, section)}
   ${articles.join("")}
-  ${sectionAudit(section)}</section>`;
+  ${sectionAudit(section)}${section.analyzer?.contextHint ? `<p>${esc(section.analyzer.contextHint)}</p>` : ""}</section>`;
     })
     .join("");
   const hash = createHash("sha256").update(reportInteractions).digest("base64");
@@ -564,7 +570,7 @@ export function renderPreparedDependencyReport(report: Report): string {
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta http-equiv="Content-Security-Policy" content="${policy}"><meta name="referrer" content="no-referrer">
 <title>${esc(report.title)} · Exploitability report</title><style>${reportStyles}</style></head>
-<body><header class="masthead"><span class="brand">Codex Security</span><span class="product">Exploitability report</span>${checkout(report.target)}</header>
+<body><header class="masthead"><span class="brand">Codex Security</span><span class="product">Exploitability report</span>${report.sections[0]?.analyzer ? "" : checkout(report.target)}</header>
 <div class="workspace">${rail(groups)}
   <main class="reader"><p data-no-results hidden>No findings match these filters.</p>${pages || empty}${report.contextHint ? `<p>${esc(report.contextHint)}</p>` : ""}</main>
 </div><script>${reportInteractions}</script></body></html>\n`;
