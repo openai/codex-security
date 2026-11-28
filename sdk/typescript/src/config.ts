@@ -71,8 +71,8 @@ export const DEFAULT_CODEX_CONFIG: Readonly<JsonObject> = Object.freeze({
   approval_policy: "on-request",
   approvals_reviewer: "auto_review",
   cli_auth_credentials_store: "auto",
-  model: "gpt-5.6-sol",
-  model_reasoning_effort: "xhigh",
+  model: "gpt-6.1-sol",
+  model_reasoning_effort: "high",
   model_reasoning_summary: "detailed",
   show_raw_agent_reasoning: true,
   features: Object.freeze({

@@ -102,6 +102,7 @@ import {
   PLUGIN_ROOT,
 } from "./plugin-root.js";
 import {
+  BUDGET_TEST_CONFIG,
   EXTERNAL_PROVIDER_CASES,
   measuredScanUsage,
   mockScanRegistration,
@@ -781,8 +782,8 @@ describe("CodexSecurity orchestration", () => {
         source: "OPENAI_API_KEY",
         verified: false,
       },
-      model: "gpt-5.6-sol",
-      reasoningEffort: "xhigh",
+      model: "gpt-6.1-sol",
+      reasoningEffort: "high",
     });
     await expect(
       client.preflight(repository, { outputDir: join(repository, "scan") }),
@@ -888,7 +889,7 @@ describe("CodexSecurity orchestration", () => {
 
     await expect(
       client.preflight(repository, { maxCostUsd: 5 }),
-    ).resolves.toMatchObject({ model: "gpt-5.6-sol", maxCostUsd: 5 });
+    ).resolves.toMatchObject({ model: "gpt-6.1-sol", maxCostUsd: 5 });
     for (const model of [
       "gpt-6-astra",
       "gpt-6-cyber",
@@ -1435,7 +1436,7 @@ describe("CodexSecurity orchestration", () => {
       expect(createCodex.mock.lastCall?.[0]?.env).toMatchObject(credentials);
       expect(createCodex.mock.lastCall?.[0]?.config).toMatchObject({
         model_reasoning_summary: "none",
-        model_reasoning_effort: "xhigh",
+        model_reasoning_effort: "high",
       });
       const configuration = JSON.parse(
         await readFile(join(PLUGIN_ROOT, ".mcp.json"), "utf8"),
@@ -1539,7 +1540,7 @@ describe("CodexSecurity orchestration", () => {
     });
     expect(createCodex.mock.lastCall?.[0]?.config).toMatchObject({
       model_reasoning_summary: "none",
-      model_reasoning_effort: "xhigh",
+      model_reasoning_effort: "high",
     });
     expect(createCodex.mock.lastCall?.[0]?.env).not.toHaveProperty(
       "OPENAI_API_KEY",
@@ -1874,7 +1875,7 @@ describe("CodexSecurity orchestration", () => {
           profiles: {
             "cloud.production": {
               model: "synthetic-profile-model",
-              model_reasoning_effort: "high",
+              model_reasoning_effort: "xhigh",
               model_reasoning_summary: "concise",
               service_tier: "fast",
               model_instructions_file: "profile-instructions.md",
@@ -1913,7 +1914,7 @@ describe("CodexSecurity orchestration", () => {
         const expectedModel = {
           model:
             index === 3 ? "synthetic-profile-model" : "openai.gpt-5.6-luna",
-          model_reasoning_effort: index === 3 ? "high" : "xhigh",
+          model_reasoning_effort: index === 3 ? "xhigh" : "high",
         };
         const scanDir = join(root, `scan-${index}`);
         await mkdir(scanDir, { mode: 0o700 });
@@ -3406,7 +3407,12 @@ if __name__ == "__main__":
     expect(prompt).toContain("record_codex_security_scan_draft");
     expect(prompt).toContain("scan-results.md");
     expect(prompt).not.toContain("bind-repo-scopes");
-    expect(prompt).not.toContain("CODEX_SECURITY_TARGET_REVISION");
+    expect(codexEnvironment?.["CODEX_SECURITY_TARGET_REVISION"]).toBe(
+      "deadbeef",
+    );
+    expect(prompt).toContain(
+      `Use exactly ${shellEnvironmentReference("CODEX_SECURITY_TARGET_REVISION")} as scan.target.revision.`,
+    );
     expect(prompt).toContain("CODEX_SECURITY_SCAN_PROGRESS");
     expect(prompt).toContain(
       `Repository root: ${shellEnvironmentReference("CODEX_SECURITY_REPOSITORY")}`,
@@ -3666,23 +3672,43 @@ if __name__ == "__main__":
     },
   );
 
-  test("passes the workbench snapshot contract to dirty Git scans", async () => {
+  test.each([
+    ["git_revision", "cafebabe", undefined],
+    ["git_worktree", "cafebabe", TEST_SNAPSHOT_DIGEST],
+    ["directory_snapshot", "unversioned", TEST_SNAPSHOT_DIGEST],
+  ] as const)("binds %s metadata", async (kind, revision, digest) => {
     const { repository, codexHome, scanDir } = await scanDirectories();
+    let prompt = "";
     const createCodex = mock((_options: CodexOptions) => {
-      return codexWithStream(async () => fail("target contract captured"));
+      return codexWithStream(async (input: string) => {
+        prompt = input;
+        return fail("target contract captured");
+      });
     });
 
-    const client = TestClient.withDependencies({
+    await using client = TestClient.withDependencies({
       ...scanRuntimeDependencies(codexHome, scanDir),
+      prepareRuntime: async () => ({
+        ...preparedRuntime(codexHome),
+        environment: {
+          CODEX_SECURITY_TARGET_REVISION: "stale-revision",
+          CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST: "stale-digest",
+          ...(process.platform === "win32"
+            ? { Codex_Security_Target_Snapshot_Digest: "stale-digest" }
+            : {}),
+        },
+      }),
       runWorkbench: async (_options, args, input): Promise<JsonObject> => {
         if (args[0] === "register-cli-scan") {
           return {
             ...mockScanRegistration(args, input),
-            targetRevision: "cafebabe",
+            targetRevision: revision,
             contract: {
               target: {
-                allowedKinds: ["git_worktree"],
-                requiredSnapshotDigest: TEST_SNAPSHOT_DIGEST,
+                allowedKinds: [kind],
+                ...(digest === undefined
+                  ? {}
+                  : { requiredSnapshotDigest: digest }),
               },
             },
           };
@@ -3695,12 +3721,24 @@ if __name__ == "__main__":
     await expect(client.run(repository)).rejects.toThrow(
       "target contract captured",
     );
-    expect(createCodex.mock.lastCall?.[0]?.env).toMatchObject({
-      CODEX_SECURITY_TARGET_KIND: "git_worktree",
-      CODEX_SECURITY_TARGET_REVISION: "cafebabe",
-      CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST: TEST_SNAPSHOT_DIGEST,
-    });
-    await client.close();
+    const env = createCodex.mock.lastCall?.[0]?.env;
+    expect(env?.["CODEX_SECURITY_TARGET_KIND"]).toBe(kind);
+    expect(env?.["CODEX_SECURITY_TARGET_REVISION"]).toBe(
+      revision === "unversioned" ? undefined : revision,
+    );
+    expect(env?.["CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST"]).toBe(digest);
+    expect(env).not.toHaveProperty("Codex_Security_Target_Snapshot_Digest");
+    expect(
+      prompt.includes(
+        shellEnvironmentReference("CODEX_SECURITY_TARGET_REVISION"),
+      ),
+    ).toBe(revision !== "unversioned");
+    expect(
+      prompt.includes(
+        shellEnvironmentReference("CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST"),
+      ),
+    ).toBe(digest !== undefined);
+    expect(prompt).not.toContain(TEST_SNAPSHOT_DIGEST);
   });
 
   test("resolves deep settings before runtime preparation and records the snapshot", async () => {
@@ -13677,7 +13715,7 @@ if __name__ == "__main__":
       events: completedEvents(threadId),
     }));
     const thread = { id: threadId, runStreamed };
-    await using client = TestClient.withDependencies({
+    await using client = new TestClient(BUDGET_TEST_CONFIG, {
       ...scanRuntimeDependencies(codexHome, scanDir),
       canRunDirectDeepScan: () => false,
       readDeepScanParentConfig: readConfig,
@@ -14060,7 +14098,7 @@ if __name__ == "__main__":
       };
     });
     let budgetSignal: AbortSignal | undefined;
-    const client = TestClient.withDependencies({
+    const client = new TestClient(BUDGET_TEST_CONFIG, {
       ...scanRuntimeDependencies(codexHome, scanDir),
       runWorkbench: recordingWorkbench(commands, () =>
         measuredScanUsage(measured, 0, 0),
@@ -14129,7 +14167,7 @@ if __name__ == "__main__":
         if (cost.inputTokens === 950) nextCost.resolve();
       });
       let budgetSignal: AbortSignal | undefined;
-      const client = TestClient.withDependencies({
+      const client = new TestClient(BUDGET_TEST_CONFIG, {
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (_options, args, input) => {
           commands.push(args);
@@ -14264,12 +14302,12 @@ if __name__ == "__main__":
         return { events: events() };
       },
     );
-    const cost = estimateScanCost("gpt-5.6-sol", {
+    const cost = estimateScanCost(BUDGET_TEST_CONFIG.codexOverrides.model, {
       input_tokens: 1_250,
       cached_input_tokens: 200,
       output_tokens: 30,
     })!;
-    const client = TestClient.withDependencies({
+    const client = new TestClient(BUDGET_TEST_CONFIG, {
       ...scanRuntimeDependencies(codexHome, scanDir),
       runWorkbench: recordingWorkbench(commands, {
         ...measuredScanUsage(1_250, 200, 30),
@@ -14401,7 +14439,7 @@ if __name__ == "__main__":
           return { events: events() };
         },
       );
-      const client = TestClient.withDependencies({
+      const client = new TestClient(BUDGET_TEST_CONFIG, {
         ...scanRuntimeDependencies(codexHome, scanDir),
         runWorkbench: async (_options, args, input): Promise<JsonObject> => {
           commands.push(args);
@@ -14942,13 +14980,13 @@ if __name__ == "__main__":
   });
 
   test.each([
-    ["OpenAI", undefined, "OPENAI_API_KEY", "gpt-5.6-sol", undefined],
+    ["OpenAI", undefined, "OPENAI_API_KEY", "gpt-6.1-sol", undefined],
     ...EXTERNAL_PROVIDER_CASES,
     [
       "managed custom",
       "synthetic.gateway",
       "OPENAI_API_KEY",
-      "gpt-5.6-sol",
+      "gpt-6.1-sol",
       {
         name: "Synthetic",
         wire_api: "responses",
@@ -15083,7 +15121,7 @@ if __name__ == "__main__":
     const clients = await Promise.all(
       (
         [
-          ["OPENAI_API_KEY", "gpt-5.6-sol", undefined],
+          ["OPENAI_API_KEY", "gpt-6.1-sol", undefined],
           ["OPENROUTER_API_KEY", "anthropic/claude-sonnet-4.5", "openrouter"],
         ] as const
       ).map(async ([apiKey, model, provider], index) => {
@@ -16155,15 +16193,17 @@ if __name__ == "__main__":
       expect(windowsCommand).toBeDefined();
       expect(prompt).toContain(windowsCommand!.replaceAll("\r\n", "\n"));
     }
-    const fileInstructions = await readFile(
-      join(PLUGIN_ROOT, "skills/security-scan/references/sdk-files.md"),
-      "utf8",
-    );
     const commandFence =
       process.platform === "win32"
         ? /^`{3}powershell\r?\n([\s\S]*?)\r?\n`{3}/m
         : /^`{3}sh\r?\n([\s\S]*?)\r?\n`{3}/m;
-    const bindScopeCommand = fileInstructions.match(commandFence)![1]!;
+    const scopeCommand = (topic: string) =>
+      execFileSync(
+        Bun.which("node")!,
+        [join(PLUGIN_ROOT, "scripts", "skill_runtime.mjs"), topic],
+        { encoding: "utf8" },
+      ).match(commandFence)![1]!;
+    const bindScopeCommand = scopeCommand("scope-binding");
     expect(prompt).toContain("references/scoped-paths.md");
     expect(prompt).toContain("resolve-security-md");
     expect(prompt).not.toContain(policyDirectory);
@@ -16232,11 +16272,7 @@ if __name__ == "__main__":
       );
     };
     expect(existsSync(scopedSourceInput)).toBe(false);
-    const scopedInstructions = await readFile(
-      join(PLUGIN_ROOT, "skills/security-scan/references/scoped-paths.md"),
-      "utf8",
-    );
-    const makeScopeCommand = scopedInstructions.match(commandFence)![1]!;
+    const makeScopeCommand = scopeCommand("scope-inventory");
     runScopedHelper(makeScopeCommand);
     const scopedSourceInputContents = await readFile(scopedSourceInput, "utf8");
     expect(
@@ -16486,6 +16522,7 @@ if __name__ == "__main__":
       }),
     ).rejects.toThrow("prompt captured");
     expect(prompt()).toContain("do not finalize or seal them");
+    expect(prompt()).toMatch(/scan\.mode[^.]*"branch_diff"/u);
     expect(prompt()).not.toContain("complete_codex_security_scan");
 
     await expect(

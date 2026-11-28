@@ -209,13 +209,26 @@ describe("scan import", () => {
   test.each([
     { input: ["--", "--findings.json"], file: "--findings.json" },
     { input: ["--json", "findings"], file: "findings" },
+    {
+      prefix: [
+        "--full-output",
+        "--no-full-output",
+        "--no-token-count",
+        "--no-json",
+      ],
+      input: ["--json", "findings"],
+      file: "findings",
+    },
   ])(
     "keeps JSON output before the import verb with $input",
-    async ({ input, file }) => {
+    async ({ input, file, prefix = [] }) => {
       const { deps, calls } = importDependencies();
       const { stdout, runCli } = createCliTest(main);
       expect(
-        await runCli(["scan", "--json", "import", "--dry-run", ...input], deps),
+        await runCli(
+          ["scan", ...prefix, "--json", "import", "--dry-run", ...input],
+          deps,
+        ),
       ).toBe(0);
       expect(calls[0]).toMatchObject({
         sourcePath: resolve("workspace", file),
@@ -224,6 +237,15 @@ describe("scan import", () => {
       expect(JSON.parse(stdout.text())).toMatchObject({ dryRun: true });
     },
   );
+
+  test("negated scan output options preserve import file validation", async () => {
+    const { deps } = importDependencies();
+    const { stderr, runCli } = createCliTest(main);
+    expect(
+      await runCli(["scan", "--no-json", "import", "--dry-run"], deps),
+    ).toBe(2);
+    expect(stderr.text()).toContain("file");
+  });
 
   test("accepts equals input syntax and validates without saving", async () => {
     const { deps, calls } = importDependencies();

@@ -108,7 +108,19 @@ export async function testDeepScanContextSnapshots() {
               },
             }),
           );
-          let store = new WorkbenchDeepScanStore(command);
+          let store = new WorkbenchDeepScanStore(async (args, input) => {
+            const result = await command(args, input);
+            if (!result.confirmationRequired) return result;
+            assert.equal(result.otherRunningDeepScans.length, 1);
+            return command(
+              [
+                ...args,
+                "--confirmed-concurrent-scan-id",
+                result.otherRunningDeepScans[0].scanId,
+              ],
+              input,
+            );
+          });
           let registeredScanId: string | undefined;
           if (userContext !== undefined) {
             await writeFile(

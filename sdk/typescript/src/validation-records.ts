@@ -61,9 +61,10 @@ export async function validateRecords(
     effort: data.effort ?? defaults.reasoningEffort,
     trustedInstructions: await standaloneValidationPrompt(
       await bundledPluginRoot(),
+      "json",
     ),
     prompt: [
-      "Assess every supplied finding against source evidence. Preserve the host-provided IDs. Return only JSON matching the supplied output schema.",
+      "Assess every supplied finding against source evidence. Preserve the host-provided IDs.",
       ...(data.context === undefined
         ? []
         : [

@@ -349,8 +349,8 @@ hints; parsing does not insert them. Lists are replaced, not concatenated.
 | Path                                                    | Relative to                    |
 | ------------------------------------------------------- | ------------------------------ |
 | Repository positional argument                          | Invocation directory           |
-| File `scan.scope.paths`                                 | Selected repository            |
-| File `scan.exclude_paths`                               | Selected repository            |
+| File `scan.scope.paths` and CLI `--path`                | Selected repository            |
+| File `scan.exclude_paths` and CLI `--exclude-path`      | Selected repository            |
 | File context, instruction, validation, and output paths | Configuration file's directory |
 | CLI context, prompt, and output paths                   | Invocation directory           |
 | Native values under `codex`                             | Existing native Codex rules    |
@@ -369,6 +369,13 @@ file diff; `--base` can refine a file working-tree scope. Contradictory explicit
 selectors fail. `--no-working-tree` disables a configured working-tree scope but
 does not clear a path or committed-diff scope.
 
+Committed-diff scans require a clean, nonsparse checkout, including no untracked
+files, and the selected head must be the checked-out commit. Working-tree scans
+include staged, unstaged, and untracked changes. Both diff scopes allow `--exclude-path` and
+`scan.exclude_paths`. Neither supports `--path` or deep mode. Output directories
+must be new or empty and outside the enclosing Git worktree. `--archive-existing` can archive a directory selected
+through `output.directory` as well as `--output-dir`.
+
 There is no general CLI reset for configured context, policy, cost limit, or scope.
 Edit the file, select another file, or omit `-c` and unset
 `CODEX_SECURITY_PROJECT_CONFIG`. An empty context list is valid.
@@ -376,8 +383,10 @@ Edit the file, select another file, or omit `-c` and unset
 Native objects merge using the existing configuration code. Duplicate native CLI
 assignments remain errors; overriding a file value is valid. Selected native
 profiles can still override root model/effort values, including convenience flags.
-`--provider openai` retains its existing behavior and does not clear a native
-provider selected by the file.
+`--provider openai` explicitly selects OpenAI. Omit `--provider` to keep the
+configured provider. When project or CLI settings select an external provider,
+supply a model. Providers selected only in a native Codex profile file can
+inherit the scan default.
 
 ## Deep settings and limits
 
@@ -407,7 +416,8 @@ files still receive a complete snapshot.
 A valid deep block can stay inactive in standard mode. Explicit deep CLI options
 still require deep mode. Deep diff scans and custom validation remain unsupported.
 Counts retain their existing bounds; zero subagents is valid, and discovery time
-cannot exceed 96 hours.
+cannot exceed 96 hours. `stop_after_no_new` counts consecutive discovery runs
+without new findings and resets when new findings appear.
 
 `scan.max_time_minutes` accepts positive fractional minutes: an optional advisory
 allowance in Standard, or the enforced discovery limit in Deep (default and
@@ -421,7 +431,7 @@ aliases there are errors, while equivalent durations are accepted.
 
 `max_cost_usd_per_scan` has the same meaning as `--max-cost`: an estimated limit for one
 scan attempt. In-flight work may exceed it. It is not a total budget for a batch or
-follow-up actions. `fail_on_severity` changes the exit status without filtering the
+follow-up actions. There is no built-in cost limit. `fail_on_severity` changes the exit status without filtering the
 retained findings. A bounded scan cannot run `--patch` or `--validate`. Select a
 finding from the saved scan to patch or validate separately.
 
@@ -465,8 +475,9 @@ that the selected scan configuration still matches the campaign.
 target, prompt-file reads, credentials checks, or runtime initialization. With no
 file, it shows defaults. Active deep mode also resolves legacy TOML. It reports
 effective model details and native key sources without dumping raw native values.
-This is configuration inspection,
-not a filesystem, target, or model-availability check.
+It applies the same provider and model requirements as `scan`.
+This is configuration inspection, not a filesystem, target, or model-availability
+check.
 
 `scan ... --dry-run --json` checks local inputs without starting Codex, verifying
 credentials, or establishing model availability. Removing `--dry-run` starts a

@@ -9,13 +9,9 @@ Identify technically plausible security vulnerabilities in the authorized source
 
 Read `../../references/artifact-storage.md` before saving output and `../../references/security-guidance.md` before source review. Resolve applicable policy for each reviewed path, including delegated assignments. Honor explicit input and output paths; ask for an explicitly required input only when its absence prevents the requested analysis.
 
-## Select the Workflow
+## Review the assigned source
 
-Standard and Deep workers use their coordinator's self-contained prompts rather than this phase skill.
-
-- **Running compact diff:** read the supplied inventory through `list_codex_security_review_items`, review every assigned changed file, and record all candidates once with `record_codex_security_discovery_candidates`. Do not create ranked worklists, per-finding ledgers, receipts, or discovery reports.
-- **Standalone diff without a compact inventory:** use `../security-scan/references/scan-artifacts-and-ledger.md` for the changed-file worklist and retained phase artifacts.
-- **Standalone repository discovery:** apply the evidence criteria below to the authorized source and return the candidates and coverage limitations. Do not start a scan or run the diff worklist pipeline.
+Use the caller's inventory, authorized scope, and candidate output contract. For a standalone diff discovery request without a supplied inventory, follow the [standalone diff worklist](../security-scan/references/scan-artifacts-and-ledger.md) for changed files, receipts and the discovery report. For a standalone repository request, review the requested scope directly and return candidates with coverage limitations.
 
 For a diff, inspect the actual changed behavior, including deleted files at the baseline revision. Follow supporting code far enough to understand the affected boundary; expand to sibling callers when a changed shared control affects them. Do not broaden into an unrelated repository audit.
 
@@ -42,4 +38,4 @@ For each candidate, retain:
 - For repository or scoped-path instances, an instance key `<family>:<file>:<line>` when required by the caller.
 - For diff findings, `relevant_lines` only where relevant buggy behavior overlaps the diff.
 
-Use the caller's structured candidate contract. For a legacy diff, save the discovery report and discovery receipts at the paths in `../../references/scan-artifacts.md`; subsequent phases own their own evidence and receipts. Finish when assigned source review and concrete follow-ups are accounted for, recording unfinished review honestly. If no plausible candidates remain, return that result with the actual reviewed scope and limitations.
+Finish when assigned source review and concrete follow-ups are accounted for. Record unfinished review honestly. If no plausible candidates remain, return that result with the actual reviewed scope and limitations.

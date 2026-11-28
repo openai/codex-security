@@ -31,6 +31,16 @@ const root = await realpath(
 );
 const installedPlugin = join(installedRoot, "_bundled_plugin");
 const retryMissingResult = process.env.PACKAGE_DEEP_RETRY !== "false";
+const staleTarget = {
+  CODEX_SECURITY_TARGET_ID: "stale-id",
+  CODEX_SECURITY_TARGET_KIND: "git_revision",
+  CODEX_SECURITY_TARGET_DISPLAY_NAME: "stale-name",
+  CODEX_SECURITY_TARGET_REVISION: "stale-revision",
+  CODEX_SECURITY_TARGET_SNAPSHOT_DIGEST: "stale-digest",
+  ...(process.platform === "win32"
+    ? { Codex_Security_Target_Revision: "stale-alias" }
+    : {}),
+};
 let restoreSpawn;
 try {
   const detachedPlugin = join(root, "standalone plugin %", "codex-security");
@@ -187,6 +197,11 @@ function server(f, env = f.env) {
 
 async function runDetachedPlugin(pluginRoot, executable) {
   const f = await fixture("detached", pluginRoot, executable);
+  // Project the parent bindings as Codex does on MCP launch and restart.
+  const mcp = JSON.parse(await readFile(join(pluginRoot, ".mcp.json"), "utf8"));
+  for (const key of mcp.mcpServers["codex-security"].env_vars) {
+    if (Object.hasOwn(staleTarget, key)) f.env[key] = staleTarget[key];
+  }
   const owner = "package-detached-owner";
   f.env.PACKAGE_DEEP_HOLD = join(f.directory, "hold-second-worker");
   await writeFile(f.env.PACKAGE_DEEP_HOLD, "hold");
@@ -366,6 +381,7 @@ async function workbench(f, args) {
 
 async function runInstalledSdk(pluginRoot, executable) {
   const f = await fixture("installed", pluginRoot, executable);
+  Object.assign(f.env, staleTarget);
   if (retryMissingResult) {
     f.env.PACKAGE_DEEP_EMPTY_ONCE = join(
       f.directory,
@@ -429,6 +445,14 @@ async function runInstalledSdk(pluginRoot, executable) {
       stopAfterNoNew: 2,
       outputDir: join(f.directory, "output"),
     });
+    const { targetId, displayName, snapshotDigest } =
+      result.manifest.scan.target;
+    await assertExecutions(f, scanId, {
+      kind: "directory_snapshot",
+      targetId,
+      displayName,
+      snapshotDigest,
+    });
     assert.equal(result.threadId, owner);
     assert.equal(result.manifest.scan.status, "completed");
     assert.ok(result.manifest.scan.sealedAt);
@@ -441,7 +465,6 @@ async function runInstalledSdk(pluginRoot, executable) {
   } finally {
     await client.close();
   }
-  await assertExecutions(f, scanId);
 }
 
 async function assertDraft(path) {
@@ -466,7 +489,7 @@ async function readExecutions(f) {
   }
 }
 
-async function assertExecutions(f, scanId) {
+async function assertExecutions(f, scanId, expectedTarget = {}) {
   const executions = await readExecutions(f);
   for (const execution of executions) {
     assert.equal(
@@ -485,6 +508,7 @@ async function assertExecutions(f, scanId) {
     3 + incomplete,
   );
   for (const execution of workers) {
+    assert.deepEqual(execution.target, expectedTarget);
     assert.equal(execution.scanId, scanId);
     assert.equal(execution.home, f.home);
     assert.equal(execution.hasApiKey, true);
