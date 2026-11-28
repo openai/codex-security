@@ -81,6 +81,6 @@ credentials they need because subprocesses can inherit your environment.
 ## Documentation and security
 
 - [CLI reference](https://github.com/openai/codex-security/blob/main/sdk/typescript/docs/cli.md) for scan options, authentication, and exports.
-- [Dependency exploitability](https://github.com/openai/codex-security/blob/main/sdk/typescript/docs/dependency-exploitability.md) for investigating dependency alerts and captured stacks.
+- [Dependency exploitability](https://github.com/openai/codex-security/blob/main/sdk/typescript/docs/dependency-exploitability.md) for checking a CVE or package against your code and captured stacks.
 - [SDK guide](https://github.com/openai/codex-security/blob/main/sdk/typescript/docs/sdk.md) for configuration, progress events, and the full set of examples.
 - [Security policy](https://github.com/openai/codex-security/blob/main/SECURITY.md) for reporting vulnerabilities in this package privately.
