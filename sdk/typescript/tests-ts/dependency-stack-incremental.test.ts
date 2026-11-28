@@ -3,6 +3,9 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { main } from "../src/cli.js";
+import { manualStackExploitabilityReport } from "../src/exploitability/check-output.js";
+import { renderDependencyReport } from "../src/exploitability/report/renderer.js";
+import { renderDependencyReportMarkdown } from "../src/exploitability/report/text.js";
 import { DependencyAttemptStore } from "../src/exploitability/attempt-store.js";
 import {
   executeStackRun,
@@ -121,7 +124,7 @@ test("the gated CLI can attach a CVE to an existing capture without a packet", a
   expect(observed.workItemIds).toEqual(["captures/0/stacks/0"]);
   expect(await invoke(["next", "--state", state])).toMatchObject({
     workItem: null,
-    openQuestions: ["Supply the CVE identifier."],
+    openQuestions: ["Supply a CVE identifier or a package hypothesis."],
   });
   expect(
     await invoke(["init", "--repo", repo, "--state", state, "--json-stdin"], {
@@ -136,6 +139,120 @@ test("the gated CLI can attach a CVE to an existing capture without a packet", a
       sinkMatches: [{ sinkId: sink.id, rawIndex: 0 }],
     },
   });
+});
+
+test("interactive package questions survive resume and use the standard report format", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-hypothesis-");
+  const { repo, state, run } = await fixture(dir.path);
+  const hypothesis = {
+    package: "PyPI:example-decoder",
+    description: "Did decode run in 1.0.0? <sample>",
+  };
+  const selected = {
+    ...sink,
+    versionScheme: "pep440",
+    affectedVersions: ["==1.0.0"],
+    preconditions: [],
+  };
+  const callerScope = "Decoder service";
+  async function init(flags: string[], metadata: unknown = {}) {
+    const io = createCliTest(main);
+    const deps = dependencies({ currentDirectory: repo });
+    deps.environment["CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY"] = "1";
+    deps.recordsInput = Readable.from([JSON.stringify(metadata)]);
+    const code = await io.runCli(
+      [
+        "exploitability",
+        "run",
+        "init",
+        ...flags,
+        "--repo",
+        repo,
+        "--state",
+        state,
+        "--json-stdin",
+      ],
+      deps,
+    );
+    return { code, error: io.stderr.text() };
+  }
+  const flags = [
+    hypothesis.package,
+    "--vuln-description",
+    hypothesis.description,
+  ];
+  for (const args of [
+    [hypothesis.package],
+    flags.slice(1),
+    ["example-decoder", ...flags.slice(1)],
+    [...flags, "--inputs", dir.path],
+  ])
+    expect((await init(args)).code).not.toBe(0);
+  expect((await init(flags, { hypothesis })).code).not.toBe(0);
+  const initialized = await init(flags, { callerScope });
+  expect(initialized.code, initialized.error).toBe(0);
+  const resume = (input?: unknown) =>
+    executeStackRun("init", { repo, state, input });
+  await run("record-observations", {
+    format: "codex-security.stacks/v2",
+    captures: [
+      {
+        query: { selectors: { function: "decode" }, coverage: "partial" },
+        stacks: [],
+      },
+    ],
+  });
+  expect(await run("next")).toMatchObject({
+    workItem: null,
+    openQuestions: ["Supply at least one sink for the package hypothesis."],
+  });
+  await expect(resume({ cve })).rejects.toThrow(/cannot be combined/);
+  await expect(
+    resume({ hypothesis: { ...hypothesis, description: "Changed" } }),
+  ).rejects.toThrow(/already recorded differently/);
+  await expect(
+    resume({ sinks: [{ ...selected, package: "other" }] }),
+  ).rejects.toThrow(/must belong/);
+  expect(await resume({ sinks: [selected] })).toMatchObject({
+    hypothesis,
+    callerScope,
+    sinks: [selected],
+  });
+  expect(await run("next")).toMatchObject({
+    hypothesis,
+    callerScope,
+    sinks: [selected],
+    workItem: { id: "captures/0", status: "no_coverage" },
+  });
+  await run("record-assessments", {
+    items: [
+      {
+        workItemId: "captures/0",
+        verdict: "unknown",
+        reason: "No runtime evidence.",
+        remainingQuestions: ["Was decode captured?"],
+      },
+    ],
+  });
+  const saved = await run("finalize");
+  expect(saved).toEqual(await readFinalStackReport(state));
+  const output = manualStackExploitabilityReport(saved);
+  expect(output).toMatchObject({
+    subject: { kind: "package", ecosystem: "PyPI", name: "example-decoder" },
+    vulnerabilities: [
+      {
+        kind: "hypothesis",
+        description: hypothesis.description,
+        findings: [],
+        analyses: [{ audit: { callerScope, sinks: [selected] } }],
+      },
+    ],
+  });
+  const html = renderDependencyReport(output);
+  expect(html).toContain(hypothesis.package);
+  expect(html).toContain("&lt;sample&gt;");
+  expect(html).toContain("==1.0.0");
+  expect(renderDependencyReportMarkdown(output)).toContain("==1.0.0");
 });
 
 function capture(origin: string) {

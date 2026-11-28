@@ -157,7 +157,12 @@ async function startPacket(root: string, files: Sample) {
 }
 
 async function startProof(root: string, files: Sample) {
-  const { inputs, state, call } = await startPacket(root, files);
+  const { inputs, state } = await startPacket(root, files);
+  return { inputs, ...(await capturedProof(state)) };
+}
+async function capturedProof(state: string) {
+  const call = (command: string, input?: unknown) =>
+    executeStackRun(command, { state, input });
   const { workItem, receiptId, rootFirstRawIndices } = (await call("next")) as {
     workItem: { id: string; stack: { frames: { package?: unknown }[] } };
     receiptId: string;
@@ -221,8 +226,60 @@ async function startProof(root: string, files: Sample) {
       },
     },
   };
-  return { inputs, state, call, capture, claims, write, row };
+  return { state, call, capture, claims, write, row };
 }
+
+test("a matching function and version alone do not establish a vulnerability", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-reachability-");
+  const files = await sample(dir.path, true);
+  const state = join(dir.path, "live.sqlite");
+  const { sinks } = JSON.parse(await readFile(files.sinksPath, "utf8"));
+  const hypothesis = {
+    package: "npm:sample-codec",
+    description: "Did decode run on version 1.0.0?",
+  };
+  await executeStackRun("init", {
+    state,
+    repo: files.repo,
+    input: {
+      hypothesis,
+      sinks: [{ ...sinks[0], preconditions: [], affectedVersions: ["1.0.0"] }],
+    },
+  });
+  await executeStackRun("record-observations", {
+    state,
+    input: JSON.parse(await readFile(files.stacksPath, "utf8")),
+  });
+  const { call, row, claims } = await capturedProof(state);
+  await expect(call("record-assessments", { items: [row] })).rejects.toThrow(
+    /alone establish no vulnerability/,
+  );
+  const question = "What condition would make this call vulnerable?";
+  await call("record-assessments", {
+    items: [
+      {
+        workItemId: row.workItemId,
+        verdict: "unknown",
+        reason: "Observed decode in 1.0.0.",
+        supportingClaims: claims,
+        remainingQuestions: [question],
+        questionChecks: [
+          {
+            question,
+            claims,
+            checked: "Matched the captured package and version.",
+            missingEvidence: "No vulnerability condition was supplied.",
+          },
+        ],
+      },
+    ],
+  });
+  expect(await call("finalize")).toMatchObject({
+    hypothesis,
+    verdict: "unknown",
+    assessments: [{ sinkMatches: [{ sinkId: sinks[0].id, rawIndex: 0 }] }],
+  });
+});
 
 test("trigger analysis checks quotations and addresses each supplied sink", async () => {
   const quote = "The decoder must accept a caller-supplied length.";
