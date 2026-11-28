@@ -3,6 +3,7 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { main } from "../src/cli.js";
+import { DependencyAttemptStore } from "../src/exploitability/attempt-store.js";
 import {
   executeStackRun,
   readFinalStackReport,
@@ -181,7 +182,7 @@ function capture(origin: string) {
 async function packet(root: string, repo: string) {
   const documents = {
     sinks: {
-      format: "codex-security.stack-sinks/v2",
+      format: "codex-security.sinks/v2",
       cve,
       advisory,
       sinks: [sink],
@@ -361,7 +362,7 @@ test("packet-bound verification rejects added work while direct finalize retains
   ).rejects.toThrow(/outside the expected input packet/i);
 });
 
-test("a supplemental capture citation automatically carries its original runtime receipt into finalization", async () => {
+test.each(["direct", "imported"])("%s capture provenance", async (kind) => {
   await using dir = await scopedTemporaryDirectory(
     "incremental-stack-capture-",
   );
@@ -374,8 +375,11 @@ test("a supplemental capture citation automatically carries its original runtime
     input: { cve, advisory, sinks: [sink] },
   });
   const original = capture("supplemental");
-  const runtime = await recordQuery(original);
-  await run("record-observations", { receiptId: runtime.receiptId });
+  const runtime = kind === "imported" ? await recordQuery(original) : null;
+  await run(
+    "record-observations",
+    runtime ? { receiptId: runtime.receiptId } : original,
+  );
   const current = (await run("next")) as {
     workItem: { id: string };
     receiptId: string;
@@ -401,13 +405,30 @@ test("a supplemental capture citation automatically carries its original runtime
     ReturnType<typeof readFinalStackReport>
   >;
   const receipts = final.claims[0]!.receipts;
-  expect(receipts.map(({ receiptId }) => receiptId)).toContain(
-    current.receiptId,
-  );
-  expect(
-    receipts.find(({ receiptId }) => receiptId === runtime.receiptId)!.result,
-  ).toEqual(JSON.parse(JSON.stringify(original)));
+  expect(receipts[0]).toMatchObject({
+    receiptId: current.receiptId,
+    origin: { arguments: { sourceReceiptId: runtime?.receiptId ?? null } },
+    result: { name: "decode" },
+  });
+  if (runtime) {
+    expect(
+      receipts.find(({ receiptId }) => receiptId === runtime.receiptId)!.result,
+    ).toEqual(JSON.parse(JSON.stringify(original)));
+  } else {
+    expect(receipts).toHaveLength(1);
+  }
   expect(await readFinalStackReport(state)).toEqual(final);
+  if (runtime) {
+    const store = new DependencyAttemptStore(state, { create: false });
+    try {
+      store.delete("runtime-receipt", runtime.receiptId);
+    } finally {
+      store.close();
+    }
+    await expect(readFinalStackReport(state)).rejects.toThrow(
+      /unknown runtime receipt/i,
+    );
+  }
 });
 
 test("a receipt cannot be reused to introduce fabricated frames", async () => {

@@ -115,11 +115,20 @@ test("check rejects invalid analyzer choices before launching an investigation",
       return 1;
     },
   });
-  for (const [analyzers, inputs, problem] of [
-    [{}, [], /at least 1|fewer than 1|at least one/i],
-    [{ other: {} }, [], /additional properties|unknown/i],
-    [{ stacks: {} }, [], /No analyzer has input/],
-    [{ repository: {} }, ["stacks=unused"], /unknown or disabled/],
+  for (const [project, inputs, problem] of [
+    [{ analyzers: {} }, [], /at least 1|fewer than 1|at least one/i],
+    [{ analyzers: { other: {} } }, [], /additional properties|unknown/i],
+    [{ analyzers: { stacks: {} } }, [], /No analyzer has input/],
+    [
+      { analyzers: { repository: {} } },
+      ["stacks=unused"],
+      /unknown or disabled/,
+    ],
+    [
+      { analyzers: { stacks: { input: "missing-capture" } }, sinks: [] },
+      [],
+      /exploitability\/sinks/,
+    ],
     [undefined, ["repository=unused"], /takes no input path/],
     [undefined, ["stacks"], /NAME=PATH/],
     [undefined, ["stacks=a", "stacks=b"], /Duplicate --analyzer-input/],
@@ -127,17 +136,14 @@ test("check rejects invalid analyzer choices before launching an investigation",
   ] as const) {
     const stdout = capture(),
       stderr = capture();
-    if (analyzers)
-      await writeFile(
-        config,
-        JSON.stringify({ exploitability: { analyzers } }),
-      );
+    if (project)
+      await writeFile(config, JSON.stringify({ exploitability: project }));
     const code = await main(
       [
         "exploitability",
         "check",
         "CVE-2099-1000",
-        ...(analyzers ? ["--config", config] : []),
+        ...(project ? ["--config", config] : []),
         ...inputs.flatMap((value) => ["--analyzer-input", value]),
       ],
       stdout.stream,

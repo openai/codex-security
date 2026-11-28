@@ -40,7 +40,9 @@ export const dependencyAnalyzersSchema = z
         input: nonempty
           .regex(/\S/u)
           .optional()
-          .describe("Capture file, directory or glob, relative to this config file."),
+          .describe(
+            "Capture file, directory or glob, relative to this config file.",
+          ),
       })
       .optional()
       .describe("Investigate a captured stack when input is supplied."),

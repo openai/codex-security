@@ -16,6 +16,8 @@ import {
 import { evidencePreviews } from "../src/exploitability/investigation-session";
 import { affectedByFrozenVersion } from "../src/exploitability/advisory";
 import { dependencyCheckOutputSchema } from "../src/exploitability/reachability";
+import { renderDependencyReport } from "../src/exploitability/report/renderer";
+import { renderDependencyReportMarkdown } from "../src/exploitability/report/text";
 import {
   createDependencyVerdictProgress,
   withDependencyCheckOutput,
@@ -172,7 +174,7 @@ async function fixture(extraFiles: Record<string, string> = {}) {
   };
 }
 
-test("binds each argument frame to its reviewed source and pins the published revision", async () => {
+test("reviewed trace, service and input citations keep their revision through publication and rendering", async () => {
   await using f = await fixture();
   const scope = reviewScopes([f.discovery])[0]!;
   f.use.trace = [
@@ -193,26 +195,56 @@ test("binds each argument frame to its reviewed source and pins the published re
     site: { path: "app.js", line: 2 },
     argument: "request.body",
   };
-  const verified = await verifyProposedUse(f.path, scope, f.use, signal, true);
-  const key = dependencyRecordHash(
-    verified.evidence.find((s) => s.path === "app.js")!,
-  );
-  expect(verified.findingEvidence).toContainEqual({
-    field: "trace[0].site",
-    keys: [key],
-  });
-  const claim = {
-    id: "use-1",
-    revision: 1,
-    hash: "a".repeat(64),
-    value: { kind: "use" as const, use: verified },
+  const evidence = [
+    { kind: "source" as const, path: "app.js", startLine: 2, endLine: 2 },
+  ];
+  const use = {
+    ...f.use,
+    services: [
+      { id: "preview", name: "Preview service", source: "checkout", evidence },
+    ],
+    inputSource: {
+      endpoint: "POST /preview",
+      exposure: "internet" as const,
+      evidence,
+    },
   };
-  const published = reportedUse(verified, claim, [key]);
-  expect(published.trace?.[0]).toMatchObject({
+  const result = await f.check(
+    { vulnDescription: "A parser issue." },
+    {
+      runAgent: async ({ prompt }) => {
+        const input = agentInput(prompt);
+        if (!input.claims) return proposalJson(use);
+        const reviewed = input.claims[0].payload.use;
+        expect(reviewed.findingEvidence).toContainEqual({
+          field: "trace[0].site",
+          keys: [dependencyRecordHash(reviewed.evidence[0])],
+        });
+        return approvedReview(input.claims);
+      },
+    },
+  );
+  const saved = result.checks[0]!.uses[0]!;
+  expect(saved.trace?.[0]).toMatchObject({
     site: { commit: f.revision },
     argument: "request.body",
   });
-  expect(published.proof.sink?.callSite.commit).toBe(f.revision);
+  expect(saved.proof.sink?.callSite.commit).toBe(f.revision);
+  const expected = { ...evidence[0]!, commit: f.revision };
+  expect(saved.services?.[0]?.evidence[0]).toEqual(expected);
+  expect(saved.inputSource?.evidence[0]).toEqual(expected);
+  for (const render of [
+    renderDependencyReport,
+    renderDependencyReportMarkdown,
+  ]) {
+    const output = render(result);
+    expect(output).toContain("Preview service");
+    expect(output).toContain("POST /preview");
+  }
+  const ref = saved.services![0]!.evidence[0]!;
+  if (ref.kind !== "source") throw new Error("Expected a source citation");
+  ref.commit = "d".repeat(40);
+  expect(renderDependencyReport(result)).not.toContain("Preview service");
 });
 
 test("repository investigators share pinned source notes without promoting assertions to reviewed claims", async () => {
@@ -711,21 +743,26 @@ test("caller descriptions stay scoped and a source-only positive is blocked", as
   ).rejects.toThrow("running workload");
 });
 
-test("a positive use requires an endpoint on each explicitly bounded side", async () => {
+test("an empty sink list fails before advisory lookup, while an empty source list rules out a positive use", async () => {
   await using f = await fixture();
-  for (const boundary of [{ sources: [] }, { sinks: [] }]) {
-    await expect(
-      f.check(
-        {
-          vulnDescription: "Incorrect length validation.",
-          ...boundary,
-        },
-        {
-          runAgent: async () => proposalJson(f.use),
-        },
-      ),
-    ).rejects.toThrow("explicitly empty source or sink boundary");
-  }
+  const unexpected = async () => {
+    throw new Error("Unexpected lookup or model call");
+  };
+  await expect(
+    f.check(
+      { sinks: [] },
+      {
+        lookupPackage: unexpected,
+        runAgent: unexpected,
+      },
+    ),
+  ).rejects.toThrow("at least one sink endpoint");
+  await expect(
+    f.check(
+      { vulnDescription: "Incorrect length validation.", sources: [] },
+      { runAgent: async () => proposalJson(f.use) },
+    ),
+  ).rejects.toThrow("explicitly empty source boundary");
 });
 
 test("a Git-only library gets its own discovery scope alongside a packaged wrapper", async () => {
@@ -1415,6 +1452,18 @@ test("the reviewer corrects an omitted direct access citation without repeating 
   ).toEqual(records.map((r) => r.sha256));
   expect<unknown>(dependencyCheckOutputSchema.parse(result)).toEqual(result);
   expect(check.claimEvidence.receipts[records[0]!.sha256]).toEqual(records[0]!);
+  const html = renderDependencyReport(result);
+  expect(html).toContain("<dt>Tool</dt><dd>running</dd>");
+  expect(html).toContain("<dt>Tool</dt><dd>access</dd>");
+  const ref = check.uses[0]!.decidingEvidence.find(
+    (r) => r.kind === "receipt" && r.receiptId === records[0]!.sha256,
+  );
+  if (ref?.kind !== "receipt") throw new Error("Expected a receipt");
+  ref.originalPayloadSha256 = "0".repeat(64);
+  expect(renderDependencyReport(result)).not.toContain(
+    "<dt>Tool</dt><dd>running</dd>",
+  );
+  expect(html).not.toContain("only in request");
 });
 
 test("only unambiguous returned facts can bind a selected copy and independent caller access", async () => {
@@ -2169,6 +2218,13 @@ test("native investigators share asynchronous reviews, immutable premises and pa
               text: '"fixture-parser"',
               next: null,
             });
+            // A reviewer asking to wait on its own claim must see it as pending.
+            expect(
+              await call("query_dependency_claims", {
+                ids: ["premise:version"],
+                wait: true,
+              }),
+            ).toMatchObject([{ state: "pending" }]);
             waiting.resolve();
             await release.promise;
           }
@@ -2794,6 +2850,10 @@ test("a reviewed premise retains independently selected rows of the historical m
   expect(
     report.uses[0]!.decidingEvidence.filter((r) => r.kind === "receipt"),
   ).toHaveLength(2);
+  const html = renderDependencyReport(checked);
+  expect(html).toContain("<dt>Tool</dt><dd>mcpServer/resource/read</dd>");
+  expect(html).not.toContain("third_row_must_not_escape");
+  expect(html).not.toContain("UNRELATED-GRAPH-PROFILE-BYTES");
 });
 
 test.each(["ledger", "identical", "additional", "invalid"] as const)(

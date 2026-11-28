@@ -96,11 +96,50 @@ test("binds returned service IDs and empty scoped lookups to the consumer", asyn
   await expect(
     run({ ...original, arguments: { project: "other" } }),
   ).rejects.toThrow(/file or its project/);
+  // A result row describes a service, never the coverage of its lookup.
+  expect(
+    await run({
+      ...original,
+      result: {
+        structuredContent: {
+          data: {
+            services: [
+              { id: 4, name: "mailer", coverage: "partial", nextCursor: "row" },
+            ],
+          },
+        },
+      },
+    }),
+  ).toMatchObject({ services: [{ scope: "service-registry:4" }] });
+  for (const envelope of [
+    { truncated: true },
+    { next_page_token: "", nextCursor: "second-page" },
+    { nextCursor: 0 },
+    { has_more: "false" },
+    { coverage: "unknown" },
+    { coverage: { available: false } },
+    { complete: true, metadata: { coverage: { result_complete: false } } },
+    { metadata: { limits: { truncated: true } } },
+    { truncation: { omitted_by_key: { services: 1 } } },
+  ]) {
+    await expect(
+      run({
+        ...original,
+        result: { structuredContent: { data: { services: [], ...envelope } } },
+      }),
+    ).rejects.toThrow(/incomplete/);
+  }
   await expect(
     run({
       ...original,
       result: {
-        structuredContent: { data: { services: [], truncated: true } },
+        ...original.result,
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify({ metadata: { has_more: true } }),
+          },
+        ],
       },
     }),
   ).rejects.toThrow(/incomplete/);
@@ -146,6 +185,17 @@ test("keeps the exact text block and offset path of the original sampled resourc
     block: 1,
     observations: [witness],
   });
+  for (const metadata of [
+    { join_basis: "inferred_creator_code" },
+    { instance_correlation_verified: false },
+    { scope: { query: { kind: "async_parent" } } },
+  ]) {
+    expect(() =>
+      sample({ ...packet, metadata })["ingest_dependency_graph_evidence"]!(
+        args,
+      ),
+    ).toThrow(/inferred graph join/i);
+  }
   expect(() =>
     sample({ ...packet, frame_order: "leaf_first" })[
       "ingest_dependency_graph_evidence"
