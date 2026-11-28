@@ -1084,6 +1084,14 @@ test("offline finalize renders the saved assessment and protects existing output
   expect(markdown.stdout.text()).toContain(cve);
   expect(markdown.stdout.text()).toContain("Source identity is missing.");
   expect(markdown.stdout.text()).not.toContain("[object Object]");
+  const mdPath = join(files.repo, "saved.md");
+  const mdArgs = [...args, "--format", "md", "--report-file", "saved.md"];
+  const savedMarkdown = createCliTest(main);
+  expect(await savedMarkdown.runCli(mdArgs, readDeps)).toBe(0);
+  expect(savedMarkdown.stdout.text().trimEnd()).toEndWith(mdPath);
+  expect(await readFile(mdPath, "utf8")).toBe(markdown.stdout.text());
+  expect(await createCliTest(main).runCli(mdArgs, readDeps)).not.toBe(0);
+  expect(await readFile(mdPath, "utf8")).toBe(markdown.stdout.text());
   const saved = createCliTest(main);
   const htmlPath = join(dir.path, "saved.html");
   expect(
