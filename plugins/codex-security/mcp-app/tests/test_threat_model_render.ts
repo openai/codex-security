@@ -165,6 +165,10 @@ equivalent("footer URL ampersands", markdownModel, {
     )
     .join(" "),
 });
+equivalent("footer URL underscores", markdownModel, {
+  target:
+    "(https://example.com/__init__.py?q=a&key=_private_), WWW.example.com/_end_. www.example.com/a_b_c snake_case",
+});
 for (const [paths, expected] of [
   [
     [

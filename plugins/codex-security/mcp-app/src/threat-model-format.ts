@@ -10,38 +10,41 @@ function collapse(value: string): string {
   return value.replace(whitespace, " ").replace(/^ | $/gu, "");
 }
 
-/** Match report_projection._escape_markdown without changing URL ampersands. */
+// collapse() has reduced all whitespace to spaces. Match // or a dotted host
+// with /, ? or #, and bare www links inside Markdown punctuation.
+const urlTokens =
+  /(?<![^ <>])(?:[^ <>]*\/\/|[^./ <>]*\.[^ <>]*[/?#])[^ <>]*|(?<![^ *_~(])www\.[^ <>]+/giu;
+const webLink =
+  /(?<![^ ("])(?:https?:\/\/|www\.)[a-z0-9.:-]+[/?#][^ <>\\`*\[\]|()"]+(?=$|[ )"])/i;
+const wordUnderscore = /(?<=[A-Za-z0-9])_(?=[A-Za-z0-9])/gu;
+const inlineCode = /(?<!`)`[^`\n]+`(?!`)/u;
+const punctuation = /[\\`*_\[\]<>]/u;
+// ASCII case folding keeps the web link scheme and host in sync with Python.
+const markdown = new RegExp(
+  `${inlineCode.source}|(${webLink.source})|(${wordUnderscore.source})|${punctuation.source}|${entityAmp.source}`,
+  "gi",
+);
+const linkLabel = new RegExp("[_~]|" + entityAmp.source, "gu");
+
+/** Match report_projection._escape_markdown, including bare web link handling. */
 function escapeMarkdown(value: string): string {
-  const urls = [
-    ...value.matchAll(
-      /(?<![^\p{White_Space}\u001c-\u001f*_~(])www\.[^\p{White_Space}\u001c-\u001f<>]+/giu,
-    ),
-  ].map((match) => ({
-    start: match.index,
-    end: match.index + match[0].length,
-  }));
-  // Preserve protocol-relative and fuzzy links without a domain/TLD table.
-  for (const match of value.matchAll(/[^\p{White_Space}\u001c-\u001f<>]+/gu)) {
-    const token = match[0];
-    const dot = token.split("/", 1)[0]!.indexOf(".");
-    if (
-      token.includes("//") ||
-      (dot >= 0 && /[/?#]/u.test(token.slice(dot + 1)))
-    ) {
-      urls.push({ start: match.index, end: match.index + token.length });
-    }
+  const inUrl = new Uint8Array(value.length);
+  for (const match of value.matchAll(urlTokens)) {
+    inUrl.fill(1, match.index, match.index + match[0].length);
   }
-  const pattern = new RegExp(
-    /(?<!`)`[^`\n]+`(?!`)|[\\`*_\[\]<>]/u.source + "|" + entityAmp.source,
-    "gu",
-  );
-  return value.replace(pattern, (match, offset: number) =>
-    match.length > 1 ||
-    (match === "&" &&
-      urls.some(({ start, end }) => start <= offset && offset < end))
+  return value.replace(markdown, (match, link, word, offset: number) => {
+    if (link !== undefined) {
+      const url = match.replace(/(?<![.,:;!?])[.,:;!?]+$/u, "");
+      if (!url.replace(wordUnderscore, "").includes("_")) return match;
+      const label = url.replace(linkLabel, "\\$&");
+      const target = /^www\./iu.test(url) ? "http://" + url : url;
+      return `[${label}](<${target.replaceAll("&", "&amp;")}>)${match.slice(url.length)}`;
+    }
+    return match.length > 1 ||
+      ((match === "&" || word !== undefined) && inUrl[offset])
       ? match
-      : "\\" + match,
-  );
+      : "\\" + match;
+  });
 }
 
 /** Match report_projection._path_text with ensure_ascii for quoted scope paths. */

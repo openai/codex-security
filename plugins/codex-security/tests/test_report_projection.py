@@ -872,7 +872,7 @@ def test_projection_preserves_inline_code_and_existing_url_escapes() -> None:
     markdown = PROJECTION.generate_report_markdown(manifest, findings, coverage).decode()
 
     assert "Compare `&amp;` and `https://example.com/?a=1&b=2 &amp;`" in markdown
-    assert r"https://example.com/a\_b?first=1&second=2 and \&amp;." in markdown
+    assert r"https://example.com/a_b?first=1&second=2 and \&amp;." in markdown
     assert "Keep https://example.com/`a _b_` as written." in markdown
     assert "- Included paths: `docs/www.example.com/&lt;tag&gt;.md`" in markdown
     assert "``docs/`&lt;tag&gt;`.md``" in markdown
@@ -882,6 +882,18 @@ def test_projection_preserves_inline_code_and_existing_url_escapes() -> None:
     assert "`` `&amp;` ``" in markdown
     assert "`` `&amp;.md ``" in markdown
     assert "`` file&amp;` ``" in markdown
+
+
+def test_projection_preserves_emphasis_and_trailing_underscores_in_web_links() -> None:
+    url = "https://example.com/__init__.py?q=a&key=_private_"
+    label = r"https://example.com/\_\_init\_\_.py?q=a&key=\_private\_"
+    markdown = report_with_finding(
+        title=url, summary=f"See ({url}), www.example.com/_end_. Keep snake_case and `{url}`."
+    )
+    assert f"[{label}](#finding-1)" in markdown
+    assert f"See ([{label}](<{url.replace('&', '&amp;')}>))," in markdown
+    assert r"[www.example.com/\_end\_](<http://www.example.com/_end_>)." in markdown
+    assert f"Keep snake\\_case and `{url}`." in markdown
 
 
 @pytest.mark.parametrize("status", ["completed", "interrupted"])
