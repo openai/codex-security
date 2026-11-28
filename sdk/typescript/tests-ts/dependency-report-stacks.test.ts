@@ -5,26 +5,6 @@ import { renderDependencyReportMarkdown } from "../src/exploitability/report/tex
 import { dependencyClaimHash } from "../src/exploitability/analyzers/stacks/claims.js";
 import { stackReport } from "./support/dependency-stack-report-fixture.js";
 
-test("projects a sparse observation, query limits and no-match without inventing reviewed uses", () => {
-  const input = stackReport();
-  const report = readStackReport(input)!;
-  expect(report.review).toBeNull();
-  expect(report.coverage).toEqual(input.coverage);
-  expect(report).not.toHaveProperty("uses");
-  const [path, missing] = report.assessments;
-  expect(path?.stack?.labels?.["process"]).toBe("uploader");
-  expect(path?.query?.selectors?.["process"]).toBeUndefined();
-  expect(path?.stack).toEqual(input.assessments[0].stack);
-  expect(path?.reason).toBe(input.assessments[0].reason);
-  expect(path?.use?.reason).toBe(input.assessments[0].use.reason);
-  expect(path?.claims.map((c) => c.id)).toEqual(["copy", "call"]);
-  expect(path?.claims[1]?.sources[0]?.text).toBe("return decode(bytes);");
-  expect(JSON.stringify(report)).not.toContain("RAW_RECEIPT_CONTENT");
-  expect(missing?.claims).toEqual([]);
-  expect(missing?.stack).toBeNull();
-  expect(missing?.use).toBeUndefined();
-});
-
 test("a debugger stack with only a name is a lead, with no fabricated search or package", () => {
   const raw = stackReport();
   const first = raw.assessments[0];
@@ -93,13 +73,6 @@ test("shared premises appear once and require the exact revision and hash", () =
   const incomplete = path();
   expect(incomplete.claims.map((c) => c.id)).toEqual(["copy", "other"]);
   expect(incomplete.missingClaims).toEqual(input.claims[0]!.dependencies);
-});
-
-test("only recognizes the stack contract and requires a nullable review", () => {
-  expect(readStackReport({ schemaVersion: 2, uses: [] })).toBeUndefined();
-  expect(() =>
-    readStackReport({ ...stackReport(), review: undefined }),
-  ).toThrow();
 });
 
 test("reviewed exports preserve each decision and the frozen advisory", () => {

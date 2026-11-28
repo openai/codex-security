@@ -164,53 +164,6 @@ export function withExcerpts(
     claimEvidence: { sources, receipts: {} },
   };
 }
-export function broadReport() {
-  const uses = Array.from({ length: 64 }, (_, i) => {
-    const u = reviewed(i + 1, {
-      verdict: i < 48 ? "unknown" : "ruled_out",
-      reason:
-        i < 48
-          ? `Handler ${i + 1} reaches the codec; its runtime setting is unverified.`
-          : `Handler ${i + 1} enforces an unaffected mode.`,
-      place: place({
-        kind: (["library_caller", "job", "service"] as const)[i % 3]!,
-      }),
-    });
-    if (i % 7 !== 0)
-      u.services = [
-        service(
-          `svc:${i % 6}`,
-          `Service ${String.fromCharCode(65 + (i % 6))}`,
-          u.decidingEvidence[0]!,
-        ),
-      ];
-    if (i < 16) {
-      const boundary = receiptRef(`source-boundary-${i + 1}`, "c");
-      u.decidingEvidence.push(boundary);
-      u.inputSource = {
-        exposure: i < 8 ? "internet" : "not_internet",
-        endpoint:
-          i < 8 ? `POST /v1/document/${i + 1}` : `queue:document-${i + 1}`,
-        evidence: [boundary],
-      };
-      u.tags = [{ name: "documents", evidence: [boundary] }];
-    }
-    return u;
-  });
-  const coverage = Array.from({ length: 24 }, (_, i) => {
-    const c = unresolved(i + 1);
-    if (i % 4 !== 0)
-      c.services = [
-        service(
-          `svc:${i % 6}`,
-          `Service ${String.fromCharCode(65 + (i % 6))}`,
-          c.decidingEvidence![0]!,
-        ),
-      ];
-    return c;
-  });
-  return report(uses, coverage);
-}
 export function zeroReport() {
   const index = "sha256:" + "7".repeat(64);
   const variants = [

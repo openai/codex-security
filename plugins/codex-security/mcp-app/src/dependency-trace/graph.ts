@@ -20,6 +20,7 @@ interface ResolvedServiceResolution {
   path: string;
   project?: string;
   status?: undefined;
+  complete?: boolean;
   directory?: string;
   services: readonly {
     name: string;
@@ -587,7 +588,7 @@ export class EvidenceGraph {
       const { directory, services } = answer;
       if (
         directory !== undefined &&
-        (!services.length ||
+        ((!services.length && answer.complete !== false) ||
           !(directory === "." || path.startsWith(directory + "/")))
       ) {
         throw new Error(
@@ -596,7 +597,12 @@ export class EvidenceGraph {
       }
     }
     for (const answer of answers) {
-      const { path, reason, source = "configured service catalog" } = answer;
+      const { path, source = "configured service catalog" } = answer;
+      const partial =
+        answer.status !== "unresolved" && answer.complete === false;
+      const reason =
+        answer.reason ??
+        (partial ? "Catalog coverage is incomplete." : undefined);
       const question = this.questions.get(path)!;
       // A newer hint may arrive during a lookup. Retain older positive evidence,
       // but only the current context can settle the question or its uncertainty.
@@ -631,6 +637,7 @@ export class EvidenceGraph {
       const beforeMappings = this.directoryMappings.size;
       if (services.length === 0) {
         if (
+          !partial &&
           !this.record(
             { from: target, relation: "no_service_found" },
             source,
@@ -651,14 +658,14 @@ export class EvidenceGraph {
               },
               citation ?? source,
               line,
-              reason,
+              answer.reason,
               receiptSelections,
             ),
         );
         if (!retained.every((fact): fact is Fact => fact !== undefined))
           continue;
         if (directory !== undefined) {
-          this.coveredDirectories.add(directory);
+          if (!partial) this.coveredDirectories.add(directory);
           for (const fact of retained) this.directoryMappings.add(fact);
         }
       }
@@ -670,14 +677,15 @@ export class EvidenceGraph {
           this.revision++;
         continue;
       }
+      const status = partial ? "unresolved" : "checked";
       if (
-        question.status !== "checked" ||
+        question.status !== status ||
         changedExplanation ||
         this.facts.size !== before ||
         this.directoryMappings.size !== beforeMappings
       )
         this.revision++;
-      question.status = "checked";
+      question.status = status;
       if (reason === undefined) delete question.reason;
       else question.reason = reason;
       question.source = source;

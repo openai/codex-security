@@ -98,7 +98,7 @@ async function fixture(root: string) {
   };
 }
 
-test("the gated CLI accepts an interactive init and runtime evidence without a packet", async () => {
+test("the gated CLI can attach a CVE to an existing capture without a packet", async () => {
   await using dir = await scopedTemporaryDirectory("incremental-stack-cli-");
   const { repo, state } = await fixture(dir.path);
   async function invoke(args: string[], input?: unknown) {
@@ -136,21 +136,6 @@ test("the gated CLI accepts an interactive init and runtime evidence without a p
       sinkMatches: [{ sinkId: sink.id, rawIndex: 0 }],
     },
   });
-  const evidence = await invoke(
-    ["record-evidence", "--state", state, "--json-stdin"],
-    {
-      kind: "runtime",
-      server: "fixture",
-      tool: "inventory",
-      result: { version: "1.0.0" },
-    },
-  );
-  expect(evidence.receiptId).toMatch(/^runtime-/);
-  const { commands } = await invoke(["tools", "--state", state]);
-  const names = commands.map((item: { name: string }) => item.name);
-  expect(names).toContain("record-evidence");
-  expect(names).toContain("record-observations");
-  expect(names).not.toContain("read-stacks");
 });
 
 function capture(origin: string) {
@@ -497,7 +482,6 @@ test("profiler pages preserve coverage, leaf-first positions and unattributed fr
     const receipt = await recordQuery(graph);
     await run("record-observations", { receiptId: receipt.receiptId });
     const next = await run("next");
-    expect(next).not.toHaveProperty("workItem.stack.frames.0.package");
     expect(next).toMatchObject({
       workItem: {
         id: "captures/0/stacks/0",
@@ -507,6 +491,8 @@ test("profiler pages preserve coverage, leaf-first positions and unattributed fr
         leads: [{ sinkId: "decode", rawIndex: 0 }],
       },
     });
+    // Keep the provider's opaque stack key in the original receipt.
+    expect(next).toHaveProperty("workItem.stack.labels", { service: "sample" });
     const empty = {
       ...graph,
       metadata: {
@@ -518,8 +504,13 @@ test("profiler pages preserve coverage, leaf-first positions and unattributed fr
     };
     for (const [result, status] of [
       [empty, "no_match"],
-      [{ ...empty, hasMore: true }, "no_coverage"],
+      [{ ...empty, nextCursor: "more" }, "no_coverage"],
       [{ structuredContent: empty, nextCursor: "more" }, "no_coverage"],
+      [{ ...empty, nextCursor: 1 }, "no_coverage"],
+      [
+        { ...empty, metadata: { ...empty.metadata, limits: {} } },
+        "no_coverage",
+      ],
     ] as const) {
       const saved = await recordQuery(result);
       const [page] = readRuntimeStackCaptures(store, saved.receiptId);

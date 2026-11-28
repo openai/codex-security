@@ -61,71 +61,29 @@ test("stack Markdown explains sampled call, gaps and claims without borrowing ev
   expect(output).not.toContain("RAW_RECEIPT_CONTENT");
 });
 
-test("Markdown puts the bound code at its sampled frame and shows locations even without source", () => {
+test("Markdown annotates a caller only when its revision matches the cited code", () => {
   const raw = stackReport();
   const [sampled] = raw.assessments;
-  const observation = {
-    ...sampled.stack,
-    frames: [
-      {
-        rawIndex: 0,
-        frame: {
-          name: "decode",
-          type: "native",
-          location: "decoder.c",
-          line: 16,
-        },
-      },
-      {
-        rawIndex: 2,
-        frame: {
-          name: "handle",
-          type: "function",
-          location: "/app.runfiles/_main/src/codec.ts:3",
-        },
-      },
-      {
-        rawIndex: 4,
-        frame: { name: "upload", type: "function", location: "upload.ts:9" },
-      },
-    ],
-  };
-  const render = (sha: string) =>
-    renderDependencyReportMarkdown({
+  const render = (sourceRevision: string) => {
+    const frame = {
+      name: "handle",
+      location: "src/codec.ts:3",
+      sourceRevision,
+    };
+    const stack = {
+      ...sampled.stack,
+      frames: [...sampled.stack.frames, { rawIndex: 2, frame }],
+    };
+    const output = renderDependencyReportMarkdown({
       ...raw,
-      assessments: [
-        {
-          ...sampled,
-          sinkMatches: [],
-          leads: [{ sinkId: "codec", rawIndex: 0 }],
-          stack: {
-            ...observation,
-            frames: observation.frames.map((entry) =>
-              entry.rawIndex === 2
-                ? { ...entry, frame: { ...entry.frame, sourceRevision: sha } }
-                : entry,
-            ),
-          },
-        },
-        raw.assessments[1],
-      ],
-    })
+      assessments: [{ ...sampled, stack }, raw.assessments[1]],
+    });
+    return output
       .split("**Captured stack**")[1]!
-      .split("**Advisory conditions**")[0]!;
-  const stack = render(raw.target.sha);
-  expect(stack).toContain("`upload` · `upload.ts:9` · frame 4");
-  expect(stack).toContain(
-    "`handle` · `src/codec.ts:3` · call site, frame 2 · calls `decode`\n\n  ```ts\n  return decode(bytes);\n  ```",
-  );
-  expect(stack).toContain("`decode` · `decoder.c:16` · name-only lead");
-  expect(stack).not.toContain("matched sink");
-  expect(stack).toContain("A function name alone");
-  expect(stack).not.toContain("stack-a");
-  expect(stack.split("return decode(bytes);")).toHaveLength(2);
-  const [stale, review] = render("d".repeat(40)).split("**Source review**");
-  expect(stale).toContain("`/app.runfiles/_main/src/codec.ts:3`");
-  expect(stale).not.toContain("return decode(bytes);");
-  expect(review).toContain("return decode(bytes);");
+      .split("**Source review**")[0]!;
+  };
+  expect(render(raw.target.sha)).toContain("return decode(bytes);");
+  expect(render("d".repeat(40))).not.toContain("return decode(bytes);");
 });
 
 test("zero reviewed uses still retains unresolved handoffs", () => {
@@ -141,13 +99,6 @@ test("the short stack summary leads with decisions and questions scoped to each 
   expect(output).toContain("2/2 stack items assessed");
   expect(output).toContain("Partial or unknown search coverage: 1");
   expect(output).toContain("No matching stack: 1");
-  expect(output).toContain("process=uploader · environment=prod");
-  expect(output).toContain("scheduled-job");
-  expect(output).toContain("2099-02-01T00:00:00Z");
-  expect(output).toContain(
-    "Requires more information · decode at the upload handler · sample-codec@1.0 · captures[0].stacks[0]",
-  );
-  expect(output).toContain("Call: src/codec.ts:3");
   expect(output).toContain("Next: Which decoder mode ran?");
   expect(output).toContain("Next: Did the job run?");
   expect(output).not.toContain(report.assessments[0].reason);

@@ -1260,7 +1260,7 @@ test("without a catalog, frozen OSV ranges can exclude an attributed copy, but a
     }),
   );
   const options = { cve, repository: repo, toolRevision: "test" };
-  const freeze = (inputsDir: string, packages: string[]) =>
+  const freeze = (inputsDir: string, ecosystems: string[]) =>
     prepareStackPacket(
       { ...options, stacksPath, inputsDir },
       {
@@ -1268,9 +1268,10 @@ test("without a catalog, frozen OSV ranges can exclude an attributed copy, but a
           lookupDependencyAdvisory(id, signal, async () =>
             Response.json({
               id,
-              details: "Vulnerable function: `decode`",
-              affected: packages.map((name) => ({
-                package: { name, ecosystem: "npm" },
+              details: "The example calls `other`.",
+              affected: ecosystems.map((ecosystem) => ({
+                package: { name: "sample-codec", ecosystem },
+                ecosystem_specific: { affects: { functions: ["decode"] } },
                 ranges: [
                   {
                     type: "SEMVER",
@@ -1286,13 +1287,13 @@ test("without a catalog, frozen OSV ranges can exclude an attributed copy, but a
       },
     );
   const ambiguous = await freeze(join(dir.path, "ambiguous"), [
-    "sample-codec",
-    "another-codec",
+    "crates.io",
+    "npm",
   ]);
   for (const item of stackPacketWorkItems(ambiguous))
     expect(item).toMatchObject({ sinkMatches: [], leads: [] });
   const frozen = join(dir.path, "frozen");
-  const original = await freeze(frozen, ["sample-codec"]);
+  const original = await freeze(frozen, ["crates.io"]);
   expect(original.sinks).toEqual({ format: "codex-security.sinks/v2", cve });
   const replay = await prepareStackInput({ ...options, input: frozen });
   const inputs = join(dir.path, "replay");

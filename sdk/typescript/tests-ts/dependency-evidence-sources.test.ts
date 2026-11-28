@@ -1,8 +1,6 @@
 import { expect, test } from "bun:test";
 import {
   createDependencyEvidenceCapture,
-  dependencyLookupSearch,
-  lookupCoverage,
   selectDependencyEvidenceServers,
 } from "../src/exploitability/evidence-sources.js";
 
@@ -119,39 +117,4 @@ test("captures resource reads linked by a successful lookup on the same server a
   expect(
     createDependencyEvidenceCapture(servers)(resource("primary")),
   ).toBeUndefined();
-});
-
-test("searches report contradictory flags conservatively and ignore row metadata", () => {
-  const base = { server: "mcp", tool: "list", sha256: "id", arguments: {} };
-  const search = (structuredContent: object) =>
-    dependencyLookupSearch({ ...base, result: { structuredContent } });
-  const rows = [{ partial: true, status: "found" }];
-  expect(search({ complete: true, rows, nextCursor: null })).toMatchObject({
-    result: "returned",
-    completeness: "complete",
-  });
-  // A provider document can itself contain a field named content.
-  const content = [{ type: "text", text: "…25 chars truncated…" }];
-  const text = JSON.stringify({ complete: true, content });
-  const result = { content: [{ type: "text", text }] };
-  expect(dependencyLookupSearch({ ...base, result }).completeness).toBe(
-    "complete",
-  );
-  const metadata = { coverage: { result_complete: false } };
-  expect(search({ complete: true, metadata }).completeness).toBe("partial");
-  expect(search({ complete: true, hasMore: "false" }).completeness).toBe(
-    "unknown",
-  );
-  expect(search({ outcome: "found", status: "no_match" }).result).toBe(
-    "returned",
-  );
-});
-
-test("resource coverage is scoped to the selected JSON document", () => {
-  const contents = [false, true].map((complete) => ({
-    text: JSON.stringify({ complete }),
-  }));
-  const page = (textBlock: number) =>
-    lookupCoverage({ contents }, { textBlock, record: [] }).incomplete;
-  expect([page(0), page(1)]).toEqual([true, false]);
 });

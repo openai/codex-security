@@ -3,9 +3,12 @@ import {
   createDependencyGraphEvidenceTools,
   type DependencyEvidenceGraph,
 } from "../src/exploitability/graph-evidence.js";
-import type { DependencyEvidenceRecord } from "../src/exploitability/evidence-sources.js";
+import type {
+  DependencyEvidenceRecord,
+  Sample,
+} from "../src/exploitability/evidence-sources.js";
 
-function tools(entries?: DependencyEvidenceRecord[]) {
+function tools(entries?: DependencyEvidenceRecord[], sample?: Sample) {
   const graph: DependencyEvidenceGraph = {
     tools: [],
     call: async (name, input) => ({ name, input }),
@@ -21,6 +24,8 @@ function tools(entries?: DependencyEvidenceRecord[]) {
     createDependencyGraphEvidenceTools(
       graph,
       entries && ((id) => entries.find((r) => r.sha256 === id)),
+      undefined,
+      sample,
     ).map((tool) => [tool.name, tool.run]),
   );
 }
@@ -34,23 +39,15 @@ test("without external sources the investigator can still search local project r
   expect(await local[resolve]!(input)).toEqual({ name: resolve, input });
 });
 
-test("binds returned service IDs and empty scoped lookups to the consumer", async () => {
-  const original = {
+test("only a cited declaration can settle a catalog lookup; observed rows survive uncertainty", async () => {
+  const row = { id: 93, name: "mailer", full: true };
+  const make = (data: object): DependencyEvidenceRecord => ({
     sha256: "receipt",
     server: "service-registry",
     tool: "list",
-    arguments: { project: "jobs" },
-    result: {
-      structuredContent: {
-        data: {
-          services: [
-            { id: 93, name: "mailer", coverage: "partial", nextCursor: "row" },
-            { id: 22, name: "nightly" },
-          ],
-        },
-      },
-    },
-  };
+    arguments: { project: "jobs", token: "do-not-forward" },
+    result: { structuredContent: { data } },
+  });
   const input = {
     path: "jobs/send.js",
     project: "jobs",
@@ -65,51 +62,58 @@ test("binds returned service IDs and empty scoped lookups to the consumer", asyn
       },
     ],
   };
-  const run = (r: DependencyEvidenceRecord) => tools([r])[resolve]!(input);
-  const catalog = (data: object) =>
-    run({ ...original, result: { structuredContent: { data } } });
-  expect(await run(original)).toMatchObject({
-    path: "jobs/send.js",
-    project: "jobs",
+  const proof = JSON.stringify({
+    coverage: "complete",
+    path: ["data", "everyPageRead"],
+    value: true,
+  });
+  let calls = 0;
+  const sample: Sample = async (prompt) => {
+    calls++;
+    expect(prompt).not.toContain("do-not-forward");
+    return proof;
+  };
+  const lookup = (data: object, classify?: Sample) =>
+    tools([make(data)], classify)[resolve]!(input);
+  const run = tools([make({ services: [], everyPageRead: true })], sample)[
+    resolve
+  ]!;
+  expect(await run(input)).toMatchObject({
+    complete: true,
+    services: [],
+    receiptSelections: [
+      { record: ["data", "services"] },
+      { record: ["data", "everyPageRead"] },
+    ],
+  });
+  expect(calls).toBe(1);
+  // An invented witness never certifies the result, even with real service rows.
+  expect(await lookup({ services: [row] }, sample)).toMatchObject({
+    complete: false,
     services: [
       {
         scope: "service-registry:93",
         name: "mailer",
-        receiptSelections: [
-          {
-            receiptId: "receipt",
-            textBlock: null,
-            record: ["data", "services", 0],
-          },
-        ],
+        receiptSelections: [{ record: ["data", "services", 0] }],
       },
-      { scope: "service-registry:22", name: "nightly" },
     ],
   });
-  expect(await catalog({ services: [] })).toMatchObject({
-    services: [],
-    receiptSelections: [{ record: ["data", "services"] }],
+  expect(await lookup({ services: [] }, async () => "invalid")).toMatchObject({
+    complete: false,
   });
-  await expect(
-    run({ ...original, arguments: { project: "other" } }),
-  ).rejects.toThrow(/file or its project/);
-  for (const flag of [
-    { truncated: true },
-    { next_page_token: "", nextCursor: "page2" },
-    { nextCursor: 0 },
-    { coverage: "unknown" },
-    { coverage: { available: false } },
-    { truncation: { omitted_by_key: { services: 1 } } },
-  ]) {
-    await expect(catalog({ services: [], ...flag })).rejects.toThrow(
-      /incomplete/,
-    );
-  }
-  const content = [{ type: "text", text: '{"metadata":{"has_more":true}}' }];
-  await expect(
-    run({ ...original, result: { ...original.result, content } }),
-  ).rejects.toThrow(/incomplete/);
-  await expect(catalog({})).rejects.toThrow(/Selector/);
+  expect(await lookup({ services: [] })).toMatchObject({ complete: false });
+  const linked = {
+    ...make({ services: [], everyPageRead: true }),
+    tool: "read_mcp_resource",
+  };
+  expect(await tools([linked], sample)[resolve]!(input)).toMatchObject({
+    complete: false,
+  });
+  const wrong = { ...make({ services: [] }), arguments: { project: "other" } };
+  await expect(tools([wrong], sample)[resolve]!(input)).rejects.toThrow(
+    /file or its project/,
+  );
+  expect(calls).toBe(2);
 });
 
 test("keeps the exact text block and offset path of the original sampled resource", () => {

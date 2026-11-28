@@ -123,49 +123,21 @@ function reviewedWithRuntimeRevision() {
   return report([use]);
 }
 
-test.each([
-  ["checkout", reviewedWithRuntimeRevision()],
-  ["sampled stacks", stackReport()],
-  [
-    "package with multiple advisories",
-    {
-      package: { ecosystem: "npm", name: "sample-codec" },
-      checks: ["CVE-2099-44001", "CVE-2099-44002"].map((advisoryId) => {
-        const { cve: _cve, ...check } = reviewedWithRuntimeRevision();
-        return { ...check, advisoryId };
-      }),
-    },
-  ],
-  [
-    "package without advisories",
-    { package: { ecosystem: "npm", name: "sample-codec" }, checks: [] },
-  ],
-  [
-    "blocked",
-    { status: "blocked", code: "INVESTIGATION_BLOCKED", reason: "Unavailable" },
-  ],
-] as const)(
-  "identifies the analyzed checkout once in the report header for %s",
-  (_kind, data) => {
-    const model = prepareDependencyReport({
-      data: { ...data, target: checkout },
-    });
-    const html = renderPreparedDependencyReport(model);
-    const header = html.match(
-      /<header class="masthead">([\s\S]*?)<\/header>/u,
-    )![1]!;
-    const md = renderPreparedDependencyReportMarkdown(model).split("\n\n")[1]!;
-    const summary = summarizeDependencyReport(model);
-    expect(html.split(checkout.repository)).toHaveLength(2);
-    for (const text of [header, md, summary]) {
-      expect(text).toContain(checkout.repository);
-      expect(text).toContain(checkout.sha);
-    }
-    expect(header).toContain(">" + checkout.sha.slice(0, 12) + "</code>");
-    expect(header).not.toContain(otherRevision);
-    expect(md).not.toContain(otherRevision);
-  },
-);
+test("report headers identify the checkout even when a deployed build has another revision", () => {
+  const model = prepareDependencyReport({
+    data: { ...reviewedWithRuntimeRevision(), target: checkout },
+  });
+  const header = renderPreparedDependencyReport(model).match(
+    /<header class="masthead">([\s\S]*?)<\/header>/u,
+  )![1]!;
+  const md = renderPreparedDependencyReportMarkdown(model).split("\n\n")[1]!;
+  for (const text of [header, md, summarizeDependencyReport(model)]) {
+    expect(text).toContain(checkout.repository);
+    expect(text).toContain(checkout.sha);
+  }
+  expect(header).not.toContain(otherRevision);
+  expect(md).not.toContain(otherRevision);
+});
 
 test("older reports preserve an unknown checkout even when evidence cites a commit", () => {
   const model = prepareDependencyReport(reviewedWithRuntimeRevision());

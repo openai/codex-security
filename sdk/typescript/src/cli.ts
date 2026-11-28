@@ -11117,6 +11117,8 @@ async function executeDependencyAgent(
             await linked?.(origin, read, invocation);
           },
           usage: request.onUsage,
+          sampler: request.sampler,
+          signal: request.signal,
           startup(name, status, error) {
             if (!Object.hasOwn(servers, name)) return;
             const settings = servers[name];
@@ -11756,6 +11758,7 @@ export async function readSkillCommandOutput(
         appServer.linkedEvidence,
         send,
         recovery,
+        () => turnId,
       )
     : undefined;
   let connectionClosed = false;
