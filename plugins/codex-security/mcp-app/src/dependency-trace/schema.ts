@@ -4,8 +4,8 @@ const text = z.string().trim().min(1);
 
 export const traceInputSchema = z
   .strictObject({
-    package: text.describe("Dependency package name from the advisory."),
-    version: text.optional().describe("Resolved package version, if known."),
+    package: text.describe("Affected component, not its parent artifact."),
+    version: text.optional().describe("Affected component version, if known."),
     symbol: text.optional().describe("Affected operation or symbol, if known."),
     source_symbol: z
       .string()

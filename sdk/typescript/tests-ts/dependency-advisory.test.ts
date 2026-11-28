@@ -1,9 +1,12 @@
 import { expect, test } from "bun:test";
 import {
+  affectedByFrozenVersion,
+  affectedSinkVersion,
+  effectiveSinks,
   lookupDependencyAdvisory,
   lookupPackageAdvisories,
   parseDependencyPackage,
-} from "../src/dependency-advisory.js";
+} from "../src/exploitability/advisory.js";
 
 const cve = "CVE-2099-0001";
 const id = "SAMPLE-1";
@@ -57,15 +60,57 @@ test("CVE aliases freeze the original advisory text and disjoint version events"
     id,
     body: record.details,
     modified: record.modified,
-    vulnerableFunctions: ["Codec.decode"],
     affected: record.affected,
   });
+  expect(advisories[0]).not.toHaveProperty("vulnerableFunctions");
+  expect(
+    effectiveSinks({
+      format: "codex-security.sinks/v2",
+      cve,
+      advisoryDetails: advisories,
+    }),
+  ).toEqual([]);
   expect(advisories[0]!.sha256).toMatch(/^[a-f0-9]{64}$/);
   await expect(
     lookupDependencyAdvisory(cve, undefined, async () =>
       Response.json({ code: 5, message: "Not found" }, { status: 404 }),
     ),
   ).rejects.toThrow("No active public OSV advisory");
+});
+
+test("an advisory binds each affected operation and version range to its own package", async () => {
+  const entry = (name: string, version: string) => ({
+    package: { ecosystem: "crates.io", name },
+    versions: [version],
+    ecosystem_specific: { affects: { functions: ["decode"] } },
+  });
+  const { advisories } = await lookupDependencyAdvisory(
+    cve,
+    undefined,
+    async () =>
+      Response.json({
+        id: cve,
+        details: "Vulnerable function: `other`",
+        affected: [entry("one", "1.0.0"), entry("two", "2.0.0")],
+      }),
+  );
+  const catalog = {
+    format: "codex-security.sinks/v2" as const,
+    cve,
+    advisoryDetails: advisories,
+  };
+  const sinks = effectiveSinks(catalog);
+  expect(
+    sinks.map((s) => [
+      s.package,
+      s.function,
+      affectedSinkVersion(s, "1.0.0", catalog),
+    ]),
+  ).toEqual([
+    ["one", "decode", true],
+    ["two", "decode", false],
+  ]);
+  expect(new Set(sinks.map((s) => s.id)).size).toBe(2);
 });
 
 test("package lookup keeps distinct advisories and unifies aliases across pages", async () => {
@@ -99,4 +144,22 @@ test("package lookup keeps distinct advisories and unifies aliases across pages"
   expect(() => parseDependencyPackage("npm:sample-codec@1.0.0")).toThrow(
     "unversioned",
   );
+});
+
+test("a frozen PyPI version list only excludes releases it can compare", () => {
+  const pkg = { ecosystem: "PyPI", name: "example" };
+  function affected(version: string, versions: string[]) {
+    return affectedByFrozenVersion(pkg, version, [
+      {
+        id: "test-advisory",
+        url: "https://example.invalid/advisory",
+        sha256: "a".repeat(64),
+        affected: [{ package: pkg, versions }],
+      },
+    ]);
+  }
+  expect(affected("1.0.0", ["1.0"])).toBe(true);
+  expect(affected("1.0.1", ["1.0"])).toBe(false);
+  expect(affected("1.0a1", ["1.0a1"])).toBe(true);
+  expect(affected("1.0a1", ["1.0-alpha1"])).toBeUndefined();
 });

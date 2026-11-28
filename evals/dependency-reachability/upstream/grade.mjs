@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { approvedCitations, sourceReader } from "../grade.mjs";
+import {
+  approvedCitations,
+  assertCheckout,
+  repositoryReport,
+  sourceReader,
+} from "../grade.mjs";
 import { checkoutPlacesV2 } from "./checkout-places-v2.mjs";
 
 // Each group needs one of its alternatives. A required absence across an entire
@@ -142,9 +147,10 @@ function namesComponent(label, name) {
   );
 }
 
-export function gradeSnapshot(report, scenario, repo, commit) {
-  assert.equal(report.cve, scenario.cve);
-  assert.equal(report.schemaVersion, 2);
+export function gradeSnapshot(response, scenario, repo, commit) {
+  assert.equal(response.subject.kind, "advisory");
+  assertCheckout(response, repo, commit);
+  const report = repositoryReport(response, scenario.cve);
   const { expected, identity, deciding } = groupsFor(scenario);
   const read = sourceReader(repo, commit);
   const allowedVersions = Object.hasOwn(scenario, "commandVersion")
@@ -160,10 +166,6 @@ export function gradeSnapshot(report, scenario, repo, commit) {
   } catch (error) {
     auditError = error.message;
   }
-  assert(
-    !Object.hasOwn(report, "status"),
-    "reviewed v2 reports contain per-use verdicts",
-  );
   const uses = report.uses.filter((u) =>
     components.some((c) => namesComponent(u.component, c)),
   );

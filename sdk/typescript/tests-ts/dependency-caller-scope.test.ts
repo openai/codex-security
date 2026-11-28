@@ -6,28 +6,8 @@ import { join } from "node:path";
 import {
   defaultDependencyCallerScope,
   dependencyPathExcluded,
-} from "../src/dependency-caller-scope.js";
-import type { DependencyRuntimeSelector } from "../src/index.js";
-import { resolveProjectConfig } from "../src/project-config.js";
-import { runReviewedDependencyCheck } from "../src/dependency-reviewed-check.js";
-
-test("project configuration preserves supplied boundaries and runtime selector metadata", () => {
-  const selector: DependencyRuntimeSelector = {
-    name: "decode",
-    location: "codec.c",
-    line: 8,
-    binary: "libcodec",
-    provider_detail: { resource: 3 },
-  };
-  for (const boundary of [
-    { sources: [] },
-    { sinks: [{ function: "decode", runtime_selectors: [selector] }] },
-  ]) {
-    expect(
-      resolveProjectConfig({ exploitability: boundary }).exploitability,
-    ).toEqual(boundary);
-  }
-});
+} from "../src/exploitability/caller-scope.js";
+import { runReviewedDependencyCheck } from "../src/exploitability/analyzers/repository/check.js";
 
 test("broad production and explicit exclusions reopen paths with their own SECURITY.md", () => {
   const policyPaths = new Set(["SECURITY.md", "examples/service/SECURITY.md"]);
@@ -127,21 +107,22 @@ test("a production-only investigation can close a checkout with a test-only mani
         },
       );
       expect(reviewed).toBe(true);
-      if (!("checks" in result)) throw new Error("Expected package report");
-      expect(result.checks[0]!.uses).toHaveLength(0);
+      const vulnerability = result.vulnerabilities[0]!;
+      expect(vulnerability.findings).toHaveLength(0);
+      const coverage = vulnerability.analyses.find(
+        (a) => a.analyzer === "repository",
+      )!.coverage!;
       if (scope) {
-        const [boundary] = result.checks[0]!.assumptions;
+        const [boundary] = coverage.assumptions;
         expect(boundary).toContain(scope);
         expect(boundary).toContain("source boundary: []");
         expect(boundary).toContain('sink boundary: [{"function":"parse"}]');
         expect(boundary).toContain('broad discovery: ["examples"]');
-        expect(result.checks[0]!.coverage).toMatchObject([
+        expect(coverage.dispositions).toMatchObject([
           { kind: "dismissed", location: "tests" },
         ]);
       } else
-        expect(result.checks[0]!.assumptions).toEqual([
-          defaultDependencyCallerScope,
-        ]);
+        expect(coverage.assumptions).toEqual([defaultDependencyCallerScope]);
     }
   } finally {
     await rm(directory, { recursive: true, force: true });

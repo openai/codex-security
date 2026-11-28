@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { basename } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
   git,
@@ -93,18 +94,114 @@ export function exactClaim(claims, ref) {
   return matches[0];
 }
 
-export function gradeStack(report, fixture, { reviewed }) {
+export function vulnerabilityFor(report, advisoryId, { reviewed = true } = {}) {
+  assert.equal(report.schemaVersion, 3);
+  assert.equal(report.status, "complete");
+  if (report.subject.kind === "advisory")
+    assert.equal(report.subject.id, advisoryId);
+  const matches = report.vulnerabilities.filter(
+    (item) =>
+      item.kind === "advisory" &&
+      (item.id === advisoryId ||
+        item.analyses.some((analysis) =>
+          analysis.audit?.advisoryDetails?.some(
+            (advisory) =>
+              advisory.id === advisoryId ||
+              advisory.aliases?.includes(advisoryId),
+          ),
+        )),
+  );
+  assert.equal(matches.length, 1, "one vulnerability for the fixture advisory");
+  const [vulnerability] = matches;
+  assert.equal(vulnerability.status, "complete");
+  assert.equal(
+    vulnerability.result?.review?.status,
+    reviewed ? "approved" : "not_reviewed",
+    "final result review",
+  );
+  if (reviewed)
+    assert.match(
+      vulnerability.result.review.reason,
+      /\S/u,
+      "final reviewer reason",
+    );
+  assert.match(vulnerability.result.reason, /\S/u, "final result reason");
+  const refs = vulnerability.result.findingRefs;
+  assert(
+    Array.isArray(refs) &&
+      refs.every(
+        (index) =>
+          Number.isSafeInteger(index) &&
+          index >= 0 &&
+          index < vulnerability.findings.length,
+      ) &&
+      new Set(refs).size === refs.length,
+    "valid final finding references",
+  );
+  return vulnerability;
+}
+
+function analysisFor(vulnerability, analyzer) {
+  const matches = vulnerability.analyses.filter(
+    (item) => item.analyzer === analyzer,
+  );
+  assert.equal(matches.length, 1, "one " + analyzer + " analysis");
+  assert.equal(matches[0].status, "complete");
+  assert(
+    vulnerability.analyses.every(
+      (item) => item === matches[0] || item.status === "skipped",
+    ),
+    "unexpected active analyzer",
+  );
+  assert(
+    vulnerability.findings.every((finding) => finding.analyzer === analyzer),
+    analyzer + " findings only",
+  );
+  return matches[0];
+}
+
+export function repositoryReport(response, advisoryId) {
+  const vulnerability = vulnerabilityFor(response, advisoryId);
+  const analysis = analysisFor(vulnerability, "repository");
+  return {
+    claims: analysis.claims,
+    claimEvidence: analysis.evidence,
+    searches: analysis.coverage?.searches,
+    assumptions: analysis.coverage?.assumptions,
+    uses: vulnerability.findings,
+  };
+}
+
+export function assertCheckout(report, repo, sha) {
+  assert.deepEqual(
+    report.target,
+    { repository: basename(repo), sha },
+    "fixture checkout",
+  );
+}
+
+export function gradeStack(response, fixture, { reviewed }) {
   const { variant, target, repo, observation, scope, advisory, files, docs } =
     fixture;
-  assert.equal(
-    report.schemaVersion,
-    "codex-security.pipeline-stacks.report/v1",
-  );
-  assert.equal(report.cve, summaryCve);
+  const vulnerability = vulnerabilityFor(response, summaryCve, { reviewed });
+  const analysis = analysisFor(vulnerability, "stacks");
+  const { items, ...coverage } = analysis.coverage;
+  assert.deepEqual(items, [], "no unobserved stack items in this fixture");
+  const report = {
+    schemaVersion: "codex-security.pipeline-stacks.report/v2",
+    cve: vulnerability.id,
+    target: response.target,
+    ...analysis.audit,
+    coverage,
+    claims: analysis.claims,
+    assessments: vulnerability.findings.map(
+      ({ analyzer: _, ...assessment }) => assessment,
+    ),
+  };
   assert.deepEqual(report.target, target);
   assert(report.runId && report.attemptId && report.toolRevision);
   const material = {
-    format: "codex-security.stack-manifest/v1",
+    format: "codex-security.stack-manifest/v2",
     cve: summaryCve,
     target,
     advisory,
@@ -126,13 +223,12 @@ export function gradeStack(report, fixture, { reviewed }) {
     outstanding: [],
     noMatch: [],
     noCoverage: [],
-    truncated: [],
-    truncationUnknown: [],
+    incompleteSearch: [],
     scopeConflicts: [],
   });
   assert.equal(report.assessments.length, 1);
   const [a] = report.assessments;
-  assert.equal(a.workItemId, "request/service/sample");
+  assert.equal(a.workItemId, "captures/0/stacks/0");
   if (reviewed) {
     assert.equal(
       report.review?.draftDigest,
@@ -147,40 +243,43 @@ export function gradeStack(report, fixture, { reviewed }) {
   } else {
     assert.equal(report.review, null, "offline finalization");
   }
-  assert.deepEqual(a.scope, scope);
-  assert.deepEqual(a.queryScope, scope);
-  assert.equal(a.status, "observed");
-  assert.equal(a.truncated, false);
-  assert.equal(a.observation.stackHash, observation.stackHash);
-  assert.equal(a.observation.sinkIndex, observation.sinkIndex);
-  assert.equal(a.observation.sourceIndex, observation.sourceIndex);
-  assert.deepEqual(a.observation.sinkMatches, [{ sinkId: "sum", rawIndex: 0 }]);
-  assert.deepEqual(a.observation.bindings, observation.bindings ?? []);
-  const indices = a.observation.frames.map((entry) => {
-    assert.deepEqual(
-      entry.frame,
-      observation.frames[entry.rawIndex],
-      "original captured frame",
-    );
-    return entry.rawIndex;
-  });
-  assert(
-    indices.includes(observation.sourceIndex) &&
-      indices.includes(observation.sinkIndex),
-  );
+  const capture = docs.stacks.captures[0];
+  const match = { sinkId: "sum", rawIndex: 0 };
+  const attributed = Boolean(observation.frames[0].package);
   const item = {
     id: a.workItemId,
-    queryId: "request",
-    groupId: "service",
-    scope,
-    queryScope: scope,
-    scopeConflicts: [],
-    origin: docs.stacks.origin,
-    selectors: docs.stacks.queries[0].selectors,
+    captureIndex: 0,
+    stackIndex: 0,
+    origin: capture.origin,
     status: "observed",
-    truncated: false,
-    observation,
+    scopeConflicts: [],
+    sinkMatches: attributed ? [match] : [],
+    leads: attributed ? [] : [match],
+    stack: observation,
   };
+  assert.equal(a.captureIndex, 0);
+  assert.equal(a.stackIndex, 0);
+  assert.equal(a.status, item.status);
+  assert.equal(a.origin, item.origin);
+  assert.deepEqual(a.sinkMatches, item.sinkMatches);
+  assert.deepEqual(a.leads, item.leads);
+  assert.deepEqual(a.stack.labels, scope);
+  assert.equal(a.stack.observedAt, observation.observedAt);
+  const indices = a.stack.frames.map(({ rawIndex, frame }) => {
+    assert.deepEqual(
+      frame,
+      observation.frames[rawIndex],
+      "original captured frame",
+    );
+    return rawIndex;
+  });
+  const caller = observation.frames.findIndex(
+    (frame) => frame.name === "parseBatch" && frame.location === "server.cjs",
+  );
+  assert(
+    caller > 0 && indices.includes(caller) && indices.includes(0),
+    "caller and sink frame citations",
+  );
   const validate = sourceReader(repo, target.sha);
   const pending = [...a.supportingClaims];
   const selected = new Set();
@@ -196,13 +295,13 @@ export function gradeStack(report, fixture, { reviewed }) {
       assert.equal(receipt.server, "stack-packet");
       assert.equal(receipt.originalPayloadSha256, files.stacks.sha256);
       const { tool, ...origin } = receipt.origin;
-      assert.ok(["next", "read-stacks"].includes(tool), "capture operation");
+      assert.equal(tool, "next", "capture operation");
       assert.deepEqual(origin, {
         arguments: {
           inputDigest: report.inputDigest,
           workItemId: item.id,
-          queryId: "request",
-          groupId: "service",
+          captureIndex: 0,
+          stackIndex: 0,
         },
       });
       let expected = item;
@@ -219,25 +318,29 @@ export function gradeStack(report, fixture, { reviewed }) {
   }
   assert.equal(selected.size, report.claims.length, "exact claim closure");
   assert.equal(a.verdict, report.verdict);
+  assert.equal(vulnerability.result.verdict, report.verdict);
   const expected = {
     positive: ["exploitable"],
     fixed: ["ruled_out"],
     unbound: ["unknown", "potentially_exploitable"],
-    "missing-version": ["unknown", "potentially_exploitable"],
+    "missing-version": ["unknown"],
   };
   assert(
     expected[variant].includes(report.verdict),
     "scoped verdict for " + variant,
   );
   if (variant === "fixed" || variant === "positive") {
-    assert(
-      receipts.some(
-        (r) =>
-          JSON.stringify(r.selection?.record) ===
-          JSON.stringify(["observation", "bindings", 0]),
-      ),
-      "cited running package/build binding",
+    const paths = new Set(
+      receipts.map((r) => JSON.stringify(r.selection?.record)),
     );
+    const frame = ["stack", "frames", 0];
+    const cites = (...parts) => paths.has(JSON.stringify([...frame, ...parts]));
+    assert(cites() || cites("package"), "cited running frame package");
+    if (variant === "positive")
+      assert(
+        cites() || cites("sourceRevision"),
+        "cited source revision for the captured copy",
+      );
   }
   if (variant === "positive") {
     const control = exactClaim(report.claims, a.attackerControlClaim);
@@ -698,26 +801,14 @@ export function gradeMixed(
   packageCheck = false,
   evidenceSource,
 ) {
-  let report = response;
   if (packageCheck) {
-    assert.equal(response.package.name, "linkify-it");
-    const checks = response.checks.filter(
-      (c) =>
-        c.advisoryId === reviewedCve ||
-        c.advisoryDetails?.some(
-          (a) => a.id === reviewedCve || a.aliases?.includes(reviewedCve),
-        ),
-    );
-    assert.equal(
-      checks.length,
-      1,
-      "one package check for the fixture advisory",
-    );
-    [report] = checks;
+    assert.equal(response.subject.kind, "package");
+    assert.equal(response.subject.name, "linkify-it");
   } else {
-    assert.equal(report.cve, reviewedCve);
+    assert.equal(response.subject.kind, "advisory");
   }
-  assert.equal(report.schemaVersion, 2);
+  assertCheckout(response, fixture.repo, fixture.sha);
+  const report = repositoryReport(response, reviewedCve);
   const validate = sourceReader(fixture.repo, fixture.sha);
   assert.equal(report.uses.length, 2, "both services assessed separately");
   const outcomes = [];

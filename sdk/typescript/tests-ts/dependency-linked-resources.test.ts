@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
 import { hash } from "node:crypto";
-import { dependencyRecordHash } from "../src/dependency-attempt-store.js";
-import type { DependencyEvidenceRecord } from "../src/dependency-evidence-sources.js";
+import { dependencyRecordHash } from "../src/exploitability/attempt-store.js";
+import type { DependencyEvidenceRecord } from "../src/exploitability/evidence-sources.js";
 import {
   createDependencyLinkedResourceCapture,
   type LinkedDependencyEvidence,
-} from "../src/dependency-linked-resources.js";
+} from "../src/exploitability/linked-resources.js";
 
 const primary = "sample://capture/first",
   next = "sample://capture/second";
@@ -149,9 +149,7 @@ test("ignores unselected or denied tools, failed receipts, text links and cursor
   await follow(origin([link(primary)]), read);
   expect(calls).toEqual([primary]);
   expect(records).toHaveLength(1);
-  expect(diagnostics).toEqual([
-    "A linked MCP resource advertised more results without a resource link. Coverage is incomplete.",
-  ]);
+  expect(diagnostics).toEqual([]);
 });
 
 test("refuses substituted resources, malformed blobs and invalid digests without publishing their contents", async () => {

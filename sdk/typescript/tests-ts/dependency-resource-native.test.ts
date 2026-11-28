@@ -5,8 +5,8 @@ import { resolveCodexCommand } from "../src/runtime.js";
 import {
   createDependencyEvidenceCapture,
   type DependencyEvidenceRecord,
-} from "../src/dependency-evidence-sources.js";
-import { createDependencyLinkedResourceCapture } from "../src/dependency-linked-resources.js";
+} from "../src/exploitability/evidence-sources.js";
+import { createDependencyLinkedResourceCapture } from "../src/exploitability/linked-resources.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
 // Serve both APIs on loopback. The scripted model calls a real native MCP tool;
