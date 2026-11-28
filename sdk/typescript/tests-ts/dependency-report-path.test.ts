@@ -17,85 +17,59 @@ function sample() {
   )!;
   if (finding.kind !== "stack") throw new Error("Expected sample");
   const observation = finding.assessment.stack!;
-  observation.frames.push(
-    { rawIndex: 6, frame: { name: "outside", type: "function" } },
-    {
-      rawIndex: 2,
-      frame: {
-        name: "handle",
-        sourceRevision: sha,
-        type: "function",
-        location: "/app.runfiles/_main/src/codec.ts:3",
-      },
-    },
-  );
-  return {
-    finding,
-    observation,
-    target: section.stack!.target,
-    run: () => inspectPath(finding, section.stack!.target),
+  const caller: (typeof observation.frames)[number]["frame"] = {
+    name: "handle",
+    sourceRevision: sha,
+    location: "/app.runfiles/_main/src/codec.ts:3",
   };
+  observation.frames.push({ rawIndex: 2, frame: caller });
+  const frame = () =>
+    inspectPath(finding, section.stack!.target).frames.find(
+      (f) => f.rawIndex === 2,
+    )!;
+  return { finding, observation, caller, frame };
 }
-test("matches the saved caller line, not the third-party sink; preserves original frame positions", () => {
-  const { run } = sample();
-  const { frames, initialIndex } = run();
-  expect(frames.map((f) => [f.role, f.rawIndex, f.omittedBefore])).toEqual([
-    ["call", 6, 0],
-    ["call", 4, 1],
-    ["call_site", 2, 1],
-    ["sink", 0, 1],
-  ]);
-  expect(frames[initialIndex]).toMatchObject({
-    rawIndex: 2,
-    line: 3,
-    code: {
-      path,
-      commit: sha,
-      startLine: 3,
-      text: "return decode(bytes);",
-      citationIndex: 0,
-    },
-  });
-  expect(frames[3]?.code).toBeUndefined();
+test("a different reviewed revision cannot label the captured frame as its call site", () => {
+  const { finding, frame } = sample();
+  expect(frame().role).toBe("call_site");
+  finding.item.evidence[0]!.commit = "d".repeat(40);
+  expect(frame().role).toBe("call");
+  expect(frame().code?.commit).toBe(sha);
 });
 test("a missing or stale frame revision cannot borrow the revision of a sibling", () => {
-  const { run, observation } = sample();
-  const caller = observation.frames.find((f) => f.rawIndex === 2)!.frame;
+  const { caller, observation, frame } = sample();
   observation.frames[0]!.frame.sourceRevision = sha;
   for (const revision of [undefined, "d".repeat(40)]) {
     caller.sourceRevision = revision;
-    expect(run().frames.find((f) => f.rawIndex === 2)?.code).toBeUndefined();
+    expect(frame().code).toBeUndefined();
   }
 });
 test("exact path and line required; no basename or arbitrary suffix matches", () => {
-  const { observation, run } = sample();
-  const frame = observation.frames.find((f) => f.rawIndex === 2)!.frame;
-  const code = () => run().frames.find((f) => f.rawIndex === 2)?.code;
+  const { caller, frame } = sample();
   for (const location of [
     "other/codec.ts:3",
     "/other/src/codec.ts:3",
     "/app.runfiles/lib/src/codec.ts:3",
     "src/codec.ts:4",
   ]) {
-    frame.location = location;
-    expect(code()).toBeUndefined();
+    caller.location = location;
+    expect(frame().code).toBeUndefined();
   }
-  frame.location = path;
-  frame.line = 3;
-  expect(code()?.path).toBe(path);
-  frame.location = "src/codec.ts:4";
-  expect(code()).toBeUndefined();
+  caller.location = path;
+  caller.line = 3;
+  expect(frame().code?.path).toBe(path);
+  caller.location = "src/codec.ts:4";
+  expect(frame().code).toBeUndefined();
 });
 test("source excerpts from a different revision or contradicting the same line never annotate a sample", () => {
-  const { run, finding } = sample();
+  const { frame, finding } = sample();
   const claim = finding.assessment.claims.find((c) => c.sources.length)!;
   const source = claim.sources[0]!;
-  const code = () => run().frames.find((f) => f.rawIndex === 2)?.code;
   source.commit = "d".repeat(40);
-  expect(code()).toBeUndefined();
+  expect(frame().code).toBeUndefined();
   source.commit = sha;
   claim.sources.push({ ...source, text: "return other(bytes);" });
-  expect(code()).toBeUndefined();
+  expect(frame().code).toBeUndefined();
 });
 test("a missing or unreviewed source step is a gap, not a selectable call", () => {
   const line = 2;

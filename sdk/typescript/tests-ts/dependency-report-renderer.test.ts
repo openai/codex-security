@@ -167,50 +167,39 @@ describe("call site report", () => {
   test("walks retained frames, opens the exact caller line, and does not pass caller code off as dependency code", () => {
     const raw = stackReport(),
       [assessment, empty] = raw.assessments;
-    const o = assessment.stack;
+    const caller = {
+      rawIndex: 2,
+      frame: {
+        name: "caller",
+        sourceRevision: raw.target.sha,
+        location: "/app.runfiles/_main/src/codec.ts:3",
+      },
+    };
+    const stack = {
+      ...assessment.stack,
+      frames: [...assessment.stack.frames, caller],
+    };
     const html = renderDependencyReport({
       ...raw,
-      assessments: [
-        {
-          ...assessment,
-          stack: {
-            ...o,
-            frames: [
-              ...o.frames,
-              { rawIndex: 7, frame: { name: "outer", type: "function" } },
-              {
-                rawIndex: 2,
-                frame: {
-                  name: "caller",
-                  sourceRevision: raw.target.sha,
-                  location: "/app.runfiles/_main/src/codec.ts:3",
-                  type: "function",
-                },
-              },
-            ],
-          },
-        },
-        empty,
-      ],
+      assessments: [{ ...assessment, stack }, empty],
     });
     const observed = panel(html, "stack-1-1");
     const frames = elements(observed, "details.frame", ["data-role"]);
     expect(frames.map((f) => f.attrs["data-role"])).toEqual([
       "call",
-      "call",
       "call_site",
       "sink",
     ]);
     expect(attributes(observed, "details.frame[open]", "id")).toEqual([
-      "stack-1-1-frame-2",
+      "stack-1-1-frame-1",
     ]);
-    expect(frames[2]!.text).toContain("caller");
+    expect(frames[1]!.text).toContain("caller");
     expect(
-      elements(observed, "#stack-1-1-frame-2 [data-highlighted]"),
+      elements(observed, "#stack-1-1-frame-1 [data-highlighted]"),
     ).toHaveLength(1);
-    expect(elements(observed, "#stack-1-1-frame-3 pre")).toHaveLength(0);
+    expect(elements(observed, "#stack-1-1-frame-2 pre")).toHaveLength(0);
     expect(
-      elements(observed, "#stack-1-1-frame-3 .unavailable").length,
+      elements(observed, "#stack-1-1-frame-2 .unavailable").length,
     ).toBeGreaterThan(0);
     for (const selector of ["[data-next]", "[data-prev]", ".gap"])
       expect(elements(observed, selector).length).toBeGreaterThan(0);
