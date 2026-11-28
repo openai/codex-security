@@ -1480,6 +1480,7 @@ type SkillThreadSource = Extract<
 >;
 
 interface SkillCommandOutput {
+  readonly failureOutput?: Writable;
   readonly signal?: AbortSignal;
   readonly responseSchema?: ValidateFunction;
   readonly directory?: string;
@@ -1523,6 +1524,7 @@ const SANDBOX_UNAVAILABLE_MESSAGE =
   "The patch sandbox could not start. Check the runner's sandbox permissions and retry. No patch was applied; 0 files changed.";
 
 interface SkillRunOptions {
+  readonly failureOutput?: Writable;
   readonly signal?: AbortSignal;
   context?: string;
   contextFile?: string;
@@ -1970,6 +1972,7 @@ async function runCodexSkillProcess(
     let apiKey: string | undefined;
     let authentication: ScanAuthentication | null = null;
     let modelProvider: string | undefined;
+    let checkPatchAccount = false;
     // runSkill selects auth; other process callers supply their own environment.
     if (output?.auth !== undefined) {
       const ambientConfig =
@@ -2005,7 +2008,9 @@ async function runCodexSkillProcess(
         );
         const protectedRoots = [
           directory,
-          ...(await enclosingGitWorktreeRoots(directory, output.signal)),
+          ...(await enclosingGitWorktreeRoots(directory, output.signal, {
+            protectEmptyAncestorMarkers: output.command === "patch",
+          })),
         ];
         const codexHome = await prepareCodexSecurityCredentialHome(
           selected,
@@ -2072,6 +2077,9 @@ async function runCodexSkillProcess(
           output.auth,
           provider,
         );
+        checkPatchAccount =
+          output.appServer?.threadSource ===
+          CODEX_SECURITY_THREAD_SOURCES.remediation;
         if (output.appServer !== undefined) {
           const controller = new AbortController();
           const signal = output.signal ?? controller.signal;
@@ -2320,6 +2328,7 @@ async function runCodexSkillProcess(
                   : {
                       ...output.appServer,
                       apiKey,
+                      checkPatchAccount,
                       modelProvider,
                       onThreadStarted: releaseCredentialHome,
                       recovery,
@@ -2379,29 +2388,41 @@ async function runCodexSkillProcess(
         }
         if (output === undefined || status === 130 || status === 143)
           return status;
+        const fail = async (code: number, message: string): Promise<number> => {
+          if (output.failureOutput)
+            await writeCliOutput(output.failureOutput, message);
+          else
+            await writeCliOutput(
+              output.stderr,
+              `codex-security: ${diagnosticLines(message)}\n`,
+            );
+          return code;
+        };
         if (status !== 0) {
+          const account = events?.accountDiagnostic;
+          const detail = (events?.error ?? diagnostic) || account || "";
           const failure = skillCommandFailure(
             output.command,
             status,
-            events?.error ?? diagnostic,
+            detail,
             authentication,
           );
-          await writeCliOutput(
-            output.stderr,
-            `codex-security: ${diagnosticLines(failure)}\n`,
+          return await fail(
+            status,
+            account && !detail.includes(account)
+              ? `${failure}\n${account}`
+              : failure,
           );
-          return status;
         }
         if (
           (output.appServer !== undefined && events?.completed !== true) ||
           events?.message === undefined ||
           events.message.trim().length === 0
         ) {
-          await writeCliOutput(
-            output.stderr,
-            `codex-security: Codex did not return a completed ${output.command} response.\n`,
+          return await fail(
+            2,
+            `Codex did not return a completed ${output.command} response.`,
           );
-          return 2;
         }
         let message = events.message.trimEnd();
         if (output.responseSchema !== undefined) {
@@ -7907,6 +7928,7 @@ export async function main(
             );
           }
           const report = captureOutput();
+          const workerFailure = captureOutput();
           exitCode = await runSkill(
             "fix-finding",
             [...positionals, ...imports],
@@ -7915,6 +7937,7 @@ export async function main(
             errorOutput,
             dependencies,
             {
+              failureOutput: workerFailure.stream,
               environment,
               auth: options.auth,
               externalSandbox: options.externalSandbox,
@@ -7937,7 +7960,8 @@ export async function main(
           if (exitCode !== 0) {
             throw new PatchCommandError(
               "PATCH_FAILED",
-              `Patch command exited with status ${exitCode}.`,
+              workerFailure.text() ||
+                `Patch command exited with status ${exitCode}.`,
             );
           }
           if (files.length === 0) {
@@ -10739,7 +10763,9 @@ async function resolvePatchValidationPrompt(
   if (file === undefined) return undefined;
   const roots = new Set([repository, directory]);
   for (const root of [...roots]) {
-    for (const enclosing of await enclosingGitWorktreeRoots(root)) {
+    for (const enclosing of await enclosingGitWorktreeRoots(root, undefined, {
+      protectEmptyAncestorMarkers: true,
+    })) {
       roots.add(enclosing);
     }
   }
@@ -10790,6 +10816,7 @@ async function runFindingPatches(
         void writeCliOutput(stderr, chunk).then(() => callback(), callback);
       },
     });
+    const workerFailure = captureOutput();
     let status: number;
     let changed: boolean;
     let observedTree: string | undefined;
@@ -10805,6 +10832,7 @@ async function runFindingPatches(
         dependencies,
         {
           ...options,
+          failureOutput: workerFailure.stream,
           directory: selected.repository,
           findings: [finding],
           findingInstructions: instruction?.trim()
@@ -10839,7 +10867,9 @@ async function runFindingPatches(
     });
     let patch: FindingPatch;
     if (status !== 0) {
-      patch = failed(`Patch command exited with status ${status}.`);
+      patch = failed(
+        workerFailure.text() || `Patch command exited with status ${status}.`,
+      );
     } else {
       try {
         const reported = JSON.parse(response.text()) as { patches?: unknown };
@@ -11663,6 +11693,7 @@ async function runSkill(
             ]),
       ],
       {
+        failureOutput: options.failureOutput,
         command: verify ? "verify-fix" : patch || assess ? "patch" : "validate",
         ...(assess ? { telemetryCommand: "assess-patch-risk" as const } : {}),
         signal: options.signal,
@@ -11703,6 +11734,7 @@ export async function readSkillCommandOutput(
   stream: AsyncIterable<Buffer | string>,
   appServer?: {
     readonly apiKey?: string;
+    readonly checkPatchAccount?: boolean;
     readonly modelProvider?: string;
     readonly onThreadStarted?: () => Promise<void>;
     readonly directory?: string;
@@ -11725,6 +11757,7 @@ export async function readSkillCommandOutput(
   error?: string;
   completed?: boolean;
   sandboxUnavailable?: boolean;
+  accountDiagnostic?: string;
 }> {
   let message: string | undefined;
   let error: string | undefined;
@@ -11732,6 +11765,7 @@ export async function readSkillCommandOutput(
   let turnId: string | undefined;
   let completed = false;
   let sandboxUnavailable = false;
+  let accountDiagnostic: string | undefined;
   let config: JsonObject = {};
   let model: string;
   let provider: string;
@@ -11926,16 +11960,13 @@ export async function readSkillCommandOutput(
         } catch {}
       }
       if (value["id"] !== undefined) {
+        const readingAccount = value["id"] === "patch-account";
+        const rpcError = value["error"] as { message: string } | undefined;
         if (value["id"] === daybreakRequest?.id) {
           const pending = daybreakRequest;
           daybreakRequest = undefined;
-          if (value["error"] !== undefined) {
-            pending.reject(
-              new Error((value["error"] as { message: string }).message),
-            );
-          } else {
-            pending.resolve(value["result"] as JsonObject);
-          }
+          if (rpcError) pending.reject(new Error(rpcError.message));
+          else pending.resolve(value["result"] as JsonObject);
           continue;
         }
         if (typeof value["method"] === "string") {
@@ -11943,13 +11974,42 @@ export async function readSkillCommandOutput(
             id: value["id"] as string | number,
             error: { code: -32601, message: "Unsupported client request" },
           });
-        } else if (value["error"] !== undefined) {
-          error = (value["error"] as { message: string }).message;
+        } else if (
+          rpcError &&
+          (!readingAccount || isStoredSignInFailure(rpcError.message))
+        ) {
+          error = rpcError.message;
           sandboxUnavailable = value["id"] === 5;
           appServer.input.end();
-        } else if (value["id"] === 1 || value["id"] === "login") {
+        } else if (
+          value["id"] === 1 ||
+          value["id"] === "login" ||
+          readingAccount
+        ) {
+          if (readingAccount) {
+            const account = value["result"];
+            if (
+              isJsonObject(account) &&
+              account["requiresOpenaiAuth"] === true &&
+              account["account"] === null
+            ) {
+              error = `Codex could not use the stored sign-in. ${PATCH_SIGN_IN_RECOVERY}`;
+              appServer.input.end();
+              continue;
+            }
+            // Routing can fail independently of the worker's selected provider.
+            accountDiagnostic = rpcError?.message;
+          }
           if (value["id"] === 1) {
             send({ method: "initialized" });
+            if (appServer.checkPatchAccount) {
+              send({
+                id: "patch-account",
+                method: "account/read",
+                params: { refreshToken: false },
+              });
+              continue;
+            }
             if (appServer.apiKey !== undefined) {
               send({
                 id: "login",
@@ -12201,7 +12261,21 @@ export async function readSkillCommandOutput(
     ...(error === undefined ? {} : { error }),
     ...(appServer === undefined ? {} : { completed }),
     ...(sandboxUnavailable ? { sandboxUnavailable } : {}),
+    ...(accountDiagnostic === undefined ? {} : { accountDiagnostic }),
   };
+}
+
+const PATCH_SIGN_IN_RECOVERY =
+  "Run codex-security login, then retry the same patch command from the selected checkout.";
+const NATIVE_REFRESH_RECOVERY =
+  /\b(?:your access token could not be refreshed because you have since logged out or signed in to another account\. Please sign in again\.|your authentication session could not be refreshed automatically\. Please log out and sign in again\.)/iu;
+const NATIVE_REFRESH_FAILURE =
+  /\byour access token could not be refreshed(?: because your refresh token (has expired|was already used|was revoked))?\. Please log out and sign in again\./iu;
+
+function isStoredSignInFailure(detail: string): boolean {
+  return (
+    NATIVE_REFRESH_RECOVERY.test(detail) || NATIVE_REFRESH_FAILURE.test(detail)
+  );
 }
 
 export function skillCommandFailure(
@@ -12233,6 +12307,12 @@ export function skillCommandFailure(
   const classification = classifyConnectionFailure(classificationDetail);
   let advice: string | undefined;
   if (
+    command === "patch" &&
+    authentication?.method === "stored_credentials" &&
+    isStoredSignInFailure(diagnosticDetail)
+  ) {
+    advice = PATCH_SIGN_IN_RECOVERY;
+  } else if (
     classification === "unauthorized" ||
     /\bauthorizationrequired\b/iu.test(classificationDetail)
   ) {
@@ -13919,17 +13999,13 @@ function scanFailureMessage(
     }
   }
   const message = errorMessage(error);
-  const nativeRefreshRecovery = message.match(
-    /\b(?:your access token could not be refreshed because you have since logged out or signed in to another account\. Please sign in again\.|your authentication session could not be refreshed automatically\. Please log out and sign in again\.)/iu,
-  )?.[0];
+  const nativeRefreshRecovery = message.match(NATIVE_REFRESH_RECOVERY)?.[0];
   if (nativeRefreshRecovery !== undefined)
     return error instanceof IncompleteScanError
       ? diagnosticValue(error)
       : nativeRefreshRecovery;
   const detail = `${diagnosticValue(error)}\n`;
-  const refreshFailure = message.match(
-    /\byour access token could not be refreshed(?: because your refresh token (has expired|was already used|was revoked))?\. Please log out and sign in again\./iu,
-  );
+  const refreshFailure = message.match(NATIVE_REFRESH_FAILURE);
   if (refreshFailure) {
     const recovery =
       refreshFailure[1]?.toLowerCase() === "was already used"

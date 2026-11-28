@@ -81,6 +81,22 @@ async function repositoryFixture({
 }
 
 describe("patch outcomes", () => {
+  test("returns the worker diagnostic and changed files after a failed patch", async () => {
+    await using fixture = await repositoryFixture();
+    const detail = "Sign in again and retry the selected patch.";
+    const { result } = await fixture.patch(["text:Example issue."], {
+      onCodex: async (_args, output) => {
+        await writeFile(
+          join(fixture.directory, "app.ts"),
+          "partially changed\n",
+        );
+        output?.failureOutput?.write(detail);
+        return 1;
+      },
+    });
+    expect(result.error.message).toBe(detail);
+    expect(result.files).toContain("app.ts");
+  });
   test("uses the external sandbox only after explicit opt-in and prints a warning", async () => {
     await using fixture = await repositoryFixture();
     const source = `
