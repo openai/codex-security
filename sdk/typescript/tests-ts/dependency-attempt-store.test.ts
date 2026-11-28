@@ -7,7 +7,7 @@ import {
   DependencyAttemptStore,
   dependencyRecordHash,
   type StoredClaim,
-} from "../src/dependency/attempt-store.js";
+} from "../src/exploitability/attempt-store.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
 test("an attempt reopens with its original evidence and atomically replays a write", async () => {
@@ -115,7 +115,7 @@ test("two processes replacing the same claim revision leave one winner and prese
       store.recordClaim("version", { version: "different" }),
     ).toThrow(/expected revision/);
     const module = new URL(
-      "../src/dependency/attempt-store.ts",
+      "../src/exploitability/attempt-store.ts",
       import.meta.url,
     ).href;
     const contender = `

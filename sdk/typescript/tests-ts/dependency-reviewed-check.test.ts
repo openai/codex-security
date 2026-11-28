@@ -6,20 +6,20 @@ import { scopedTemporaryDirectory } from "./support/temporary-directories";
 import {
   DependencyAttemptStore,
   dependencyRecordHash,
-} from "../src/dependency/attempt-store";
+} from "../src/exploitability/attempt-store";
 import {
   createPremiseQueue,
   currentApproval,
   premiseKey,
   type PremiseRef,
-} from "../src/dependency/analyzers/repository/review-queue";
-import { evidencePreviews } from "../src/dependency/investigation-session";
-import { affectedByFrozenVersion } from "../src/dependency/advisory";
-import { dependencyCheckOutputSchema } from "../src/dependency/reachability";
+} from "../src/exploitability/analyzers/repository/review-queue";
+import { evidencePreviews } from "../src/exploitability/investigation-session";
+import { affectedByFrozenVersion } from "../src/exploitability/advisory";
+import { dependencyCheckOutputSchema } from "../src/exploitability/reachability";
 import {
   createDependencyVerdictProgress,
   withDependencyCheckOutput,
-} from "../src/dependency/check-output";
+} from "../src/exploitability/check-output";
 import {
   approveDependencyClaims,
   reviewScopes,
@@ -28,21 +28,21 @@ import {
   verifyProposedUse,
   type Claim,
   type Proposal,
-} from "../src/dependency/analyzers/repository/claims";
+} from "../src/exploitability/analyzers/repository/claims";
 import {
   DependencyInvestigationBlockedError,
   runReviewedDependencyCheck,
   type ReviewedCheckOptions,
-} from "../src/dependency/analyzers/repository/check";
+} from "../src/exploitability/analyzers/repository/check";
 import {
   createDependencyEvidenceCapture,
   investigationServer,
   type DependencyEvidenceRecord,
-} from "../src/dependency/evidence-sources";
+} from "../src/exploitability/evidence-sources";
 import {
   discoverDependencyRepository,
   type RepositoryDiscovery,
-} from "../src/dependency/analyzers/repository/discovery";
+} from "../src/exploitability/analyzers/repository/discovery";
 
 function agentInput(prompt: string) {
   return JSON.parse(prompt.split("\n\n").at(-1)!);

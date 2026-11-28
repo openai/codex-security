@@ -1,16 +1,16 @@
 import { expect, test } from "bun:test";
 import { PassThrough, Writable } from "node:stream";
-import { dependencyResourcePermissionsMatch } from "../src/dependency/resource-session.js";
+import { dependencyResourcePermissionsMatch } from "../src/exploitability/resource-session.js";
 import { readSkillCommandOutput } from "../src/cli.js";
 import {
   createDependencyEvidenceCapture,
   type DependencyEvidenceRecord,
-} from "../src/dependency/evidence-sources.js";
-import { createDependencyLinkedResourceCapture } from "../src/dependency/linked-resources.js";
+} from "../src/exploitability/evidence-sources.js";
+import { createDependencyLinkedResourceCapture } from "../src/exploitability/linked-resources.js";
 import {
   evidencePreviews,
   evidencePage,
-} from "../src/dependency/investigation-session.js";
+} from "../src/exploitability/investigation-session.js";
 
 test("the selected coordinator's child retrieves linked evidence on its own native thread before exit", async () => {
   const profile = {

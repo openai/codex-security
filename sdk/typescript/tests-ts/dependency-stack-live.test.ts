@@ -1,7 +1,7 @@
 import { expect, test } from "bun:test";
 import { join } from "node:path";
 import { mkdir } from "node:fs/promises";
-import { DependencyAttemptStore } from "../src/dependency/attempt-store.js";
+import { DependencyAttemptStore } from "../src/exploitability/attempt-store.js";
 import {
   getLiveRun,
   initializeLive,
@@ -10,13 +10,13 @@ import {
   overlayPacket,
   recordObservations,
   supplementalReceipt,
-} from "../src/dependency/analyzers/stacks/live.js";
-import { stackPacketWorkItems } from "../src/dependency/analyzers/stacks/packet.js";
+} from "../src/exploitability/analyzers/stacks/live.js";
+import { stackPacketWorkItems } from "../src/exploitability/analyzers/stacks/packet.js";
 import {
   prepareRuntimeEvidence,
   readRuntimeStackQueries,
   saveRuntimeEvidence,
-} from "../src/dependency/analyzers/stacks/runtime-receipts.js";
+} from "../src/exploitability/analyzers/stacks/runtime-receipts.js";
 import { git } from "./git-fixture.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 

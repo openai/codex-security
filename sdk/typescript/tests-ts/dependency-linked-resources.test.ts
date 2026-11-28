@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
 import { hash } from "node:crypto";
-import { dependencyRecordHash } from "../src/dependency/attempt-store.js";
-import type { DependencyEvidenceRecord } from "../src/dependency/evidence-sources.js";
+import { dependencyRecordHash } from "../src/exploitability/attempt-store.js";
+import type { DependencyEvidenceRecord } from "../src/exploitability/evidence-sources.js";
 import {
   createDependencyLinkedResourceCapture,
   type LinkedDependencyEvidence,
-} from "../src/dependency/linked-resources.js";
+} from "../src/exploitability/linked-resources.js";
 
 const primary = "sample://capture/first",
   next = "sample://capture/second";
