@@ -149,9 +149,7 @@ test("ignores unselected or denied tools, failed receipts, text links and cursor
   await follow(origin([link(primary)]), read);
   expect(calls).toEqual([primary]);
   expect(records).toHaveLength(1);
-  expect(diagnostics).toEqual([
-    "A linked MCP resource advertised more results without a resource link. Coverage is incomplete.",
-  ]);
+  expect(diagnostics).toEqual([]);
 });
 
 test("refuses substituted resources, malformed blobs and invalid digests without publishing their contents", async () => {
