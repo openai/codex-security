@@ -7,7 +7,7 @@ This suite runs the installed dependency exploitability CLI against two small Gi
 | `positive`        | An anonymous client sends a valid empty batch to a loopback summary service. The loaded sample-summary 0.2.0 library throws, terminating the disposable process. A separate health client can no longer connect. The packet ties the version and source commit to that process. Expect `exploitable` for a caller in the service's network namespace. |
 | `fixed`           | The same application running sample-summary 0.2.1 sums an empty batch to zero and stays healthy. Expect `ruled_out` with a citation to the running version.                                                                                                                                                                                           |
 | `unbound`         | Omit only the running source commit from the positive capture. Leave the affected version, original frames and source checkout intact. The report must identify the missing build-to-source link and leave the outcome `unknown` or `potentially_exploitable`.                                                                                        |
-| `missing-version` | Omit the runtime binding entirely. A conclusive verdict fails the grade. The report must name the missing dependency version or copy.                                                                                                                                                                                                                 |
+| `missing-version` | Omit package attribution and the source revision on the library frame. The name alone is a lead. Expect `unknown` and an explanation of which copy or version is missing.                                                                                                                                                                             |
 | `mixed-services`  | Run a repository CVE check for linkify-it. The configured notes service installs 5.0.0 and exposes its parser to request input. The reviews service installs fixed 5.0.2. Expect `potentially_exploitable` and `ruled_out` respectively, with citations specific to each build.                                                                       |
 | `mixed-package`   | Run `check npm:linkify-it` against a fresh copy of the same project. Find the advisory inside the package report and grade both service decisions independently.                                                                                                                                                                                      |
 
@@ -21,7 +21,7 @@ The mixed-services project uses the published linkify-it CVE-2026-48801, npm dis
 
 ## Run
 
-Use Node.js 22.13 or later, Git and a built CLI with the `@openai/codex-security/stack-packet` export. Point `CLI` to the JavaScript entry point of the installed package to test packed resources. For a local build use `sdk/typescript/bin/codex-security.mjs`. The runner sets `CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1` on its CLI processes. Live cases use OSV and the CLI's normal model credentials. Repository cases also use OpenGrep.
+Use Node.js 22.13 or later, Git and a built CLI. The offline harness reads the CLI’s internal packet helper from that build. Point `CLI` to the JavaScript entry point of the installed package to test packed resources. For a local build use `sdk/typescript/bin/codex-security.mjs`. The runner sets `CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1` on its CLI processes. Live cases use OSV and the CLI's normal model credentials. Repository cases also use OpenGrep.
 
 From the repository root, capture the ground truth and run the offline host contracts. Every `--out` path must be new. Omitting it creates a temporary output directory.
 
@@ -34,9 +34,9 @@ node "$runner" contracts --cli "$CLI" --packets "$outputs/observed/packets" --ou
 node --test evals/dependency-reachability/test-eval.mjs
 ```
 
-The offline contract drives the public `run` commands from a scripted caller and checks a finalized fixed-version report against the original binding. It also alters the returned evidence and checks that the grader detects it. This measures the host and grader. The live run measures the model's investigation.
+The offline contract drives the public `run` commands from a scripted caller and checks a finalized fixed-version report against the package attributed to the observed library frame. It also alters the returned evidence and checks that the grader detects it. This measures the host and grader. The live run measures the model's investigation.
 
-Run all cases through actual CLI sessions or select one with `--case positive`. Set `--model MODEL` to use the same model across builds. Supplying `--packets` reuses the original input bytes, frame order and timestamps. Each investigator still gets its own clean checkout. Without that option the suite takes new measurements.
+Run all cases through actual CLI sessions or select one with `--case positive`. Set `--model MODEL` to use the same model across builds. Supplying `--packets` reuses the original input bytes, frame order and timestamps. For the v2 stack format, run `behavior` again if your saved inputs use v1. Each investigator still gets its own clean checkout. Without that option the suite takes new measurements.
 
 ```sh
 node "$runner" live --cli "$CLI" --packets "$outputs/observed/packets" --out "$outputs/live"
@@ -61,7 +61,7 @@ The optional suites materialize 23 source snapshots and run ordinary reviewed CV
 
 The SHA-256 manifest pins five GitHub archives by full revision, ten selected upstream files and two published npm archives. Snapshot preparation also checks the MIME packages' lockfile SHA-512 integrity and individual file hashes. Upstream source is staged as inert evidence. The checkout's dependency installation scripts and application code are never executed by the snapshot builder. The published wheel manifests describe the exact wheel artifacts in those cases. Rollout records and application overlays are synthetic.
 
-Fetch the sources once into a local cache (about 226 MiB). This optional step uses Python 3.12 or later with HTTPS access to GitHub and npm. Snapshot assembly and verification then work offline. Live runs use the selected CLI's OSV access, OpenGrep and model credentials.
+Fetch the sources once into a local cache (about 226 MiB). This optional step uses Python 3.12 or later with HTTPS access to GitHub and npm. Snapshot assembly and verification then work offline. Live runs use the selected CLI's OSV access and model credentials. Put OpenGrep on `PATH` and use a private temporary directory visible inside the Codex sandbox. On Linux, avoid setting `TMPDIR` under `/dev/shm`. Preparation can succeed there even when the investigator cannot see the checkout.
 
 ```sh
 cache=$(mktemp -d)

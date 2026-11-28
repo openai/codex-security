@@ -8,9 +8,8 @@ import {
   rm,
   writeFile,
 } from "node:fs/promises";
-import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { invokeCli, writeCliLogs } from "./cli.mjs";
@@ -97,10 +96,16 @@ async function runJson(repo, args, input) {
   return JSON.parse(result.stdout.toString("utf8"));
 }
 async function initialize(fixture) {
-  const sdkEntry = createRequire(pathToFileURL(cli)).resolve(
-    "@openai/codex-security/stack-packet",
+  const { prepareStackPacket } = await import(
+    pathToFileURL(
+      join(
+        dirname(cli),
+        "..",
+        "dist",
+        "exploitability/analyzers/stacks/packet.js",
+      ),
+    ).href
   );
-  const { prepareStackPacket } = await import(pathToFileURL(sdkEntry).href);
   const attempt = await mkdtemp(join(scratch, "attempt-"));
   const inputs = join(attempt, "inputs"),
     state = join(attempt, "state.sqlite");
@@ -141,23 +146,19 @@ async function initialize(fixture) {
 // This scripted handoff exercises the public host and the grader without a model.
 async function contracts(fixture) {
   const { manifest, tool } = await initialize(fixture);
-  const next = await tool("next");
-  // The harness can also compare CLI builds that returned only a frame count.
-  const item = Array.isArray(next.workItem.observation.frames)
-    ? { ...next.workItem, receiptId: next.receiptId }
-    : await tool("read-stacks", { workItemId: next.workItem.id });
-  const binding = item.observation.bindings[0];
+  const { workItem: item, receiptId } = await tool("next");
+  const pkg = item.stack.frames[0].package;
   const result = await tool("record-claims", {
     claims: [
       {
         id: "running-version",
         scope: fixture.scope,
-        payload: binding,
+        payload: pkg,
         receiptSelections: [
           {
-            receiptId: item.receiptId,
+            receiptId,
             textBlock: null,
-            record: ["observation", "bindings", 0],
+            record: ["stack", "frames", 0, "package"],
           },
         ],
       },
@@ -179,12 +180,16 @@ async function contracts(fixture) {
     ],
   });
   const report = await tool("finalize");
-  assert.equal(report.runId, manifest.runId);
-  assert.equal(report.attemptId, manifest.attemptId);
+  const stack = report.vulnerabilities[0].analyses.find(
+    (analysis) => analysis.analyzer === "stacks",
+  );
+  assert.equal(stack.audit.runId, manifest.runId);
+  assert.equal(stack.audit.attemptId, manifest.attemptId);
   await jsonFile(join(out, "scripted-report.json"), report);
   const grade = gradeStack(report, fixture, { reviewed: false });
   const tampered = structuredClone(report);
-  tampered.claims[0].receipts[0].result.version = "0.2.0";
+  tampered.vulnerabilities[0].analyses[0].claims[0].receipts[0].result.version =
+    "0.2.0";
   assert.throws(
     () => gradeStack(tampered, fixture, { reviewed: false }),
     /original capture selection/u,
@@ -250,7 +255,9 @@ try {
   if (mode === "contracts") {
     const result = await contracts(summaries.fixtures.fixed);
     await jsonFile(join(out, "contracts.json"), result);
-    console.log("Fixed binding, reopened claims and tamper check passed");
+    console.log(
+      "Fixed package attribution, reopened claims and tamper check passed",
+    );
   }
   if (mode === "benchmark") {
     const result = await benchmark(summaries.fixtures.positive);
@@ -278,16 +285,17 @@ try {
           : mixed
             ? reviewedCve
             : summaryCve;
-      const args = ["check", subject];
-      if (!mixed) {
-        for (const role of ["sources", "sinks", "stacks"])
-          args.push("--" + role, join(fixture.input, role + ".json"));
-      }
+      const config = join(answerDir, "project.json");
+      const args = ["check", subject, "--config", config];
       let transcript;
-      if (id.startsWith("mixed-evidence")) {
+      if (!mixed) {
+        await jsonFile(config, {
+          exploitability: { analyzers: { stacks: {} } },
+        });
+        args.push("--analyzer-input", "stacks=" + fixture.input);
+      } else if (id.startsWith("mixed-evidence")) {
         const records = join(answerDir, "records.json");
         transcript = join(answerDir, "calls.jsonl");
-        const config = join(answerDir, "project.json");
         await writeFile(transcript, "", { mode: 0o600 });
         await jsonFile(records, {
           notes: {
@@ -321,8 +329,7 @@ try {
             },
           },
         });
-        args.push("--config", config);
-      }
+      } else await jsonFile(config, {});
       if (values.model) args.push("--model", values.model);
       args.push("--json", "--report-file", reportFile);
       assert.equal(git(fixture.repo, "status", "--porcelain"), "");

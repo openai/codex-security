@@ -2,7 +2,6 @@
 "use strict";
 const assert = require("node:assert/strict");
 const { execFileSync } = require("node:child_process");
-const { createHash } = require("node:crypto");
 const { subscribe } = require("node:diagnostics_channel");
 const { readFileSync, writeFileSync } = require("node:fs");
 const { Session } = require("node:inspector");
@@ -43,9 +42,8 @@ session.on("Debugger.paused", ({ params }) => {
         ? relative(process.cwd(), fileURLToPath(url)).split(sep).join("/")
         : url;
       return {
-        name: functionName,
-        type: "javascript",
-        location: file,
+        name: functionName || "<anonymous>",
+        ...(file && { location: file }),
         line: location.lineNumber + 1,
       };
     });
@@ -81,9 +79,6 @@ session.on("Debugger.paused", ({ params }) => {
         observedAt,
         frames,
         ingress,
-        stackHash: createHash("sha256")
-          .update(JSON.stringify(frames))
-          .digest("hex"),
       }),
       { flag: "wx" },
     );

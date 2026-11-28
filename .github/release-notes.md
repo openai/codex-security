@@ -1,4 +1,4 @@
-<!-- release-version: 0.11.1 -->
+<!-- release-version: 0.12.0 -->
 
 <!-- release-section: highlights:start -->
 
@@ -38,6 +38,8 @@
 
 ## Upgrade notes
 
-No additional migration steps are documented for this release.
+<!-- Replace each candidate with the affected users and the action they need to take. -->
+
+- compose repository and stack analyzers and simplify dependency checks ([#2850](https://github.com/openai/codex-security/pull/2850))
 
 <!-- release-section: upgrades:end -->

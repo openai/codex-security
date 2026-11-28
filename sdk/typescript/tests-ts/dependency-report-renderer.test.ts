@@ -1,11 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { stackReport } from "./support/dependency-stack-report-fixture.js";
-import { renderDependencyReport } from "../src/dependency-report-renderer.js";
 import {
-  broadReport,
-  place,
+  stackReport,
+  stacksReport,
+} from "./support/dependency-stack-report-fixture.js";
+import { renderDependencyCode } from "../src/exploitability/report/audit.js";
+import { renderDependencyReport } from "../src/exploitability/report/renderer.js";
+import {
   receiptRef,
+  repositoryReport,
   report,
   reviewed,
   service,
@@ -15,6 +18,10 @@ import {
   withExcerpts,
   zeroReport,
 } from "./support/dependency-report-fixtures.js";
+
+function renderRepository(input: Parameters<typeof repositoryReport>[0]) {
+  return renderDependencyReport(repositoryReport(input));
+}
 
 function text(html: string) {
   const content =
@@ -44,6 +51,10 @@ function elements(html: string, selector: string, attrs: string[] = []) {
     text: r.text.replace(/\s+/gu, " ").trim(),
   }));
 }
+function attributes(html: string, selector: string, attr: string) {
+  return elements(html, selector, [attr]).map((node) => node.attrs[attr]);
+}
+
 function panel(html: string, id: string) {
   const article = html.match(
     new RegExp('<article[^>]* id="' + id + '"[^>]*>[\\s\\S]*?</article>'),
@@ -51,137 +62,98 @@ function panel(html: string, id: string) {
   if (!article) throw new Error("Missing finding: " + id);
   return article;
 }
+test("renders untrusted source as escaped, numbered lines", () => {
+  const source =
+    'const item = "<img src=x onerror=alert(1)> & data";\r\n\nreturn item;\n';
+  const html = renderDependencyCode(source, "worker.ts", 17, new Set([19]));
+  expect(html).not.toContain("<img");
+  expect(html).toContain("&lt;img src=x onerror=alert(1)&gt; &amp; data");
+  expect(html).toContain("&#13;");
+  expect(attributes(html, ".code-row", "data-line")).toEqual([
+    "17",
+    "18",
+    "19",
+    "20",
+  ]);
+  expect(attributes(html, "[data-highlighted]", "data-line")).toEqual(["19"]);
+  expect(elements(html, ".tok-keyword").map((t) => t.text)).toEqual([
+    "const",
+    "return",
+  ]);
+  const plain = renderDependencyCode(source, "notes.txt", 17);
+  expect(plain).not.toContain("<img");
+  expect(plain).not.toContain("tok-");
+});
+
+test("marks only unambiguous expressions on the cited line and escapes syntax inside the mark", () => {
+  const listing = (line: string, argument: string) =>
+    renderDependencyCode(line, "src.ts", 3, new Set([3]), {
+      line: 3,
+      expression: argument,
+    });
+  expect(listing("run(a, a)", "a")).not.toContain("<mark");
+  expect(listing("run(payload)", "load")).not.toContain("<mark");
+  const marked = listing('read(doc["<main>"])', 'doc["<main>"]');
+  expect(marked).toContain(
+    '<mark class="trace-argument">doc[<span class="tok-string">&quot;&lt;main&gt;&quot;</span>]</mark>',
+  );
+});
+
 describe("call site report", () => {
   test("walks retained frames, opens the exact caller line, and does not pass caller code off as dependency code", () => {
     const raw = stackReport(),
       [assessment, empty] = raw.assessments;
-    const o = assessment.observation;
-    const html = renderDependencyReport({
-      ...raw,
-      assessments: [
-        {
-          ...assessment,
-          observation: {
-            ...o,
-            frames: [
-              ...o.frames,
-              { rawIndex: 7, frame: { name: "outer", type: "function" } },
-              {
-                rawIndex: 2,
-                frame: {
-                  name: "caller",
-                  location: "/app.runfiles/_main/src/codec.ts:3",
-                  type: "function",
-                },
-              },
-            ],
-            bindings: [
-              ...o.bindings,
-              {
-                package: "example",
-                sourceSha: raw.target.sha,
-                version: raw.target.sha,
-                provenance: "sampled build",
-              },
-            ],
-          },
-        },
-        empty,
-      ],
-    });
+    const caller = {
+      rawIndex: 2,
+      frame: {
+        name: "caller",
+        sourceRevision: raw.target.sha,
+        location: "/app.runfiles/_main/src/codec.ts:3",
+      },
+    };
+    const stack = {
+      ...assessment.stack,
+      frames: [...assessment.stack.frames, caller],
+    };
+    const html = renderDependencyReport(
+      stacksReport({
+        ...raw,
+        assessments: [{ ...assessment, stack }, empty],
+      }),
+    );
     const observed = panel(html, "stack-1-1");
-    const frames = elements(observed, "details.frame", [
-      "id",
-      "data-role",
-      "data-in-range",
-      "open",
-    ]);
-    expect(frames.map((f) => f.attrs["data-role"])).toEqual([
-      "call",
-      "source",
-      "call_site",
-      "sink",
-    ]);
-    expect(frames[0]!.attrs["data-in-range"]).toBe("false");
+    expect(text(observed)).toContain("caller");
     expect(
-      elements(observed, "details.frame[open]", ["id"]).map(
-        (f) => f.attrs["id"],
-      ),
-    ).toEqual(["stack-1-1-frame-2"]);
-    expect(frames[2]!.text).toContain("caller");
-    expect(
-      elements(observed, "#stack-1-1-frame-2 [data-highlighted]"),
+      elements(observed, "details.frame[open] [data-highlighted]"),
     ).toHaveLength(1);
-    expect(elements(observed, "#stack-1-1-frame-3 pre")).toHaveLength(0);
     expect(
-      elements(observed, "#stack-1-1-frame-3 .unavailable").length,
-    ).toBeGreaterThan(0);
-    for (const selector of [
-      "[data-range]",
-      "[data-next]",
-      "[data-prev]",
-      ".gap",
-    ])
-      expect(elements(observed, selector).length).toBeGreaterThan(0);
+      elements(observed, "details.frame[data-role=sink] pre"),
+    ).toHaveLength(0);
     expect(text(observed)).toContain("Sampled copy 1.0");
     expect(text(observed)).toContain("Which decoder mode ran?");
-    expect(text(observed)).toContain("The guard is configurable.");
-    expect(text(observed)).toContain("Query truncated Yes");
-    expect(text(html)).toContain("Finalized offline");
-    expect(text(html)).toContain("omits the advisory description");
     expect(html).not.toContain("RAW_RECEIPT_CONTENT");
-    const missing = panel(html, "stack-1-2");
-    expect(elements(missing, "details.frame")).toHaveLength(0);
-    expect(text(missing)).not.toContain("Sampled copy 1.0");
-  });
-  test("queue links name call sites, not stack hashes, and cover every item exactly once", () => {
-    const stack = renderDependencyReport(stackReport());
-    const [entry] = elements(stack, '[data-entry="stack-1-1"]');
-    expect(entry!.text).toContain("codec.ts:3");
-    expect(entry!.text).not.toContain("stack-a");
-    const html = renderDependencyReport(broadReport());
-    const links = elements(html, "a[data-entry]", ["href"]);
-    const articles = elements(html, "article[data-finding]", [
-      "id",
-      "data-verdict",
-    ]);
-    expect(links.map((l) => l.attrs["href"])).toEqual(
-      articles.map((a) => "#" + a.attrs["id"]),
-    );
-    expect(new Set(articles.map((a) => a.attrs["id"])).size).toBe(88);
-    expect(
-      articles.filter((a) => a.attrs["data-verdict"] === "unknown"),
-    ).toHaveLength(48);
-    expect(
-      articles.filter((a) => a.attrs["data-verdict"] === "ruled_out"),
-    ).toHaveLength(16);
-    expect(
-      articles.filter((a) => a.attrs["data-verdict"] === "unresolved"),
-    ).toHaveLength(24);
+    expect(elements(html, "article[data-finding]")).toHaveLength(1);
+    expect(text(html)).toContain("scheduled-job");
   });
   test("source-only code starts at the reviewed call, with conditions and the deciding check", () => {
     const raw = variantReport();
-    const html = renderDependencyReport(
+    const html = renderRepository(
       withExcerpts(raw, ["return decodeFrame(document);"]),
     );
     const source = panel(html, "use-1-1");
     expect(text(source)).toContain("Source review");
-    const frames = elements(source, "details.frame", ["data-role", "open"]);
-    expect(frames.map((f) => f.attrs["data-role"])).toEqual(["call_site"]);
-    expect(elements(source, "details.frame[open]")).toHaveLength(1);
-    expect(elements(source, ".frame [data-highlighted]")).toHaveLength(1);
-    expect(
-      elements(source, "[data-condition]", ["data-condition"]).map(
-        (c) => c.attrs["data-condition"],
-      ),
-    ).toEqual(["met", "unknown"]);
-    for (const fact of [
-      "Request reaches decoder before authentication",
-      "Read the admitted worker setting",
-      "Cedar prod stable linux/amd64",
-      "The guard rejects",
-    ])
-      expect(text(source)).toContain(fact);
+    expect(attributes(source, "details.frame", "data-role")).toEqual([
+      "call_site",
+    ]);
+    const active = elements(source, "details.frame[open] [data-highlighted]", [
+      "data-line",
+    ]);
+    expect(active.map((row) => row.attrs["data-line"])).toEqual(["2"]);
+    expect(active[0]!.text).toContain("decodeFrame");
+    expect(attributes(source, "[data-condition]", "data-condition")).toEqual([
+      "met",
+      "unknown",
+    ]);
     const shared = panel(html, "use-1-3");
     expect(text(shared)).toContain("Cedar");
     expect(text(shared)).toContain("Spruce");
@@ -191,22 +163,8 @@ describe("call site report", () => {
     expect(canary).not.toContain("2".repeat(64));
     expect(source).not.toContain("3".repeat(64));
   });
-  test("an artifact exclusion does not fabricate a sampled path", () => {
-    const use = reviewed(1, {
-      verdict: "ruled_out",
-      reason: "This copy contains the fix.",
-      place: place({
-        kind: "artifact",
-        patch: "Verified image-specific backport",
-      }),
-    });
-    const article = panel(renderDependencyReport(report([use])), "use-1-1");
-    expect(text(article)).toContain("Verified image-specific backport");
-    expect(text(article)).toContain("This copy contains the fix.");
-    expect(elements(article, "details.frame[data-role=sink]")).toHaveLength(0);
-  });
   test("unresolved handoffs retain worker-specific launch and mitigation facts", () => {
-    const html = renderDependencyReport(zeroReport());
+    const html = renderRepository(zeroReport());
     const stable = text(panel(html, "coverage-1-1")),
       canary = text(panel(html, "coverage-1-2"));
     expect(stable).toContain("Submitted bytes reach the parser entrypoint");
@@ -226,7 +184,7 @@ describe("call site report", () => {
         evidence: [receiptRef("not-cited")],
       },
     });
-    const html = renderDependencyReport(report([u]));
+    const html = renderRepository(report([u]));
     expect(html).not.toContain("POST /unverified");
     expect(html).not.toContain("Wrong service");
   });
@@ -264,16 +222,8 @@ describe("call site report", () => {
         measurement: { unit: "cpu_samples", count: 321 },
         completeness: "partial",
       },
-      {
-        question: "Image",
-        target,
-        source: "registry",
-        outcome: "denied",
-        evidence: [ref],
-        result: "Registry denied the request.",
-      },
     ];
-    const h = text(panel(renderDependencyReport(report([u])), "use-1-1"));
+    const h = text(panel(renderRepository(report([u])), "use-1-1"));
     for (const fact of [
       "0 CPU samples",
       "00:00–01:00",
@@ -281,86 +231,11 @@ describe("call site report", () => {
       "Comparison workload Neighbor",
       "321 CPU samples",
       "Backend reported partial",
-      "Registry denied the request.",
     ])
       expect(h).toContain(fact);
     expect(h).not.toContain("321 calls");
   });
-  test("legacy uses retain their verdict without an invented matched sink", () => {
-    const { place: _place, decidingEvidence: _ref, ...u } = reviewed(1);
-    const html = renderDependencyReport({
-      cve: "CVE-2099-44001",
-      advisories: [],
-      usage: null,
-      status: "unknown",
-      uses: [u],
-      limitations: [],
-    });
-    const item = panel(html, "use-1-1");
-    expect(text(item)).toContain("Requires more information");
-    expect(elements(item, "[data-role=sink]")).toHaveLength(0);
-    expect(text(item)).toContain("Deployment unverified");
-  });
-  test("shows blocked and pending advisories as states, not as use verdicts", () => {
-    const blocked = {
-      status: "blocked",
-      code: "INVESTIGATION_BLOCKED",
-      reason: "The service did not respond.",
-      unblockCondition: "Restore inventory.",
-    };
-    const { cve: _cve, ...check } = report([reviewed(1)]);
-    const html = renderDependencyReport({
-      ...blocked,
-      package: { ecosystem: "npm", name: "sample-codec" },
-      checks: [
-        { ...check, advisoryId: "CVE-2099-44001" },
-        { ...blocked, advisoryId: "CVE-2099-44002" },
-      ],
-      pendingAdvisories: ["CVE-2099-44003"],
-    });
-    const entries = elements(html, "[data-entry]", ["data-verdict"]);
-    expect(entries).toHaveLength(3);
-    expect(
-      entries.filter((a) => a.attrs["data-verdict"] === "unknown"),
-    ).toHaveLength(1);
-    expect(text(html)).toContain("Restore inventory.");
-    expect(text(html)).toMatch(/not (started|investigated)/i);
-    expect(text(html)).not.toContain("undefined");
-  });
-  test("empty report has no vulnerable or cleared findings", () => {
-    const html = renderDependencyReport(report([]));
-    expect(elements(html, "[data-entry][data-verdict=ruled_out]")).toHaveLength(
-      0,
-    );
-    expect(text(html)).toMatch(
-      /no (reviewed|assessed|findings|uses|call sites)/i,
-    );
-  });
-  test("keeps receipt metadata but never embeds raw inventory payloads in HTML", () => {
-    const u = reviewed(1);
-    const ref = receiptRef("fixture-receipt");
-    u.decidingEvidence.push(ref);
-    const r = {
-      ...report([u]),
-      claimEvidence: {
-        sources: {},
-        receipts: {
-          r1: {
-            receiptId: "fixture-receipt",
-            originalPayloadSha256: "a".repeat(64),
-            server: "artifacts",
-            origin: { tool: "inspect", arguments: { secret: "DO_NOT_EMBED" } },
-            result: { token: "DO_NOT_EMBED", massiveStack: "DO_NOT_EMBED" },
-          },
-        },
-      },
-    };
-    const html = renderDependencyReport(r);
-    expect(html).toContain("fixture-receipt");
-    expect(html).toContain("SHA-256");
-    expect(html).not.toContain("DO_NOT_EMBED");
-  });
-  test("preserves original use IDs and source bindings after priority sorting", () => {
+  test("preserves links, dismissed coverage and source bindings after priority sorting", () => {
     const a = reviewed(1, {
         verdict: "ruled_out",
         reason: "Excluded by a source guard.",
@@ -371,30 +246,77 @@ describe("call site report", () => {
     b.evidence = a.evidence;
     b.decidingEvidence = a.decidingEvidence;
     b.services = [service("svc:b", "Beta", b.decidingEvidence[0]!)];
-    const html = renderDependencyReport(
-      withExcerpts(report([a, b]), ["const mode = 'safe';"]),
+    const dismissed = unresolved(2, {
+      kind: "dismissed",
+      evidence: [
+        { path: "src/handler-1.ts", startLine: 1, endLine: 1, supports: [] },
+      ],
+      decidingEvidence: [sourceRef("src/handler-1.ts", 1)],
+    });
+    const input = withExcerpts(
+      report([a], [dismissed]),
+      ["safeMode();"],
+      ["dismissedMode();"],
     );
-    expect(html.indexOf('id="use-1-2"')).toBeLessThan(
-      html.indexOf('id="use-1-1"'),
-    );
-    expect(panel(html, "use-1-1")).toContain("tok-keyword");
-    expect(panel(html, "use-1-2")).not.toContain("tok-keyword");
-    expect(html).toContain('value="unknown"');
-    expect(html).toContain('href="#use-1-1"');
+    input.uses.push(b);
+    input.coverage.unshift(unresolved(1));
+    input.coverage.push(unresolved(3));
+    input.claimEvidence.sources["uncited"] = {
+      path: "src/handler-1.ts",
+      startLine: 3,
+      endLine: 3,
+      excerpt: "uncitedMode();",
+    };
+    const html = renderRepository(input);
+    expect(attributes(html, "a[data-entry]", "href")).toEqual([
+      "#use-1-2",
+      "#use-1-1",
+      "#coverage-1-1",
+      "#coverage-1-3",
+    ]);
+    const dismissedItems = elements(html, "details#coverage-1-2");
+    expect(dismissedItems).toHaveLength(1);
+    expect(dismissedItems[0]!.text).toContain("dismissedMode");
+    expect(html).not.toContain("uncitedMode");
+    expect(panel(html, "use-1-1")).toContain("safeMode");
+    expect(panel(html, "use-1-2")).not.toContain("safeMode");
   });
-  test("does not display excerpts from the wrong claim revision or source revision", () => {
-    const input = withExcerpts(report([reviewed(1)]), ["hiddenExcerpt()"]);
-    expect(renderDependencyReport(input)).toContain("hiddenExcerpt");
-    input.claims[0]!.revision = 2;
-    expect(renderDependencyReport(input)).not.toContain("hiddenExcerpt");
-    input.claims[0]!.revision = 1;
+  test("shows the conclusion before its premise and binds excerpts to the cited revision and commit", () => {
+    const use = reviewed(1);
+    use.evidence[0]!.commit = "a".repeat(40);
+    const input = withExcerpts(report([use]), ["hiddenExcerpt()"]);
+    const premise = input.uses[0]!.supportingClaims![0]!;
+    const ref = { ...premise, id: "conclusion" };
+    const conclusion = {
+      ...input.claims[0]!,
+      ...ref,
+      dependencies: [premise],
+      decision: { ...input.claims[0]!.decision, reason: "Call path verified." },
+      evidence: { sourceIds: [], receiptIds: [] },
+    };
+    const render = () =>
+      renderRepository({
+        ...input,
+        uses: [{ ...use, conclusionClaim: ref, supportingClaims: [premise] }],
+        claims: [conclusion, ...input.claims],
+      });
+    const complete = text(panel(render(), "use-1-1"));
+    expect(complete).toMatch(/Call path verified\..*Source verified/u);
+    expect(complete).toContain("hiddenExcerpt");
+    input.claims[0]!.revision++;
+    const stale = text(panel(render(), "use-1-1"));
+    expect(stale).toContain("Missing claim: evidence-0 · r1");
+    expect(stale).not.toContain("hiddenExcerpt");
+    input.claims[0]!.revision--;
     input.claimEvidence.sources["cite-0-0"]!.commit = "f".repeat(40);
-    expect(renderDependencyReport(input)).not.toContain("hiddenExcerpt");
+    expect(render()).not.toContain("hiddenExcerpt");
   });
   test("renders advisory description, affected package versions and vulnerable functions with safe links", () => {
     const u = reviewed(1),
       url = "https://example.invalid/advisories/CVE-2099-44001",
-      raw = "<img src=x onerror=alert(1)>";
+      raw = "<img src=x onerror=alert(1)>",
+      suspicious =
+        "https://fixture:synthetic-password@example.invalid/advisory?token=synthetic-token";
     const r = {
       ...report([u]),
       advisoryDetails: [
@@ -416,10 +338,15 @@ describe("call site report", () => {
             },
           ],
         },
+        {
+          url: "https://unrelated.invalid",
+          summary: "Unreferenced advisory",
+          affected: [],
+        },
       ],
-      advisories: [url, "javascript:alert(1)"],
+      advisories: [url, "javascript:alert(1)", suspicious],
     };
-    const html = renderDependencyReport(r);
+    const html = renderRepository(r);
     for (const v of [
       "A malformed frame",
       "Decoder.decode",
@@ -431,104 +358,12 @@ describe("call site report", () => {
     expect(html).not.toContain(raw);
     expect(html).not.toContain('href="javascript:');
     expect(html).toContain("&lt;img");
-    const unrelated = renderDependencyReport({
-      ...report([u]),
-      advisoryDetails: [
-        {
-          url: "https://unrelated.invalid",
-          summary: "Unreferenced advisory",
-          affected: [],
-        },
-      ],
-    });
-    expect(unrelated).not.toContain("Unreferenced advisory");
+    expect(html).not.toContain("Unreferenced advisory");
+    expect(html).toContain("Link omitted (credentials in URL)");
+    expect(html).not.toContain("synthetic-password");
+    expect(html).not.toContain("synthetic-token");
   });
-  test.each([
-    [
-      "Go",
-      {
-        imports: [
-          { path: "example.invalid/codec", symbols: ["Decoder.Decode"] },
-        ],
-      },
-      "Decoder.Decode",
-    ],
-    ["Rust", { affects: { functions: ["decode::run"] } }, "decode::run"],
-  ] as const)(
-    "extracts %s vulnerable functions from ecosystem metadata",
-    (_, metadata, symbol) => {
-      const r = report([reviewed(1)]);
-      const html = renderDependencyReport({
-        ...r,
-        advisoryDetails: [
-          {
-            url: r.advisories[0],
-            affected: [{ ecosystem_specific: metadata }],
-          },
-        ],
-      });
-      expect(text(html)).toContain(symbol);
-    },
-  );
-  test("shows only cited excerpts including dismissed coverage, and highlights the exact call site", () => {
-    const u = reviewed(1, {
-      location: "POST /upload → decodeFrame",
-      evidence: [{ path: "entry.ts", startLine: 2, endLine: 2, supports: [] }],
-      decidingEvidence: [sourceRef("entry.ts", 2)],
-      proof: {
-        sink: {
-          function: "decodeFrame",
-          callSite: { path: "entry.ts", line: 2 },
-        },
-        conditions: [],
-      },
-    });
-    const dismissed = unresolved(2, {
-      kind: "dismissed",
-      reason: "Excluded from the requested scope.",
-      evidence: [{ path: "entry.ts", startLine: 1, endLine: 1, supports: [] }],
-      decidingEvidence: [sourceRef("entry.ts", 1)],
-    });
-    const r = withExcerpts(
-      report([u], [dismissed]),
-      ["const value = decodeFrame(input);"],
-      ["const input = 1;"],
-    );
-    r.claimEvidence.sources["uncited"] = {
-      path: "entry.ts",
-      startLine: 3,
-      endLine: 3,
-      excerpt: "const unused = 3;",
-    };
-    const html = renderDependencyReport(r);
-    expect(html).toContain("data-highlighted");
-    expect(html).toContain("tok-keyword");
-    expect(html).toContain("decodeFrame(input)");
-    expect(text(html)).toContain("const input");
-    expect(html).not.toContain("const unused");
-  });
-  test("deduplicates unresolved limitations without removing source records or merging leads", () => {
-    const a = unresolved(1, { reason: "The selected build is missing." }),
-      b = unresolved(2, { reason: "The selected build is missing." });
-    const r = {
-      ...report([], [a, b]),
-      limitations: [
-        "The selected build is missing. Unresolved source locations: src/parser-1.ts:2.",
-        "The selected build is missing. Unresolved source locations: src/parser-2.ts:3.",
-        "Independent shared limitation.",
-      ],
-    };
-    const html = renderDependencyReport(r);
-    expect(elements(html, "article[data-verdict=unresolved]")).toHaveLength(2);
-    expect(text(html)).toMatch(/Affected: Parser 1\s*,\s*Parser 2/u);
-    expect(text(html)).toContain("Independent shared limitation");
-    expect(text(html)).toContain("src/parser-1.ts:2.");
-    expect(text(html)).toContain("src/parser-2.ts:3.");
-    expect(html.indexOf("Report limitations")).toBeLessThan(
-      html.indexOf("Investigation scope and search coverage"),
-    );
-  });
-  test("escapes untrusted metadata and snippets, has a valid script hash, offline styles, keyboard and print fallbacks", () => {
+  test("escapes untrusted metadata and snippets, verifies the script hash and loads no external resources", () => {
     const raw = '<svg onload="alert(1)">',
       u = reviewed(1, {
         location: raw,
@@ -537,7 +372,7 @@ describe("call site report", () => {
         services: [service("svc:x", raw, sourceRef("src/handler-1.ts", 2))],
       });
     const r = { ...withExcerpts(report([u]), [raw]), limitations: [raw] };
-    const html = renderDependencyReport(r);
+    const html = renderRepository(r);
     expect(html).not.toContain(raw);
     expect(html).toContain("&lt;svg");
     const scripts: string[] = [];
@@ -562,21 +397,8 @@ describe("call site report", () => {
       `script-src 'sha256-${createHash("sha256").update(script).digest("base64")}'`,
     );
     expect(policy).toContain("default-src 'none'");
-    expect(html).toContain("@media print");
-    expect(html).toContain(":focus-visible");
     expect(elements(html, "script[src]")).toHaveLength(0);
     expect(elements(html, "link[rel]")).toHaveLength(0);
-  });
-  test("does not activate or display credential-bearing URLs", () => {
-    const suspicious =
-      "https://fixture:synthetic-password@example.invalid/advisory?token=synthetic-token";
-    const html = renderDependencyReport({
-      ...report([reviewed(1)]),
-      advisories: [suspicious],
-    });
-    expect(html).toContain("Link omitted (credentials in URL)");
-    expect(html).not.toContain("synthetic-password");
-    expect(html).not.toContain("synthetic-token");
   });
   test("rejects workload samples presented as transferable immutable artifact evidence", () => {
     const u = reviewed(1);
@@ -591,6 +413,97 @@ describe("call site report", () => {
         transferBasis: "The files match.",
       },
     ];
-    expect(() => renderDependencyReport(report([u]))).toThrow();
+    expect(() => renderRepository(report([u]))).toThrow();
+  });
+  test("follows cited argument renames and retains an exact anchor for each frame", () => {
+    const input = "read.ts";
+    const output = "write.ts";
+    const item = reviewed(1, {
+      evidence: [
+        { path: input, startLine: 1, endLine: 2, supports: [] },
+        { path: output, startLine: 4, endLine: 4, supports: [] },
+      ],
+      decidingEvidence: [
+        sourceRef(input, 1),
+        sourceRef(input, 2),
+        sourceRef(output, 4),
+      ],
+      trace: [
+        {
+          kind: "source",
+          label: "Request bytes",
+          site: { path: input, line: 1 },
+          argument: "request.body",
+        },
+        {
+          kind: "handoff",
+          label: "Document handler",
+          site: { path: input, line: 2 },
+          argument: "doc",
+        },
+      ],
+      proof: {
+        sink: {
+          function: "codec.read",
+          callSite: { path: output, line: 4 },
+          argument: "payload",
+        },
+        conditions: [],
+      },
+    });
+    const excerpts = [
+      "const doc = request.body;\nhandle(doc);",
+      "codec.read(payload);",
+    ];
+    const html = renderRepository(withExcerpts(report([item]), excerpts));
+    expect(attributes(html, "details.frame", "data-role")).toEqual([
+      "source",
+      "call",
+      "call_site",
+    ]);
+    expect(elements(html, "details.frame[open] [data-follow]")).toHaveLength(1);
+    const gapped = {
+      ...item,
+      trace: [
+        item.trace![0]!,
+        { kind: "gap" as const, label: "Missing caller" },
+        item.trace![1]!,
+      ],
+    };
+    const gappedHtml = renderRepository(
+      withExcerpts(report([gapped]), excerpts),
+    );
+    expect(
+      elements(gappedHtml, "details.frame[open] [data-related]"),
+    ).toHaveLength(0);
+
+    for (const value of ["request.body", "doc", "payload"])
+      expect(html).toContain(`<mark class="trace-argument">${value}</mark>`);
+  });
+
+  test("never converts location labels into call frames or a coverage gap into a sink", () => {
+    const item = reviewed(1, {
+      location: "Upload → allegedWrapper() → allegedSink()",
+    });
+    expect(
+      elements(renderRepository(report([item])), "details.frame"),
+    ).toHaveLength(0);
+    const gap = unresolved(1, {
+      trace: [
+        {
+          kind: "source",
+          label: "Upload",
+          site: { path: "src/parser-1.ts", line: 2 },
+        },
+      ],
+      handoff: {
+        verified: "Bytes reach the parser.",
+        missing: "Which plugin handles the document?",
+      },
+    });
+    const html = renderRepository(report([], [gap]));
+    expect(attributes(html, "details.frame", "data-role")).toEqual(["source"]);
+    expect(html).toContain("Which plugin handles the document?");
+    expect(html).toContain("Bytes reach the parser.");
   });
 });

@@ -10,7 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { after, before, test } from "node:test";
 import {
   commitFixture,
@@ -25,8 +25,61 @@ import {
 import {
   approvedCitations,
   gradeEvidenceSource,
-  gradeMixed,
+  gradeMixed as gradeMixedReport,
 } from "./grade.mjs";
+
+function repositoryFixture(report, packageCheck = false) {
+  const id = report.cve;
+  return {
+    schemaVersion: 3,
+    subject: packageCheck
+      ? { kind: "package", ecosystem: "npm", name: "linkify-it" }
+      : { kind: "advisory", id },
+    status: "complete",
+    target: report.target,
+    vulnerabilities: [
+      {
+        kind: "advisory",
+        id,
+        status: "complete",
+        result: {
+          verdict: report.uses[0].verdict,
+          reason: "Fixture evidence",
+          questions: [],
+          findingRefs: report.uses.map((_, index) => index),
+          review: { status: "approved", reason: "Fixture review" },
+        },
+        analyses: [
+          {
+            analyzer: "repository",
+            status: "complete",
+            claims: report.claims,
+            evidence: report.claimEvidence,
+            coverage: {
+              searches: report.searches ?? [],
+              dispositions: [],
+              assumptions: report.assumptions ?? [],
+              limitations: [],
+            },
+          },
+        ],
+        findings: report.uses.map((use) => ({
+          ...use,
+          analyzer: "repository",
+        })),
+      },
+    ],
+  };
+}
+
+function gradeMixed(report, fixture, packageCheck = false, evidenceSource) {
+  return gradeMixedReport(
+    repositoryFixture(report, packageCheck),
+    fixture,
+    packageCheck,
+    evidenceSource,
+  );
+}
 
 let root;
 before(async () => {
@@ -76,7 +129,7 @@ process.exitCode = 7;\n`,
   );
 });
 
-test("the probe measures the affected and fixed releases and withholds exactly one binding field", async () => {
+test("the probe distinguishes fixed, affected, and unattributed stack frames", async () => {
   const { fixtures, outcomes } = await summaryFixtures(root);
   assert.deepEqual(
     outcomes.map(({ after }) => after),
@@ -89,16 +142,15 @@ test("the probe measures the affected and fixed releases and withholds exactly o
   assert.deepEqual(positive.files.sinks, unbound.files.sinks);
   assert.deepEqual(positive.files.sources, unbound.files.sources);
   const full = structuredClone(positive.docs.stacks);
-  delete full.queries[0].groups[0].observations[0].bindings[0].sourceSha;
+  const [sum, ...callers] = full.captures[0].stacks[0].frames;
+  assert.equal(sum.name, "sum");
+  assert.equal(sum.package.version, "0.2.0");
+  assert.equal(fixed.observation.frames[0].package.version, "0.2.1");
+  assert(callers.some((frame) => frame.name === "parseBatch"));
+  delete sum.sourceRevision;
   assert.deepEqual(full, unbound.docs.stacks);
-  assert.equal(
-    positive.observation.frames[positive.observation.sourceIndex].name,
-    "parseBatch",
-  );
-  assert.equal(
-    positive.observation.frames[positive.observation.sinkIndex].name,
-    "sum",
-  );
+  delete sum.package;
+  assert.deepEqual(full, fixtures["missing-version"].docs.stacks);
   assert.deepEqual(git(positive.repo, "ls-files").split("\n"), [
     "sample-summary/index.cjs",
     "sample-summary/package.json",
@@ -134,8 +186,8 @@ test("the repository grader binds each service's verdict to its own checkout evi
     return { path, startLine: line, endLine: line, commit: fixture.sha };
   };
   const report = {
-    schemaVersion: 2,
     cve: reviewedCve,
+    target: { repository: basename(fixture.repo), sha: fixture.sha },
     claims: [],
     uses: [],
     claimEvidence: { sources: {} },
@@ -170,6 +222,18 @@ test("the repository grader binds each service's verdict to its own checkout evi
     );
   }
   assert.equal(gradeMixed(report, fixture).outcomes.length, 2);
+  const wrongCheckout = repositoryFixture(report);
+  wrongCheckout.target = { ...wrongCheckout.target, sha: "0".repeat(40) };
+  assert.throws(
+    () => gradeMixedReport(wrongCheckout, fixture),
+    /fixture checkout/u,
+  );
+  const wrongAnalyzer = repositoryFixture(report);
+  wrongAnalyzer.vulnerabilities[0].findings[0].analyzer = "stacks";
+  assert.throws(
+    () => gradeMixedReport(wrongAnalyzer, fixture),
+    /repository findings only/u,
+  );
   const context = structuredClone(report);
   const row = context.uses[0];
   // Context was approved with this exact claim, but the reviewer did not use
@@ -259,17 +323,7 @@ test("the repository grader binds each service's verdict to its own checkout evi
   assert.equal(gradeMixed(compact, fixture).outcomes.length, 2);
   compact.uses[0].place.revision = "wrong";
   assert.throws(() => gradeMixed(compact, fixture), /cited revision/u);
-  assert.equal(
-    gradeMixed(
-      {
-        package: { name: "linkify-it" },
-        checks: [{ ...report, advisoryId: reviewedCve }],
-      },
-      fixture,
-      true,
-    ).outcomes.length,
-    2,
-  );
+  assert.equal(gradeMixed(report, fixture, true).outcomes.length, 2);
   const stale = structuredClone(report);
   stale.uses[0].conclusionClaim.revision++;
   assert.throws(() => gradeMixed(stale, fixture), /one exact claim revision/u);
@@ -504,6 +558,7 @@ test("the optional suite grades a caller's actual route and config in the same a
   const sources = {};
   const report = {
     cve: scenario.cve,
+    target: { repository: basename(repo), sha: commit },
     searches: [
       {
         source: "Checkout trace graph",
@@ -517,14 +572,16 @@ test("the optional suite grades a caller's actual route and config in the same a
         evidenceReferences: [],
       },
     ],
-    schemaVersion: 2,
     claimEvidence: { sources },
     claims: [approvedUseClaim(use, sources)],
     uses: [use],
   };
-  assert.equal(gradeSnapshot(report, scenario, repo, commit).pass, true);
+  assert.equal(
+    gradeSnapshot(repositoryFixture(report), scenario, repo, commit).pass,
+    true,
+  );
   const untraced = gradeSnapshot(
-    { ...report, searches: [] },
+    repositoryFixture({ ...report, searches: [] }),
     scenario,
     repo,
     commit,
@@ -546,7 +603,10 @@ test("the optional suite grades a caller's actual route and config in the same a
   };
   partial.uses.push(other);
   partial.claims.push(approvedUseClaim(other, partial.claimEvidence.sources));
-  assert.equal(gradeSnapshot(partial, scenario, repo, commit).pass, false);
+  assert.equal(
+    gradeSnapshot(repositoryFixture(partial), scenario, repo, commit).pass,
+    false,
+  );
 });
 
 test("the skill and standalone adapter use the same 23 blind questions and verify exact source lines", async () => {
