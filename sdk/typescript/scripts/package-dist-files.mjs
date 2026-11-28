@@ -52,6 +52,7 @@ const distModules = [
   "exploitability/graph-evidence",
   "exploitability/investigation-session",
   "exploitability/linked-resources",
+  "exploitability/python-version",
   "exploitability/reachability",
   "exploitability/report/audit",
   "exploitability/report/model",

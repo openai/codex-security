@@ -160,6 +160,34 @@ test("a frozen PyPI version list only excludes releases it can compare", () => {
   }
   expect(affected("1.0.0", ["1.0"])).toBe(true);
   expect(affected("1.0.1", ["1.0"])).toBe(false);
-  expect(affected("1.0a1", ["1.0a1"])).toBe(true);
-  expect(affected("1.0a1", ["1.0-alpha1"])).toBeUndefined();
+  expect(affected("1.0a1", ["1.0-alpha1"])).toBe(true);
+  expect(affected("2.1.0+cpu", ["2.1.0"])).toBe(true);
+  expect(affected("2.1.0+cpu", ["2.1.0+cu121"])).toBe(false);
+  expect(affected("2.1.0+CUDA_012", ["2.1.0+cuda.12"])).toBe(true);
+  expect(affected("1.0+", ["1.0"])).toBeUndefined();
+});
+
+test("Python sink ranges respect release boundaries and local build labels", () => {
+  function affected(version: string, range: string) {
+    const sink = {
+      id: "decode",
+      function: "decode",
+      package: "sample-codec",
+      versionScheme: "pep440",
+      affectedVersions: [range],
+      preconditions: [],
+    };
+    return affectedSinkVersion(sink, version, {
+      format: "codex-security.sinks/v2",
+      cve,
+      sinks: [sink],
+    });
+  }
+  expect(affected("2.1+cpu", "==2.1")).toBe(true);
+  expect(affected("2.1+cpu", ">=2.1+cpu")).toBeUndefined();
+  expect(affected("1.0rc2", ">1.0rc1,<1.1")).toBe(true);
+  expect(affected("1.0rc2", "<1.0")).toBe(false);
+  expect(affected("1.0.post1", ">1.0")).toBe(false);
+  expect(affected("1.0.post1.dev1", "<1.0.post1")).toBe(false);
+  expect(affected("1.0.dev1", ">=1.0.dev0,<=1.0")).toBe(true);
 });
