@@ -85,7 +85,8 @@ Run `cs exploitability check CVE-2019-10744 --config project.yaml`. The followin
 
 - `scope.instructions` replaces the default scope of production services, jobs, workers and the code they deploy or import.
 - `scope.exclude_paths` skips literal checkout-relative files or directories in broad searches. A nested `SECURITY.md` boundary or specific source or build evidence can bring an excluded path back into scope.
-- For repository checks, `sources` and `sinks` each specify a complete endpoint list. Omit a list to discover those endpoints. `sources: []` declares no entry points. If you set `sinks`, name at least one affected operation. Each endpoint requires a `function` and may include a package, symbol, file and line.
+
+Use `--sources handle --sinks defaultsDeep` to scope a single check. Repeat either flag to name more functions. Omit a flag to discover that end of the path.
 
 External search summaries record that a tool replied. A service catalog can establish that a caller exists even when more pages remain. To mark a file checked, the SDK asks for one model judgment about the selected list and verifies the quoted coverage field against the receipt. An empty list without explicit evidence of completeness leaves the file open. So does an unavailable sampler. Observed services keep their citations.
 

@@ -862,6 +862,8 @@ async function reviewedStackCheck(
   if (!combined) await configure(callerScope);
   const check = ["exploitability", "check", cve];
   if (!combined) check.push("--config", configPath);
+  if (mode === "correct")
+    check.push("--sources", "request", "--sinks", "decode");
   if (mode !== "correct")
     check.push(
       "--analyzer-input",
@@ -904,6 +906,17 @@ async function reviewedStackCheck(
   const output = JSON.parse(io.stdout.text());
   expect(JSON.parse(await readFile(destination, "utf8"))).toEqual(output);
   const report = combined ? output.analyzers.stacks : output;
+  if (mode === "correct") {
+    expect(report.endpointScope).toEqual({
+      sources: ["request"],
+      sinks: ["decode"],
+    });
+    expect(report.assessments[0]).toMatchObject({
+      verdict: "unknown",
+      sinkMatches: [],
+      leads: [{ sinkId: "decode", rawIndex: 0 }],
+    });
+  }
   if (glob) {
     const sha256 = createHash("sha256").update(bytes).digest("hex");
     const names = ["snap-a.json", "snap-z.json"];
@@ -1263,14 +1276,24 @@ test("without a catalog, frozen OSV ranges can exclude an attributed copy, but a
     JSON.stringify({
       format: "codex-security.stacks/v2",
       captures: [
-        { stacks: [{ frames: [frame] }, { frames: [{ name: "decode" }] }] },
+        {
+          stacks: [
+            { frames: [frame, { ...frame, name: "unselected" }] },
+            { frames: [{ name: "decode" }, { ...frame, name: "manual" }] },
+          ],
+        },
       ],
     }),
   );
   const options = { cve, repository: repo, toolRevision: "test" };
-  const freeze = (inputsDir: string, ecosystems: string[]) =>
+  const requested = { sources: ["request"], sinks: ["decode", "manual"] };
+  const freeze = (
+    inputsDir: string,
+    ecosystems: string[],
+    endpointScope?: typeof requested,
+  ) =>
     prepareStackPacket(
-      { ...options, stacksPath, inputsDir },
+      { ...options, stacksPath, inputsDir, endpointScope },
       {
         lookupCve: (id, signal) =>
           lookupDependencyAdvisory(id, signal, async () =>
@@ -1279,7 +1302,9 @@ test("without a catalog, frozen OSV ranges can exclude an attributed copy, but a
               details: "The example calls `other`.",
               affected: ecosystems.map((ecosystem) => ({
                 package: { name: "sample-codec", ecosystem },
-                ecosystem_specific: { affects: { functions: ["decode"] } },
+                ecosystem_specific: {
+                  affects: { functions: ["decode", "unselected"] },
+                },
                 ranges: [
                   {
                     type: "SEMVER",
@@ -1301,7 +1326,14 @@ test("without a catalog, frozen OSV ranges can exclude an attributed copy, but a
   for (const item of stackPacketWorkItems(ambiguous))
     expect(item).toMatchObject({ sinkMatches: [], leads: [] });
   const frozen = join(dir.path, "frozen");
-  const original = await freeze(frozen, ["crates.io"]);
+  const original = await freeze(frozen, ["crates.io"], requested);
+  await expect(
+    prepareStackInput({
+      ...options,
+      input: frozen,
+      endpointScope: { sinks: ["unselected"] },
+    }),
+  ).rejects.toThrow(/--sinks conflicts/);
   expect(original.sinks).toEqual({ format: "codex-security.sinks/v2", cve });
   const replay = await prepareStackInput({ ...options, input: frozen });
   const inputs = join(dir.path, "replay");
@@ -1318,7 +1350,9 @@ test("without a catalog, frozen OSV ranges can exclude an attributed copy, but a
   };
   expect(first).toMatchObject({
     workItem: { sinkMatches: [{ sinkId: "decode", rawIndex: 0 }], leads: [] },
-    advisoryDetails: [{ vulnerableFunctions: ["decode"] }],
+    endpointScope: requested,
+    sinks: [{ function: "decode", affectedVersions: [] }],
+    advisoryDetails: [{ vulnerableFunctions: ["decode", "unselected"] }],
   });
   const { claims } = (await call("record-claims", {
     claims: [
@@ -1348,7 +1382,13 @@ test("without a catalog, frozen OSV ranges can exclude an attributed copy, but a
   });
   const second = (await call("next")) as { workItem: { id: string } };
   expect(second).toMatchObject({
-    workItem: { sinkMatches: [], leads: [{ sinkId: "decode", rawIndex: 0 }] },
+    workItem: {
+      sinkMatches: [],
+      leads: [
+        { sinkId: "decode", rawIndex: 0 },
+        { sinkId: "manual", rawIndex: 1 },
+      ],
+    },
   });
   await expect(
     call("record-assessments", {
@@ -1373,6 +1413,7 @@ test("without a catalog, frozen OSV ranges can exclude an attributed copy, but a
     ],
   });
   expect(await call("finalize")).toMatchObject({
+    endpointScope: requested,
     assessments: [{ verdict: "ruled_out" }, { verdict: "unknown" }],
   });
 });
@@ -1455,6 +1496,9 @@ test("a caller scope is frozen separately from imported endpoint metadata", asyn
     runId: "run",
     attemptId: "attempt",
   };
+  await expect(
+    prepareStackPacket({ ...options, endpointScope: { sinks: ["other"] } }),
+  ).rejects.toThrow(/--sinks requested other/);
   const { manifest } = await prepareStackPacket(options);
   expect(manifest).not.toHaveProperty("callerScope");
 

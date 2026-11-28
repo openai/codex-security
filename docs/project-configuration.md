@@ -12,10 +12,7 @@ or glob such as `./profiles/**/stacks.json`. Paths resolve relative to the confi
 A one-run override such as `--analyzer-input stacks=./capture` resolves relative
 to the working directory. Quote globs on the command line so the CLI expands them.
 
-For repository checks, omit `exploitability.sinks` to discover affected operations
-or list one or more endpoints. An explicit `sinks: []` is invalid.
-`exploitability.sources: []` still declares no entry points. For stack checks,
-put optional endpoint catalogs in the capture directory.
+Set sources and sinks for each investigation with `cs exploitability check --sources handle --sinks decode`. Repeat either flag to investigate several functions.
 
 **Choose a file you trust.** Native Codex settings in the file can start MCP
 servers and select where model requests go. In CI, keep the configuration in an
