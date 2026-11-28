@@ -1,0 +1,52 @@
+{
+  "documentType": "codex-security.findings",
+  "schemaVersion": "1.0",
+  "scanId": "scan_diff_fixture_a",
+  "findings": [
+    {
+      "findingId": "csf_852f90d6e1177502ff113d4a",
+      "occurrenceId": "occ_aaaaaaaaaaaaaaaaaaaaaaaa",
+      "ruleId": "path-traversal.archive-extraction",
+      "identity": {
+        "anchor": "archive-entry-write-without-containment"
+      },
+      "fingerprints": {
+        "algorithm": "codex-security/v1",
+        "primary": "codex-security/v1:sha256:990a4a6a2ec18440dd47eac4d7256c0ee2c02db1b43104720cab3cbe9db706ca"
+      },
+      "title": "Unsafe archive extraction can escape the output directory",
+      "summary": "Archive extraction can overwrite files outside the directory chosen for the import.",
+      "severity": {
+        "level": "high"
+      },
+      "locations": [
+        {
+          "path": "src/extract.py",
+          "startLine": 41,
+          "endLine": 44,
+          "role": "sink"
+        }
+      ]
+    },
+    {
+      "findingId": "csf_111111111111111111111111",
+      "occurrenceId": "occ_bbbbbbbbbbbbbbbbbbbbbbbb",
+      "ruleId": "sql-injection.query-builder",
+      "identity": {
+        "anchor": "user-filter-concatenated-into-sql"
+      },
+      "title": "User filters are concatenated into SQL",
+      "summary": "The list endpoint builds a WHERE clause from request parameters.",
+      "severity": {
+        "level": "critical"
+      },
+      "locations": [
+        {
+          "path": "src/query.py",
+          "startLine": 12,
+          "role": "sink"
+        }
+      ]
+    }
+  ]
+}

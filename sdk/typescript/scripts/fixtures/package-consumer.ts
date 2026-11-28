@@ -36,6 +36,7 @@ import {
   estimateScanCost,
   loadProjectConfig,
   matchScanFindings,
+  diffScanFindings,
   planComponents,
   publishScanToCustom,
   publishScan,
@@ -262,6 +263,12 @@ const comparisonResult: Promise<ScanComparisonResult> = matchScanFindings(
   comparisonOptions,
 );
 void comparisonResult;
+
+const scanDiff = diffScanFindings(
+  { scanId: "before", findings: [] },
+  { scanId: "after", findings: [] },
+);
+void scanDiff.summary.new;
 
 // @ts-expect-error Historical matching policy is internal.
 matchScanFindings(comparisonInput, { allowHistoricalUncertainty: true });

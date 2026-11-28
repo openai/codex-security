@@ -988,6 +988,7 @@ describe("CLI", () => {
       "scans rerun [scanId]",
       "scans match [beforeId] [afterId]",
       "scans compare [beforeId] [afterId]",
+      "scans diff <beforeId> <afterId>",
       "info",
     ]) {
       expect(manifest.text()).toContain(`codex-security ${usage}`);
@@ -1035,6 +1036,7 @@ describe("CLI", () => {
       ["scans", "rerun"],
       ["scans", "match"],
       ["scans", "compare"],
+      ["scans", "diff"],
       ["findings", "false-positive"],
       ["findings", "list"],
     ] as const;
@@ -2150,6 +2152,7 @@ describe("CLI", () => {
         ["scans", "show", "--json"],
         ["scans", "list", "--json"],
         ["scans", "compare", "before", "after", "--json"],
+        ["scans", "diff", "before", "after", "--json"],
         ["scans", "match", "before", "after", "--json"],
         ["scans", "match", "--all", "--json"],
       ]) {
