@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { parse } from "yaml";
 import runtimeVars from "./runtime-vars.mts";
+import sastbench from "../sastbench/promptfooconfig.sastbench.mts";
 
 const evalRoot = path.resolve(import.meta.dirname, "..");
 
@@ -102,11 +103,20 @@ try {
 for (const name of [
   "promptfooconfig.yaml",
   "promptfooconfig.calibration.yaml",
-  "promptfooconfig.sastbench.yaml",
+  "sastbench/promptfooconfig.sastbench.mts",
 ]) {
-  const suite = parse(fs.readFileSync(path.join(evalRoot, name), "utf8"));
-  const providerPath = path.resolve(evalRoot, suite.providers[0].$ref);
-  const { id, config } = parse(fs.readFileSync(providerPath, "utf8"));
+  const isSastBench = name.startsWith("sastbench/");
+  const suite = isSastBench
+    ? sastbench
+    : parse(fs.readFileSync(path.join(evalRoot, name), "utf8"));
+  const { id, config } = isSastBench
+    ? suite.providers[0]
+    : parse(
+        fs.readFileSync(
+          path.resolve(evalRoot, suite.providers[0].$ref),
+          "utf8",
+        ),
+      );
   assert.match(id, /^openai:codex-sdk:/);
   assert.deepEqual(
     config.cli_config.permissions[config.cli_config.default_permissions],
@@ -125,7 +135,7 @@ for (const name of [
   assert.equal(config.cli_env?.CODEX_MCP_NODE_PATH, undefined);
   assert.equal(config.sandbox_mode, undefined);
   assert.equal(config.network_access_enabled, undefined);
-  if (name !== "promptfooconfig.sastbench.yaml") {
+  if (!isSastBench) {
     for (const proxy of [
       "HTTP_PROXY",
       "HTTPS_PROXY",

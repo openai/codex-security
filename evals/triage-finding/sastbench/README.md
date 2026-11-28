@@ -76,7 +76,7 @@ Both evaluation scripts pass `--no-cache --no-share`. Keep the checkout, skill, 
 
 ## Inspect native metrics
 
-Promptfoo computes the SastBench confusion matrix, strict and decided-only metrics, abstention rates, workflow rates, and error rates while the evaluation runs. The `afterEach` extension adds counters to every row, including provider errors, and weights representative-sample counters back to the full benchmark population. The `derivedMetrics` section in `promptfooconfig.sastbench.yaml` calculates the aggregate results.
+Promptfoo computes the SastBench confusion matrix, strict and decided-only metrics, abstention rates, workflow rates, and error rates while the evaluation runs. The `afterEach` extension adds counters to every row, including provider errors, and weights representative-sample counters back to the full benchmark population. The `derivedMetrics` section in `promptfooconfig.sastbench.mts` calculates the aggregate results.
 
 ### Verdict mapping
 

@@ -5,39 +5,23 @@ import os from "node:os";
 import { pathToFileURL } from "node:url";
 import fs from "node:fs";
 import path from "node:path";
-import { parse } from "yaml";
+import config from "../promptfooconfig.sastbench.mts";
+import sampleConfig from "../promptfooconfig.sastbench-sample.mts";
 
 const sastbenchRoot = path.resolve(import.meta.dirname, "..");
 const evalRoot = path.resolve(sastbenchRoot, "..");
-const entryConfig = parse(
-  fs.readFileSync(
-    path.join(sastbenchRoot, "promptfooconfig.sastbench.yaml"),
-    "utf8",
-  ),
-);
-assert.equal(entryConfig.$ref, "./promptfooconfig.sastbench.yaml");
-const config = parse(
-  fs.readFileSync(path.resolve(evalRoot, entryConfig.$ref), "utf8"),
-);
-const sampleConfig = parse(
-  fs.readFileSync(
-    path.join(sastbenchRoot, "promptfooconfig.sastbench-sample.yaml"),
-    "utf8",
-  ),
-);
 const packageJson = JSON.parse(
   fs.readFileSync(path.join(evalRoot, "package.json"), "utf8"),
 );
 
-const providerPath = path.resolve(evalRoot, config.providers[0].$ref);
-const provider = parse(fs.readFileSync(providerPath, "utf8"));
+const [provider] = config.providers;
 assert.match(provider.id, /^openai:codex-sdk:/);
 assert.deepEqual(provider.config.additional_directories, [
   "{{env.SASTBENCH_GIT_CACHE_ROOT}}",
   "{{target_repo}}",
 ]);
 assert.equal(provider.config.cli_env, undefined);
-assert.equal(config.evaluateOptions?.maxConcurrency, undefined);
+assert.equal("evaluateOptions" in config, false);
 assert.equal(config.tests, "file://./scripts/sastbench-lib.mts:generateTests");
 assert.deepEqual(
   config.defaultTest.assert.map(
@@ -50,10 +34,8 @@ assert.ok(
     "file://./assertions/sastbench-metrics.mts:afterEach",
   ),
 );
-const derivedMetrics = new Map<string, string>(
-  config.derivedMetrics.map(
-    ({ name, value }: { name: string; value: string }) => [name, value],
-  ),
+const derivedMetrics = new Map(
+  config.derivedMetrics.map(({ name, value }) => [name, value] as const),
 );
 for (const metric of [
   "strict_precision",
@@ -73,17 +55,31 @@ for (const metric of [
 ]) {
   assert.ok(derivedMetrics.has(metric), `Missing aggregate metric: ${metric}`);
 }
+const strict = { strict_tp: 2, strict_tn: 3, strict_fp: 1, strict_fn: 2 };
 assert.equal(
-  derivedMetrics.get("strict_accuracy"),
-  "(strict_tp + strict_tn) / max(positive_cases + negative_cases, 1)",
+  derivedMetrics.get("strict_accuracy")?.({
+    ...strict,
+    positive_cases: 4,
+    negative_cases: 4,
+  }),
+  5 / 8,
 );
-assert.equal(sampleConfig.$ref, entryConfig.$ref);
+assert.equal(derivedMetrics.get("strict_mcc")?.(strict), 4 / Math.sqrt(240));
+assert.equal(
+  derivedMetrics.get("strict_mcc")?.({
+    strict_tp: 0,
+    strict_tn: 0,
+    strict_fp: 0,
+    strict_fn: 0,
+  }),
+  0,
+);
 assert.equal(
   sampleConfig.tests,
   "file://./scripts/sastbench-lib.mts:generateSampleTests",
 );
-assert.equal(sampleConfig.providers, undefined);
-assert.equal(sampleConfig.derivedMetrics, undefined);
+assert.equal(sampleConfig.providers, config.providers);
+assert.equal(sampleConfig.derivedMetrics, config.derivedMetrics);
 
 assert.match(packageJson.scripts["eval:sastbench"], /run-promptfoo\.mts eval/);
 assert.match(packageJson.scripts["eval:sastbench"], /--no-cache/);
@@ -96,11 +92,11 @@ assert.doesNotMatch(
 );
 assert.match(
   packageJson.scripts["validate:sastbench:sample"],
-  /run-promptfoo\.mts validate config -c .\/sastbench\/promptfooconfig\.sastbench-sample\.yaml/,
+  /run-promptfoo\.mts validate config -c .\/sastbench\/promptfooconfig\.sastbench-sample\.mts/,
 );
 assert.match(
   packageJson.scripts["eval:sastbench:sample"],
-  /run-promptfoo\.mts eval -c .\/sastbench\/promptfooconfig\.sastbench-sample\.yaml/,
+  /run-promptfoo\.mts eval -c .\/sastbench\/promptfooconfig\.sastbench-sample\.mts/,
 );
 assert.match(packageJson.scripts["eval:sastbench:sample"], /--no-cache/);
 assert.match(packageJson.scripts["eval:sastbench:sample"], /--no-share/);

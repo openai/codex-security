@@ -7,6 +7,7 @@ import path from "node:path";
 import test, { after, type TestContext } from "node:test";
 import { DatabaseSync } from "node:sqlite";
 import { parse } from "yaml";
+import sastbench from "../sastbench/promptfooconfig.sastbench.mts";
 import { CODEX_EXECUTABLE_VERSION } from "../../../sdk/typescript/dist/version.js";
 import { beforeAll } from "./triage-provider.mts";
 
@@ -1278,17 +1279,15 @@ if (fs.existsSync(${JSON.stringify(failure)})) {
         ...promptfooEnvironment(root),
         CODEX_MCP_NODE_PATH: process.execPath,
       };
-      const template = parse(
-        fs.readFileSync(
-          path.join(
-            evalRoot,
-            suite === "SAST"
-              ? "promptfooconfig.sastbench.yaml"
-              : "promptfooconfig.calibration.yaml",
-          ),
-          "utf8",
-        ),
-      );
+      const template =
+        suite === "SAST"
+          ? sastbench
+          : parse(
+              fs.readFileSync(
+                path.join(evalRoot, "promptfooconfig.calibration.yaml"),
+                "utf8",
+              ),
+            );
       const provider = providerConfig(
         suite === "SAST" ? "sastbench" : "calibration",
       );
