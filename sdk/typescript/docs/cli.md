@@ -47,7 +47,7 @@ Use `cs exploitability check` to investigate whether a CVE or suspected vulnerab
 
 ```sh
 export CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1
-cs exploitability check CVE-2019-10744 --format md > review.md
+cs exploitability check CVE-2019-10744 --format md --report-file review.md
 ```
 
 The [dependency exploitability guide](dependency-exploitability.md) covers analyzer selection, package checks, verdicts, evidence sources, and experimental agent integrations.
