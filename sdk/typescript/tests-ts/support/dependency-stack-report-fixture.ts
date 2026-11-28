@@ -1,7 +1,8 @@
+export { manualStackExploitabilityReport as stacksReport } from "../../src/exploitability/check-output.js";
 const sha = "a".repeat(40);
 const hash = "b".repeat(64);
 const range = { path: "src/codec.ts", commit: sha, startLine: 3, endLine: 3 };
-const scope = {
+const query = {
   window: { start: "2099-02-01T00:00:00Z", end: "2099-02-01T01:00:00Z" },
 };
 const ref = { id: "copy", revision: 2, hash };
@@ -11,16 +12,17 @@ export function stackReport() {
   const common = {
     verdict: "unknown",
     supportingClaims: [],
-    queryId: "query-a",
-    groupId: "group-a",
     scopeConflicts: [],
-    queryScope: scope,
-    scope,
-    truncated: null,
+    sinkMatches: [],
+    leads: [],
   };
   const stack = {
     ...common,
-    workItemId: "sample-a",
+    workItemId: "captures/0/stacks/0",
+    captureIndex: 0,
+    stackIndex: 0,
+    origin: "debugger backtrace",
+    query: { ...query, coverage: "partial" },
     reason: "The decoder ran. Its effective mode is unknown.",
     supportingClaims: [ref],
     remainingQuestions: ["Which decoder mode ran?"],
@@ -54,39 +56,40 @@ export function stackReport() {
       },
     },
     status: "observed",
-    scope: { ...scope, service: "uploader", environment: "prod" },
-    truncated: true,
-    observation: {
-      id: "observation-a",
-      stackHash: "stack-a",
-      framesTruncated: false,
-      sourceIndex: 4,
-      sinkIndex: 0,
-      sinkMatches: [{ sinkId: "codec", rawIndex: 0 }],
+    sinkMatches: [{ sinkId: "codec", rawIndex: 0 }],
+    stack: {
+      labels: { process: "uploader", environment: "prod" },
       frames: [
-        { rawIndex: 0, frame: { name: "decode", type: "native" } },
-        { rawIndex: 4, frame: { name: "upload", type: "function" } },
-      ],
-      bindings: [
         {
-          package: "sample-codec",
-          version: "1.0",
-          provenance: "sample",
-          frameIndices: [0],
+          rawIndex: 0,
+          frame: {
+            name: "decode",
+            type: "native",
+            package: {
+              name: "sample-codec",
+              version: "1.0",
+              provenance: "local build record",
+            },
+          },
         },
+        { rawIndex: 4, frame: { name: "upload", type: "function" } },
       ],
     },
   };
   const noMatch = {
     ...common,
-    workItemId: "sample-b",
-    groupId: "group-b",
+    workItemId: "captures/1",
+    captureIndex: 1,
+    stackIndex: null,
     status: "no_match",
-    observation: null,
-    reason: "No matching sample in this window.",
+    stack: null,
+    reason: "The search returned no matching stacks.",
     remainingQuestions: ["Did the job run?"],
-    queryScope: { ...scope, service: "scheduled-job" },
-    scope: { ...scope, service: "scheduled-job" },
+    query: {
+      ...query,
+      selectors: { process: "scheduled-job" },
+      coverage: "complete",
+    },
   };
   const source = {
     ...range,
@@ -95,7 +98,7 @@ export function stackReport() {
     text: "return decode(bytes);",
   };
   return {
-    schemaVersion: "codex-security.pipeline-stacks.report/v1",
+    schemaVersion: "codex-security.pipeline-stacks.report/v2",
     review: null,
     cve: "CVE-2099-10001",
     runId: "run-a",
@@ -139,8 +142,7 @@ export function stackReport() {
       noMatch: [noMatch.workItemId],
       noCoverage: [],
       scopeConflicts: [],
-      truncated: [stack.workItemId],
-      truncationUnknown: [noMatch.workItemId],
+      incompleteSearch: [stack.workItemId],
     },
     remainingQuestions: [
       ...stack.remainingQuestions,

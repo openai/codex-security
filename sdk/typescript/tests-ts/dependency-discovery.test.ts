@@ -3,8 +3,12 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { discoverDependencyRepository } from "../src/dependency-discovery.js";
-import { readNpmManifests } from "../src/dependency-manifests.js";
+import { reviewScopes } from "../src/exploitability/analyzers/repository/claims.js";
+import {
+  discoverDependencyRepository,
+  readNpmManifests,
+} from "../src/exploitability/analyzers/repository/discovery.js";
+import { dependencyGraphCandidates } from "../src/exploitability/analyzers/repository/graph-candidates.js";
 
 const pkg = { ecosystem: "npm", name: "sample-codec" };
 
@@ -115,6 +119,33 @@ test("caller ownership and installed versions come from the same committed works
     expect(result.coverage.gaps).toContain(
       "No runtime observations were supplied.",
     );
+
+    // Only beta owns its manifest. The shared lockfile alone cannot identify a copy.
+    git("--no-replace-objects", "restore", "--", "package-lock.json");
+    const scopes = reviewScopes([
+      result,
+      {
+        ...result,
+        package: { ...pkg, ecosystem: "GIT" },
+        gitRepository: "https://example.invalid/sample-codec.git",
+        manifests: [],
+        callers: [],
+      },
+    ]);
+    const dependency = {
+      path: "apps/beta/package.json",
+      line: 1,
+      kind: "dependency" as const,
+      package: pkg.name,
+    };
+    const routed = await dependencyGraphCandidates(
+      scopes,
+      [dependency, { ...dependency, path: "package-lock.json" }],
+      repo,
+      new AbortController().signal,
+    );
+    const beta = scopes.find((s) => s.manifest === dependency.path)!;
+    expect([...routed]).toEqual([[beta.id, [dependency]]]);
   } finally {
     await rm(repo, { recursive: true, force: true });
   }
@@ -257,7 +288,7 @@ test("a wildcard npm request selects a locked prerelease like npm does", async (
     };
     const gaps: string[] = [];
     const [manifest] = await readNpmManifests(
-      new Set(Object.keys(files)),
+      new Map(Object.keys(files).map((path) => [path, path])),
       ["package.json"],
       "lib",
       async (path) => files[path]!,

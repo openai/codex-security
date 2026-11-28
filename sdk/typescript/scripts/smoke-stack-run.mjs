@@ -32,53 +32,21 @@ export async function smokeStackRun({
   git("add", "app.js");
   git("commit", "--quiet", "-m", "Add application");
   const cve = "CVE-2099-0001";
-  const target = { repository: "example/app", sha: git("rev-parse", "HEAD") };
-  const documents = {
-    sources: { format: "codex-security.stack-sources/v1", sources: [] },
-    sinks: {
-      format: "codex-security.stack-sinks/v1",
-      cve,
-      advisory: {
-        url: "https://example.invalid/advisory",
-        summary: "Sample decoding error.",
+  const sha = git("rev-parse", "HEAD");
+  const capture = {
+    format: "codex-security.stacks/v2",
+    captures: [
+      {
+        query: { selectors: { function: "decode" }, coverage: "complete" },
+        stacks: [],
       },
-      sinks: [
-        {
-          id: "decode",
-          function: "decode",
-          package: "example-decoder",
-          versionScheme: "semver",
-          affectedVersions: ["<1.0.0"],
-          preconditions: [],
-        },
-      ],
-    },
-    stacks: {
-      format: "codex-security.sampled-stacks/v1",
-      target,
-      origin: { source: "example" },
-      frameOrder: "leaf_first",
-      queries: [
-        {
-          id: "q",
-          scope: {
-            window: {
-              start: "2025-01-01T00:00:00Z",
-              end: "2025-01-02T00:00:00Z",
-            },
-          },
-          selectors: { sources: [], sinks: ["decode"] },
-          groups: [
-            { id: "g", status: "no_match", truncated: false, observations: [] },
-          ],
-        },
-      ],
-    },
+    ],
   };
-  for (const [name, value] of Object.entries(documents))
-    await writeFile(join(root, name + ".json"), JSON.stringify(value));
+  await writeFile(join(root, "stacks.json"), JSON.stringify(capture));
   const { prepareStackPacket } = await import(
-    pathToFileURL(join(installedRoot, "dist", "stack-packet.js")).href
+    pathToFileURL(
+      join(installedRoot, "dist", "exploitability/analyzers/stacks/packet.js"),
+    ).href
   );
   const inputsDir = join(root, "packet");
   await prepareStackPacket({
@@ -86,8 +54,6 @@ export async function smokeStackRun({
     repository,
     inputsDir,
     toolRevision: "fixture",
-    sourcesPath: join(root, "sources.json"),
-    sinksPath: join(root, "sinks.json"),
     stacksPath: join(root, "stacks.json"),
   });
   const state = join(root, "attempt.sqlite");
@@ -116,7 +82,7 @@ export async function smokeStackRun({
   assert.equal(
     command("init", undefined, ["--inputs", inputsDir, "--repo", repository])
       .target.sha,
-    target.sha,
+    sha,
   );
   assert.equal(command("tools").commands.length, 10);
   const { workItem, rootFirstRawIndices } = command("next");
@@ -155,7 +121,10 @@ export async function smokeStackRun({
     kind: "runtime",
     server: "example",
     tool: "sample",
-    result: { ...documents.stacks.queries[0], id: "follow-up" },
+    result: {
+      ...capture,
+      captures: [{ ...capture.captures[0], origin: "follow-up" }],
+    },
   });
   const { workItemIds } = command("record-observations", { receiptId });
   const followUp = command("next").workItem;
@@ -171,7 +140,11 @@ export async function smokeStackRun({
     ],
   });
   assert.equal(command("summarize-coverage").assessed, 2);
-  assert.equal(command("finalize").verdict, "unknown");
+  const [vulnerability] = command("finalize").vulnerabilities;
+  assert.equal(vulnerability.result.verdict, "unknown");
+  assert.equal(vulnerability.result.review.status, "not_reviewed");
+  assert.equal(vulnerability.findings.length, 0);
+  assert.equal(vulnerability.analyses[0].coverage.items.length, 2);
   assert.match(
     invoke("summarize-coverage", ["--format", "yaml"]),
     /assessed: 2/u,

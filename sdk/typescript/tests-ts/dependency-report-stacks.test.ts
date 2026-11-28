@@ -1,65 +1,63 @@
 import { expect, test } from "bun:test";
+import { renderDependencyReport } from "../src/exploitability/report/renderer.js";
+import { renderDependencyReportMarkdown } from "../src/exploitability/report/text.js";
+import { dependencyClaimHash } from "../src/exploitability/analyzers/stacks/claims.js";
 import {
-  readStackReport,
-  stackFrames,
-} from "../src/dependency-report-stacks.js";
-import { renderDependencyReport } from "../src/dependency-report-renderer.js";
-import { renderDependencyReportMarkdown } from "../src/dependency-report-markdown.js";
-import { dependencyClaimHash } from "../src/dependency-stack-claims.js";
-import { stackReport } from "./support/dependency-stack-report-fixture.js";
+  stackReport,
+  stacksReport,
+} from "./support/dependency-stack-report-fixture.js";
 
-test("projects a sparse observation, query limits and no-match without inventing reviewed uses", () => {
-  const input = stackReport();
-  const report = readStackReport(input)!;
-  expect(report.review).toBeNull();
-  expect(report.coverage).toEqual(input.coverage);
-  expect(report).not.toHaveProperty("uses");
-  const [path, missing] = report.assessments;
-  expect(path?.scope.service).toBe("uploader");
-  expect(path?.queryScope.service).toBeUndefined();
-  expect(path?.observation).toEqual(input.assessments[0].observation);
-  expect(
-    stackFrames(path!.observation!).map(
-      ({ rawIndex, source, sink, omittedBefore }) => ({
-        rawIndex,
-        source,
-        sink,
-        omittedBefore,
-      }),
-    ),
-  ).toEqual([
-    { rawIndex: 4, source: true, sink: false, omittedBefore: 0 },
-    { rawIndex: 0, source: false, sink: true, omittedBefore: 3 },
-  ]);
-  expect(path?.reason).toBe(input.assessments[0].reason);
-  expect(path?.use?.reason).toBe(input.assessments[0].use.reason);
-  expect(path?.claims.map((c) => c.id)).toEqual(["copy", "call"]);
-  expect(path?.claims[1]?.sources[0]?.text).toBe("return decode(bytes);");
-  expect(JSON.stringify(report)).not.toContain("RAW_RECEIPT_CONTENT");
-  expect(missing?.claims).toEqual([]);
-  expect(missing?.observation).toBeNull();
-  expect(missing?.use).toBeUndefined();
-});
-
-test("does not attach a different revision or hash in place of missing evidence", () => {
-  const input = stackReport();
-  const call = input.claims[1]!;
-  input.claims.splice(
-    1,
-    1,
-    { ...call, revision: call.revision + 1 },
-    { ...call, hash: "f".repeat(64) },
+test("a debugger stack with only a name is a lead, with no fabricated search or package", () => {
+  const raw = stackReport();
+  const first = raw.assessments[0];
+  const entry = {
+    ...first,
+    sourceFile: {
+      index: 1,
+      name: "debug<svg>.json",
+      captureIndex: 0,
+      sha256: "d".repeat(64),
+    },
+    query: undefined,
+    use: undefined,
+    supportingClaims: [],
+    frameIndices: [0, 1],
+    sinkMatches: [],
+    leads: [{ sinkId: "codec", rawIndex: 0 }],
+    stack: {
+      frames: [
+        { rawIndex: 0, frame: { name: "decode" } },
+        { rawIndex: 1, frame: { name: "open_file" } },
+      ],
+    },
+  };
+  const report = {
+    ...raw,
+    assessments: [entry],
+    claims: [],
+    coverage: {
+      ...raw.coverage,
+      total: 1,
+      assessed: 1,
+      noMatch: [],
+      incompleteSearch: [],
+    },
+  };
+  for (const render of [
+    renderDependencyReport,
+    renderDependencyReportMarkdown,
+  ]) {
+    const result = render(stacksReport(report));
+    expect(result).toContain("open_file");
+    expect(result).toContain("files[1]");
+    expect(result).toContain(entry.sourceFile.sha256);
+    expect(result).toMatch(/name-only lead/iu);
+    expect(result).not.toContain("Search window");
+    expect(result).not.toContain("sample-codec");
+  }
+  expect(renderDependencyReport(stacksReport(report))).not.toContain(
+    "debug<svg>.json",
   );
-  const path = readStackReport(input)!.assessments[0]!;
-  expect(path.claims.map((c) => c.id)).toEqual(["copy"]);
-  expect(path.missingClaims).toEqual(input.claims[0]!.dependencies);
-});
-
-test("only recognizes the stack contract and requires a nullable review", () => {
-  expect(readStackReport({ schemaVersion: 2, uses: [] })).toBeUndefined();
-  expect(() =>
-    readStackReport({ ...stackReport(), review: undefined }),
-  ).toThrow();
 });
 
 test("reviewed exports preserve each decision and the frozen advisory", () => {
@@ -91,12 +89,8 @@ test("reviewed exports preserve each decision and the frozen advisory", () => {
       },
     ],
   };
-  const reviewed = { ...draft, review };
-  const report = readStackReport(reviewed)!;
-  expect(report.assessments.map((a) => a.reviewReason)).toEqual([
-    review.decisions[1]!.reason,
-    review.decisions[0]!.reason,
-  ]);
+  const reviewed = stacksReport({ ...draft, review });
+  reviewed.vulnerabilities[0]!.result!.review = { status: "approved" };
   for (const render of [
     renderDependencyReport,
     renderDependencyReportMarkdown,
@@ -115,7 +109,12 @@ test("reviewed exports preserve each decision and the frozen advisory", () => {
     );
     expect(output).not.toContain("RAW_RECEIPT_CONTENT");
     expect(
-      render({ ...input, advisoryLookupError: "Registry unavailable." }),
+      render(
+        stacksReport({
+          ...input,
+          advisoryLookupError: "Registry unavailable.",
+        }),
+      ),
     ).toContain("Registry unavailable.");
   }
 });

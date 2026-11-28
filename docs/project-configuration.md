@@ -4,6 +4,16 @@ Use a YAML or JSON file to reuse a scan scope, cost limit, or findings threshold
 Select the file with `-c FILE` (or `--config FILE`) on `scan`, `bulk-scan`,
 `scan-components`, or `info`. The repository is a separate command argument.
 
+For [experimental dependency investigations](../sdk/typescript/docs/cli.md#experimental-dependency-investigations),
+`cs exploitability check CVE-2099-0001 --config FILE` runs each analyzer with
+the inputs it needs. Use `exploitability.analyzers` to restrict the eligible
+analyzers. Set `exploitability.analyzers.stacks.input` to a capture file, directory
+or glob such as `./profiles/**/stacks.json`. Paths resolve relative to the config file.
+A one-run override such as `--analyzer-input stacks=./capture` resolves relative
+to the working directory. Quote globs on the command line so the CLI expands them.
+
+Set sources and sinks for each investigation with `cs exploitability check --sources handle --sinks decode`. Repeat either flag to investigate several functions.
+
 **Choose a file you trust.** Native Codex settings in the file can start MCP
 servers and select where model requests go. In CI, keep the configuration in an
 operator-controlled location outside the checkout being scanned.

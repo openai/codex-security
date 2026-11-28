@@ -5,7 +5,7 @@ import { once } from "node:events";
 import { mkdirSync, writeFileSync } from "node:fs";
 import { cp, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import http from "node:http";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { createInterface } from "node:readline";
 
 export const summaryCve = "CVE-2099-1001";
@@ -203,36 +203,20 @@ async function packet(root, repo, capture, variant) {
     affectedVersions: ["<0.2.1"],
     preconditions: [precondition],
   };
-  const binding = {
-    package: "sample-summary",
-    version: capture.version,
-    frameIndices: [0],
-    provenance:
-      "The running service's loaded module and package manifest were checked against the clean Git tree.",
-  };
-  if (variant !== "unbound") binding.sourceSha = capture.sourceSha;
-  const scope = {
-    service: "summary",
-    environment: "loopback",
-    window: {
-      start: new Date(Date.parse(capture.observedAt) - 1000).toISOString(),
-      end: new Date(Date.parse(capture.observedAt) + 1000).toISOString(),
-    },
-  };
+  const [sum, ...callers] = capture.frames;
+  const frame = { ...sum };
+  if (variant !== "missing-version") {
+    frame.package = {
+      name: "sample-summary",
+      version: capture.version,
+      provenance: "The running service's loaded module and package manifest.",
+    };
+    if (variant !== "unbound") frame.sourceRevision = capture.sourceSha;
+  }
   const observation = {
-    id: "sample",
-    stackHash: capture.stackHash,
     observedAt: capture.observedAt,
-    provenance: {
-      source:
-        "V8 breakpoint in sum during an anonymous HTTP POST /summary on loopback.",
-    },
-    framesTruncated: false,
-    frames: capture.frames,
-    sourceIndex,
-    sinkIndex: 0,
-    sinkIds: ["sum"],
-    ...(variant === "missing-version" ? {} : { bindings: [binding] }),
+    labels: { service: "summary", environment: "loopback" },
+    frames: [frame, ...callers],
   };
   const advisory = {
     url: "https://example.invalid/advisories/sample-summary",
@@ -240,36 +224,21 @@ async function packet(root, repo, capture, variant) {
     summary:
       "Synthetic advisory. Before 0.2.1, the sample-summary sum function throws on an empty sample list. An unhandled exception can terminate a long-lived server.",
   };
-  const target = { repository: "example/summary", sha: capture.sourceSha };
   const docs = {
-    sources: { format: "codex-security.stack-sources/v1", sources: [source] },
+    sources: { format: "codex-security.sources/v2", sources: [source] },
     sinks: {
-      format: "codex-security.stack-sinks/v1",
+      format: "codex-security.sinks/v2",
       cve: summaryCve,
       advisory,
       sinks: [sink],
     },
     stacks: {
-      format: "codex-security.sampled-stacks/v1",
-      target,
-      origin: { source: "example-summary-observer", revision: "1" },
-      frameOrder: "leaf_first",
-      queries: [
+      format: "codex-security.stacks/v2",
+      captures: [
         {
-          id: "request",
-          scope,
-          selectors: {
-            sources: source.runtime_selectors,
-            sinks: sink.runtime_selectors,
-          },
-          groups: [
-            {
-              id: "service",
-              status: "observed",
-              truncated: false,
-              observations: [observation],
-            },
-          ],
+          origin:
+            "V8 breakpoint in sum during an anonymous HTTP POST /summary on loopback.",
+          stacks: [observation],
         },
       ],
     },
@@ -287,23 +256,23 @@ async function readPacket(repo, input, variant) {
     files[role] = { sha256: sha256(bytes), byteLength: bytes.byteLength };
     docs[role] = JSON.parse(bytes);
   }
-  const {
-    target,
-    queries: [query],
-  } = docs.stacks;
-  const {
-    scope,
-    groups: [
-      {
-        observations: [observation],
-      },
-    ],
-  } = query;
   assert.equal(
-    target.sha,
-    git(repo, "rev-parse", "HEAD"),
-    "recording matches regenerated fixture commit",
+    docs.stacks.format,
+    "codex-security.stacks/v2",
+    "Regenerate saved captures with the behavior command.",
   );
+  const [observation] = docs.stacks.captures[0].stacks;
+  const target = {
+    repository: basename(repo),
+    sha: git(repo, "rev-parse", "HEAD"),
+  };
+  if (variant === "positive" || variant === "fixed") {
+    assert.equal(
+      observation.frames[0].sourceRevision,
+      target.sha,
+      "recording matches regenerated fixture commit",
+    );
+  }
   return {
     repo,
     input,
@@ -312,7 +281,7 @@ async function readPacket(repo, input, variant) {
     variant,
     observation,
     target,
-    scope,
+    scope: observation.labels,
     advisory: docs.sinks.advisory,
   };
 }

@@ -1,31 +1,42 @@
 import { expect, spyOn, test } from "bun:test";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  cp,
+  mkdir,
+  readFile,
+  rename,
+  symlink,
+  writeFile,
+} from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { main, runCodexSkillCommand } from "../src/cli.js";
 import { parse as parseToml } from "smol-toml";
-import { DependencyAttemptStore } from "../src/dependency-attempt-store.js";
-import { lookupDependencyAdvisory } from "../src/dependency-advisory.js";
-import { analyzeStackAdvisory } from "../src/dependency-stack-advisory.js";
-import { prepareStackPacket } from "../src/stack-packet.js";
-import { sqliteDatabaseOpener } from "../src/runtime.js";
+import { DependencyAttemptStore } from "../src/exploitability/attempt-store.js";
 import {
-  prepareStackCheckPacket,
+  analyzeAdvisoryTriggers,
+  lookupDependencyAdvisory,
+} from "../src/exploitability/advisory.js";
+import {
+  prepareStackInput,
+  prepareStackPacket,
   readStackPacket,
   stackPacketWorkItems,
-} from "../src/dependency-stack-packet.js";
-import type { StackInvestigationReport } from "../src/dependency-stack-assessment.js";
+} from "../src/exploitability/analyzers/stacks/packet.js";
+import type { StackInvestigationReport } from "../src/exploitability/analyzers/stacks/assessment.js";
 import {
   dependencyClaimHash,
   type DependencyClaimReference,
-} from "../src/dependency-stack-claims.js";
+} from "../src/exploitability/analyzers/stacks/claims.js";
 import {
   executeStackRun,
   readFinalStackReport,
-} from "../src/dependency-stack-run.js";
+} from "../src/exploitability/analyzers/stacks/run.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { git } from "./git-fixture.js";
 import { createCliTest } from "./support/cli-run.js";
+import { synthesisAnswer } from "./support/dependency-report-fixtures.js";
 import { requestMetadata } from "./support/request-metadata.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
@@ -35,7 +46,6 @@ const callerEvidence = { path: "app.js", startLine: 1, endLine: 2 };
 async function sample(
   root: string,
   bindSource: boolean,
-  separateImage?: "same" | "other",
   callerSource = "export function request(bytes) {\n  return decode(bytes);\n}\n",
 ) {
   const repo = join(root, "target");
@@ -65,44 +75,26 @@ async function sample(
     affectedVersions: ["<2.0.0"],
     preconditions: [condition],
   };
-  const observation = {
-    id: "call",
-    stackHash: "sample",
-    framesTruncated: false,
-    sourceIndex: 1,
-    sinkIndex: 0,
-    sinkIds: [sink.id],
-    bindings: [
-      {
-        package: sink.package,
-        frameIndices: [0],
-        version: "1.0.0",
-        imageDigest: "sha256:" + "a".repeat(64),
-        provenance: "sample process",
-        ...(bindSource && { sourceSha: sha }),
-      },
-      ...(separateImage
-        ? [
-            {
-              package: "sample-app",
-              version: "1.0.0",
-              provenance: "sample application",
-              sourceSha: sha,
-              imageDigest:
-                "sha256:" + (separateImage === "same" ? "a" : "b").repeat(64),
-            },
-          ]
-        : []),
-    ],
+  const stack = {
+    labels: { service: "decoder" },
     frames: [
-      { name: "decode", type: "javascript", offset: "9007199254740993" },
-      { name: "request", type: "javascript", location: "app.js", line: 2 },
+      {
+        name: "decode",
+        offset: "9007199254740993",
+        package: {
+          name: sink.package,
+          version: "1.0.0",
+          provenance: "sample process",
+        },
+        ...(bindSource && { sourceRevision: sha }),
+      },
+      { name: "request", location: "app.js", line: 2 },
     ],
   };
   const documents = {
-    sources: { format: "codex-security.stack-sources/v1", sources: [source] },
+    sources: { format: "codex-security.sources/v2", sources: [source] },
     sinks: {
-      format: "codex-security.stack-sinks/v1",
+      format: "codex-security.sinks/v2",
       cve,
       advisory: {
         url: "https://example.invalid/advisories/decoder",
@@ -111,32 +103,19 @@ async function sample(
       sinks: [sink],
     },
     stacks: {
-      format: "codex-security.sampled-stacks/v1",
-      target: { repository: "example/decoder", sha },
-      origin: { source: "test" },
-      frameOrder: "leaf_first",
-      queries: [
+      format: "codex-security.stacks/v2",
+      captures: [
         {
-          id: "request",
-          scope: {
-            service: "decoder",
+          origin: "debugger backtrace",
+          query: {
+            selectors: { function: sink.function },
+            coverage: "complete",
             window: {
               start: "2026-01-01T00:00:00Z",
               end: "2026-01-02T00:00:00Z",
             },
           },
-          selectors: {
-            sources: [source.function],
-            sinks: [sink.function],
-          },
-          groups: [
-            {
-              id: "example",
-              status: "observed",
-              truncated: false,
-              observations: [observation],
-            },
-          ],
+          stacks: [stack],
         },
       ],
     },
@@ -151,37 +130,36 @@ async function sample(
   };
 }
 
-async function startProof(
-  root: string,
-  files: Awaited<ReturnType<typeof sample>>,
-  legacyCapture = false,
-) {
-  const inputs = join(root, "packet"),
-    state = join(root, "attempt.sqlite");
-  await prepareStackPacket({
+type Sample = Awaited<ReturnType<typeof sample>>;
+
+function packetOptions(files: Sample, inputsDir: string) {
+  return {
     cve,
     ...files,
     repository: files.repo,
-    inputsDir: inputs,
+    inputsDir,
     toolRevision: "test",
+  };
+}
+
+async function startPacket(root: string, files: Sample) {
+  const inputs = join(root, "packet");
+  const state = join(root, "attempt.sqlite");
+  const packet = await prepareStackPacket(packetOptions(files, inputs));
+  const ready = await executeStackRun("init", {
+    state,
+    repo: files.repo,
+    inputs,
   });
-  await executeStackRun("init", { state, repo: files.repo, inputs });
-  if (legacyCapture) {
-    // Packet-backed attempts created before run next supplied captures had no
-    // protocol record; their claim receipts identify the read-stacks command.
-    const db = sqliteDatabaseOpener()(state);
-    try {
-      db.exec(
-        "DELETE FROM records WHERE kind = 'stack-protocol' AND id = 'capture-origin'",
-      );
-    } finally {
-      db.close();
-    }
-  }
   const call = (command: string, input?: unknown) =>
     executeStackRun(command, { state, input });
+  return { inputs, state, packet, ready, call };
+}
+
+async function startProof(root: string, files: Sample) {
+  const { inputs, state, call } = await startPacket(root, files);
   const { workItem, receiptId, rootFirstRawIndices } = (await call("next")) as {
-    workItem: { id: string; observation: { bindings?: unknown[] } };
+    workItem: { id: string; stack: { frames: { package?: unknown }[] } };
     receiptId: string;
     rootFirstRawIndices: number[];
   };
@@ -194,12 +172,16 @@ async function startProof(
         scope: "sample caller",
         payload: "The caller supplies bytes to decode.",
         evidence: [callerEvidence],
-        receiptSelections: (capture.observation.bindings ?? []).map(
-          (_, index) => ({
-            receiptId,
-            textBlock: null,
-            record: ["observation", "bindings", index],
-          }),
+        receiptSelections: capture.stack.frames.flatMap((frame, index) =>
+          frame.package
+            ? [
+                {
+                  receiptId,
+                  textBlock: null,
+                  record: ["stack", "frames", index],
+                },
+              ]
+            : [],
         ),
       },
     ],
@@ -242,43 +224,6 @@ async function startProof(
   return { inputs, state, call, capture, claims, write, row };
 }
 
-test("an unchanged finalized packet with a legacy read-stacks receipt retains its report bytes", async () => {
-  await using dir = await scopedTemporaryDirectory("stack-legacy-final-");
-  const files = await sample(dir.path, true);
-  const { state, call, claims, row } = await startProof(dir.path, files, true);
-  const queried = (await call("query-claims", { ids: ["caller"] })) as {
-    claims: { evidence: { receipts: { origin: { tool: string } }[] } }[];
-  };
-  expect(queried.claims[0]!.evidence.receipts[0]!.origin.tool).toBe(
-    "read-stacks",
-  );
-  await call("record-assessments", { items: [row] });
-  const original = await call("finalize");
-  expect(original).toMatchObject({ claims });
-  expect(original).not.toHaveProperty("effectiveInputDigest");
-  const originalBytes = JSON.stringify(original);
-  const savedBytes = () => {
-    const db = sqliteDatabaseOpener()(state);
-    try {
-      const statement = db.prepare(
-        "SELECT value FROM records WHERE kind = 'report' AND id = 'final'",
-      );
-      try {
-        const [row] = statement.all() as { value: string }[];
-        return row!.value;
-      } finally {
-        statement.finalize?.();
-      }
-    } finally {
-      db.close();
-    }
-  };
-  const saved = savedBytes();
-  expect(JSON.stringify(await readFinalStackReport(state))).toBe(originalBytes);
-  expect(JSON.stringify(await call("finalize"))).toBe(originalBytes);
-  expect(savedBytes()).toBe(saved);
-});
-
 test("trigger analysis checks quotations and addresses each supplied sink", async () => {
   const quote = "The decoder must accept a caller-supplied length.";
   const { advisories } = await lookupDependencyAdvisory(
@@ -309,7 +254,7 @@ test("trigger analysis checks quotations and addresses each supplied sink", asyn
   const first = { sinkId: "decode", conditions: [condition] };
   const second = { sinkId: "another", conditions: [] };
   const analyze = (output: unknown) =>
-    analyzeStackAdvisory(input, async () => JSON.stringify(output));
+    analyzeAdvisoryTriggers(input, async () => JSON.stringify(output));
   expect(await analyze([first, second])).toEqual([first, second]);
   await expect(analyze([first])).rejects.toThrow(/Missing trigger analysis/);
   await expect(analyze([first, first])).rejects.toThrow(/repeated sink/);
@@ -376,219 +321,150 @@ test("a positive path must prove the supplied and derived conditions in the froz
   expect(report).toEqual(await readFinalStackReport(state));
 });
 
-for (const [label, bindSource, separateImage, expectedPositive] of [
-  ["source and version in one binding", true, undefined, true],
-  ["source not recorded", false, undefined, false],
-  ["source and version in the same image", false, "same", true],
-  ["source and version in different images", false, "other", false],
-] as const) {
-  test("stack verdict with " + label, async () => {
-    await using dir = await scopedTemporaryDirectory("stack-proof-");
-    const files = await sample(dir.path, bindSource, separateImage);
-    const { inputs, state, call, capture, claims, write, row } =
-      await startProof(dir.path, files);
-    expect(capture).toMatchObject({
-      rootFirstRawIndices: [1, 0],
-      observation: { frames: [{ offset: "9007199254740993" }, {}] },
-    });
-    expect(await call("record-claims", write)).toEqual({ claims });
-    expect(await call("query-claims", { ids: ["caller"] })).toMatchObject({
-      claims: [{ ...claims[0], state: "recorded" }],
-    });
-    if (!expectedPositive) {
+for (const bindSource of [true, false]) {
+  test(
+    bindSource
+      ? "a captured frame tied to this checkout can support a positive verdict"
+      : "an installed package alone cannot prove which revision ran",
+    async () => {
+      await using dir = await scopedTemporaryDirectory("stack-proof-");
+      const files = await sample(dir.path, bindSource);
+      const { inputs, state, call, capture, claims, write, row } =
+        await startProof(dir.path, files);
+      expect(capture).toMatchObject({
+        receiptId: expect.stringMatching(/^capture-/),
+        rootFirstRawIndices: [1, 0],
+        stack: {
+          frames: [
+            { name: "decode", offset: "9007199254740993" },
+            { name: "request" },
+          ],
+        },
+      });
+      expect(await call("record-claims", write)).toEqual({ claims });
+      expect(await call("query-claims", { ids: ["caller"] })).toMatchObject({
+        claims: [{ ...claims[0], state: "recorded" }],
+      });
+      if (!bindSource) {
+        await expect(
+          call("record-assessments", { items: [row] }),
+        ).rejects.toThrow(/frame source revision matching the checkout/);
+        await expect(call("finalize")).rejects.toThrow();
+        return;
+      }
+      await call("record-assessments", { items: [row] });
+      const report = await call("finalize");
+      expect(report).toMatchObject({
+        verdict: "exploitable",
+        review: null,
+        coverage: { total: 1, assessed: 1 },
+      });
+      expect(report).toEqual(await readFinalStackReport(state));
       await expect(
-        call("record-assessments", { items: [row] }),
-      ).rejects.toThrow(/build-to-source binding/);
-      await expect(call("finalize")).rejects.toThrow();
-      return;
-    }
-    await call("record-assessments", { items: [row] });
-    const report = await call("finalize");
-    expect(report).toMatchObject({
-      verdict: "exploitable",
-      review: null,
-      coverage: { total: 1, assessed: 1 },
-    });
-    expect(report).toEqual(await readFinalStackReport(state));
-    await expect(
-      call("record-evidence", {
-        scope: "caller",
-        question: "Who supplies bytes?",
-        claim: "Caller supplied bytes.",
-        evidence: [callerEvidence],
-      }),
-    ).rejects.toThrow(/finalized/);
-    await chmod(join(inputs, "stacks.json"), 0o600);
-    await writeFile(
-      join(inputs, "stacks.json"),
-      (await readFile(join(inputs, "stacks.json"), "utf8")) + "\n",
-    );
-    await expect(call("next")).rejects.toThrow();
-  });
+        call("record-evidence", {
+          scope: "caller",
+          question: "Who supplies bytes?",
+          claim: "Caller supplied bytes.",
+          evidence: [callerEvidence],
+        }),
+      ).rejects.toThrow(/finalized/);
+      await chmod(join(inputs, "stacks.json"), 0o600);
+      await writeFile(
+        join(inputs, "stacks.json"),
+        (await readFile(join(inputs, "stacks.json"), "utf8")) + "\n",
+      );
+      await expect(call("next")).rejects.toThrow();
+    },
+  );
 }
 
-async function sampledCopies(
-  root: string,
-  bindings: readonly {
-    version: string;
-    frameIndices?: readonly number[];
-    sourceBound?: boolean;
-  }[],
-  sinkFrames: readonly number[],
-) {
-  const files = await sample(root, true);
-  const capture = JSON.parse(await readFile(files.stacksPath, "utf8"));
-  const observation = capture.queries[0].groups[0].observations[0];
-  observation.frames[0].location = "primary/decode.js";
-  observation.frames.splice(1, 0, {
-    name: "decode",
-    type: "javascript",
-    location: "secondary/decode.js",
-  });
-  observation.sourceIndex = 2;
-  observation.sinkIndex = 1;
-  observation.sinkIds = [];
-  observation.sinkMatches = sinkFrames.map((rawIndex) => ({
-    sinkId: "decode",
-    rawIndex,
-  }));
-  observation.bindings = bindings.map(({ sourceBound = true, ...binding }) => ({
-    ...binding,
-    package: "sample-codec",
-    imageDigest: "sha256:" + "a".repeat(64),
-    ...(sourceBound && { sourceSha: capture.target.sha }),
-    provenance: "loaded modules",
-  }));
-  await writeFile(files.stacksPath, JSON.stringify(capture));
-  return startProof(root, files);
-}
-
-const fixedSink = { version: "2.1.0", frameIndices: [0] };
-const fixedWrapper = { ...fixedSink, frameIndices: [1] };
-const affectedSink = { version: "1.5.0", frameIndices: [0] };
-const affectedWrapper = { ...affectedSink, frameIndices: [1] };
-for (const [label, bindings, sinkFrames, ruledOut] of [
-  ["unattributed version", [{ version: "2.1.0" }], [0], false],
-  ["empty frame list", [{ version: "2.1.0", frameIndices: [] }], [0], false],
-  ["queried wrapper only", [fixedWrapper], [0], false],
-  [
-    "affected prerelease",
-    [{ ...affectedSink, version: "1.5.0-beta.1" }],
-    [0],
-    false,
-  ],
-  ["conflicting sink versions", [fixedSink, affectedSink], [0], false],
-  ["fixed sink and affected wrapper", [fixedSink, affectedWrapper], [0], true],
-  ["partially covered sinks", [fixedSink], [0, 1], false],
-  ["both sink frames covered", [fixedSink, fixedWrapper], [0, 1], true],
+for (const [secondVersion, expected] of [
+  ["2.1.0", true],
+  ["1.5.0", false],
+  [undefined, false],
 ] as const) {
-  test("version exclusion with " + label, async () => {
-    await using dir = await scopedTemporaryDirectory("stack-copies-");
-    const { call, row } = await sampledCopies(dir.path, bindings, sinkFrames);
-    const item = {
-      workItemId: row.workItemId,
-      verdict: "ruled_out",
-      reason: "The sampled decoder is fixed.",
-      supportingClaims: row.supportingClaims,
-    };
-    const result = call("record-assessments", { items: [item] });
-    if (ruledOut) {
-      await result;
-      expect(await call("finalize")).toMatchObject({ verdict: "ruled_out" });
-    } else {
-      await expect(result).rejects.toThrow();
-      const unknown = {
-        ...item,
-        verdict: "unknown",
-        reason: "Missing copy identity.",
-        remainingQuestions: ["Which copy supplied the sink?"],
-        questionChecks: [
+  test(
+    "version exclusion checks each matching frame, second copy " +
+      (secondVersion ?? "unattributed"),
+    async () => {
+      await using dir = await scopedTemporaryDirectory("stack-copies-");
+      const files = await sample(dir.path, true);
+      const raw = JSON.parse(await readFile(files.stacksPath, "utf8"));
+      const frames = raw.captures[0].stacks[0].frames;
+      frames[0].package.version = "2.1.0";
+      const sibling = structuredClone(frames[0]);
+      if (secondVersion) sibling.package.version = secondVersion;
+      else delete sibling.package;
+      frames.splice(1, 0, sibling);
+      await writeFile(files.stacksPath, JSON.stringify(raw));
+      const { call, row } = await startProof(dir.path, files);
+      const decision = call("record-assessments", {
+        items: [
           {
-            question: "Which copy supplied the sink?",
-            checked: "Compared the captured versions and their frame indices.",
-            missingEvidence:
-              "Unambiguous fixed-version attribution to every sink frame.",
-            claims: row.supportingClaims,
+            workItemId: row.workItemId,
+            verdict: "ruled_out",
+            reason: "All decoder copies were fixed.",
+            supportingClaims: row.supportingClaims,
           },
         ],
-      };
-      await call("record-assessments", { items: [unknown] });
-      expect(await call("finalize")).toMatchObject({ verdict: "unknown" });
-    }
-  });
-}
-
-for (const sourceBound of [true, false]) {
-  const label = sourceBound
-    ? "both copies linked to source"
-    : "only the fixed copy linked to source";
-  test("an affected sink beside a fixed sink with " + label, async () => {
-    await using dir = await scopedTemporaryDirectory("stack-peer-");
-    const { call, row } = await sampledCopies(
-      dir.path,
-      [{ ...affectedSink, sourceBound }, fixedWrapper],
-      [0, 1],
-    );
-    row.use.version = affectedSink.version;
-    const result = call("record-assessments", { items: [row] });
-    if (sourceBound) {
-      await result;
-      expect(await call("finalize")).toMatchObject({ verdict: "exploitable" });
-    } else {
-      await expect(result).rejects.toThrow();
-    }
-  });
+      });
+      if (expected) {
+        await decision;
+        expect(await call("finalize")).toMatchObject({ verdict: "ruled_out" });
+      } else await expect(decision).rejects.toThrow();
+    },
+  );
 }
 
 for (const [version, affected] of [
   ["1.5.0", true],
-  ["1.5.0-beta.1", true],
   ["2.1.0", false],
 ] as const) {
-  test("potential verdict with only a build selecting " + version, async () => {
-    await using dir = await scopedTemporaryDirectory("stack-configured-");
-    const source = `import { decode } from "npm:sample-codec@${version}";\nexport function request(bytes) { return decode(bytes); }\n`;
-    const files = await sample(dir.path, false, undefined, source);
-    const catalog = JSON.parse(await readFile(files.sinksPath, "utf8"));
-    const earlier = {
-      ...catalog.sinks[0],
-      id: "decode-earlier",
-      affectedVersions: ["<1.1.0"],
-    };
-    catalog.sinks.unshift(earlier);
-    await writeFile(files.sinksPath, JSON.stringify(catalog));
-    const capture = JSON.parse(await readFile(files.stacksPath, "utf8"));
-    const observation = capture.queries[0].groups[0].observations[0];
-    observation.sinkIds.unshift(earlier.id);
-    delete observation.bindings;
-    await writeFile(files.stacksPath, JSON.stringify(capture));
-    const { call, row } = await startProof(dir.path, files);
-    const verdict = "potentially_exploitable";
-    const use = {
-      ...row.use,
-      version,
-      verdict,
-      deployment: "configured",
-      evidence: row.use.evidence.map((range) => ({
-        ...range,
-        supports: ["affected_copy", "affected_use"],
-      })),
-    };
-    const item = {
-      ...row,
-      use,
-      verdict,
-      remainingQuestions: ["Which build ran?"],
-    };
-    const result = call("record-assessments", { items: [item] });
-    if (affected) {
-      await result;
-      expect(await call("finalize")).toMatchObject({ verdict });
-    } else {
-      await expect(result).rejects.toThrow(/affected range/);
-      expect(await call("summarize-coverage")).toMatchObject({ assessed: 0 });
-    }
-  });
+  test(
+    "potential verdict requires an affected frame version " + version,
+    async () => {
+      await using dir = await scopedTemporaryDirectory("stack-configured-");
+      const source = `import { decode } from "npm:sample-codec@${version}";\nexport function request(bytes) { return decode(bytes); }\n`;
+      const files = await sample(dir.path, false, source);
+      const catalog = JSON.parse(await readFile(files.sinksPath, "utf8"));
+      const earlier = {
+        ...catalog.sinks[0],
+        id: "decode-earlier",
+        affectedVersions: ["<1.1.0"],
+      };
+      catalog.sinks.unshift(earlier);
+      await writeFile(files.sinksPath, JSON.stringify(catalog));
+      const capture = JSON.parse(await readFile(files.stacksPath, "utf8"));
+      capture.captures[0].stacks[0].frames[0].package.version = version;
+      await writeFile(files.stacksPath, JSON.stringify(capture));
+      const { call, row } = await startProof(dir.path, files);
+      const verdict = "potentially_exploitable";
+      const use = {
+        ...row.use,
+        version,
+        verdict,
+        deployment: "configured",
+        evidence: row.use.evidence.map((range) => ({
+          ...range,
+          supports: ["affected_copy", "affected_use"],
+        })),
+      };
+      const item = {
+        ...row,
+        use,
+        verdict,
+        remainingQuestions: ["Which build ran?"],
+      };
+      const result = call("record-assessments", { items: [item] });
+      if (affected) {
+        await result;
+        expect(await call("finalize")).toMatchObject({ verdict });
+      } else {
+        await expect(result).rejects.toThrow(/affected range/);
+        expect(await call("summarize-coverage")).toMatchObject({ assessed: 0 });
+      }
+    },
+  );
 }
 
 test("the stack process gets a private Codex home and can write only its workspace", async () => {
@@ -664,6 +540,12 @@ test("the gated check preserves configured caller scope through review and two c
     'Assess the "import" worker.\nTreat uploaded records as caller-controlled.',
   ));
 
+test("a glob freezes identical files independently in lexical order and retains their source", () =>
+  reviewedStackCheck("glob", "Assess the desktop viewer."));
+
+test("a combined check replays the frozen stack evidence alongside the repository report", () =>
+  reviewedStackCheck("combined", "Assess only the decoder service."));
+
 test("a third independent rejection exhausts the one-shot budget without publishing a report", () =>
   reviewedStackCheck("exhausted"));
 
@@ -671,15 +553,40 @@ test("a review that repeats one decision and omits another cannot publish a repo
   reviewedStackCheck("duplicate"));
 
 async function reviewedStackCheck(
-  mode: "correct" | "duplicate" | "exhausted",
+  mode: "correct" | "glob" | "combined" | "duplicate" | "exhausted",
   callerScope?: string,
 ) {
   await using dir = await scopedTemporaryDirectory("stack-cli-");
   const files = await sample(dir.path, false);
   const stacks = JSON.parse(await readFile(files.stacksPath, "utf8"));
-  const { observations } = stacks.queries[0].groups[0];
-  observations.push({ ...observations[0], id: "other", stackHash: "other" });
-  await writeFile(files.stacksPath, JSON.stringify(stacks));
+  const glob = mode === "glob";
+  const raw = mode === "correct" || glob;
+  const combined = mode === "combined";
+  const observations = stacks.captures[0].stacks;
+  const rawDir = join(dir.path, "raw");
+  const captured = join(dir.path, "captured");
+  const replay = join(dir.path, "replay");
+  if (raw) {
+    // A debugger snapshot supplies its own frames and nothing else.
+    delete stacks.captures[0].query;
+    delete observations[0].frames[0].package;
+    await mkdir(rawDir);
+  }
+  if (!glob) observations.push(structuredClone(observations[0]));
+  const bytes = JSON.stringify(stacks) + "\n";
+  if (glob) {
+    for (const name of ["snap-z.json", "snap-a.json"])
+      await writeFile(join(rawDir, name), bytes);
+    await writeFile(join(rawDir, "unrelated.json"), "not a capture");
+  } else if (raw) await writeFile(join(rawDir, "stacks.json"), bytes);
+  else {
+    await writeFile(files.stacksPath, bytes);
+    if (!combined) {
+      await mkdir(captured);
+      for (const name of ["stacks.json", "sources.json", "sinks.json"])
+        await rename(join(dir.path, name), join(captured, name));
+    }
+  }
   const trigger =
     "The declared length must exceed the number of bytes supplied.";
   using lookup = spyOn(globalThis, "fetch").mockResolvedValue(
@@ -691,6 +598,19 @@ async function reviewedStackCheck(
       conditions: [{ label: trigger, advisoryId: cve, quote: trigger }],
     },
   ];
+  const inputs = join(dir.path, "packet");
+  const saved = combined
+    ? await prepareStackPacket(
+        { ...packetOptions(files, inputs), callerScope },
+        {
+          lookupCve: (id, signal) =>
+            lookupDependencyAdvisory(id, signal, async () =>
+              Response.json({ id, details: trigger }),
+            ),
+          analyze: async () => triggerAnalysis,
+        },
+      )
+    : undefined;
   const gate = "CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY";
   const requests = [
     "Inspect the captured frames to see if the argument values are recorded.",
@@ -710,6 +630,39 @@ async function reviewedStackCheck(
   const d = dependencies({
     currentDirectory: files.repo,
     async onCodex(argv, out, _env, prompt) {
+      const synthesis = synthesisAnswer((prompt ?? out?.appServer?.prompt)!);
+      if (synthesis) {
+        expect(out?.readOnly).toBe(true);
+        out!.stdout.write(JSON.stringify(synthesis));
+        return 0;
+      }
+      if (combined && !out?.stackTarget) {
+        const payload = JSON.parse(
+          (prompt ?? out?.appServer?.prompt)!.split("\n\n").at(-1)!,
+        );
+        out!.stdout.write(
+          JSON.stringify(
+            payload.claims
+              ? {
+                  decisions: payload.claims.map(
+                    ({ id, revision, hash }: DependencyClaimReference) => ({
+                      id,
+                      revision,
+                      hash,
+                      approved: true,
+                      evidenceKeys: [],
+                      reason: "Checked coverage.",
+                    }),
+                  ),
+                }
+              : {
+                  uses: [],
+                  limitations: ["No matching dependency in this checkout."],
+                },
+          ),
+        );
+        return 0;
+      }
       calls++;
       expect(argv[0]).toBe("exec");
       expect(requestMetadata(argv)).toMatchObject({
@@ -721,7 +674,7 @@ async function reviewedStackCheck(
       expect(out?.investigationServers).toEqual({});
       expect(argv).toContain('model_provider="sample"');
       expect(argv.some((arg) => arg.includes(gate))).toBe(true);
-      if (calls === 1) {
+      if (!raw && !combined && calls === 1) {
         expect(prompt).toContain(trigger);
         expect(out?.readOnly).toBe(true);
         out!.stdout.write(JSON.stringify(triggerAnalysis));
@@ -744,6 +697,7 @@ async function reviewedStackCheck(
         expect(draft.review).toBeNull();
         expect(draft.assessments).toHaveLength(2);
         const round = drafts.length;
+        if (glob && round === 0) await cp(inputs, replay, { recursive: true });
         expect(draft.assessments[0]?.questionChecks?.[0]?.checked).toBe(
           checks[round]!,
         );
@@ -754,7 +708,8 @@ async function reviewedStackCheck(
             drafts[round - 1]!.assessments[0]!.supportingClaims,
           );
         }
-        const challenge = round < 2 || mode === "exhausted";
+        const challenge =
+          mode === "exhausted" || (mode === "correct" && round < 2);
         const decisions = draft.assessments.map(({ workItemId }, index) => ({
           workItemId,
           reason: "Checked the source and captured evidence.",
@@ -811,13 +766,15 @@ async function reviewedStackCheck(
           rejected.workItemId,
         ]);
       } else originalState = state;
-      for (let i = 0; i < (previousDraft ? 1 : observations.length); i++) {
+      for (let i = 0; i < (previousDraft ? 1 : 2); i++) {
         const previous = previousDraft?.assessments[i];
         const { workItem, receiptId, openQuestions, advisoryDetails } =
           await child("next");
         if (previous) expect(workItem.id).toBe(previous.workItemId);
-        expect(openQuestions).toContain(condition);
-        expect(openQuestions).toContain(trigger);
+        if (!raw) {
+          expect(openQuestions).toContain(condition);
+          expect(openQuestions).toContain(trigger);
+        }
         expect(advisoryDetails[0].body).toBe(trigger);
         const question = "Which bytes did the request supply?";
         const row = {
@@ -828,7 +785,7 @@ async function reviewedStackCheck(
             : "The caller forwards bytes whose runtime values are unknown.",
           remainingQuestions: [question],
         };
-        if (!previous && i === 0) {
+        if (!raw && !previous && i === 0) {
           await child(
             "record-assessments",
             { items: [row] },
@@ -869,7 +826,7 @@ async function reviewedStackCheck(
           missingEvidence,
           claims: supportingClaims,
         };
-        if (!previous && i === 0) {
+        if (!raw && !previous && i === 0) {
           await child(
             "record-assessments",
             { items: [{ ...row, questionChecks: [check] }] },
@@ -897,59 +854,179 @@ async function reviewedStackCheck(
   d.environment["CODEX_HOME"] = configHome;
   d.environment[gate] = "1";
   const configPath = join(dir.path, "project.json");
-  if (callerScope !== undefined) {
-    await writeFile(
+  const progress = join(dir.path, "progress.jsonl");
+  const configure = (scope?: string) =>
+    writeFile(
       configPath,
       JSON.stringify({
-        exploitability: { scope: { instructions: callerScope } },
+        exploitability: {
+          analyzers: combined
+            ? undefined
+            : { stacks: { input: raw ? "./raw/stacks.json" : "./unused" } },
+          ...(scope && { scope: { instructions: scope } }),
+        },
       }),
     );
-  }
+  if (!combined) await configure(callerScope);
+  const check = ["exploitability", "check", cve];
+  if (!combined) check.push("--config", configPath);
+  if (mode === "correct")
+    check.push("--sources", "request", "--sinks", "decode");
+  if (mode !== "correct")
+    check.push(
+      "--analyzer-input",
+      combined
+        ? "stacks=../packet"
+        : glob
+          ? "stacks=../raw/snap-*.json"
+          : "stacks=../captured",
+    );
   const io = createCliTest(main);
   const code = await io.runCli(
     [
-      "exploitability",
-      "check",
-      cve,
-      "--sources",
-      files.sourcesPath,
-      "--sinks",
-      files.sinksPath,
-      "--stacks",
-      files.stacksPath,
-      ...(callerScope === undefined ? [] : ["--config", configPath]),
+      ...check,
+      ...(combined ? ["--progress-events", progress] : []),
       "--report-file",
       destination,
       "--json",
     ],
     d,
   );
+  // A combined check only looks up the repository advisory. Stack review reuses its snapshot.
   expect(lookup).toHaveBeenCalledTimes(1);
-  if (mode !== "duplicate") {
-    expect(drafts, io.stderr.text()).toHaveLength(3);
-    expect(calls).toBe(7); // analysis, then three investigator/reviewer pairs
-  }
-  if (mode !== "correct") {
-    expect(code).not.toBe(0);
+  expect(drafts, io.stderr.text() + io.stdout.text()).toHaveLength(
+    mode === "correct" || mode === "exhausted" ? 3 : 1,
+  );
+  if (mode === "exhausted" || mode === "duplicate") {
+    expect(code).toBe(2);
+    const blocked = JSON.parse(io.stdout.text());
+    expect(blocked.vulnerabilities[0]).toMatchObject({
+      status: "blocked",
+      result: null,
+    });
     if (mode === "exhausted") {
-      expect(io.stderr.text()).toContain(drafts[2]!.assessments[0]!.workItemId);
-      expect(io.stderr.text()).toContain(requests[2]!);
+      expect(blocked.reason).toContain(drafts[2]!.assessments[0]!.workItemId);
+      expect(blocked.reason).toContain(requests[2]!);
     } else
-      expect(io.stderr.text()).toContain("decide each work item exactly once");
+      expect(blocked.reason).toContain("decide each work item exactly once");
     await expect(readFile(destination)).rejects.toMatchObject({
       code: "ENOENT",
     });
     return;
   }
   expect(code, io.stderr.text()).toBe(0);
-  const report = JSON.parse(io.stdout.text());
-  expect(JSON.parse(await readFile(destination, "utf8"))).toEqual(report);
-  const approvedDraft = drafts[2]!;
-  expect({ ...report, review: null }).toEqual(approvedDraft);
-  expect(report).toMatchObject({
+  const output = JSON.parse(io.stdout.text());
+  expect(JSON.parse(await readFile(destination, "utf8"))).toEqual(output);
+  expect(output).toMatchObject({
+    schemaVersion: 3,
+    subject: { kind: "advisory", id: cve },
+    status: "complete",
+  });
+  expect(output.vulnerabilities).toHaveLength(1);
+  const [vulnerability] = output.vulnerabilities;
+  expect(vulnerability).toMatchObject({
+    kind: "advisory",
+    id: cve,
+    result: {
+      verdict: "unknown",
+      review: { status: "approved" },
+      findingRefs: [0, 1],
+    },
+  });
+  const stackAnalysis = vulnerability.analyses.find(
+    (a: { analyzer: string }) => a.analyzer === "stacks",
+  );
+  const assessments = vulnerability.findings.filter(
+    (item: { analyzer: string }) => item.analyzer === "stacks",
+  );
+  expect(assessments).toHaveLength(2);
+  const audit = stackAnalysis.audit;
+  if (mode === "correct") {
+    expect(audit.endpointScope).toEqual({
+      sources: ["request"],
+      sinks: ["decode"],
+    });
+    expect(assessments[0]).toMatchObject({
+      verdict: "unknown",
+      sinkMatches: [],
+      leads: [{ sinkId: "decode", rawIndex: 0 }],
+    });
+  }
+  if (glob) {
+    const sha256 = createHash("sha256").update(bytes).digest("hex");
+    const names = ["snap-a.json", "snap-z.json"];
+    const frozen = await readStackPacket(replay, files.repo);
+    expect(frozen.manifest.files.stacks.parts).toEqual(
+      names.map((name) => ({
+        name,
+        captureCount: 1,
+        sha256,
+        byteLength: Buffer.byteLength(bytes),
+      })),
+    );
+    for (const [index, name] of names.entries()) {
+      expect(assessments[index]).toMatchObject({
+        workItemId: `captures/${index}/stacks/0`,
+        sourceFile: { index, name, captureIndex: 0, sha256 },
+      });
+      expect(await readFile(join(replay, `stacks-${index}.json`), "utf8")).toBe(
+        bytes,
+      );
+    }
+    const changed = join(replay, "stacks-1.json");
+    await chmod(changed, 0o600);
+    await writeFile(changed, bytes + " ");
+    await expect(readStackPacket(replay, files.repo)).rejects.toThrow();
+  }
+  if (saved) {
+    expect(vulnerability.analyses).toMatchObject([
+      { analyzer: "repository", status: "complete" },
+      { analyzer: "stacks", status: "complete" },
+    ]);
+    expect(audit.inputDigest).toBe(saved.manifest.inputDigest);
+    const events = (await readFile(progress, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    for (const analyzer of ["repository", "stacks"]) {
+      expect(events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ analyzer, type: "investigation" }),
+          expect.objectContaining({
+            analyzer,
+            type: "stage",
+            stage: "investigate",
+          }),
+        ]),
+      );
+    }
+    async function expectRejected(message: RegExp) {
+      const retry = createCliTest(main);
+      expect(
+        await retry.runCli([...check, "--config", configPath], d),
+      ).not.toBe(0);
+      expect(retry.stderr.text()).toMatch(message);
+      expect(lookup).toHaveBeenCalledTimes(1);
+    }
+    await configure("A different scope.");
+    await expectRejected(/scope conflicts/i);
+    await configure();
+    const manifest = join(inputs, "manifest.json");
+    await chmod(manifest, 0o600);
+    await writeFile(
+      manifest,
+      JSON.stringify({ ...saved.manifest, inputDigest: "f".repeat(64) }),
+    );
+    await expectRejected(/manifest/i);
+    // Selecting raw files must not bypass the stored manifest and frozen scope.
+    check[check.length - 1] = "stacks=../packet/stacks.json";
+    await expectRejected(/replay the manifest/i);
+  }
+  const approvedDraft = drafts.at(-1)!;
+  expect(stackAnalysis.coverage.assessed).toBe(2);
+  expect(audit).toMatchObject({
     callerScope,
     verdict: "unknown",
-    coverage: { assessed: 2 },
     review: {
       draftDigest: dependencyClaimHash(approvedDraft),
       decisions: approvedDraft.assessments.map(({ workItemId }) => ({
@@ -957,14 +1034,14 @@ async function reviewedStackCheck(
         followUp: null,
       })),
     },
-    triggerAnalysis,
+    ...(!raw && { triggerAnalysis }),
     advisoryDetails: [{ id: cve, body: trigger }],
   });
-  for (const [index, assessment] of report.assessments.entries()) {
+  for (const [index, assessment] of assessments.entries()) {
     expect(assessment.questionChecks).toEqual([
       {
         question: assessment.remainingQuestions[0],
-        checked: index === 0 ? checks[2] : checks[0],
+        checked: index === 0 ? checks[drafts.length - 1] : checks[0],
         missingEvidence,
         claims: assessment.supportingClaims,
       },
@@ -972,15 +1049,96 @@ async function reviewedStackCheck(
   }
 }
 
-test("offline finalize renders the saved assessment and protects existing output", async () => {
+test("invalid captures and catalogs fail before either analyzer starts", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-glob-");
+  const { repo, stacksPath, sinksPath } = await sample(dir.path, false);
+  await writeFile(
+    sinksPath,
+    JSON.stringify({ format: "codex-security.sinks/v2", cve, sinks: [] }),
+  );
+  const folder = join(dir.path, "captures");
+  await mkdir(folder);
+  await writeFile(join(folder, "batch-a.json"), await readFile(stacksPath));
+  await writeFile(join(folder, "batch-broken.json"), "{");
+  await writeFile(
+    join(folder, "legacy.json"),
+    JSON.stringify({ format: "codex-security.sampled-stacks/v1", queries: [] }),
+  );
+  await writeFile(
+    join(folder, "empty.json"),
+    JSON.stringify({
+      format: "codex-security.stacks/v2",
+      captures: [{ stacks: [] }],
+    }),
+  );
+  await symlink(stacksPath, join(folder, "link.json"));
+  using lookup = spyOn(globalThis, "fetch").mockRejectedValue(
+    new Error("unexpected network access"),
+  );
+  let calls = 0;
+  const d = dependencies({
+    currentDirectory: repo,
+    async onCodex() {
+      calls++;
+      return 1;
+    },
+  });
+  d.environment["CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY"] = "1";
+  for (const [pattern, message] of [
+    ["no-such-*.json", /no stack capture files/i],
+    ["batch-*.json", /batch-broken.json/],
+    ["legacy.json", /stacks\/v2|unsupported/i],
+    ["empty.json", /query|empty/i],
+    ["link.json", /symlink|symbolic link|regular file/i],
+    ["../", /Supply at least one sink/],
+  ] as const) {
+    const io = createCliTest(main);
+    const code = await io.runCli(
+      [
+        "exploitability",
+        "check",
+        cve,
+        "--analyzer-input",
+        "stacks=../captures/" + pattern,
+      ],
+      d,
+    );
+    expect(code).not.toBe(0);
+    expect(io.stderr.text()).toMatch(message);
+  }
+  expect(calls).toBe(0);
+  expect(lookup).not.toHaveBeenCalled();
+});
+
+test("offline finalize preserves exact evidence, renders unreviewed findings and protects existing output", async () => {
   await using dir = await scopedTemporaryDirectory("stack-render-");
   const files = await sample(dir.path, false);
-  const { state, call, row, claims } = await startProof(dir.path, files);
+  const { call, state } = await startPacket(dir.path, files);
+  const { workItem, receiptId } = (await call("next")) as {
+    workItem: { id: string };
+    receiptId: string;
+  };
+  const payload = JSON.parse('{"sample":{"__proto__":{"enabled":true}}}');
+  const record = (value: unknown) =>
+    call("record-claims", {
+      claims: [
+        {
+          id: "input",
+          scope: "sample",
+          payload: value,
+          receiptIds: [receiptId],
+        },
+      ],
+    });
+  const { claims } = (await record(payload)) as {
+    claims: DependencyClaimReference[];
+  };
+  await expect(record({ sample: {} })).rejects.toThrow();
   const question = "Which source commit ran?";
   await call("record-assessments", {
     items: [
       {
-        workItemId: row.workItemId,
+        workItemId: workItem.id,
         verdict: "unknown",
         reason: "Source identity is missing.",
         remainingQuestions: [question],
@@ -988,7 +1146,7 @@ test("offline finalize renders the saved assessment and protects existing output
         questionChecks: [
           {
             question,
-            checked: "Read the captured package binding and the pinned caller.",
+            checked: "Checked the captured package and caller.",
             missingEvidence:
               "The source revision used to build the captured image.",
             claims,
@@ -997,12 +1155,30 @@ test("offline finalize renders the saved assessment and protects existing output
       },
     ],
   });
-  await call("finalize");
+  const frozen = (await call("finalize")) as { claims: { payload: unknown }[] };
+  expect(JSON.stringify(frozen.claims[0]!.payload)).toEqual(
+    JSON.stringify(payload),
+  );
   const readDeps = dependencies({ currentDirectory: files.repo });
   readDeps.environment["CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY"] = "1";
   const args = ["exploitability", "run", "finalize", "--state", state];
+  const offline = createCliTest(main);
+  expect(
+    await offline.runCli([...args, "--json"], readDeps),
+    offline.stderr.text(),
+  ).toBe(0);
+  const manual = JSON.parse(offline.stdout.text());
+  expect(manual.vulnerabilities[0]).toMatchObject({
+    kind: "advisory",
+    id: cve,
+    result: { verdict: "unknown", review: { status: "not_reviewed" } },
+    findings: [{ analyzer: "stacks", reason: "Source identity is missing." }],
+  });
   const markdown = createCliTest(main);
-  expect(await markdown.runCli([...args, "--format", "md"], readDeps)).toBe(0);
+  expect(
+    await markdown.runCli([...args, "--format", "md"], readDeps),
+    markdown.stderr.text(),
+  ).toBe(0);
   expect(markdown.stdout.text()).toContain(cve);
   expect(markdown.stdout.text()).toContain("Source identity is missing.");
   expect(markdown.stdout.text()).not.toContain("[object Object]");
@@ -1061,233 +1237,262 @@ test("an explicitly dated observation outside the requested window stays an unre
   await using dir = await scopedTemporaryDirectory("stack-window-");
   const files = await sample(dir.path, true);
   const original = JSON.parse(await readFile(files.stacksPath, "utf8"));
-  original.queries[0].groups[0].observations[0].observedAt =
-    "2026-01-02T00:00:00.000001Z";
+  original.captures[0].stacks[0].observedAt = "2026-01-02T00:00:00.000001Z";
   await writeFile(files.stacksPath, JSON.stringify(original));
-  const inputs = join(dir.path, "inputs"),
-    state = join(dir.path, "run.sqlite");
-  const packet = await prepareStackPacket({
-    cve,
-    ...files,
-    repository: files.repo,
-    inputsDir: inputs,
-    toolRevision: "test",
-  });
+  const { packet, call } = await startPacket(dir.path, files);
   const [work] = stackPacketWorkItems(packet);
   expect(work!.scopeConflicts.join(" ")).toContain("outside the query window");
-  await executeStackRun("init", { state, repo: files.repo, inputs });
   await expect(
-    executeStackRun("record-assessments", {
-      state,
-      input: {
-        items: [
-          {
-            workItemId: work!.id,
-            verdict: "exploitable",
-            reason: "Observed caller.",
-          },
-        ],
-      },
-    }),
-  ).rejects.toThrow(/Conflicting capture scope/);
-  await executeStackRun("record-assessments", {
-    state,
-    input: {
+    call("record-assessments", {
       items: [
         {
           workItemId: work!.id,
-          verdict: "unknown",
-          reason: "Observation fell outside the requested time.",
-          remainingQuestions: ["Did this caller run in the requested window?"],
+          verdict: "exploitable",
+          reason: "Observed caller.",
         },
       ],
-    },
+    }),
+  ).rejects.toThrow(/Conflicting capture scope/);
+  await call("record-assessments", {
+    items: [
+      {
+        workItemId: work!.id,
+        verdict: "unknown",
+        reason: "Observation fell outside the requested time.",
+        remainingQuestions: ["Did this caller run in the requested window?"],
+      },
+    ],
   });
-  expect(await executeStackRun("finalize", { state })).toMatchObject({
+  expect(await call("finalize")).toMatchObject({
     verdict: "unknown",
     coverage: { scopeConflicts: [work!.id] },
   });
 });
 
-test("an indexed miss stays unknown and other capture groups can be assessed", async () => {
-  await using dir = await scopedTemporaryDirectory("stack-indexed-miss-");
+test("two searches and a raw stack keep their own coverage and positions", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-multiple-");
   const files = await sample(dir.path, true);
-  const stacks = JSON.parse(await readFile(files.stacksPath, "utf8"));
-  const [observed] = stacks.queries[0].groups;
-  const indexedMiss = {
-    id: "empty-index",
-    status: "no_indexed_match",
-    truncated: false,
-    observations: [],
-  };
-  stacks.queries[0].groups = [indexedMiss, observed];
-  await writeFile(files.stacksPath, JSON.stringify(stacks));
-
-  const inputs = join(dir.path, "inputs");
-  const state = join(dir.path, "run.sqlite");
-  const packet = await prepareStackPacket({
-    cve,
-    ...files,
-    repository: files.repo,
-    inputsDir: inputs,
-    toolRevision: "test",
-  });
-  const [miss, call] = stackPacketWorkItems(packet);
-  expect(miss).toMatchObject({ status: "no_indexed_match", observation: null });
-  await executeStackRun("init", { state, repo: files.repo, inputs });
-  expect(await executeStackRun("next", { state })).toMatchObject({
-    workItem: { id: miss!.id, status: "no_indexed_match" },
-  });
-
-  await expect(
-    executeStackRun("record-assessments", {
-      state,
-      input: {
-        items: [
-          {
-            workItemId: miss!.id,
-            verdict: "ruled_out",
-            reason: "The index returned no stacks.",
-          },
-        ],
+  const doc = {
+    format: "codex-security.stacks/v2",
+    captures: [
+      {
+        query: { selectors: { function: "decode" }, coverage: "partial" },
+        stacks: [{ frames: [{ name: "decode" }, { name: "open_file" }] }],
       },
-    }),
-  ).rejects.toThrow(/requires a scoped unknown assessment/);
-
-  await executeStackRun("record-assessments", {
-    state,
-    input: {
-      items: [
-        {
-          workItemId: miss!.id,
-          verdict: "unknown",
-          reason: "The index returned no stacks for this scope.",
-          remainingQuestions: ["Do profiles cover the requested window?"],
-        },
-      ],
-    },
-  });
-  const next = (await executeStackRun("next", { state })) as {
-    receiptId: string;
-    workItem: { id: string; status: string };
+      {
+        query: { selectors: { function: "unpack" }, coverage: "complete" },
+        stacks: [],
+      },
+      {
+        origin: "crash dump",
+        stacks: [{ frames: [{ name: "parse_header" }] }],
+      },
+    ],
   };
-  expect(next).toMatchObject({
-    workItem: { id: call!.id, status: "observed" },
+  await writeFile(files.stacksPath, JSON.stringify(doc));
+  const { packet, call } = await startPacket(dir.path, files);
+  const items = stackPacketWorkItems(packet);
+  expect(items.map(({ id, status }) => [id, status])).toEqual([
+    ["captures/0/stacks/0", "observed"],
+    ["captures/1", "no_match"],
+    ["captures/2/stacks/0", "observed"],
+  ]);
+  expect(items[0]).toMatchObject({
+    sinkMatches: [],
+    leads: [{ sinkId: "decode", rawIndex: 0 }],
   });
-  const { claims } = (await executeStackRun("record-claims", {
-    state,
-    input: {
-      claims: [
-        {
-          id: "captured-frame",
-          scope: "sample caller",
-          payload: "The sampled frames show a call to the decoder.",
-          receiptIds: [next.receiptId],
-        },
-      ],
-    },
-  })) as { claims: DependencyClaimReference[] };
-  const question = "Was the decoder input caller-controlled?";
-  await executeStackRun("record-assessments", {
-    state,
-    input: {
-      items: [
-        {
-          workItemId: call!.id,
-          verdict: "unknown",
-          reason: "The captured call has an unverified prerequisite.",
-          supportingClaims: claims,
-          remainingQuestions: [question],
-          questionChecks: [
+  expect(items[2]).not.toHaveProperty("query");
+  for (const work of items) {
+    if (work.status === "no_match")
+      await expect(
+        call("record-assessments", {
+          items: [
             {
-              question,
-              checked: "Read the supplied stack frames.",
-              missingEvidence: "The sampled decoder argument and its origin.",
-              claims,
+              workItemId: work.id,
+              verdict: "ruled_out",
+              reason: "No stacks returned.",
             },
           ],
-        },
-      ],
-    },
-  });
-  const report = await executeStackRun("finalize", { state });
-  expect(report).toMatchObject({
-    verdict: "unknown",
-    assessments: [
-      { status: "no_coverage", verdict: "unknown", observation: null },
-      { status: "observed", observation: { id: "call" } },
-    ],
-    coverage: {
-      assessed: 2,
-      observed: 1,
-      noMatch: [],
-      noCoverage: [miss!.id],
-    },
-  });
-  expect(report).toEqual(await readFinalStackReport(state));
-});
-
-test("claim identity and finalized reports retain every own key in opaque JSON evidence", async () => {
-  await using dir = await scopedTemporaryDirectory("stack-json-");
-  const files = await sample(dir.path, true);
-  const inputs = join(dir.path, "inputs"),
-    state = join(dir.path, "attempt.sqlite");
-  await prepareStackPacket({
-    cve,
-    ...files,
-    repository: files.repo,
-    inputsDir: inputs,
-    toolRevision: "test",
-  });
-  await executeStackRun("init", { state, repo: files.repo, inputs });
-  const command = (name: string, input?: unknown) =>
-    executeStackRun(name, { state, input });
-  const { workItem, receiptId } = (await command("next")) as {
-    workItem: { id: string };
-    receiptId: string;
-  };
-  const payload = JSON.parse('{"sample":{"__proto__":{"enabled":true}}}');
-  const record = (value: unknown) =>
-    command("record-claims", {
-      claims: [
+        }),
+      ).rejects.toThrow(/requires a scoped unknown assessment/);
+    await call("record-assessments", {
+      items: [
         {
-          id: "input",
-          scope: "sample",
-          payload: value,
-          receiptIds: [receiptId],
+          workItemId: work.id,
+          verdict: "unknown",
+          reason: "The capture cannot identify an affected copy.",
+          remainingQuestions: ["Which build ran?"],
         },
       ],
     });
-  const { claims } = (await record(payload)) as {
-    claims: DependencyClaimReference[];
+  }
+  expect(await call("finalize")).toMatchObject({
+    verdict: "unknown",
+    coverage: {
+      assessed: 3,
+      observed: 2,
+      noMatch: [items[1]!.id],
+      incompleteSearch: [items[0]!.id],
+    },
+  });
+});
+
+test("without a catalog, frozen OSV ranges can exclude an attributed copy, but a name alone stays a lead", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-implicit-osv-");
+  const { repo, stacksPath } = await sample(dir.path, false);
+  const frame = {
+    name: "decode",
+    package: {
+      name: "sample-codec",
+      version: "2.1.0",
+      provenance: "loaded module",
+    },
   };
-  await expect(record({ sample: {} })).rejects.toThrow();
-  await command("record-assessments", {
-    items: [
+  await writeFile(
+    stacksPath,
+    JSON.stringify({
+      format: "codex-security.stacks/v2",
+      captures: [
+        {
+          stacks: [
+            { frames: [frame, { ...frame, name: "unselected" }] },
+            { frames: [{ name: "decode" }, { ...frame, name: "manual" }] },
+          ],
+        },
+      ],
+    }),
+  );
+  const options = { cve, repository: repo, toolRevision: "test" };
+  const requested = { sources: ["request"], sinks: ["decode", "manual"] };
+  const freeze = (
+    inputsDir: string,
+    ecosystems: string[],
+    endpointScope?: typeof requested,
+  ) =>
+    prepareStackPacket(
+      { ...options, stacksPath, inputsDir, endpointScope },
       {
-        workItemId: workItem.id,
-        verdict: "unknown",
-        reason: "Missing input provenance.",
-        remainingQuestions: ["Who controls the input?"],
-        supportingClaims: claims,
-        questionChecks: [
+        lookupCve: (id, signal) =>
+          lookupDependencyAdvisory(id, signal, async () =>
+            Response.json({
+              id,
+              details: "The example calls `other`.",
+              affected: ecosystems.map((ecosystem) => ({
+                package: { name: "sample-codec", ecosystem },
+                ecosystem_specific: {
+                  affects: { functions: ["decode", "unselected"] },
+                },
+                ranges: [
+                  {
+                    type: "SEMVER",
+                    events: [{ introduced: "0" }, { fixed: "2.0.0" }],
+                  },
+                ],
+              })),
+            }),
+          ),
+        analyze: async () => {
+          throw new Error("No supplied catalog needs trigger analysis.");
+        },
+      },
+    );
+  const ambiguous = await freeze(join(dir.path, "ambiguous"), [
+    "crates.io",
+    "npm",
+  ]);
+  for (const item of stackPacketWorkItems(ambiguous))
+    expect(item).toMatchObject({ sinkMatches: [], leads: [] });
+  const frozen = join(dir.path, "frozen");
+  const original = await freeze(frozen, ["crates.io"], requested);
+  await expect(
+    prepareStackInput({
+      ...options,
+      input: frozen,
+      endpointScope: { sinks: ["unselected"] },
+    }),
+  ).rejects.toThrow(/--sinks conflicts/);
+  expect(original.sinks).toEqual({ format: "codex-security.sinks/v2", cve });
+  const replay = await prepareStackInput({ ...options, input: frozen });
+  const inputs = join(dir.path, "replay");
+  expect((await replay(inputs)).manifest.inputDigest).toBe(
+    original.manifest.inputDigest,
+  );
+  const state = join(dir.path, "run.sqlite");
+  await executeStackRun("init", { state, inputs, repo });
+  const call = (command: string, input?: unknown) =>
+    executeStackRun(command, { state, input });
+  const first = (await call("next")) as {
+    workItem: { id: string };
+    receiptId: string;
+  };
+  expect(first).toMatchObject({
+    workItem: { sinkMatches: [{ sinkId: "decode", rawIndex: 0 }], leads: [] },
+    endpointScope: requested,
+    sinks: [{ function: "decode", affectedVersions: [] }],
+    advisoryDetails: [{ vulnerableFunctions: ["decode", "unselected"] }],
+  });
+  const { claims } = (await call("record-claims", {
+    claims: [
+      {
+        id: "running",
+        scope: "decoder",
+        payload: "The frame is from 2.1.0.",
+        receiptSelections: [
           {
-            question: "Who controls the input?",
-            checked:
-              "The captured stack identifies the caller but not its trust boundary.",
-            missingEvidence: "The origin of the request bytes.",
-            claims,
+            receiptId: first.receiptId,
+            textBlock: null,
+            record: ["stack", "frames", 0, "package"],
           },
         ],
       },
     ],
+  })) as { claims: DependencyClaimReference[] };
+  await call("record-assessments", {
+    items: [
+      {
+        workItemId: first.workItem.id,
+        verdict: "ruled_out",
+        reason: "OSV fixes the package at 2.0.0.",
+        supportingClaims: claims,
+      },
+    ],
   });
-  const result = (await command("finalize")) as {
-    claims: { payload: unknown }[];
-  };
-  expect(JSON.stringify(result.claims[0]!.payload)).toEqual(
-    JSON.stringify(payload),
-  );
+  const second = (await call("next")) as { workItem: { id: string } };
+  expect(second).toMatchObject({
+    workItem: {
+      sinkMatches: [],
+      leads: [
+        { sinkId: "decode", rawIndex: 0 },
+        { sinkId: "manual", rawIndex: 1 },
+      ],
+    },
+  });
+  await expect(
+    call("record-assessments", {
+      items: [
+        {
+          workItemId: second.workItem.id,
+          verdict: "ruled_out",
+          reason: "The function has the same name.",
+          supportingClaims: claims,
+        },
+      ],
+    }),
+  ).rejects.toThrow();
+  await call("record-assessments", {
+    items: [
+      {
+        workItemId: second.workItem.id,
+        verdict: "unknown",
+        reason: "The frame does not identify a package.",
+        remainingQuestions: ["Which package supplied this function?"],
+      },
+    ],
+  });
+  expect(await call("finalize")).toMatchObject({
+    endpointScope: requested,
+    assessments: [{ verdict: "ruled_out" }, { verdict: "unknown" }],
+  });
 });
 
 test("a caller scope is frozen separately from imported endpoint metadata", async () => {
@@ -1296,19 +1501,16 @@ test("a caller scope is frozen separately from imported endpoint metadata", asyn
   const catalog = JSON.parse(await readFile(files.sinksPath, "utf8"));
   catalog.sinks[0].callerScope = "An endpoint annotation.";
   await writeFile(files.sinksPath, JSON.stringify(catalog));
+  const original = join(dir.path, "original");
   const options = {
-    ...files,
-    cve,
-    repository: files.repo,
-    toolRevision: "test",
+    ...packetOptions(files, original),
     runId: "run",
     attemptId: "attempt",
   };
-  const original = join(dir.path, "original");
-  const { manifest } = await prepareStackPacket({
-    ...options,
-    inputsDir: original,
-  });
+  await expect(
+    prepareStackPacket({ ...options, endpointScope: { sinks: ["other"] } }),
+  ).rejects.toThrow(/--sinks requested other/);
+  const { manifest } = await prepareStackPacket(options);
   expect(manifest).not.toHaveProperty("callerScope");
 
   const callerScope = "Assess ordinary accounts.\nInclude delegated jobs.";
@@ -1346,36 +1548,23 @@ test("packet preparation and reopen preserve opaque endpoint and query metadata"
     await writeFile(path, JSON.stringify(doc));
   }
   const capture = JSON.parse(await readFile(files.stacksPath, "utf8"));
-  capture.queries[0].selectors = {
+  capture.captures[0].query.selectors = {
     sources: [labels, "example input"],
     sinks: [{ match: labels }, 17],
   };
   await writeFile(files.stacksPath, JSON.stringify(capture));
-  const inputs = join(dir.path, "packet"),
-    state = join(dir.path, "run.sqlite");
-  const packet = await prepareStackPacket({
-    cve,
-    ...files,
-    repository: files.repo,
-    inputsDir: inputs,
-    toolRevision: "test",
-  });
-  const ready = await executeStackRun("init", {
-    state,
-    inputs,
-    repo: files.repo,
-  });
+  const { inputs, packet, ready, call } = await startPacket(dir.path, files);
   expect(ready).toMatchObject({ inputDigest: packet.manifest.inputDigest });
   expect(await readFile(join(inputs, "stacks.json"))).toEqual(
     await readFile(files.stacksPath),
   );
-  const next = (await executeStackRun("next", { state })) as {
-    workItem: { selectors: unknown };
+  const next = (await call("next")) as {
+    workItem: { query: { selectors: unknown } };
     sources: unknown[];
     sinks: unknown[];
   };
-  expect(JSON.stringify(next.workItem.selectors)).toBe(
-    JSON.stringify(capture.queries[0].selectors),
+  expect(JSON.stringify(next.workItem.query.selectors)).toBe(
+    JSON.stringify(capture.captures[0].query.selectors),
   );
   const source = JSON.parse(await readFile(files.sourcesPath, "utf8")),
     sink = JSON.parse(await readFile(files.sinksPath, "utf8"));
@@ -1388,13 +1577,7 @@ test("a check freezes advisory evidence without rewriting the catalog and can re
   const files = await sample(dir.path, true);
   const original = await readFile(files.sinksPath, "utf8");
   const catalog = JSON.parse(original);
-  const options = {
-    cve,
-    ...files,
-    repository: files.repo,
-    toolRevision: "test",
-    inputsDir: join(dir.path, "first"),
-  };
+  const options = packetOptions(files, join(dir.path, "first"));
   const quote = "An invalid length must reach the decoder.";
   const id = "SAMPLE-1";
   const triggerAnalysis = [
@@ -1424,7 +1607,7 @@ test("a check freezes advisory evidence without rewriting the catalog and can re
       return triggerAnalysis;
     },
   };
-  const { manifest } = await prepareStackCheckPacket(options, host);
+  const { manifest } = await prepareStackPacket(options, host);
   expect(manifest.advisory).toEqual(catalog.advisory);
   expect(await readFile(join(options.inputsDir, "sinks.json"), "utf8")).toBe(
     original,
@@ -1445,7 +1628,7 @@ test("a check freezes advisory evidence without rewriting the catalog and can re
   );
   const replay = { ...catalog, advisoryDetails, triggerAnalysis };
   await writeFile(files.sinksPath, JSON.stringify(replay));
-  const second = await prepareStackCheckPacket(
+  const second = await prepareStackPacket(
     { ...options, inputsDir: join(dir.path, "second") },
     host,
   );
@@ -1456,7 +1639,7 @@ test("a check freezes advisory evidence without rewriting the catalog and can re
     JSON.stringify({ ...replay, cve: "CVE-2099-0002" }),
   );
   await expect(
-    prepareStackCheckPacket({ ...invalid, cve: "CVE-2099-0002" }, host),
+    prepareStackPacket({ ...invalid, cve: "CVE-2099-0002" }, host),
   ).rejects.toThrow(/does not identify/);
   const modified = structuredClone(advisoryDetails!);
   Object.assign(modified[0]!.affected[0]!, { extra: true });
@@ -1464,12 +1647,12 @@ test("a check freezes advisory evidence without rewriting the catalog and can re
     files.sinksPath,
     JSON.stringify({ ...catalog, advisoryDetails: modified }),
   );
-  await expect(prepareStackCheckPacket(invalid, host)).rejects.toThrow(
+  await expect(prepareStackPacket(invalid, host)).rejects.toThrow(
     /Frozen advisoryDetails does not match/,
   );
   advisoryDetails![1]!.body = "Changed since lookup.";
   await writeFile(files.sinksPath, JSON.stringify(replay));
-  await expect(prepareStackCheckPacket(invalid, host)).rejects.toThrow(
+  await expect(prepareStackPacket(invalid, host)).rejects.toThrow(
     /Frozen advisory SHA-256 mismatch/,
   );
   expect({ lookups, analyses }).toEqual({ lookups: 1, analyses: 1 });
@@ -1478,13 +1661,7 @@ test("a check freezes advisory evidence without rewriting the catalog and can re
 test("unavailable public advisories retain a visible catalog fallback, but cancellation is not a fallback", async () => {
   await using dir = await scopedTemporaryDirectory("stack-advisory-offline-");
   const files = await sample(dir.path, true);
-  const options = {
-    cve,
-    ...files,
-    repository: files.repo,
-    toolRevision: "test",
-    inputsDir: join(dir.path, "inputs"),
-  };
+  const options = packetOptions(files, join(dir.path, "inputs"));
   const events: string[] = [];
   const host = {
     async lookupCve(): Promise<never> {
@@ -1497,13 +1674,13 @@ test("unavailable public advisories retain a visible catalog fallback, but cance
       events.push(type);
     },
   };
-  const { manifest } = await prepareStackCheckPacket(options, host);
+  const { manifest } = await prepareStackPacket(options, host);
   expect(manifest.advisoryLookupError).toBe("registry unavailable");
   expect(manifest.triggerAnalysis).toBeUndefined();
   expect(events).toContain("advisory_lookup_failed");
   const controller = new AbortController();
   await expect(
-    prepareStackCheckPacket(
+    prepareStackPacket(
       {
         ...options,
         inputsDir: join(dir.path, "abort"),

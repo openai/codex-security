@@ -7,9 +7,9 @@ import { listenForAbort } from "./cli-signals.js";
 import { appServerCyberAccessProgram } from "./cli-daybreak.js";
 import type {
   DependencyCoordinatorRecovery,
-  DependencyResourceEvents,
-} from "./dependency-resource-session.js";
-import type { DependencyAgentRequest } from "./dependency-stack-cli.js";
+  DependencyCoordinatorEvents,
+} from "./exploitability/analyzers/repository/coordinator.js";
+import type { DependencyAgentRequest } from "./exploitability/cli.js";
 import {
   providerPreflightCommand,
   restoreProviderProfile,
@@ -1499,7 +1499,7 @@ interface SkillCommandOutput {
     readonly directory: string;
     readonly prompt: string;
     readonly threadSource: SkillThreadSource;
-    readonly linkedEvidence?: DependencyResourceEvents;
+    readonly linkedEvidence?: DependencyCoordinatorEvents;
     readonly resumableCoordinator?: boolean;
     readonly onCoordinatorAnswer?: DependencyAgentRequest["onCoordinatorAnswer"];
     readonly onAccessProgram?: DependencyAgentRequest["onAccessProgram"];
@@ -8382,8 +8382,7 @@ export async function main(
       "CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY",
     ) === "1"
   ) {
-    const { createExploitabilityCli } =
-      await import("./dependency-stack-cli.js");
+    const { createExploitabilityCli } = await import("./exploitability/cli.js");
     cli.command(
       createExploitabilityCli({
         hasOutputFilter: () => frameworkFlags.filters.length > 0,
@@ -10936,7 +10935,7 @@ async function runDependencyAgent(
   if (!request.investigationTools)
     return executeDependencyAgent(request, dependencies, stderr);
   const { startInvestigationTools } =
-    await import("./dependency-investigation-session.js");
+    await import("./exploitability/investigation-session.js");
   const bridge = await startInvestigationTools(request.investigationTools);
   try {
     return await executeDependencyAgent(
@@ -11083,7 +11082,7 @@ async function executeDependencyAgent(
     deny,
   );
   const evidence = request.onEvidence
-    ? await import("./dependency-evidence-sources.js")
+    ? await import("./exploitability/evidence-sources.js")
     : undefined;
   const servers = evidence
     ? evidence.selectDependencyEvidenceServers(
@@ -11098,7 +11097,7 @@ async function executeDependencyAgent(
   const linked =
     request.coordinator && request.onEvidence && Object.keys(servers).length
       ? (
-          await import("./dependency-linked-resources.js")
+          await import("./exploitability/linked-resources.js")
         ).createDependencyLinkedResourceCapture({
           servers: { ...servers },
           onEvidence: request.onEvidence,
@@ -11108,7 +11107,7 @@ async function executeDependencyAgent(
           },
         })
       : undefined;
-  const linkedEvidence: DependencyResourceEvents | undefined =
+  const linkedEvidence: DependencyCoordinatorEvents | undefined =
     request.coordinator
       ? {
           async item(event, read, invocation) {
@@ -11118,6 +11117,8 @@ async function executeDependencyAgent(
             await linked?.(origin, read, invocation);
           },
           usage: request.onUsage,
+          sampler: request.sampler,
+          signal: request.signal,
           startup(name, status, error) {
             if (!Object.hasOwn(servers, name)) return;
             const settings = servers[name];
@@ -11131,8 +11132,9 @@ async function executeDependencyAgent(
           },
           ...(request.abortInvestigation && {
             abort: {
-              ...(await import("./dependency-blocked-evidence.js"))
-                .dependencyAbortTool,
+              ...(
+                await import("./exploitability/analyzers/repository/blocked-evidence.js")
+              ).dependencyAbortTool,
               call: request.abortInvestigation,
             },
           }),
@@ -11140,7 +11142,7 @@ async function executeDependencyAgent(
       : undefined;
   if (toolsUrl) {
     const { investigationServer } =
-      await import("./dependency-evidence-sources.js");
+      await import("./exploitability/evidence-sources.js");
     if (Object.hasOwn(servers, investigationServer))
       throw new ConfigurationError(
         "The project MCP server name conflicts with the built-in investigation tools.",
@@ -11706,7 +11708,7 @@ export async function readSkillCommandOutput(
     readonly directory?: string;
     readonly prompt: string;
     readonly threadSource: SkillThreadSource;
-    readonly linkedEvidence?: DependencyResourceEvents;
+    readonly linkedEvidence?: DependencyCoordinatorEvents;
     readonly resumableCoordinator?: boolean;
     readonly onCoordinatorAnswer?: DependencyAgentRequest["onCoordinatorAnswer"];
     readonly onAccessProgram?: DependencyAgentRequest["onAccessProgram"];
@@ -11749,13 +11751,14 @@ export async function readSkillCommandOutput(
   };
   const recovery = appServer?.recovery;
   const resumeId = recovery?.threadId;
-  const resources = appServer?.linkedEvidence
+  const coordinator = appServer?.linkedEvidence
     ? (
-        await import("./dependency-resource-session.js")
-      ).createDependencyResourceSession(
+        await import("./exploitability/analyzers/repository/coordinator.js")
+      ).createDependencyCoordinatorSession(
         appServer.linkedEvidence,
         send,
         recovery,
+        () => turnId,
       )
     : undefined;
   let connectionClosed = false;
@@ -11816,7 +11819,7 @@ export async function readSkillCommandOutput(
     if (!appServer || settling) return;
     settling = (async () => {
       try {
-        await resources?.drain();
+        await coordinator?.drain();
         if (completed && appServer.onCoordinatorAnswer) {
           if (!turnId || !message)
             throw new Error("The investigator returned no completed answer.");
@@ -11863,12 +11866,12 @@ export async function readSkillCommandOutput(
           : { modelProvider: appServer.modelProvider }),
         approvalPolicy:
           appServer?.sandbox === "read-only" ? "on-request" : "never",
-        ...(resources
+        ...(coordinator
           ? {
               permissions: "dependency_investigation",
               ...(!resumeId &&
-                resources.abortTool && {
-                  dynamicTools: [resources.abortTool as JsonObject],
+                coordinator.abortTool && {
+                  dynamicTools: [coordinator.abortTool as JsonObject],
                 }),
               ...(resumeId
                 ? {}
@@ -11877,7 +11880,7 @@ export async function readSkillCommandOutput(
             }
           : { sandbox: appServer?.sandbox ?? "workspace-write" }),
         ...(!resumeId &&
-        (!resources || appServer.resumableCoordinator) &&
+        (!coordinator || appServer.resumableCoordinator) &&
         config["daybreak"] === true
           ? { daybreakEnabled: true }
           : {}),
@@ -11905,8 +11908,8 @@ export async function readSkillCommandOutput(
     const value = event as Record<string, unknown>;
     if (appServer !== undefined) {
       if (
-        resources?.receive(value) ||
-        resources?.abortCall(value, completed ? undefined : turnId)
+        coordinator?.receive(value) ||
+        coordinator?.abortCall(value, completed ? undefined : turnId)
       )
         continue;
       const params = value["params"];
@@ -11973,7 +11976,7 @@ export async function readSkillCommandOutput(
                 ? {}
                 : { cwd: appServer.directory }),
               includeLayers:
-                Boolean(resources) || appServer.sandbox === "read-only",
+                Boolean(coordinator) || appServer.sandbox === "read-only",
             },
           });
         } else if (value["id"] === 4) {
@@ -11982,7 +11985,7 @@ export async function readSkillCommandOutput(
             isJsonObject(result) && isJsonObject(result["config"])
               ? (result["config"] as JsonObject)
               : {};
-          if (!resources && appServer.sandbox !== "read-only") {
+          if (!coordinator && appServer.sandbox !== "read-only") {
             startThread();
             continue;
           }
@@ -11991,13 +11994,13 @@ export async function readSkillCommandOutput(
               ? result.layers
               : undefined;
           if (!Array.isArray(layers)) {
-            error = resources
+            error = coordinator
               ? "Codex did not provide the configuration layers required for the investigation."
               : "Codex did not provide the configuration layers required for read-only verification.";
             appServer.input.end();
             continue;
           }
-          if (resources && !resources.permissionsMatch(config, layers)) {
+          if (coordinator && !coordinator.permissionsMatch(config, layers)) {
             error =
               "Codex did not resolve the requested investigation permission profile.";
             appServer.input.end();
@@ -12034,7 +12037,7 @@ export async function readSkillCommandOutput(
             configuredServers.has(server),
           );
           if (conflict !== undefined) {
-            error = resources
+            error = coordinator
               ? `Repository-local MCP server ${JSON.stringify(conflict)} conflicts with a selected investigation source.`
               : `Repository-local MCP server ${JSON.stringify(conflict)} overrides a configured integration; remove the repository override before verifying fixes.`;
             appServer.input.end();
@@ -12062,7 +12065,7 @@ export async function readSkillCommandOutput(
             modelProvider: string;
           };
           if (
-            resources &&
+            coordinator &&
             (result.activePermissionProfile?.id !==
               "dependency_investigation" ||
               result.thread.ephemeral !== !appServer.resumableCoordinator ||
@@ -12075,7 +12078,7 @@ export async function readSkillCommandOutput(
           }
           threadId = result.thread.id;
           if (recovery) recovery.threadId = threadId;
-          resources?.register(threadId);
+          coordinator?.register(threadId);
           model = result.model;
           provider = result.modelProvider;
           if (
@@ -12094,7 +12097,7 @@ export async function readSkillCommandOutput(
           }
           if (resumeId && recovery) {
             const { recoveredDependencyTurn, continueDependencyInvestigation } =
-              await import("./dependency-resource-session.js");
+              await import("./exploitability/analyzers/repository/coordinator.js");
             const saved = recoveredDependencyTurn(result.thread, recovery);
             if (saved.kind === "completed") {
               completed = true;
@@ -12189,10 +12192,10 @@ export async function readSkillCommandOutput(
     }
   }
   connectionClosed = true;
-  resources?.close();
+  coordinator?.close();
   await settling;
   if (callbackFailure) throw callbackFailure.cause;
-  await resources?.drain();
+  await coordinator?.drain();
   return {
     ...(message === undefined ? {} : { message }),
     ...(error === undefined ? {} : { error }),

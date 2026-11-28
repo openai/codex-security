@@ -1,13 +1,16 @@
 import { parse as parseToml } from "smol-toml";
 import { expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Writable } from "node:stream";
-import { dependencyRecordHash } from "../src/dependency-attempt-store.js";
-import { dependencyCheckOutputSchema } from "../src/dependency-reachability.js";
+import { dependencyRecordHash } from "../src/exploitability/attempt-store.js";
+import { exploitabilityReportSchema } from "../src/exploitability/report/schema.js";
+import { synthesisAnswer } from "./support/dependency-report-fixtures.js";
+import type { PremiseRef } from "../src/exploitability/analyzers/repository/review-queue.js";
 import { main, readSkillCommandOutput } from "../src/cli.js";
-import { capture, dependencies } from "./cli-fixtures.js";
+import { dependencies } from "./cli-fixtures.js";
+import { git } from "./git-fixture.js";
+import { createCliTest } from "./support/cli-run.js";
 import { requestMetadata } from "./support/request-metadata.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
@@ -15,53 +18,116 @@ async function* commandOutput(...events: object[]) {
   for (const event of events) yield JSON.stringify(event) + "\n";
 }
 
-test("command schema exposes complete and blocked reports as direct output alternatives", async () => {
-  const stdout = capture(),
-    stderr = capture();
+test("check advertises a single report schema for every analyzer", async () => {
+  const { stdout, stderr, runCli } = createCliTest(main);
   expect(
-    await main(
+    await runCli(
       ["exploitability", "check", "--schema", "--json"],
-      stdout.stream,
-      stderr.stream,
       dependencies({
         environment: { CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY: "1" },
       }),
     ),
     stderr.text(),
   ).toBe(0);
-  const { anyOf } = JSON.parse(stdout.text()).output;
-  const variant = (...required: string[]) =>
-    anyOf.find((branch: { required?: string[] }) =>
-      required.every((field) => branch.required?.includes(field)),
-    );
-  expect(variant("cve", "uses")).toBeDefined();
-  expect(variant("checks", "package")).toBeDefined();
-  const stacks = anyOf.filter((branch: { required?: string[] }) =>
-    branch.required?.includes("assessments"),
+  const schema = JSON.parse(stdout.text()).output.anyOf.find(
+    (variant: { type: string }) => variant.type === "object",
   );
-  expect(stacks).toHaveLength(1);
-  expect(stacks[0].required).toEqual(
-    expect.arrayContaining(["runId", "review"]),
-  );
-  expect(stacks[0].properties).not.toHaveProperty("reviewPolicy");
-  expect(
-    variant("status", "code", "affectedScope", "retainedEvidence"),
-  ).toBeDefined();
-  const packageCheck = variant("status", "code", "checks", "package");
-  expect(packageCheck.properties.checks.items.anyOf).toEqual(
+  expect(schema.required).toEqual(
     expect.arrayContaining([
-      expect.objectContaining({
-        required: expect.arrayContaining(["uses", "advisoryId"]),
-      }),
-      expect.objectContaining({
-        required: expect.arrayContaining([
-          "status",
-          "retainedEvidence",
-          "advisoryId",
-        ]),
-      }),
+      "schemaVersion",
+      "subject",
+      "status",
+      "vulnerabilities",
     ]),
   );
+  expect(schema.properties.schemaVersion.const).toBe(3);
+});
+
+function approve({ id, revision, hash }: PremiseRef) {
+  return {
+    id,
+    revision,
+    hash,
+    approved: true,
+    evidenceKeys: [],
+    reason: "Verified.",
+  };
+}
+
+async function commitFixture(path: string) {
+  git(path, "init", "-q");
+  await writeFile(
+    join(path, "caller.js"),
+    "export const decode = value => value;\n",
+  );
+  await writeFile(
+    join(path, "package.json"),
+    JSON.stringify({ name: "fixture", version: "1.0.0" }),
+  );
+  git(path, "add", "caller.js", "package.json");
+  git(path, "commit", "-qm", "fixture");
+}
+
+test("check rejects invalid analyzer options before launching an investigation", async () => {
+  await using repo = await scopedTemporaryDirectory(
+    "dependency-analyzer-options-",
+  );
+  await commitFixture(repo.path);
+  const config = join(repo.path, "project.json");
+  let launches = 0;
+  const deps = dependencies({
+    currentDirectory: repo.path,
+    environment: { CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY: "1" },
+    onCodex() {
+      launches++;
+      return 1;
+    },
+  });
+  for (const [project, flags, problem] of [
+    [{ analyzers: {} }, [], /at least 1|fewer than 1|at least one/i],
+    [{ analyzers: { other: {} } }, [], /additional properties|unknown/i],
+    [{ analyzers: { stacks: {} } }, [], /No analyzer has input/],
+    [
+      { analyzers: { repository: {} } },
+      ["--analyzer-input", "stacks=unused"],
+      /unknown or disabled/,
+    ],
+    [undefined, ["--sources", "  "], /sources/],
+    [undefined, ["--sinks="], /sinks/],
+    [
+      undefined,
+      ["--analyzer-input", "repository=unused"],
+      /takes no input path/,
+    ],
+    [undefined, ["--analyzer-input", "stacks"], /NAME=PATH/],
+    [
+      undefined,
+      ["--analyzer-input", "stacks=a", "--analyzer-input", "stacks=b"],
+      /Duplicate --analyzer-input/,
+    ],
+    [
+      undefined,
+      ["--analyzer-input", "stacks=missing-capture"],
+      /missing-capture|does not exist/,
+    ],
+  ] as const) {
+    const { stdout, stderr, runCli } = createCliTest(main);
+    if (project)
+      await writeFile(config, JSON.stringify({ exploitability: project }));
+    const code = await runCli(
+      [
+        "exploitability",
+        "check",
+        "CVE-2099-1000",
+        ...(project ? ["--config", config] : []),
+        ...flags,
+      ],
+      deps,
+    );
+    expect(code).not.toBe(0);
+    expect(stderr.text() + stdout.text()).toMatch(problem);
+  }
+  expect(launches).toBe(0);
 });
 
 test.each([
@@ -85,7 +151,7 @@ test.each([
   "rejects invalid investigator settings from the %s",
   async (source, review, reason) => {
     await using repo = await scopedTemporaryDirectory("investigator-provider-");
-    await preparePackage(repo.path);
+    await commitFixture(repo.path);
     const config = join(repo.path, "project.json");
     const codex =
       source === "project"
@@ -100,9 +166,8 @@ test.each([
       join(repo.path, "config.toml"),
       '[model_providers.gateway]\nbase_url="https://ambient.invalid/"',
     );
-    const stderr = capture();
-    const stdout = capture();
-    const status = await main(
+    const { stdout, stderr, runCli } = createCliTest(main);
+    const status = await runCli(
       [
         "exploitability",
         "check",
@@ -113,8 +178,6 @@ test.each([
         "Synthetic issue",
         "--json",
       ],
-      stdout.stream,
-      stderr.stream,
       dependencies({
         currentDirectory: repo.path,
         async onCodex() {
@@ -141,27 +204,7 @@ test.each(["inline", "native"] as const)(
 
 async function checkReviewed(source: "inline" | "native") {
   await using repo = await scopedTemporaryDirectory("dependency-evidence-cli-");
-  const git = (...args: string[]) =>
-    execFileSync("git", args, { cwd: repo.path });
-  git("init", "-q");
-  await writeFile(
-    join(repo.path, "caller.js"),
-    "export const decode = value => value;\n",
-  );
-  await writeFile(
-    join(repo.path, "package.json"),
-    JSON.stringify({ name: "fixture", version: "1.0.0" }),
-  );
-  git("add", "caller.js", "package.json");
-  git(
-    "-c",
-    "user.name=Fixture",
-    "-c",
-    "user.email=fixture@example.invalid",
-    "commit",
-    "-qm",
-    "fixture",
-  );
+  await commitFixture(repo.path);
   const server = { command: "fixture-server", enabled_tools: ["read_build"] };
   const config = join(repo.path, "investigation.json");
   await using home = await scopedTemporaryDirectory("investigator-home-");
@@ -196,11 +239,10 @@ async function checkReviewed(source: "inline" | "native") {
   const wireReceipts = new Map<string, Record<string, unknown>>();
   let traceSearchedPaths: string[] | undefined;
   let reviewed = false;
-  const stdout = capture();
-  const stderr = capture();
+  const { stdout, stderr, runCli } = createCliTest(main);
   const reportPath = join(repo.path, "report.json");
   const eventsPath = join(repo.path, "progress.jsonl");
-  const status = await main(
+  const status = await runCli(
     [
       "exploitability",
       "check",
@@ -215,14 +257,22 @@ async function checkReviewed(source: "inline" | "native") {
       'model_reasoning_effort="medium"',
       "--vuln-description",
       "A parser issue",
+      ...(source === "inline"
+        ? [
+            "--sources",
+            "handle",
+            "--sources",
+            "loadConfig",
+            "--sinks",
+            "decode",
+          ]
+        : []),
       "--json",
       "--report-file",
       reportPath,
       "--progress-events",
       eventsPath,
     ],
-    stdout.stream,
-    stderr.stream,
     dependencies({
       currentDirectory: repo.path,
       environment: {
@@ -238,9 +288,24 @@ async function checkReviewed(source: "inline" | "native") {
           codex_security_surface: "cli",
           codex_security_command: "exploitability check",
         });
-        const payload = JSON.parse(
-          (prompt ?? output?.appServer?.prompt)!.split("\n\n").at(-1)!,
-        );
+        const text = (prompt ?? output?.appServer?.prompt)!;
+        const synthesis = synthesisAnswer(text);
+        if (synthesis) {
+          expect(output?.readOnly).toBe(true);
+          output!.stdout.write(JSON.stringify(synthesis));
+          return 0;
+        }
+        const payload = JSON.parse(text.split("\n\n").at(-1)!);
+        if (source === "inline") {
+          expect(payload.sources).toEqual([
+            { function: "handle" },
+            { function: "loadConfig" },
+          ]);
+          expect(payload.sinks).toEqual([{ function: "decode" }]);
+        } else {
+          expect(payload).not.toHaveProperty("sources");
+          expect(payload).not.toHaveProperty("sinks");
+        }
         const features = parseToml(
           args.find((v) => v.startsWith("features="))!,
         )["features"];
@@ -295,29 +360,11 @@ async function checkReviewed(source: "inline" | "native") {
             { server: "builds", tool: "read_build", arguments: {}, result },
           ]);
           output!.stdout.write(
-            JSON.stringify({
-              decisions: payload.claims.map(
-                ({
-                  id,
-                  revision,
-                  hash,
-                }: {
-                  id: string;
-                  revision: number;
-                  hash: string;
-                }) => ({
-                  id,
-                  revision,
-                  hash,
-                  evidenceKeys: [],
-                  approved: true,
-                  reason: "The reported gap matches the evidence.",
-                }),
-              ),
-            }),
+            JSON.stringify({ decisions: payload.claims.map(approve) }),
           );
           reviewed = true;
         } else {
+          expect(output?.appServer?.resumableCoordinator).toBe(true);
           const requests: { method?: string; params?: object }[] = [];
           await readSkillCommandOutput(
             commandOutput({
@@ -345,14 +392,13 @@ async function checkReviewed(source: "inline" | "native") {
           expect(
             requests.find((r) => r.method === "turn/start")?.params,
           ).toMatchObject({ cyberAccessProgram: "standard" });
-          expect(output?.investigationServers).toMatchObject({
+          expect(output?.investigationServers).toEqual({
             builds: server,
-            dependency_investigation: {
+            dependency_investigation: expect.objectContaining({
               required: true,
               default_tools_approval_mode: "approve",
-            },
+            }),
           });
-          expect(output!.investigationServers!["builds"]).toEqual(server);
           expect(features).toMatchObject({ apps: false, multi_agent_v2: true });
           expect(
             parseToml(args.find((v) => v.startsWith("agents="))!)["agents"],
@@ -457,10 +503,9 @@ async function checkReviewed(source: "inline" | "native") {
   );
   expect(status, stderr.text() + stdout.text()).toBe(0);
   expect(reviewed).toBe(true);
-  const report = dependencyCheckOutputSchema.parse(JSON.parse(stdout.text()));
-  expect(JSON.parse(await readFile(reportPath, "utf8"))).toEqual(
-    JSON.parse(stdout.text()),
-  );
+  const json = JSON.parse(stdout.text());
+  expect(JSON.parse(await readFile(reportPath, "utf8"))).toEqual(json);
+  const report = exploitabilityReportSchema.parse(json);
   const events = (await readFile(eventsPath, "utf8"))
     .trim()
     .split("\n")
@@ -486,92 +531,73 @@ async function checkReviewed(source: "inline" | "native") {
   expect(trace.searchedPaths ?? []).toEqual(traceSearchedPaths);
   expect(events.find((e) => e.type === "report_ready")).toMatchObject({
     path: reportPath,
-    verdicts: { unknown: 0 },
+    verdicts: { unknown: 1 },
   });
   expect(events.at(-1)).toMatchObject({
     type: "finished",
     outcome: "completed",
   });
-  expect(stderr.text()).toContain(
-    "Using the supplied vulnerability description",
-  );
-  expect(stderr.text()).toContain("Tracing source call paths");
-  expect(stderr.text()).toContain("Reviewing evidence");
-  expect(stderr.text()).toContain("Turn access program · standard");
-  expect(stderr.text()).toContain("0 reviewed uses");
-  expect(stderr.text()).toContain(`Report saved · ${reportPath}`);
+  expect(stderr.text()).toContain("standard");
+  expect(stderr.text()).toContain(reportPath);
   expect(stderr.text()).not.toContain("\u001b");
-  if (!("checks" in report)) throw new Error("Expected a package report.");
-  const check = report.checks[0]!;
-  const receipts = check.claimEvidence!.receipts;
+  expect(report.subject).toEqual({
+    kind: "package",
+    ecosystem: "npm",
+    name: "sample",
+  });
+  const vulnerability = report.vulnerabilities[0]!;
+  expect(vulnerability).toMatchObject({
+    kind: "hypothesis",
+    description: "A parser issue",
+    result: { verdict: "unknown", review: { status: "approved" } },
+    analyses: [
+      { analyzer: "repository", status: "complete" },
+      { analyzer: "stacks", status: "skipped" },
+    ],
+  });
+  const check = vulnerability.analyses.find(
+    (a) => a.analyzer === "repository",
+  )!;
+  const receipts = check.evidence!.receipts;
   for (const [id, row] of wireReceipts)
     expect(receipts[id]).toEqual({ ...row, sha256: id });
-  expect(check.usage).toMatchObject({
+  expect(check.audit?.usage).toMatchObject({
     input_tokens: 12,
     output_tokens: 6,
   });
 }
 
 const outputFlags = {
-  json: ["--json"],
   md: ["--format", "md"],
   html: ["--format", "html"],
-  tokens: ["--format", "md", "--token-count"],
   summary: [],
-  filter: ["--filter-output", "vulnDescription"],
 };
 test.each(Object.keys(outputFlags) as (keyof typeof outputFlags)[])(
-  "a coordinator reports its selected access program and writes the requested %s output",
+  "saves the report and prints the requested %s output",
   checkCoordinatorOutput,
 );
 
-async function preparePackage(path: string) {
-  execFileSync("git", ["init", "-q"], { cwd: path });
-  await writeFile(
-    join(path, "package.json"),
-    JSON.stringify({ name: "fixture", version: "1.0.0" }),
-  );
-  execFileSync("git", ["add", "package.json"], { cwd: path });
-  execFileSync(
-    "git",
-    [
-      "-c",
-      "user.name=Fixture",
-      "-c",
-      "user.email=fixture@example.invalid",
-      "commit",
-      "-qm",
-      "fixture",
-    ],
-    { cwd: path },
-  );
-}
-
 async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
-  await using repo = await scopedTemporaryDirectory("dependency-progress-");
-  await preparePackage(repo.path);
-  const stdout = capture(format === "summary"),
-    stderr = capture(false);
-  const eventsPath = join(repo.path, "events.jsonl");
+  await using repo = await scopedTemporaryDirectory("dependency-output-");
+  await commitFixture(repo.path);
+  const { stdout, stderr, runCli } = createCliTest(main, {
+    stdout: format === "summary",
+  });
   // The suffix alone must not turn a canonical JSON report into HTML.
   const requestedPath = join(
     repo.path,
-    format === "summary" ? "report.html" : "report.json",
+    format === "summary" ? "report.html" : "report." + format,
   );
-  const status = await main(
+  const status = await runCli(
     [
       "exploitability",
       "check",
       "npm:sample",
       "--vuln-description",
       "Supplied condition",
-      "--progress-events",
-      eventsPath,
       ...(format === "html" ? [] : ["--report-file", requestedPath]),
       ...outputFlags[format],
     ],
-    stdout.stream,
-    stderr.stream,
     dependencies({
       currentDirectory: repo.path,
       environment: {
@@ -579,36 +605,17 @@ async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
         TERM: "dumb",
       },
       async onCodex(_args, output, _env, prompt) {
-        if (output?.appServer) {
-          expect(output.appServer.resumableCoordinator).toBe(true);
-          output.appServer.onAccessProgram?.("standard");
+        const text = (prompt ?? output?.appServer?.prompt)!;
+        const synthesis = synthesisAnswer(text);
+        if (synthesis) {
+          output!.stdout.write(JSON.stringify(synthesis));
+          return 0;
         }
-        const packet = JSON.parse(
-          (prompt ?? output?.appServer?.prompt)!.split("\n\n").at(-1)!,
-        );
+        const packet = JSON.parse(text.split("\n\n").at(-1)!);
         output!.stdout.write(
           JSON.stringify(
             packet.claims
-              ? {
-                  decisions: packet.claims.map(
-                    ({
-                      id,
-                      revision,
-                      hash,
-                    }: {
-                      id: string;
-                      revision: number;
-                      hash: string;
-                    }) => ({
-                      id,
-                      revision,
-                      hash,
-                      approved: true,
-                      evidenceKeys: [],
-                      reason: "The package is absent.",
-                    }),
-                  ),
-                }
+              ? { decisions: packet.claims.map(approve) }
               : { uses: [], limitations: ["No applicable package was found."] },
           ),
         );
@@ -616,7 +623,7 @@ async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
       },
     }),
   );
-  expect(status, stdout.text()).toBe(0);
+  expect(status, stderr.text() + stdout.text()).toBe(0);
   const reportPath =
     format === "html"
       ? stdout.text().trimEnd().split("\n").at(-1)!
@@ -624,41 +631,23 @@ async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
   if (format === "html") {
     expect(reportPath.startsWith(repo.path)).toBe(true);
     expect(reportPath).toMatch(/exploitability_report_\d{8}T\d{9}Z\.html$/u);
-  } else expect(stderr.text()).toContain("Report saved · " + reportPath);
-  const contents = await readFile(reportPath, "utf8");
-  if (format === "html") {
+    const contents = await readFile(reportPath, "utf8");
     expect(contents).toStartWith("<!doctype html>");
     expect(contents).toContain("No applicable package was found.");
-  } else expect(JSON.parse(contents).checks).toHaveLength(1);
-  const output = stdout.text().trim();
-  switch (format) {
-    case "json":
-      expect(JSON.parse(output)).toEqual(JSON.parse(contents));
-      break;
-    case "summary":
-    case "html":
-      expect(output).not.toContain("<!doctype html>");
-      expect(output).toContain("0 reviewed uses");
-      expect(output).toContain("No applicable package was found.");
-      break;
-    case "md":
-      expect(output).toContain("# ");
-      expect(output).toContain("No applicable package was found.");
-      expect(output).not.toContain("[object Object]");
-      break;
-    case "filter":
-      expect(output).toBe("Supplied condition");
-      break;
-    case "tokens":
-      expect(Number(output)).toBeGreaterThan(0);
-      break;
+  } else if (format === "md") {
+    const contents = await readFile(reportPath, "utf8");
+    expect(contents).toStartWith("# ");
+    expect(contents).toContain("No applicable package was found.");
+    expect(stdout.text().trimEnd()).toEndWith(reportPath);
+  } else {
+    const saved = JSON.parse(await readFile(reportPath, "utf8"));
+    expect(saved.vulnerabilities[0]).toMatchObject({
+      kind: "hypothesis",
+      description: "Supplied condition",
+      result: { review: { status: "approved" } },
+    });
   }
-  expect(stderr.text()).toContain("Turn access program · standard");
-  const events = (await readFile(eventsPath, "utf8"))
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line));
-  expect(events.filter((e) => e.type === "access_program")).toMatchObject([
-    { program: "standard", subject: "sample" },
-  ]);
+  const summary = stdout.text().trim();
+  expect(summary).not.toContain("<!doctype html>");
+  expect(summary).toContain("Runtime reachability is unresolved.");
 }

@@ -741,14 +741,17 @@ test("only host catalog results settle requested service lookups", async (t) => 
     pending.service_resolution.paths,
     queued.service_resolution.paths,
   );
-  session.recordCatalogResolution({
+  const row = { receiptId: "catalog-page", textBlock: 0, record: ["rows", 0] };
+  const main = {
     path: "src/main.js",
     project: ".",
+    directory: "src",
     services: [
       {
         name: "portal",
         scope: "production",
         source: "catalog:service/portal",
+        receiptSelections: [row],
       },
       {
         name: "preview",
@@ -756,18 +759,32 @@ test("only host catalog results settle requested service lookups", async (t) => 
         source: "catalog:service/preview",
       },
     ],
-  });
-  const resolved = session.recordCatalogResolution({ ...lookup, project: "." });
+  };
+  const empty = { ...lookup, project: "." };
+  session.recordCatalogResolution({ ...main, complete: false });
+  session.recordCatalogResolution({ ...empty, complete: false });
+  const missing = await session.call(query, { node: empty.path });
+  assert.equal(missing.service_lookup, "unresolved");
+  assert.deepEqual(missing.evidence, []);
+  const file = await session.call(query, { node: main.path });
+  assert.equal(file.service_lookup, "unresolved");
+  const facts = file.evidence as {
+    source: string;
+    relation: string;
+    receiptSelections?: unknown;
+  }[];
+  assert.deepEqual(
+    facts.map((f) => [f.relation, f.source, f.receiptSelections]),
+    [
+      ["uses", "catalog:service/portal", [row]],
+      ["uses", "catalog:service/preview", undefined],
+    ],
+  );
+  session.recordCatalogResolution({ ...main, complete: true });
+  const resolved = session.recordCatalogResolution(empty);
   assert.equal(resolved.services_found, 2);
   assert.equal(resolved.service_resolution.pending, 0);
   assert.equal(resolved.service_resolution.checked, 2);
-  const file = await session.call(query, { node: "src/main.js" });
-  assert.deepEqual(
-    (file.evidence as { source: string; relation?: string }[])
-      .filter(({ relation }) => relation === "uses")
-      .map(({ source }) => source),
-    ["catalog:service/portal", "catalog:service/preview"],
-  );
 });
 
 test("trace groups citations and keeps linked and similarly named endpoints distinct", () => {
