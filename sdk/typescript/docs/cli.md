@@ -85,7 +85,7 @@ Run `cs exploitability check CVE-2019-10744 --config project.yaml`. The followin
 
 - `scope.instructions` replaces the default scope of production services, jobs, workers and the code they deploy or import.
 - `scope.exclude_paths` skips literal checkout-relative files or directories in broad searches. A nested `SECURITY.md` boundary or specific source or build evidence can bring an excluded path back into scope.
-- `sources` and `sinks` each specify a complete endpoint list. Omit either list to discover those endpoints. Set it to `[]` to declare there are none. Each endpoint requires a `function` and may include a package, symbol, file and line.
+- For repository checks, `sources` and `sinks` each specify a complete endpoint list. Omit a list to discover those endpoints. `sources: []` declares no entry points. If you set `sinks`, name at least one affected operation. Each endpoint requires a `function` and may include a package, symbol, file and line.
 
 A provider can report an outage for a whole scope in one lookup. For example, a request with `{"scope":"production"}` can return `{"structuredContent":{"coverage":{"scope":"production","available":false}}}`. The coordinator must cite that response and use the same scope. A message or an incomplete page alone cannot stop the investigation. Other ways to establish a block are distinct missing required lookups and failed startup of a required server.
 
@@ -187,7 +187,7 @@ The [public advisory](https://osv.dev/vulnerability/GHSA-jf85-cpcp-j695) covers 
 
 ```json
 {
-  "format": "codex-security.stack-sinks/v2",
+  "format": "codex-security.sinks/v2",
   "cve": "CVE-2019-10744",
   "sinks": [
     {
@@ -273,9 +273,14 @@ Without a capture, the CLI skips `stacks`. If that leaves no analyzer to run, th
 
 #### Check the evidence
 
-A single v2 capture document is enough to start. The CLI rejects v1 capture files and v1 prepared directories. Start a new investigation for v2 inputs. Optional `sources.json` (`codex-security.stack-sources/v2`) and `sinks.json` (`codex-security.stack-sinks/v2`) catalogs identify entry points and affected operations. The CVE in a sink catalog must match the command. For the input schema, see `@openai/codex-security/schemas/dependency-stack-inputs-v2.schema.json`.
+A single `codex-security.stacks/v2` capture document is enough to start. The CLI rejects v1 captures and prepared directories. Catalogs describe endpoints independently of the captures. Neither catalog contains or requires stack frames.
 
-For fresh inputs, `exploitability.scope.instructions` tells the investigator and reviewer which callers to consider. The report records it as `callerScope`. Public advisory lookup sends advisory identifiers to OSV and GitHub. These requests exclude the stack data. Without a sink catalog, the analyzer can infer affected functions only if public records identify a single package and list the affected functions. If the lookup fails, the report records `advisoryLookupError`. With no usable advisory or catalog, the analyzer leaves the stack unresolved.
+- `sources.json` (`codex-security.sources/v2`) lists entry points. An empty `sources` list is valid.
+- `sinks.json` (`codex-security.sinks/v2`) names the requested CVE. Omit the file or its `sinks` field to allow advisory inference. If you supply `sinks`, list at least one affected operation. The analyzer uses each supplied version range even when OSV lists a different range.
+
+For the input schema, see `@openai/codex-security/schemas/dependency-stack-inputs-v2.schema.json`.
+
+For fresh inputs, `exploitability.scope.instructions` tells the investigator and reviewer which callers to consider. The report records it as `callerScope`. Public advisory lookup sends advisory identifiers to OSV and GitHub. These requests exclude the stack data. When `sinks` is omitted, the analyzer can infer affected functions and use OSV version ranges only if public records identify a single package and name the affected functions. If the lookup fails, the report records `advisoryLookupError`. With no usable advisory or catalog, the analyzer leaves the stack unresolved.
 
 If a directory contains `manifest.json`, pass the directory itself. Selecting its files individually or with a glob is an error. Before replay, the CLI verifies the saved inputs, caller scope, CVE and checkout revision. An invalid manifest stops the check.
 
@@ -297,7 +302,7 @@ cs exploitability run record-observations --state "$STATE" --json-stdin < observ
 cs exploitability run next --state "$STATE"
 ```
 
-`init` creates or reopens an investigation. Supply the CVE, advisory and endpoints in `advisory.json` as they become available. If you already have a prepared directory with `manifest.json`, pass `--inputs <directory>` to `init`. For independent review of a fresh capture, use `check CVE --analyzer-input stacks=PATH`. Packet preparation is internal to the CLI.
+`init` creates or reopens an investigation. Supply the CVE, advisory and endpoints in `advisory.json` as they become available. Omit `sinks` until you know an affected operation. Each update that supplies `sinks` must include at least one entry. If you already have a prepared directory with `manifest.json`, pass `--inputs <directory>` to `init`. For independent review of a fresh capture, use `check CVE --analyzer-input stacks=PATH`. Packet preparation is internal to the CLI.
 
 #### Import runtime evidence
 

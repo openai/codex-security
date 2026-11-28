@@ -15,10 +15,11 @@ import { main, runCodexSkillCommand } from "../src/cli.js";
 import { parse as parseToml } from "smol-toml";
 import { DependencyAttemptStore } from "../src/exploitability/attempt-store.js";
 import {
-  analyzeStackAdvisory,
+  analyzeAdvisoryTriggers,
   lookupDependencyAdvisory,
 } from "../src/exploitability/advisory.js";
 import {
+  prepareStackInput,
   prepareStackPacket,
   readStackPacket,
   stackPacketWorkItems,
@@ -90,9 +91,9 @@ async function sample(
     ],
   };
   const documents = {
-    sources: { format: "codex-security.stack-sources/v2", sources: [source] },
+    sources: { format: "codex-security.sources/v2", sources: [source] },
     sinks: {
-      format: "codex-security.stack-sinks/v2",
+      format: "codex-security.sinks/v2",
       cve,
       advisory: {
         url: "https://example.invalid/advisories/decoder",
@@ -252,7 +253,7 @@ test("trigger analysis checks quotations and addresses each supplied sink", asyn
   const first = { sinkId: "decode", conditions: [condition] };
   const second = { sinkId: "another", conditions: [] };
   const analyze = (output: unknown) =>
-    analyzeStackAdvisory(input, async () => JSON.stringify(output));
+    analyzeAdvisoryTriggers(input, async () => JSON.stringify(output));
   expect(await analyze([first, second])).toEqual([first, second]);
   await expect(analyze([first])).rejects.toThrow(/Missing trigger analysis/);
   await expect(analyze([first, first])).rejects.toThrow(/repeated sink/);
@@ -1233,6 +1234,29 @@ test("two searches and a raw stack keep their own coverage and positions", async
   });
 });
 
+test("an explicit empty sink list is rejected by directory input and live init", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-empty-sinks-");
+  const { repo, sinksPath } = await sample(dir.path, false);
+  const catalog = { format: "codex-security.sinks/v2", cve, sinks: [] };
+  await writeFile(sinksPath, JSON.stringify(catalog));
+  const message = /Supply at least one sink or omit sinks/;
+  await expect(
+    prepareStackInput({
+      cve,
+      repository: repo,
+      input: dir.path,
+      toolRevision: "test",
+    }),
+  ).rejects.toThrow(message);
+  await expect(
+    executeStackRun("init", {
+      repo,
+      state: join(dir.path, "run.sqlite"),
+      input: { cve, sinks: [] },
+    }),
+  ).rejects.toThrow(message);
+});
+
 test("without a catalog, frozen OSV ranges can exclude an attributed copy, but a name alone stays a lead", async () => {
   await using dir = await scopedTemporaryDirectory("stack-implicit-osv-");
   const { repo, stacksPath } = await sample(dir.path, false);
@@ -1284,8 +1308,19 @@ test("without a catalog, frozen OSV ranges can exclude an attributed copy, but a
   ]);
   for (const item of stackPacketWorkItems(ambiguous))
     expect(item).toMatchObject({ sinkMatches: [], leads: [] });
-  const inputs = join(dir.path, "frozen");
-  await freeze(inputs, ["sample-codec"]);
+  const frozen = join(dir.path, "frozen");
+  const original = await freeze(frozen, ["sample-codec"]);
+  expect(original.sinks).toEqual({ format: "codex-security.sinks/v2", cve });
+  const replay = await prepareStackInput({
+    cve,
+    repository: repo,
+    input: frozen,
+    toolRevision: "test",
+  });
+  const inputs = join(dir.path, "replay");
+  expect((await replay(inputs)).manifest.inputDigest).toBe(
+    original.manifest.inputDigest,
+  );
   const state = join(dir.path, "run.sqlite");
   await executeStackRun("init", { state, inputs, repo });
   const call = (command: string, input?: unknown) =>

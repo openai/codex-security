@@ -743,21 +743,26 @@ test("caller descriptions stay scoped and a source-only positive is blocked", as
   ).rejects.toThrow("running workload");
 });
 
-test("a positive use requires an endpoint on each explicitly bounded side", async () => {
+test("an empty sink list fails before advisory lookup, while an empty source list rules out a positive use", async () => {
   await using f = await fixture();
-  for (const boundary of [{ sources: [] }, { sinks: [] }]) {
-    await expect(
-      f.check(
-        {
-          vulnDescription: "Incorrect length validation.",
-          ...boundary,
-        },
-        {
-          runAgent: async () => proposalJson(f.use),
-        },
-      ),
-    ).rejects.toThrow("explicitly empty source or sink boundary");
-  }
+  const unexpected = async () => {
+    throw new Error("Unexpected lookup or model call");
+  };
+  await expect(
+    f.check(
+      { sinks: [] },
+      {
+        lookupPackage: unexpected,
+        runAgent: unexpected,
+      },
+    ),
+  ).rejects.toThrow("at least one sink endpoint");
+  await expect(
+    f.check(
+      { vulnDescription: "Incorrect length validation.", sources: [] },
+      { runAgent: async () => proposalJson(f.use) },
+    ),
+  ).rejects.toThrow("explicitly empty source boundary");
 });
 
 test("a Git-only library gets its own discovery scope alongside a packaged wrapper", async () => {

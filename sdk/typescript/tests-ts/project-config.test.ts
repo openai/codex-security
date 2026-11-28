@@ -148,6 +148,8 @@ const cases: [string, unknown, boolean][] = [
     false,
   ],
   ["nonpositive cost", { limits: { max_cost_usd_per_scan: 0 } }, false],
+  ["empty source boundary", { exploitability: { sources: [] } }, true],
+  ["empty sink boundary", { exploitability: { sinks: [] } }, false],
   [
     "runtime line has a source location",
     {

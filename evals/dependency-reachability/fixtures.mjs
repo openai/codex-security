@@ -225,9 +225,9 @@ async function packet(root, repo, capture, variant) {
       "Synthetic advisory. Before 0.2.1, the sample-summary sum function throws on an empty sample list. An unhandled exception can terminate a long-lived server.",
   };
   const docs = {
-    sources: { format: "codex-security.stack-sources/v2", sources: [source] },
+    sources: { format: "codex-security.sources/v2", sources: [source] },
     sinks: {
-      format: "codex-security.stack-sinks/v2",
+      format: "codex-security.sinks/v2",
       cve: summaryCve,
       advisory,
       sinks: [sink],

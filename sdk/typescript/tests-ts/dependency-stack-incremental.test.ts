@@ -182,7 +182,7 @@ function capture(origin: string) {
 async function packet(root: string, repo: string) {
   const documents = {
     sinks: {
-      format: "codex-security.stack-sinks/v2",
+      format: "codex-security.sinks/v2",
       cve,
       advisory,
       sinks: [sink],

@@ -280,7 +280,8 @@
           }
         },
         "sinks": {
-          "description": "Complete set of caller-supplied sink endpoints for the investigated scenario. An empty list closes this boundary.",
+          "description": "Complete set of sink endpoints for the scenario. Supply at least one endpoint or omit sinks to let the repository analyzer discover them.",
+          "minItems": 1,
           "type": "array",
           "items": {
             "type": "object",
