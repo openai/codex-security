@@ -11,6 +11,12 @@ import { writeJsonAtomic } from "./artifacts.js";
 import { parseDeepScan, parseWorker } from "./response.js";
 
 export { parseDeepScan };
+
+export class ConcurrentDeepScanConfirmation extends Error {
+  constructor(readonly activeScans: unknown[]) {
+    super("Confirm before starting another Deep Scan.");
+  }
+}
 import {
   deepScanErrorMessage,
   DeepScanNonRetryableError,
@@ -135,6 +141,7 @@ export class WorkbenchDeepScanStore {
     scanId?: string;
     targetPath?: string;
     scope?: string;
+    confirmedConcurrentScanIds?: string[];
     userContext?: string;
     projectConfigPath?: string;
     handoffClaimToken?: string;
@@ -153,6 +160,7 @@ export class WorkbenchDeepScanStore {
       targetPath: input.targetPath || undefined,
       projectConfigPath: input.projectConfigPath,
       scope: input.scope || undefined,
+      confirmedConcurrentScanId: input.confirmedConcurrentScanIds,
       userContextStdin: Boolean(userContext),
       claimToken: input.handoffClaimToken || undefined,
       model: input.model || undefined,
@@ -187,6 +195,11 @@ export class WorkbenchDeepScanStore {
         userContext,
       );
     }
+    if (
+      result.confirmationRequired === true &&
+      Array.isArray(result.otherRunningDeepScans)
+    )
+      throw new ConcurrentDeepScanConfirmation(result.otherRunningDeepScans);
     const run = parseDeepScan(result);
     const startDisposition = result.startDisposition;
     if (startDisposition !== "created" && startDisposition !== "joined") {

@@ -11,7 +11,7 @@ import {
   DeepScanNonRetryableError,
   confirmedOwnershipChange,
 } from "./errors.js";
-import { renderDiscoveryPrompt } from "./templates.js";
+import { renderDiscoveryPrompt, reviewInstructions } from "./templates.js";
 import {
   writeWorkerUsageReceipt,
   type WorkerUsageReceipt,
@@ -125,7 +125,12 @@ export class DeepScanWorkerRunner {
       attempt: 1,
     };
     await this.options.store.updateWorker(worker);
-    const outcome = await this.runAttempts(worker, workerLabel, resultPath);
+    const outcome = await this.runAttempts(
+      worker,
+      workerLabel,
+      resultPath,
+      feedback,
+    );
     if (outcome.status !== "validated") {
       // Cancellation can arrive after validation. Preserve that completed artifact.
       if (outcome.status === "failed" || !outcome.validated) {
@@ -195,6 +200,7 @@ export class DeepScanWorkerRunner {
     worker: DeepScanWorkerMutation,
     workerLabel: string,
     resultPath: string,
+    feedbackPath?: string,
   ): Promise<WorkerAttemptOutcome> {
     const { artifacts, run, signal } = this.options;
     const { id: workerId, scanId, kind, artifactDir, promptPath } = worker;
@@ -326,9 +332,14 @@ export class DeepScanWorkerRunner {
           },
           resumeThreadId: resumableThreadId,
           continuationPrompt:
-            resumePrompt && run.severityRubric
-              ? `${resumePrompt}\nApply the saved rubric when assigning severity.\n${JSON.stringify({ severityRubric: run.severityRubric })}`
-              : resumePrompt,
+            resumePrompt &&
+            [
+              resumePrompt,
+              reviewInstructions(run.severityRubric, feedbackPath),
+              ...(run.severityRubric
+                ? [JSON.stringify({ severityRubric: run.severityRubric })]
+                : []),
+            ].join("\n"),
           artifactContext: {
             root: artifactDir,
             layout: "worker",

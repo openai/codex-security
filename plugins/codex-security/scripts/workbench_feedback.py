@@ -21,6 +21,8 @@ from workbench_native_indexes import _indexed_findings, _legacy_generations
 from workbench_target_state import RepositoryIdentityCache
 from workbench_validation import bounded_output_text
 
+FALSE_POSITIVE_FEEDBACK_PATH = "artifacts/01_context/false_positive_feedback.json"
+
 
 def get_scan_feedback(connection: sqlite3.Connection, scan: sqlite3.Row) -> dict[str, Any]:
     """Return reviewed false-positive decisions from other completed scans of the same target.

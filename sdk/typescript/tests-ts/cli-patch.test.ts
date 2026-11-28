@@ -1489,6 +1489,8 @@ describe("scan and patch workflow", () => {
           "--codex",
           'profiles.quiet.model_provider="amazon-bedrock"',
           "--codex",
+          'profiles.quiet.model="synthetic-bedrock-model"',
+          "--codex",
           'responses_api_metadata={ "team.tag"="root", caller="preserved" }',
           "--codex",
           'profiles.quiet.responses_api_metadata={ "team.tag"="selected", codex_security_integration="github_action" }',
@@ -1508,6 +1510,8 @@ describe("scan and patch workflow", () => {
       );
 
       expect(outcome.exitCode, outcome.stderr).toBe(0);
+      expect(childArgs).toContain('model="synthetic-bedrock-model"');
+      expect(childArgs).toContain('model_provider="amazon-bedrock"');
       expect(childArgs).toContain(`analytics.enabled=${profileAnalytics}`);
       expect(requestMetadata(childArgs)).toMatchObject({
         "team.tag": "selected",
@@ -1794,10 +1798,9 @@ describe("scan and patch workflow", () => {
                 "<!-- codex-security:patch-risk-summary:end -->",
               );
               expect(output.appServer?.prompt).toContain(
-                "--helper validate-patch-risk-assessment <assessment.json>",
-              );
-              expect(output.appServer?.prompt).toContain(
-                "references/windows-validation.md",
+                process.platform === "win32"
+                  ? 'launch_codex_security_mcp.cmd" --helper validate-patch-risk-assessment'
+                  : "launch_codex_security_mcp' --helper validate-patch-risk-assessment",
               );
               const artifact = JSON.parse(
                 output

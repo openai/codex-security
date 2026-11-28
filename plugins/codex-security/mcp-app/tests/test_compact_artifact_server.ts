@@ -101,9 +101,19 @@ try {
       userContext: "Review the fixture",
     };
     try {
-      const desktopTool = "start_codex_security_prompt_only_scan";
+      const instructions = await call("get_codex_security_skill_instructions", {
+        topic: "standard-scan",
+        clientSurface: "desktop",
+      });
+      const text = (instructions.content as TextContent[])[0].text;
+      assert.notEqual(instructions.isError, true, text);
+      const desktopTool = /`(start_codex_security_\w+_scan)`/.exec(text)?.[1];
+      assert.ok(desktopTool);
       const first = await call(desktopTool, selection);
-      const started = requireSuccessfulTool<WorkspaceResult>(first);
+      const started = requireSuccessfulTool<
+        WorkspaceResult & { startDisposition: string }
+      >(first);
+      assert.equal(started.startDisposition, "created");
       assert.match(
         (first.content as TextContent[])[0].text,
         /Skip it for Amazon Bedrock or API-key-only scans/,
@@ -118,16 +128,7 @@ try {
       );
       const head = path.join(scanDir, "checkpoint-head.json");
       const checkpoint = await readFile(head, "utf8");
-      // Exercise the retry tool selected by the current desktop skill.
-      const instructions = await readFile(
-        path.join(bundledPluginRoot, "skills/security-scan/SKILL.md"),
-        "utf8",
-      );
-      const desktopRoute = /desktop[^.\n]*?`(start_codex_security_\w+)`/i.exec(
-        instructions,
-      );
-      assert.ok(desktopRoute);
-      const retry = await call(desktopRoute[1], selection);
+      const retry = await call(desktopTool, selection);
       const joined = requireSuccessfulTool<
         WorkspaceResult & { startDisposition: string }
       >(retry);

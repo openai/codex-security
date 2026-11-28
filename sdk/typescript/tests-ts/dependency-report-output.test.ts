@@ -1,13 +1,18 @@
 import {
   renderPreparedDependencyReportMarkdown,
   summarizeDependencyReport,
-} from "../src/dependency-report-text.js";
+} from "../src/dependency/report/text.js";
 import { expect, test } from "bun:test";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { writeDependencyReportFile } from "../src/dependency-check-output.js";
-import { prepareDependencyReport } from "../src/dependency-report-model.js";
-import { renderPreparedDependencyReport } from "../src/dependency-report-renderer.js";
+import {
+  DependencyInvestigationBlockedError,
+  runPreparedAnalyzers,
+  withDependencyCheckOutput,
+  writeDependencyReportFile,
+} from "../src/dependency/check-output.js";
+import { prepareDependencyReport } from "../src/dependency/report/model.js";
+import { renderPreparedDependencyReport } from "../src/dependency/report/renderer.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 import {
   variantReport,
@@ -17,6 +22,57 @@ import {
 import { stackReport } from "./support/dependency-stack-report-fixture.js";
 
 const signal = new AbortController().signal;
+
+test("a blocked analyzer preserves earlier results and publishes no completed report", async () => {
+  await using dir = await scopedTemporaryDirectory("blocked-analyzer-");
+  const subject = "CVE-2099-1000";
+  const reportFile = join(dir.path, "report.json");
+  const progressEvents = join(dir.path, "progress.jsonl");
+  const completed = { cve: subject, uses: [] };
+  const investigation = withDependencyCheckOutput(
+    { subject, reportFile, progressEvents, signal, warn: () => {} },
+    (emit) =>
+      runPreparedAnalyzers(
+        [
+          {
+            name: "repository",
+            async run(progress) {
+              progress("discovery", subject);
+              return completed;
+            },
+          },
+          {
+            name: "stacks",
+            async run() {
+              throw new Error("capture unavailable");
+            },
+          },
+        ],
+        subject,
+        emit,
+        signal,
+      ),
+  );
+  const error = await investigation.catch((reason: unknown) => reason);
+  expect(error).toBeInstanceOf(DependencyInvestigationBlockedError);
+  expect((error as DependencyInvestigationBlockedError).outcome).toMatchObject({
+    status: "blocked",
+    pendingAnalyzers: [],
+    analyzers: {
+      repository: completed,
+      stacks: { status: "blocked", reason: "capture unavailable" },
+    },
+  });
+  expect(await readdir(dir.path)).toEqual(["progress.jsonl"]);
+  const events = (await readFile(progressEvents, "utf8"))
+    .trim()
+    .split("\n")
+    .map((row) => JSON.parse(row));
+  expect(events).toContainEqual(
+    expect.objectContaining({ type: "stage", analyzer: "repository" }),
+  );
+  expect(events.at(-1)).toMatchObject({ type: "finished", outcome: "blocked" });
+});
 
 test.each([
   ["repository", variantReport()],

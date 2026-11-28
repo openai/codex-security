@@ -1,14 +1,14 @@
 import { expect, test } from "bun:test";
-import { DependencyAttemptStore } from "../src/dependency-attempt-store.js";
+import { DependencyAttemptStore } from "../src/dependency/attempt-store.js";
 import {
   approveDependencyClaims,
   type Claim,
-} from "../src/dependency-reviewed-claims.js";
+} from "../src/dependency/analyzers/repository/claims.js";
 import {
   createPremiseQueue,
   currentApproval,
   premiseKey,
-} from "../src/dependency-review-queue.js";
+} from "../src/dependency/analyzers/repository/review-queue.js";
 
 function premise(store: DependencyAttemptStore, id: string, previous = 0) {
   return store.recordClaim<Claim["value"]>(

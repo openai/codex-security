@@ -48,7 +48,7 @@ export type {
 export type {
   DependencyEndpointConfiguration,
   DependencyRuntimeSelector,
-} from "./dependency-caller-scope.js";
+} from "./dependency/caller-scope.js";
 export type { ScanSettings } from "./scan-settings.js";
 export type { SeverityRubricSnapshot } from "./severity-rubric.js";
 export { classifySeverity } from "./classify-severity.js";

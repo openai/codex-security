@@ -4,7 +4,7 @@ import {
   lookupDependencyAdvisory,
   lookupPackageAdvisories,
   parseDependencyPackage,
-} from "../src/dependency-advisory.js";
+} from "../src/dependency/advisory.js";
 
 const cve = "CVE-2099-0001";
 const id = "SAMPLE-1";

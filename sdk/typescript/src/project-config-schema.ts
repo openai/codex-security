@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { dependencyBoundarySchema } from "./dependency-caller-scope.js";
+import { dependencyBoundarySchema } from "./dependency/caller-scope.js";
 import {
   DeepScanSettingsSchema,
   FailureSeveritySchema,
@@ -28,6 +28,28 @@ export const ProjectScopeSchema = z.union([
     }),
   }),
 ]);
+
+export const dependencyAnalyzersSchema = z
+  .strictObject({
+    repository: z
+      .strictObject({})
+      .optional()
+      .describe("Investigate callers and dependency copies in the checkout."),
+    stacks: z
+      .strictObject({
+        input: nonempty
+          .regex(/\S/u)
+          .optional()
+          .describe("Capture directory, relative to this config file."),
+      })
+      .optional()
+      .describe("Investigate a captured stack when input is supplied."),
+  })
+  .refine(
+    (value) => Object.keys(value).length > 0,
+    "Select at least one analyzer.",
+  )
+  .meta({ minProperties: 1 });
 
 export const ProjectConfigInputSchema = z.strictObject({
   $schema: nonempty
@@ -81,6 +103,11 @@ export const ProjectConfigInputSchema = z.strictObject({
   exploitability: z
     .strictObject({
       ...dependencyBoundarySchema.shape,
+      analyzers: dependencyAnalyzersSchema
+        .optional()
+        .describe(
+          "Omit to enable all analyzers. An explicit map enables only the named analyzers. Stacks runs only when given a capture directory.",
+        ),
       evidence_sources: z
         .array(
           z.strictObject({

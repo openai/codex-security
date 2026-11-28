@@ -4,27 +4,26 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { main, runCodexSkillCommand } from "../src/cli.js";
 import { parse as parseToml } from "smol-toml";
-import { DependencyAttemptStore } from "../src/dependency-attempt-store.js";
+import { DependencyAttemptStore } from "../src/dependency/attempt-store.js";
 import {
   analyzeStackAdvisory,
   lookupDependencyAdvisory,
-} from "../src/dependency-advisory.js";
-import { prepareStackPacket } from "../src/stack-packet.js";
+} from "../src/dependency/advisory.js";
 import { sqliteDatabaseOpener } from "../src/runtime.js";
 import {
-  prepareStackCheckPacket,
+  prepareStackPacket,
   readStackPacket,
   stackPacketWorkItems,
-} from "../src/dependency-stack-packet.js";
-import type { StackInvestigationReport } from "../src/dependency-stack-assessment.js";
+} from "../src/dependency/analyzers/stacks/packet.js";
+import type { StackInvestigationReport } from "../src/dependency/analyzers/stacks/assessment.js";
 import {
   dependencyClaimHash,
   type DependencyClaimReference,
-} from "../src/dependency-stack-claims.js";
+} from "../src/dependency/analyzers/stacks/claims.js";
 import {
   executeStackRun,
   readFinalStackReport,
-} from "../src/dependency-stack-run.js";
+} from "../src/dependency/analyzers/stacks/run.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { git } from "./git-fixture.js";
 import { createCliTest } from "./support/cli-run.js";
@@ -683,6 +682,9 @@ test("the gated check preserves configured caller scope through review and two c
     'Assess the "import" worker.\nTreat uploaded records as caller-controlled.',
   ));
 
+test("a combined check replays the frozen stack evidence alongside the repository report", () =>
+  reviewedStackCheck("combined", "Assess only the decoder service."));
+
 test("a third independent rejection exhausts the one-shot budget without publishing a report", () =>
   reviewedStackCheck("exhausted"));
 
@@ -690,7 +692,7 @@ test("a review that repeats one decision and omits another cannot publish a repo
   reviewedStackCheck("duplicate"));
 
 async function reviewedStackCheck(
-  mode: "correct" | "duplicate" | "exhausted",
+  mode: "correct" | "combined" | "duplicate" | "exhausted",
   callerScope?: string,
 ) {
   await using dir = await scopedTemporaryDirectory("stack-cli-");
@@ -710,6 +712,20 @@ async function reviewedStackCheck(
       conditions: [{ label: trigger, advisoryId: cve, quote: trigger }],
     },
   ];
+  const combined = mode === "combined";
+  const inputs = join(dir.path, "packet");
+  const saved = combined
+    ? await prepareStackPacket(
+        { ...packetOptions(files, inputs), callerScope },
+        {
+          lookupCve: (id, signal) =>
+            lookupDependencyAdvisory(id, signal, async () =>
+              Response.json({ id, details: trigger }),
+            ),
+          analyze: async () => triggerAnalysis,
+        },
+      )
+    : undefined;
   const gate = "CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY";
   const requests = [
     "Inspect the captured frames to see if the argument values are recorded.",
@@ -729,6 +745,33 @@ async function reviewedStackCheck(
   const d = dependencies({
     currentDirectory: files.repo,
     async onCodex(argv, out, _env, prompt) {
+      if (combined && !out?.stackTarget) {
+        const payload = JSON.parse(
+          (prompt ?? out?.appServer?.prompt)!.split("\n\n").at(-1)!,
+        );
+        out!.stdout.write(
+          JSON.stringify(
+            payload.claims
+              ? {
+                  decisions: payload.claims.map(
+                    ({ id, revision, hash }: DependencyClaimReference) => ({
+                      id,
+                      revision,
+                      hash,
+                      approved: true,
+                      evidenceKeys: [],
+                      reason: "Checked coverage.",
+                    }),
+                  ),
+                }
+              : {
+                  uses: [],
+                  limitations: ["No matching dependency in this checkout."],
+                },
+          ),
+        );
+        return 0;
+      }
       calls++;
       expect(argv[0]).toBe("exec");
       expect(requestMetadata(argv)).toMatchObject({
@@ -740,7 +783,7 @@ async function reviewedStackCheck(
       expect(out?.investigationServers).toEqual({});
       expect(argv).toContain('model_provider="sample"');
       expect(argv.some((arg) => arg.includes(gate))).toBe(true);
-      if (calls === 1) {
+      if (!combined && calls === 1) {
         expect(prompt).toContain(trigger);
         expect(out?.readOnly).toBe(true);
         out!.stdout.write(JSON.stringify(triggerAnalysis));
@@ -916,39 +959,42 @@ async function reviewedStackCheck(
   d.environment["CODEX_HOME"] = configHome;
   d.environment[gate] = "1";
   const configPath = join(dir.path, "project.json");
-  if (callerScope !== undefined) {
-    await writeFile(
+  const progress = join(dir.path, "progress.jsonl");
+  const configure = (scope?: string) =>
+    writeFile(
       configPath,
       JSON.stringify({
-        exploitability: { scope: { instructions: callerScope } },
+        exploitability: {
+          analyzers: combined
+            ? undefined
+            : { stacks: { input: mode === "correct" ? "." : "./unused" } },
+          ...(scope && { scope: { instructions: scope } }),
+        },
       }),
     );
-  }
+  if (!combined) await configure(callerScope);
+  const check = ["exploitability", "check", cve];
+  if (!combined) check.push("--config", configPath);
+  if (mode !== "correct")
+    check.push("--analyzer-input", combined ? "stacks=../packet" : "stacks=..");
   const io = createCliTest(main);
   const code = await io.runCli(
     [
-      "exploitability",
-      "check",
-      cve,
-      "--sources",
-      files.sourcesPath,
-      "--sinks",
-      files.sinksPath,
-      "--stacks",
-      files.stacksPath,
-      ...(callerScope === undefined ? [] : ["--config", configPath]),
+      ...check,
+      ...(combined ? ["--progress-events", progress] : []),
       "--report-file",
       destination,
       "--json",
     ],
     d,
   );
+  // A combined check only looks up the repository advisory. Stack review reuses its snapshot.
   expect(lookup).toHaveBeenCalledTimes(1);
   if (mode !== "duplicate") {
-    expect(drafts, io.stderr.text()).toHaveLength(3);
-    expect(calls).toBe(7); // analysis, then three investigator/reviewer pairs
+    expect(drafts, io.stderr.text() + io.stdout.text()).toHaveLength(3);
+    expect(calls).toBe(combined ? 6 : 7); // Three investigator/reviewer pairs, plus analysis for raw captures.
   }
-  if (mode !== "correct") {
+  if (mode === "exhausted" || mode === "duplicate") {
     expect(code).not.toBe(0);
     if (mode === "exhausted") {
       expect(io.stderr.text()).toContain(drafts[2]!.assessments[0]!.workItemId);
@@ -961,8 +1007,47 @@ async function reviewedStackCheck(
     return;
   }
   expect(code, io.stderr.text()).toBe(0);
-  const report = JSON.parse(io.stdout.text());
-  expect(JSON.parse(await readFile(destination, "utf8"))).toEqual(report);
+  const output = JSON.parse(io.stdout.text());
+  expect(JSON.parse(await readFile(destination, "utf8"))).toEqual(output);
+  const report = combined ? output.analyzers.stacks : output;
+  if (saved) {
+    expect(output.analyzers.repository).toMatchObject({ cve, uses: [] });
+    expect(report.inputDigest).toBe(saved.manifest.inputDigest);
+    const events = (await readFile(progress, "utf8"))
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line));
+    for (const analyzer of ["repository", "stacks"]) {
+      expect(events).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ analyzer, type: "investigation" }),
+          expect.objectContaining({
+            analyzer,
+            type: "stage",
+            stage: "investigate",
+          }),
+        ]),
+      );
+    }
+    async function expectRejected(message: RegExp) {
+      const retry = createCliTest(main);
+      expect(
+        await retry.runCli([...check, "--config", configPath], d),
+      ).not.toBe(0);
+      expect(retry.stderr.text()).toMatch(message);
+      expect(lookup).toHaveBeenCalledTimes(1);
+    }
+    await configure("A different scope.");
+    await expectRejected(/scope conflicts/i);
+    await configure();
+    const manifest = join(inputs, "manifest.json");
+    await chmod(manifest, 0o600);
+    await writeFile(
+      manifest,
+      JSON.stringify({ ...saved.manifest, inputDigest: "f".repeat(64) }),
+    );
+    await expectRejected(/manifest/i);
+  }
   const approvedDraft = drafts[2]!;
   expect({ ...report, review: null }).toEqual(approvedDraft);
   expect(report).toMatchObject({
@@ -1371,7 +1456,7 @@ test("a check freezes advisory evidence without rewriting the catalog and can re
       return triggerAnalysis;
     },
   };
-  const { manifest } = await prepareStackCheckPacket(options, host);
+  const { manifest } = await prepareStackPacket(options, host);
   expect(manifest.advisory).toEqual(catalog.advisory);
   expect(await readFile(join(options.inputsDir, "sinks.json"), "utf8")).toBe(
     original,
@@ -1392,7 +1477,7 @@ test("a check freezes advisory evidence without rewriting the catalog and can re
   );
   const replay = { ...catalog, advisoryDetails, triggerAnalysis };
   await writeFile(files.sinksPath, JSON.stringify(replay));
-  const second = await prepareStackCheckPacket(
+  const second = await prepareStackPacket(
     { ...options, inputsDir: join(dir.path, "second") },
     host,
   );
@@ -1403,7 +1488,7 @@ test("a check freezes advisory evidence without rewriting the catalog and can re
     JSON.stringify({ ...replay, cve: "CVE-2099-0002" }),
   );
   await expect(
-    prepareStackCheckPacket({ ...invalid, cve: "CVE-2099-0002" }, host),
+    prepareStackPacket({ ...invalid, cve: "CVE-2099-0002" }, host),
   ).rejects.toThrow(/does not identify/);
   const modified = structuredClone(advisoryDetails!);
   Object.assign(modified[0]!.affected[0]!, { extra: true });
@@ -1411,12 +1496,12 @@ test("a check freezes advisory evidence without rewriting the catalog and can re
     files.sinksPath,
     JSON.stringify({ ...catalog, advisoryDetails: modified }),
   );
-  await expect(prepareStackCheckPacket(invalid, host)).rejects.toThrow(
+  await expect(prepareStackPacket(invalid, host)).rejects.toThrow(
     /Frozen advisoryDetails does not match/,
   );
   advisoryDetails![1]!.body = "Changed since lookup.";
   await writeFile(files.sinksPath, JSON.stringify(replay));
-  await expect(prepareStackCheckPacket(invalid, host)).rejects.toThrow(
+  await expect(prepareStackPacket(invalid, host)).rejects.toThrow(
     /Frozen advisory SHA-256 mismatch/,
   );
   expect({ lookups, analyses }).toEqual({ lookups: 1, analyses: 1 });
@@ -1438,13 +1523,13 @@ test("unavailable public advisories retain a visible catalog fallback, but cance
       events.push(type);
     },
   };
-  const { manifest } = await prepareStackCheckPacket(options, host);
+  const { manifest } = await prepareStackPacket(options, host);
   expect(manifest.advisoryLookupError).toBe("registry unavailable");
   expect(manifest.triggerAnalysis).toBeUndefined();
   expect(events).toContain("advisory_lookup_failed");
   const controller = new AbortController();
   await expect(
-    prepareStackCheckPacket(
+    prepareStackPacket(
       {
         ...options,
         inputsDir: join(dir.path, "abort"),

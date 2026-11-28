@@ -1,8 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { stackReport } from "./support/dependency-stack-report-fixture.js";
-import { renderDependencyCode } from "../src/dependency-report-audit.js";
-import { renderDependencyReport } from "../src/dependency-report-renderer.js";
+import { renderDependencyCode } from "../src/dependency/report/audit.js";
+import { renderDependencyReport } from "../src/dependency/report/renderer.js";
+import { prepareDependencyReport } from "../src/dependency/report/model.js";
+import {
+  renderPreparedDependencyReportMarkdown,
+  summarizeDependencyReport,
+} from "../src/dependency/report/text.js";
 import {
   broadReport,
   place,
@@ -94,6 +99,71 @@ test("marks only unambiguous expressions on the cited line and escapes syntax in
 });
 
 describe("call site report", () => {
+  test("combined results keep the caller and the sampled evidence in separate sections", () => {
+    const stacks = stackReport();
+    const repository = {
+      ...report([reviewed(1, { verdict: "potentially_exploitable" })]),
+      cve: stacks.cve,
+      target: { repository: "code<svg>", sha: stacks.target.sha },
+    };
+    const raw = { subject: stacks.cve, analyzers: { repository, stacks } };
+    expect(() =>
+      prepareDependencyReport({ ...raw, analyzers: { repository: stacks } }),
+    ).toThrow(/Unexpected report for repository/);
+    const prepared = prepareDependencyReport(raw);
+    for (const view of [
+      summarizeDependencyReport(prepared),
+      renderPreparedDependencyReportMarkdown(prepared),
+    ]) {
+      const [repo, sampled] = view.split("Stacks analyzer");
+      expect(repo).toContain("Repository analyzer");
+      expect(repo).toContain("Handler 1");
+      expect(repo).not.toContain("scheduled-job");
+      expect(sampled).toContain("scheduled-job");
+      expect(sampled).not.toContain("Handler 1");
+      expect(view).not.toContain("RAW_RECEIPT_CONTENT");
+    }
+    const html = renderDependencyReport(raw);
+    expect(elements(html, ".queue-title").map((e) => e.text)).toEqual([
+      "Repository analyzer",
+      "Stacks analyzer",
+    ]);
+    expect(attributes(html, "a[data-entry]", "href")).toEqual([
+      "#use-1-1",
+      "#stack-2-1",
+      "#stack-2-2",
+    ]);
+    expect(text(panel(html, "use-1-1"))).not.toContain("Sampled copy 1.0");
+    expect(text(panel(html, "stack-2-1"))).toContain("Sampled copy 1.0");
+    expect(html).not.toContain("code<svg>");
+    expect(html).not.toContain("RAW_RECEIPT_CONTENT");
+  });
+  test("a blocked analyzer preserves pending and completed results", () => {
+    const stacks = stackReport();
+    const blocked = {
+      status: "blocked",
+      code: "INVESTIGATION_BLOCKED",
+      reason: "Missing inventory.",
+    };
+    const raw = {
+      ...blocked,
+      subject: stacks.cve,
+      analyzers: { repository: blocked },
+      pendingAnalyzers: ["stacks"],
+    };
+    expect(
+      attributes(renderDependencyReport(raw), "[data-entry]", "data-verdict"),
+    ).toEqual(["blocked", "pending"]);
+    const part = {
+      ...raw,
+      analyzers: { repository: blocked, stacks },
+      pendingAnalyzers: [],
+    };
+    const summary = summarizeDependencyReport(prepareDependencyReport(part));
+    expect(summary).toContain("Missing inventory.");
+    expect(summary).toContain("scheduled-job");
+    expect(summary).not.toContain("Not started");
+  });
   test("walks retained frames, opens the exact caller line, and does not pass caller code off as dependency code", () => {
     const raw = stackReport(),
       [assessment, empty] = raw.assessments;

@@ -5,7 +5,7 @@ import { basename, join } from "node:path";
 import {
   readDependencySourceCitation,
   readDependencyTarget,
-} from "../src/dependency-source-identity.js";
+} from "../src/dependency/source-identity.js";
 import { git } from "./git-fixture.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 

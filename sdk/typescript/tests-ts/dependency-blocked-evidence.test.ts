@@ -2,16 +2,16 @@ import { expect, test } from "bun:test";
 import {
   createDependencyBlockEvidence,
   dependencyAbortTool,
-} from "../src/dependency-blocked-evidence.js";
+} from "../src/dependency/analyzers/repository/blocked-evidence.js";
 import {
   createDependencyEvidenceCapture,
   type DependencyEvidenceRecord,
-} from "../src/dependency-evidence-sources.js";
-import { createDependencyResourceSession } from "../src/dependency-resource-session.js";
+} from "../src/dependency/evidence-sources.js";
+import { createDependencyResourceSession } from "../src/dependency/resource-session.js";
 import {
   DependencyInvestigationBlockedError,
   runReviewedDependencyCheck,
-} from "../src/dependency-reviewed-check.js";
+} from "../src/dependency/analyzers/repository/check.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 import { execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
