@@ -180,12 +180,16 @@ async function contracts(fixture) {
     ],
   });
   const report = await tool("finalize");
-  assert.equal(report.runId, manifest.runId);
-  assert.equal(report.attemptId, manifest.attemptId);
+  const stack = report.vulnerabilities[0].analyses.find(
+    (analysis) => analysis.analyzer === "stacks",
+  );
+  assert.equal(stack.audit.runId, manifest.runId);
+  assert.equal(stack.audit.attemptId, manifest.attemptId);
   await jsonFile(join(out, "scripted-report.json"), report);
   const grade = gradeStack(report, fixture, { reviewed: false });
   const tampered = structuredClone(report);
-  tampered.claims[0].receipts[0].result.version = "0.2.0";
+  tampered.vulnerabilities[0].analyses[0].claims[0].receipts[0].result.version =
+    "0.2.0";
   assert.throws(
     () => gradeStack(tampered, fixture, { reviewed: false }),
     /original capture selection/u,
