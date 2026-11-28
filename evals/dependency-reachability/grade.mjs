@@ -147,24 +147,22 @@ function analysisFor(vulnerability, analyzer) {
   );
   assert.equal(matches.length, 1, "one " + analyzer + " analysis");
   assert.equal(matches[0].status, "complete");
+  assert(
+    vulnerability.analyses.every(
+      (item) => item === matches[0] || item.status === "skipped",
+    ),
+    "unexpected active analyzer",
+  );
+  assert(
+    vulnerability.findings.every((finding) => finding.analyzer === analyzer),
+    analyzer + " findings only",
+  );
   return matches[0];
 }
 
 export function repositoryReport(response, advisoryId) {
   const vulnerability = vulnerabilityFor(response, advisoryId);
   const analysis = analysisFor(vulnerability, "repository");
-  assert(
-    vulnerability.analyses.every(
-      (item) => item === analysis || item.status === "skipped",
-    ),
-    "unexpected active analyzer",
-  );
-  assert(
-    vulnerability.findings.every(
-      (finding) => finding.analyzer === "repository",
-    ),
-    "repository findings only",
-  );
   return {
     claims: analysis.claims,
     claimEvidence: analysis.evidence,
@@ -196,9 +194,9 @@ export function gradeStack(response, fixture, { reviewed }) {
     ...analysis.audit,
     coverage,
     claims: analysis.claims,
-    assessments: vulnerability.findings
-      .filter((finding) => finding.analyzer === "stacks")
-      .map(({ analyzer: _, ...assessment }) => assessment),
+    assessments: vulnerability.findings.map(
+      ({ analyzer: _, ...assessment }) => assessment,
+    ),
   };
   assert.deepEqual(report.target, target);
   assert(report.runId && report.attemptId && report.toolRevision);
