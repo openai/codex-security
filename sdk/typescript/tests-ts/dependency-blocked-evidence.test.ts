@@ -159,157 +159,54 @@ test("observed coverage must enumerate distinct selected requests and the curren
     }),
   ).toThrow(/missing status/);
 });
-test("a provider declaration is bound to the genuine scoped and current response", () => {
+test("one provider response can block only the requested scope it marks unavailable", () => {
   const { block, result } = fixture();
-  const declaration = "Required release data is unavailable.";
-  const proposal = (receiptId: string) => ({
-    ...details,
-    tool: target,
-    coverage: {
-      basis: "provider_declared",
-      scope: "two releases",
-      representativeness: "All selected releases are covered",
-      declaration,
-      selection: select(receiptId, "message"),
-    },
-  });
-  const receipt = result(
-    { releases: ["one", "two"] },
-    { structuredContent: { message: declaration } },
-  );
-  expect(block.verify(proposal(receipt), "root", []).coverage.basis).toBe(
-    "provider_declared",
-  );
-  expect(() =>
+  const scope = "production";
+  const unavailable = {
+    scope,
+    available: false,
+    reason: "Nenhum registro confirmado.",
+  };
+  const lookup = (payload: object, requestScope = scope) =>
+    result({ scope: requestScope }, { structuredContent: payload });
+  const verify = (receiptId: string, affectedScope = scope) =>
     block.verify(
       {
-        ...proposal(receipt),
-        coverage: { ...proposal(receipt).coverage, declaration: "invented" },
+        ...details,
+        affectedScope,
+        tool: target,
+        coverage: {
+          basis: "provider_declared",
+          receiptId,
+          representativeness:
+            "The deployment inventory covers the requested environment.",
+        },
       },
       "root",
       [],
-    ),
-  ).toThrow();
-  expect(() =>
-    block.verify(
-      proposal(result({}, { structuredContent: { message: declaration } })),
-      "root",
-      [],
-    ),
-  ).toThrow(/unscoped/);
-  const healthy = "No records are missing.";
-  const positive = proposal(
-    result(
-      { releases: ["one", "two"] },
-      { structuredContent: { message: healthy } },
-    ),
-  );
-  expect(() =>
-    block.verify(
-      { ...positive, coverage: { ...positive.coverage, declaration: healthy } },
-      "root",
-      [],
-    ),
-  ).toThrow(/unavailable/);
-  for (const payload of [
-    { message: "Release one is missing." },
-    { message: "missing", complete: true },
-    { message: declaration, complete: true },
-  ]) {
-    const isolated = proposal(
-      result({ release: "one" }, { structuredContent: payload }),
     );
-    expect(() =>
-      block.verify(
-        {
-          ...isolated,
-          coverage: { ...isolated.coverage, declaration: payload.message },
-        },
-        "root",
-        [],
-      ),
-    ).toThrow(/unavailable/);
-  }
-  const proof = result(
-    { releases: ["one", "two"] },
-    {
-      structuredContent: {
-        coverage: {
-          scope: "selected releases",
-          complete: false,
-          reason: "Nenhum registro confirmado.",
-        },
-      },
-    },
+  const receipt = lookup({ coverage: unavailable });
+  expect(verify(receipt).coverage).toMatchObject({
+    basis: "provider_declared",
+    receiptId: receipt,
+  });
+  expect(() => verify(receipt, "staging")).toThrow(/same scope/);
+  expect(() => verify(lookup({ coverage: unavailable }, "staging"))).toThrow(
+    /same scope/,
   );
-  const declared = proposal(proof);
-  expect(
-    block.verify(
-      {
-        ...declared,
-        coverage: {
-          ...declared.coverage,
-          declaration: "Nenhum registro confirmado.",
-          selection: {
-            receiptId: proof,
-            textBlock: null,
-            record: ["coverage", "reason"],
-          },
-        },
-      },
-      "root",
-      [],
-    ).coverage.basis,
-  ).toBe("provider_declared");
-  const contradictory = result(
-    { release: "one" },
-    {
-      structuredContent: { coverage: { complete: true } },
-      content: [
-        { type: "text", text: JSON.stringify({ message: declaration }) },
-      ],
-    },
-  );
-  const alternate = proposal(contradictory);
+  for (const response of [
+    { message: "All inventory checks passed except one missing record." },
+    { coverage: { scope, complete: false } },
+    { coverage: { scope: "staging", available: false } },
+    { complete: true, coverage: unavailable },
+  ])
+    expect(() => verify(lookup(response))).toThrow(/structured coverage/);
+  expect(() => verify(receipt)).toThrow(/current/);
   expect(() =>
-    block.verify(
-      {
-        ...alternate,
-        coverage: {
-          ...alternate.coverage,
-          selection: { ...alternate.coverage.selection, textBlock: 0 },
-        },
-      },
-      "root",
-      [],
-    ),
-  ).toThrow(/unavailable/);
-  const archived = result(
-    { releases: ["one", "two"] },
-    {
-      isError: true,
-      structuredContent: { status: "not_recorded", message: declaration },
-      content: [
-        { type: "text", text: JSON.stringify({ message: declaration }) },
-      ],
-    },
-    "failed",
-  );
-  expect(() =>
-    block.verify(
-      {
-        ...proposal(archived),
-        coverage: {
-          ...proposal(archived).coverage,
-          selection: { ...select(archived, "message"), textBlock: 0 },
-        },
-      },
-      "root",
-      [],
-    ),
+    verify(lookup({ status: "not_recorded", coverage: unavailable })),
   ).toThrow(/archived/);
-  expect(() => block.verify(proposal(receipt), "root", [])).toThrow(/current/);
 });
+
 test("the native coordinator owns the current failed required startup and only the active root turn can block", async () => {
   const { block, result } = fixture();
   const optional = block.startup("builds", "failed", false, "Optional source")!;

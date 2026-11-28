@@ -87,6 +87,8 @@ Run `cs exploitability check CVE-2019-10744 --config project.yaml`. The followin
 - `scope.exclude_paths` skips literal checkout-relative files or directories in broad searches. A nested `SECURITY.md` boundary or specific source or build evidence can bring an excluded path back into scope.
 - `sources` and `sinks` each specify a complete endpoint list. Omit either list to discover those endpoints. Set it to `[]` to declare there are none. Each endpoint requires a `function` and may include a package, symbol, file and line.
 
+A provider can report an outage for a whole scope in one lookup. For example, a request with `{"scope":"production"}` can return `{"structuredContent":{"coverage":{"scope":"production","available":false}}}`. The coordinator must cite that response and use the same scope. A message or an incomplete page alone cannot stop the investigation. Other ways to establish a block are distinct missing required lookups and failed startup of a required server.
+
 The coordinator uses high reasoning effort, reviewers use low effort and investigators use `--effort` or the project profile. `agents.default_subagent_reasoning_effort` overrides the investigator setting. If the native process exits unexpectedly, the CLI can resume the coordinator thread once if the last tool operations have known outcomes.
 
 #### Read the evidence
