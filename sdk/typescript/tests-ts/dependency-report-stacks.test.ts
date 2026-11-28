@@ -1,9 +1,11 @@
 import { expect, test } from "bun:test";
-import { readStackReport } from "../src/exploitability/report/reader.js";
 import { renderDependencyReport } from "../src/exploitability/report/renderer.js";
 import { renderDependencyReportMarkdown } from "../src/exploitability/report/text.js";
 import { dependencyClaimHash } from "../src/exploitability/analyzers/stacks/claims.js";
-import { stackReport } from "./support/dependency-stack-report-fixture.js";
+import {
+  stackReport,
+  stacksReport,
+} from "./support/dependency-stack-report-fixture.js";
 
 test("a debugger stack with only a name is a lead, with no fabricated search or package", () => {
   const raw = stackReport();
@@ -45,7 +47,7 @@ test("a debugger stack with only a name is a lead, with no fabricated search or 
     renderDependencyReport,
     renderDependencyReportMarkdown,
   ]) {
-    const result = render(report);
+    const result = render(stacksReport(report));
     expect(result).toContain("open_file");
     expect(result).toContain("files[1]");
     expect(result).toContain(entry.sourceFile.sha256);
@@ -53,26 +55,9 @@ test("a debugger stack with only a name is a lead, with no fabricated search or 
     expect(result).not.toContain("Search window");
     expect(result).not.toContain("sample-codec");
   }
-  expect(renderDependencyReport(report)).not.toContain("debug<svg>.json");
-});
-
-test("shared premises appear once and require the exact revision and hash", () => {
-  const input = stackReport();
-  const other = { ...input.assessments[0].supportingClaims[0]!, id: "other" };
-  input.assessments[0].supportingClaims.push(other);
-  input.claims.push({ ...input.claims[0]!, ...other });
-  const path = () => readStackReport(input)!.assessments[0]!;
-  expect(path().claims.map((c) => c.id)).toEqual(["copy", "other", "call"]);
-  const call = input.claims[1]!;
-  input.claims.splice(
-    1,
-    1,
-    { ...call, revision: call.revision + 1 },
-    { ...call, hash: "f".repeat(64) },
+  expect(renderDependencyReport(stacksReport(report))).not.toContain(
+    "debug<svg>.json",
   );
-  const incomplete = path();
-  expect(incomplete.claims.map((c) => c.id)).toEqual(["copy", "other"]);
-  expect(incomplete.missingClaims).toEqual(input.claims[0]!.dependencies);
 });
 
 test("reviewed exports preserve each decision and the frozen advisory", () => {
@@ -104,12 +89,8 @@ test("reviewed exports preserve each decision and the frozen advisory", () => {
       },
     ],
   };
-  const reviewed = { ...draft, review };
-  const report = readStackReport(reviewed)!;
-  expect(report.assessments.map((a) => a.reviewReason)).toEqual([
-    review.decisions[1]!.reason,
-    review.decisions[0]!.reason,
-  ]);
+  const reviewed = stacksReport({ ...draft, review });
+  reviewed.vulnerabilities[0]!.result!.review = { status: "approved" };
   for (const render of [
     renderDependencyReport,
     renderDependencyReportMarkdown,
@@ -128,7 +109,12 @@ test("reviewed exports preserve each decision and the frozen advisory", () => {
     );
     expect(output).not.toContain("RAW_RECEIPT_CONTENT");
     expect(
-      render({ ...input, advisoryLookupError: "Registry unavailable." }),
+      render(
+        stacksReport({
+          ...input,
+          advisoryLookupError: "Registry unavailable.",
+        }),
+      ),
     ).toContain("Registry unavailable.");
   }
 });

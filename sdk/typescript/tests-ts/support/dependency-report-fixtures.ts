@@ -1,3 +1,10 @@
+import {
+  assembleExploitabilityReport,
+  repositoryVulnerability,
+  type AnalyzerBatch,
+} from "../../src/exploitability/check-output.js";
+import { repositoryIssueReportSchema } from "../../src/exploitability/reachability.js";
+import type { DependencyTarget } from "../../src/exploitability/source-identity.js";
 import type {
   DependencyReviewReference,
   Finding,
@@ -11,7 +18,7 @@ type ReviewedDependencyUse = Extract<Finding, { kind: "use" }>["item"];
 export const sourceRef = (
   path = "src/handler.ts",
   line = 5,
-): DependencyReviewReference => ({
+): Extract<DependencyReviewReference, { kind: "source" }> => ({
   kind: "source",
   path,
   startLine: line,
@@ -56,8 +63,7 @@ export function reviewed(
     reason: `Handler ${n} reaches the codec; its selected runtime setting is unverified.`,
     evidence: [
       {
-        path: (ref as Extract<DependencyReviewReference, { kind: "source" }>)
-          .path,
+        path: ref.path,
         startLine: n + 1,
         endLine: n + 1,
         supports: [],
@@ -80,8 +86,7 @@ export function unresolved(
     reason: `The parser ${n} handoff to the affected decoder is unverified.`,
     evidence: [
       {
-        path: (ref as Extract<DependencyReviewReference, { kind: "source" }>)
-          .path,
+        path: ref.path,
         startLine: n + 1,
         endLine: n + 1,
         supports: [],
@@ -97,17 +102,72 @@ export function report(
   coverage: DependencyCoverageDisposition[] = [],
 ) {
   return {
-    schemaVersion: 2 as const,
     cve: "CVE-2099-44001",
     advisories: ["https://example.invalid/advisories/CVE-2099-44001"],
     usage: null,
     uses,
     coverage,
-    limitations: [],
-    assumptions: [],
+    limitations: [] as string[],
+    assumptions: [] as string[],
     searches: [],
   };
 }
+type RepositoryFixture = ReturnType<typeof report> & {
+  target?: DependencyTarget;
+  claims?: unknown;
+  claimEvidence?: unknown;
+  advisoryDetails?: unknown;
+};
+export function repositoryBatch(input: RepositoryFixture): AnalyzerBatch {
+  const { cve, target, ...issue } = input;
+  return {
+    status: "complete",
+    target,
+    vulnerabilities: [
+      repositoryVulnerability(
+        { kind: "advisory", id: cve },
+        repositoryIssueReportSchema.parse(issue),
+      ),
+    ],
+  };
+}
+
+// Renderer fixtures use their first cited finding as an approved result.
+export function reviewedBatch(subject: string, batch: AnalyzerBatch) {
+  const output = assembleExploitabilityReport(subject, [batch]);
+  for (const issue of output.vulnerabilities) {
+    if (issue.status !== "complete") continue;
+    const finding = issue.findings[0];
+    issue.result = {
+      verdict: finding?.verdict ?? "unknown",
+      reason: finding?.reason ?? "No reviewed caller was identified.",
+      questions: [],
+      findingRefs: finding ? [0] : [],
+      review: { status: "approved" },
+    };
+  }
+  return output;
+}
+export function repositoryReport(input: RepositoryFixture) {
+  return reviewedBatch(input.cve, repositoryBatch(input));
+}
+
+// The CLI fixtures have no established exploit. Both calls must see the
+// current vulnerability's own findings, including the empty repository case.
+export function synthesisAnswer(prompt: string) {
+  const original = /Original findings and coverage:\n([^\n]+)/u.exec(prompt);
+  if (!original) return;
+  if (prompt.includes("\n\nProposed result:"))
+    return { status: "approved", reason: "Checked the cited findings." };
+  const { findings } = JSON.parse(original[1]!);
+  return {
+    verdict: "unknown",
+    reason: "Runtime reachability is unresolved.",
+    questions: ["Which inputs reach the decoder?"],
+    findingRefs: findings.map((_: unknown, index: number) => index),
+  };
+}
+
 // Attach each excerpt via the same claim and source references as saved reports.
 export function withExcerpts(
   input: ReturnType<typeof report>,
@@ -165,29 +225,9 @@ export function withExcerpts(
   };
 }
 export function zeroReport() {
-  const index = "sha256:" + "7".repeat(64);
-  const variants = [
-    {
-      name: "stable",
-      platform: "linux/amd64",
-      manifest: "sha256:" + "8".repeat(64),
-      config:
-        "The admitted worker enables the document renderer and the decoder guard.",
-    },
-    {
-      name: "canary",
-      platform: "linux/arm64",
-      manifest: "sha256:" + "9".repeat(64),
-      config:
-        "The admitted worker disables the document renderer and the decoder guard.",
-    },
-  ];
-  const leads = Array.from({ length: 5 }, (_, i) => {
-    const variant = variants[i];
-    const sampled = variant
-      ? receiptRef(`workload-sample-${i + 1}`, "b")
-      : undefined;
-    const c = unresolved(i + 1, {
+  const leads = ["stable", "canary"].map((variant, i) => {
+    const ref = receiptRef(variant);
+    const lead = unresolved(i + 1, {
       handoff: {
         verified: "Submitted bytes reach the parser entrypoint.",
         missing: "Dispatch to the affected decoder is not bound.",
@@ -195,85 +235,26 @@ export function zeroReport() {
       openConditions: [
         {
           question: "Which registered provider handles this field?",
-          target: `Cedar worker variant ${i + 1}`,
-          decidingCheck:
-            "Inspect the provider registration in the exact platform artifact.",
+          target: variant,
+          decidingCheck: "Inspect the registered parser.",
         },
       ],
-      ...(variant && sampled
-        ? {
-            place: place({
-              kind: "job",
-              environment: "prod",
-              workload: `cedar-parser-${variant.name}`,
-              variant: variant.name,
-              role: "parser",
-              revision: "sample-revision",
-              deploymentBasis: "observed",
-              imageIndex: index,
-              platformManifest: variant.manifest,
-              platform: variant.platform,
-              artifact: variant.manifest,
-              observationWindow: "2026-01-01T00:00Z–01:00Z",
-              deploymentDetail:
-                "A running worker sample matches the named revision and manifest.",
-              dependencySelection:
-                "The selected parser provider remains unbound.",
-            }),
-            inspections: [
-              {
-                question:
-                  "Which worker and launch configuration were observed?",
-                target: {
-                  label: `Cedar ${variant.name}`,
-                  relationship: "target" as const,
-                  workload: `cedar-parser-${variant.name}`,
-                  environment: "prod",
-                  variant: variant.name,
-                  imageIndex: index,
-                  platformManifest: variant.manifest,
-                  platform: variant.platform,
-                  observationWindow: "2026-01-01T00:00Z–01:00Z",
-                },
-                source: "workload inventory",
-                outcome: "succeeded" as const,
-                result: `${variant.config} Configured launch: parser-worker --variant=${variant.name}.`,
-                evidence: [sampled],
-              },
-            ],
-            inputSource: {
-              exposure: "internet" as const,
-              endpoint: "POST /parse",
-              evidence: [sampled],
-            },
-            runtimeContext: {
-              launch: {
-                command: `parser-worker --variant=${variant.name}`,
-                basis: "configured" as const,
-              },
-              mitigation: {
-                state:
-                  variant.name === "stable"
-                    ? ("enabled" as const)
-                    : ("disabled" as const),
-                basis: "configured" as const,
-                detail: variant.config,
-              },
-              evidence: [sampled],
-            },
-            observations: [
-              {
-                server: "workloads",
-                record: `Running ${variant.name} worker and admitted configuration`,
-                supports: [],
-              },
-            ],
-          }
-        : {}),
+      place: place({ kind: "job", variant }),
+      runtimeContext: {
+        launch: {
+          command: `parser-worker --variant=${variant}`,
+          basis: "configured",
+        },
+        mitigation: {
+          state: i === 0 ? "enabled" : "disabled",
+          basis: "configured",
+          detail: "Admitted worker configuration.",
+        },
+        evidence: [ref],
+      },
     });
-    if (sampled) c.decidingEvidence!.push(sampled);
-    c.services = [service("svc:cedar", "Cedar", c.decidingEvidence![0]!)];
-    return c;
+    lead.decidingEvidence!.push(ref);
+    return lead;
   });
   return report([], leads);
 }
@@ -290,13 +271,11 @@ export function variantReport() {
       environment: "prod",
       deploymentBasis: "observed",
       variant: "stable",
-      role: "web",
       imageIndex: index,
       platformManifest: amd,
       platform: "linux/amd64",
       artifact: amd,
       observationWindow: "2026-01-01T00:00Z–01:00Z",
-      dependencySelection: "The selected provider JAR has not been identified.",
     }),
     proof: {
       sink: {
@@ -341,7 +320,6 @@ export function variantReport() {
       environment: "prod",
       deploymentBasis: "configured",
       variant: "canary",
-      role: "executor",
       imageIndex: index,
       platformManifest: arm,
       platform: "linux/arm64",

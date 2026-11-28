@@ -5,7 +5,8 @@ import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Writable } from "node:stream";
 import { dependencyRecordHash } from "../src/exploitability/attempt-store.js";
-import { dependencyCheckOutputSchema } from "../src/exploitability/reachability.js";
+import { exploitabilityReportSchema } from "../src/exploitability/report/schema.js";
+import { synthesisAnswer } from "./support/dependency-report-fixtures.js";
 import type { PremiseRef } from "../src/exploitability/analyzers/repository/review-queue.js";
 import { main, readSkillCommandOutput } from "../src/cli.js";
 import { capture, dependencies } from "./cli-fixtures.js";
@@ -16,7 +17,7 @@ async function* commandOutput(...events: object[]) {
   for (const event of events) yield JSON.stringify(event) + "\n";
 }
 
-test("command schema exposes complete and blocked reports as direct output alternatives", async () => {
+test("check advertises a single report schema for every analyzer", async () => {
   const stdout = capture(),
     stderr = capture();
   expect(
@@ -30,40 +31,18 @@ test("command schema exposes complete and blocked reports as direct output alter
     ),
     stderr.text(),
   ).toBe(0);
-  const { anyOf } = JSON.parse(stdout.text()).output;
-  const variant = (...required: string[]) =>
-    anyOf.find((branch: { required?: string[] }) =>
-      required.every((field) => branch.required?.includes(field)),
-    );
-  expect(variant("subject", "analyzers")).toBeDefined();
-  expect(variant("cve", "uses")).toBeDefined();
-  expect(variant("checks", "package")).toBeDefined();
-  const stacks = anyOf.filter((branch: { required?: string[] }) =>
-    branch.required?.includes("assessments"),
+  const schema = JSON.parse(stdout.text()).output.anyOf.find(
+    (variant: { type: string }) => variant.type === "object",
   );
-  expect(stacks).toHaveLength(1);
-  expect(stacks[0].required).toEqual(
-    expect.arrayContaining(["runId", "review"]),
-  );
-  expect(stacks[0].properties).not.toHaveProperty("reviewPolicy");
-  expect(
-    variant("status", "code", "affectedScope", "retainedEvidence"),
-  ).toBeDefined();
-  const packageCheck = variant("status", "code", "checks", "package");
-  expect(packageCheck.properties.checks.items.anyOf).toEqual(
+  expect(schema.required).toEqual(
     expect.arrayContaining([
-      expect.objectContaining({
-        required: expect.arrayContaining(["uses", "advisoryId"]),
-      }),
-      expect.objectContaining({
-        required: expect.arrayContaining([
-          "status",
-          "retainedEvidence",
-          "advisoryId",
-        ]),
-      }),
+      "schemaVersion",
+      "subject",
+      "status",
+      "vulnerabilities",
     ]),
   );
+  expect(schema.properties.schemaVersion.const).toBe(3);
 });
 
 function approve({ id, revision, hash }: PremiseRef) {
@@ -329,9 +308,14 @@ async function checkReviewed(source: "inline" | "native") {
           codex_security_surface: "cli",
           codex_security_command: "exploitability check",
         });
-        const payload = JSON.parse(
-          (prompt ?? output?.appServer?.prompt)!.split("\n\n").at(-1)!,
-        );
+        const text = (prompt ?? output?.appServer?.prompt)!;
+        const synthesis = synthesisAnswer(text);
+        if (synthesis) {
+          expect(output?.readOnly).toBe(true);
+          output!.stdout.write(JSON.stringify(synthesis));
+          return 0;
+        }
+        const payload = JSON.parse(text.split("\n\n").at(-1)!);
         if (source === "inline") {
           expect(payload.sources).toEqual([
             { function: "handle" },
@@ -541,7 +525,7 @@ async function checkReviewed(source: "inline" | "native") {
   expect(reviewed).toBe(true);
   const json = JSON.parse(stdout.text());
   expect(JSON.parse(await readFile(reportPath, "utf8"))).toEqual(json);
-  const report = dependencyCheckOutputSchema.parse(json);
+  const report = exploitabilityReportSchema.parse(json);
   const events = (await readFile(eventsPath, "utf8"))
     .trim()
     .split("\n")
@@ -567,7 +551,7 @@ async function checkReviewed(source: "inline" | "native") {
   expect(trace.searchedPaths ?? []).toEqual(traceSearchedPaths);
   expect(events.find((e) => e.type === "report_ready")).toMatchObject({
     path: reportPath,
-    verdicts: { unknown: 0 },
+    verdicts: { unknown: 1 },
   });
   expect(events.at(-1)).toMatchObject({
     type: "finished",
@@ -576,12 +560,28 @@ async function checkReviewed(source: "inline" | "native") {
   expect(stderr.text()).toContain("standard");
   expect(stderr.text()).toContain(reportPath);
   expect(stderr.text()).not.toContain("\u001b");
-  if (!("checks" in report)) throw new Error("Expected a package report.");
-  const check = report.checks[0]!;
-  const receipts = check.claimEvidence!.receipts;
+  expect(report.subject).toEqual({
+    kind: "package",
+    ecosystem: "npm",
+    name: "sample",
+  });
+  const vulnerability = report.vulnerabilities[0]!;
+  expect(vulnerability).toMatchObject({
+    kind: "hypothesis",
+    description: "A parser issue",
+    result: { verdict: "unknown", review: { status: "approved" } },
+    analyses: [
+      { analyzer: "repository", status: "complete" },
+      { analyzer: "stacks", status: "skipped" },
+    ],
+  });
+  const check = vulnerability.analyses.find(
+    (a) => a.analyzer === "repository",
+  )!;
+  const receipts = check.evidence!.receipts;
   for (const [id, row] of wireReceipts)
     expect(receipts[id]).toEqual({ ...row, sha256: id });
-  expect(check.usage).toMatchObject({
+  expect(check.audit?.usage).toMatchObject({
     input_tokens: 12,
     output_tokens: 6,
   });
@@ -590,11 +590,7 @@ async function checkReviewed(source: "inline" | "native") {
 const outputFlags = {
   md: ["--format", "md"],
   html: ["--format", "html"],
-  yaml: ["--format", "yaml"],
-  toon: ["--format", "toon"],
-  jsonl: ["--format", "jsonl"],
   summary: [],
-  filter: ["--filter-output", "vulnDescription"],
 };
 test.each(Object.keys(outputFlags) as (keyof typeof outputFlags)[])(
   "saves the report and prints the requested %s output",
@@ -609,9 +605,7 @@ async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
   // The suffix alone must not turn a canonical JSON report into HTML.
   const requestedPath = join(
     repo.path,
-    format === "summary"
-      ? "report.html"
-      : "report." + (format === "filter" ? "json" : format),
+    format === "summary" ? "report.html" : "report." + format,
   );
   const status = await main(
     [
@@ -632,9 +626,13 @@ async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
         TERM: "dumb",
       },
       async onCodex(_args, output, _env, prompt) {
-        const packet = JSON.parse(
-          (prompt ?? output?.appServer?.prompt)!.split("\n\n").at(-1)!,
-        );
+        const text = (prompt ?? output?.appServer?.prompt)!;
+        const synthesis = synthesisAnswer(text);
+        if (synthesis) {
+          output!.stdout.write(JSON.stringify(synthesis));
+          return 0;
+        }
+        const packet = JSON.parse(text.split("\n\n").at(-1)!);
         output!.stdout.write(
           JSON.stringify(
             packet.claims
@@ -662,26 +660,15 @@ async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
     expect(contents).toStartWith("# ");
     expect(contents).toContain("No applicable package was found.");
     expect(stdout.text().trimEnd()).toEndWith(reportPath);
-  } else if (format === "summary" || format === "filter") {
-    expect(JSON.parse(await readFile(reportPath, "utf8")).checks).toHaveLength(
-      1,
-    );
   } else {
-    const contents = await readFile(reportPath, "utf8");
-    expect(contents.trimEnd()).toBe(stdout.text().trimEnd());
-    expect(contents).toContain("Supplied condition");
+    const saved = JSON.parse(await readFile(reportPath, "utf8"));
+    expect(saved.vulnerabilities[0]).toMatchObject({
+      kind: "hypothesis",
+      description: "Supplied condition",
+      result: { review: { status: "approved" } },
+    });
   }
-  const output = stdout.text().trim();
-  switch (format) {
-    case "summary":
-    case "html":
-    case "md":
-      expect(output).not.toContain("<!doctype html>");
-      expect(output).toContain("0 reviewed uses");
-      expect(output).toContain("No applicable package was found.");
-      break;
-    case "filter":
-      expect(output).toBe("Supplied condition");
-      break;
-  }
+  const summary = stdout.text().trim();
+  expect(summary).not.toContain("<!doctype html>");
+  expect(summary).toContain("Runtime reachability is unresolved.");
 }

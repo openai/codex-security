@@ -1,3 +1,4 @@
+export { manualStackExploitabilityReport as stacksReport } from "../../src/exploitability/check-output.js";
 const sha = "a".repeat(40);
 const hash = "b".repeat(64);
 const range = { path: "src/codec.ts", commit: sha, startLine: 3, endLine: 3 };
