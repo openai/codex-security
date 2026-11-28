@@ -21,7 +21,6 @@ const manifest = {
     status: "completed",
     startedAt: "2026-01-01T00:00:00Z",
     completedAt: "2026-01-01T00:00:01Z",
-    sealedAt: "2026-01-01T00:00:01Z",
     target: { kind: "git_revision", targetId: "id", displayName: "repo" },
     scope: { includePaths: ["."], excludePaths: [] },
     coverageRef: "coverage.json",

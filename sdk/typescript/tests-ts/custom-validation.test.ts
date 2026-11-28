@@ -71,7 +71,7 @@ async function draft(scanDir: string, scanId: string, count = 1, diff = false) {
   const manifest = await json<ScanManifest>(
     join(scanDir, "scan-manifest.json"),
   );
-  const { sealedAt: _sealed, artifacts: _artifacts, ...scan } = manifest.scan;
+  const { artifacts: _artifacts, ...scan } = manifest.scan;
   scan.id = scanId;
   scan.target.kind = diff ? "git_diff" : "directory_snapshot";
   scan.scope.validationMode = "custom_pending";
@@ -508,41 +508,37 @@ describe("custom validation", () => {
     },
   );
 
-  test.each([
-    "sealedAt",
-    "artifacts",
-    "manifest ID",
-    "findings ID",
-    "coverage ID",
-  ])("rejects an invalid discovery handoff: %s", async (kind) => {
-    const f = await fixture();
-    const manifest = await json<ScanManifest>(
-      join(f.scanDir, "scan-manifest.json"),
-    );
-    if (kind === "sealedAt") manifest.scan.sealedAt = "2026-01-01T00:00:00Z";
-    if (kind === "artifacts")
-      manifest.scan.artifacts = [
-        {
-          path: "findings.json",
-          sha256: "0".repeat(64),
-          mediaType: "application/json",
-        },
-      ];
-    if (kind === "manifest ID") manifest.scan.id = randomUUID();
-    if (kind === "findings ID" || kind === "coverage ID") {
-      const name = kind === "findings ID" ? "findings.json" : "coverage.json";
-      const document = await json<{ scanId: string }>(join(f.scanDir, name));
-      document.scanId = randomUUID();
-      await save(join(f.scanDir, name), document);
-    }
-    await save(join(f.scanDir, "scan-manifest.json"), manifest);
-    await expect(
-      runCustomValidation({
-        ...f,
-        run: unexpectedValidation,
-      }),
-    ).rejects.toThrow("unsealed custom-validation draft");
-  });
+  test.each(["artifacts", "manifest ID", "findings ID", "coverage ID"])(
+    "rejects an invalid discovery handoff: %s",
+    async (kind) => {
+      const f = await fixture();
+      const manifest = await json<ScanManifest>(
+        join(f.scanDir, "scan-manifest.json"),
+      );
+      if (kind === "artifacts")
+        manifest.scan.artifacts = [
+          {
+            path: "findings.json",
+            sha256: "0".repeat(64),
+            mediaType: "application/json",
+          },
+        ];
+      if (kind === "manifest ID") manifest.scan.id = randomUUID();
+      if (kind === "findings ID" || kind === "coverage ID") {
+        const name = kind === "findings ID" ? "findings.json" : "coverage.json";
+        const document = await json<{ scanId: string }>(join(f.scanDir, name));
+        document.scanId = randomUUID();
+        await save(join(f.scanDir, name), document);
+      }
+      await save(join(f.scanDir, "scan-manifest.json"), manifest);
+      await expect(
+        runCustomValidation({
+          ...f,
+          run: unexpectedValidation,
+        }),
+      ).rejects.toThrow("unsealed custom-validation draft");
+    },
+  );
 
   test.each([
     ["empty title", { title: "" }],

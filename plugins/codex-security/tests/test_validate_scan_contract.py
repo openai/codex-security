@@ -152,7 +152,37 @@ class ValidateScanContractTest(ScanFixtureTestCase):
         manifest["scan"].pop("artifacts")
         self.write_json("scan-manifest.json", manifest)
 
-        with self.assertRaisesRegex(VALIDATOR.FINALIZER.ContractError, "sealed"):
+        with self.assertRaisesRegex(VALIDATOR.FINALIZER.ContractError, "manifest.scan.artifacts"):
+            VALIDATOR.validate_contract(self.scan_dir)
+
+    def test_ignores_legacy_timestamp_and_requires_intact_sealed_artifacts(self) -> None:
+        manifest = self.read_json("scan-manifest.json")
+        del manifest["scan"]["sealedAt"]
+        self.write_json("scan-manifest.json", manifest)
+        manifest_path = self.scan_dir / "scan-manifest.json"
+        original = manifest_path.read_bytes()
+
+        validated = VALIDATOR.validate_contract(self.scan_dir)
+
+        self.assertNotIn("sealedAt", validated["manifest"]["scan"])
+        self.assertEqual(validated["findings"], self.read_json("findings.json"))
+        self.assertEqual(manifest_path.read_bytes(), original)
+
+        manifest["scan"]["sealedAt"] = "obsolete and unrelated to completion"
+        self.write_json("scan-manifest.json", manifest)
+        self.assertEqual(
+            VALIDATOR.validate_contract(self.scan_dir)["findings"], validated["findings"]
+        )
+
+        manifest["scan"]["complete"] = False
+        self.write_json("scan-manifest.json", manifest)
+        with self.assertRaisesRegex(VALIDATOR.FINALIZER.ContractError, "incomplete scan"):
+            VALIDATOR.validate_contract(self.scan_dir)
+        manifest_path.write_bytes(original)
+
+        findings_path = self.scan_dir / "findings.json"
+        findings_path.write_bytes(findings_path.read_bytes() + b"\n")
+        with self.assertRaisesRegex(VALIDATOR.FINALIZER.ContractError, "sealed artifact changed"):
             VALIDATOR.validate_contract(self.scan_dir)
 
     def test_finalizer_then_validator_cli_smoke(self) -> None:

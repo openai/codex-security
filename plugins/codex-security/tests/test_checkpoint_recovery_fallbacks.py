@@ -685,7 +685,7 @@ def test_retry_keeps_canonical_finding_when_its_checkpoint_copy_is_unreadable(
     ):
         scan.preserve()
     assert broken.read_bytes() == b"{"
-    assert "sealedAt" not in json.loads(manifest_path.read_text())["scan"]
+    assert "artifacts" not in json.loads(manifest_path.read_text())["scan"]
 
 
 @pytest.mark.parametrize("mode", ["standard", "deep"])
@@ -759,7 +759,7 @@ def test_inherited_model_capture_is_bound_before_publication_retry(
                 saved.ContractError, match="Frozen stopped-scan checkpoint set is incomplete"
             ):
                 retry(context, workbench_db, args)
-            assert "sealedAt" not in json.loads(manifest_path.read_text())["scan"]
+            assert "artifacts" not in json.loads(manifest_path.read_text())["scan"]
             manifest_path.write_text(json.dumps(manifest))
     result = retry(context, workbench_db, args)["scan"]
     published, findings, _ = saved.finalize_scan(scan.scan_dir)
@@ -887,7 +887,7 @@ def test_source_order_failure_retains_accepted_parent_input(
     with monkeypatch.context() as patch:
         patch.setattr(saved_sources, "write_scan_local_bytes", fail_order)
         scan.fail()
-    assert "sealedAt" not in json.loads(manifest.read_text())["scan"]
+    assert "artifacts" not in json.loads(manifest.read_text())["scan"]
     head.write_text(json.dumps({"checkpoint": abandoned.name, "inputCheckpoint": abandoned.name}))
     os.utime(head, ns=(400, 400))
     scan.preserve()
@@ -914,7 +914,7 @@ def test_headless_canonical_snapshot_failure(workbench_api, publication_scan, mo
         patch.setattr(saved_sources, "write_scan_local_bytes", fail_snapshot)
         scan.fail()
     assert not head.exists()
-    assert "sealedAt" not in json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
+    assert "artifacts" not in json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
     raw = write_checkpoint(
         scan.scan_dir / "checkpoints",
         {

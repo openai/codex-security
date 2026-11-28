@@ -599,7 +599,7 @@ def test_completion_checks_selected_parent_checkpoint(
         )
         completed = json.loads(manifest_path.read_text())["scan"]
         assert completed.get("complete", True) is True
-        assert completed["sealedAt"]
+        assert completed["artifacts"]
         assert completed["scope"] == {**manifest["scan"]["scope"], **draft["scope"]}
         assert completed["threatModel"] == draft["threatModel"]
         assert completed["target"] == manifest["scan"]["target"]

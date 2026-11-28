@@ -394,7 +394,7 @@ def test_deadline_recovers_historical_closure_text_without_losing_a_valid_siblin
         invalid
     )
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
-    assert manifest["sealedAt"]
+    assert manifest["artifacts"]
     for path, contents in original.items():
         assert path.read_bytes() == contents
         assert manifest["preservedSources"][path.relative_to(scan.scan_dir).as_posix()] == (

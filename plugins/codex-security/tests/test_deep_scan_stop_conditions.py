@@ -366,7 +366,7 @@ def test_unfinished_checkpoints_after_a_completed_reduction(workbench_db, satura
     ).fetchone()
     assert tuple(row) == ("running", None)
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
-    assert "sealedAt" not in manifest["scan"]
+    assert "artifacts" not in manifest["scan"]
     completed = scan.complete()
     assert completed["progress"]["status"] == "complete"
     findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]

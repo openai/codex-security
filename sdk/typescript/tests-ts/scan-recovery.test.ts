@@ -156,7 +156,6 @@ async function startDraftScan(
     scan: {
       id: string;
       target: { kind: string };
-      sealedAt?: string;
       artifacts?: unknown[];
     };
   }>(manifestPath);
@@ -167,7 +166,6 @@ async function startDraftScan(
       : repositoryKind === "clean"
         ? "git_revision"
         : "git_worktree";
-  delete manifest.scan.sealedAt;
   delete manifest.scan.artifacts;
   await writeJson(manifestPath, manifest);
 
@@ -696,10 +694,10 @@ describe("scan publication and artifact recovery", () => {
     expect(preparedFindings).toHaveLength(1);
     expect(preparedFindings[0]).not.toHaveProperty("writeup");
     const manifest = await readJson<{
-      scan: { sealedAt: string; completedAt: string };
+      scan: { artifacts: unknown[]; completedAt: string };
     }>(join(fixture.scanDir, "scan-manifest.json"));
-    expect(manifest.scan.sealedAt).toBeTruthy();
-    expect(manifest.scan.sealedAt).toBe(manifest.scan.completedAt);
+    expect(manifest.scan.artifacts.length).toBeGreaterThan(0);
+    expect(manifest.scan).not.toHaveProperty("sealedAt");
     const running = await scanCommand(fixture, "get-scan");
     expect((running["scan"] as ScanSummary).progress.status).toBe("running");
     const completion = await scanCommand(fixture, "complete-scan");
@@ -807,7 +805,7 @@ describe("scan publication and artifact recovery", () => {
       coverage.deferred = "later";
       await writeJson(coveragePath, coverage);
       const manifest = await readJson<{
-        scan: { hardening?: unknown; sealedAt?: string };
+        scan: { hardening?: unknown; artifacts: unknown[] };
       }>(manifestPath);
       manifest.scan.hardening = hardening;
       await writeJson(manifestPath, manifest);
@@ -831,7 +829,7 @@ describe("scan publication and artifact recovery", () => {
         findings: [{ summary: findings[0]!.summary }],
       });
       const sealed = await readJson<typeof manifest>(manifestPath);
-      expect(sealed.scan.sealedAt).toBeTruthy();
+      expect(sealed.scan.artifacts.length).toBeGreaterThan(0);
       expect(sealed.scan).toMatchObject({ review: { excludedPaths: [] } });
       expect(sealed.scan).not.toHaveProperty("coverageRef");
       expect(sealed.scan).not.toHaveProperty("reviewState");

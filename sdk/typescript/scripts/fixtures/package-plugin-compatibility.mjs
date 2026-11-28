@@ -77,7 +77,6 @@ const client = new CodexSecurity(
                     );
                     manifest.scan.id = env.CODEX_SECURITY_SCAN_ID;
                     manifest.scan.producer.version = metadata.version;
-                    delete manifest.scan.sealedAt;
                     delete manifest.scan.artifacts;
                     manifest.scan.scope.context = "Synthetic archive review.";
                     manifest.scan.threatModel = {
@@ -126,7 +125,7 @@ const client = new CodexSecurity(
                       ),
                     );
                     assert.equal(manifest.scan.status, "completed");
-                    assert.ok(manifest.scan.sealedAt);
+                    assert.ok(manifest.scan.artifacts.length);
                     assert.ok(
                       (
                         await stat(
@@ -163,7 +162,7 @@ try {
   });
   assert.deepEqual(result.review, { excludedPaths: [] });
   assert.equal(result.manifest.scan.status, "completed");
-  assert.ok(result.manifest.scan.sealedAt);
+  assert.ok(result.manifest.scan.artifacts.length);
   assert.equal(result.manifest.scan.coverageRef, undefined);
   assert.equal(result.manifest.scan.reviewState, undefined);
   assert.equal(turns.length, 2);

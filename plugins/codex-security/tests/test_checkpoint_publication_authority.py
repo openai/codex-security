@@ -1687,7 +1687,7 @@ def test_successful_completion_keeps_accepted_root_model_fallback(
     }[model_choice]
     published = json.loads(manifest_path.read_text())["scan"]
     assert published["threatModel"]["summary"] == expected
-    assert published["sealedAt"]
+    assert published["artifacts"]
     assert completed["threatModelAvailable"]
     assert completed["progress"]["status"] == ("running" if prepare_only else "complete")
     assert all(
@@ -1828,7 +1828,7 @@ def test_skipped_canonical_checkpoint_keeps_valid_model_and_findings(
     if flow != "prepare":
         assert published["findingCount"] == 1
     final = json.loads(manifest_path.read_text())["scan"]
-    assert final["sealedAt"]
+    assert final["artifacts"]
     assert final["threatModel"]["summary"] == "Canonical model."
     assert canonical_path.read_bytes() == original
     if corrupt:

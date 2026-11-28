@@ -19,7 +19,6 @@ _PUBLIC_LOCATIONS = {
     "report.md",
     "scan-manifest.json",
     "manifest.scan.completedAt",
-    "manifest.scan.sealedAt",
 }
 
 

@@ -222,7 +222,7 @@ for document in documents[1:]: document['scanId']=scan_id
 prepared=_prepare_scan_finalization(root,completion_binding=binding,recover_unsealed=True,draft_documents=documents)
 warnings.extend(prepared.warnings)
 published=_write_prepared_scan_finalization(prepared)
-print(json.dumps({'count':len(published[1]['findings']),'status':published[0]['scan']['status'],'sealed':bool(published[0]['scan'].get('sealedAt')),'warnings':warnings,'assessments':sorted([row['title'],row['severity']['level']] for row in published[1]['findings'])}))`,
+print(json.dumps({'count':len(published[1]['findings']),'status':published[0]['scan']['status'],'sealed':bool(published[0]['scan'].get('artifacts')),'warnings':warnings,'assessments':sorted([row['title'],row['severity']['level']] for row in published[1]['findings'])}))`,
         fileURLToPath(new URL("../../scripts", import.meta.url)),
         f.root,
         f.context.scanId!,

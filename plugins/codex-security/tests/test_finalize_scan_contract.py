@@ -286,7 +286,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         self.assertEqual(first_sarif, (self.scan_dir / "exports" / "results.sarif").read_bytes())
 
         manifest = self.read_json("scan-manifest.json")
-        self.assertEqual(manifest["scan"]["sealedAt"], "2026-05-31T18:09:00Z")
+        self.assertEqual(manifest["scan"]["completedAt"], "2026-05-31T18:09:00Z")
         self.assertEqual(
             [artifact["path"] for artifact in manifest["scan"]["artifacts"]],
             [
@@ -752,7 +752,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
                 FINALIZER.write_sarif_projection(self.scan_dir)
             self.assertFalse((Path(external_dir) / "results.sarif").exists())
             manifest = self.read_json("scan-manifest.json")
-            self.assertEqual(manifest["scan"]["sealedAt"], "2026-05-31T18:09:00Z")
+            self.assertEqual(manifest["scan"]["completedAt"], "2026-05-31T18:09:00Z")
 
     def test_sarif_cli_alias_exports_to_stdout_or_external_file_from_read_only_scan(self) -> None:
         self.write_sealed_scan()
@@ -1405,7 +1405,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
 
         self.assert_finalization_fails("safe repository-relative")
 
-        self.assertNotIn("sealedAt", self.read_json("scan-manifest.json")["scan"])
+        self.assertNotIn("artifacts", self.read_json("scan-manifest.json")["scan"])
 
     def test_sarif_rejects_nul_location_before_sealing(self) -> None:
         self.findings["findings"][0]["locations"][0]["path"] = "src/bad\0.py"
@@ -1414,7 +1414,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         with self.assertRaisesRegex(FINALIZER.ContractError, "safe repository-relative"):
             FINALIZER.finalize_scan(self.scan_dir, source_root=self.scan_dir)
 
-        self.assertNotIn("sealedAt", self.read_json("scan-manifest.json")["scan"])
+        self.assertNotIn("artifacts", self.read_json("scan-manifest.json")["scan"])
 
     @pytest.mark.cross_platform
     def test_optional_sarif_failure_does_not_abort_first_or_repeated_finalization(self) -> None:
@@ -1470,7 +1470,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
 
         self.assertEqual(self.read_json("findings.json")["findings"], [])
         self.assertEqual(
-            self.read_json("scan-manifest.json")["scan"]["sealedAt"],
+            self.read_json("scan-manifest.json")["scan"]["completedAt"],
             "2026-05-31T18:09:00Z",
         )
         self.assertTrue((self.scan_dir / "report.md").is_file())
@@ -1645,7 +1645,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         manifest = self.read_json("scan-manifest.json")
         report = (self.scan_dir / "report.md").read_text(encoding="utf-8")
         self.assertEqual(manifest["scan"]["status"], "completed")
-        self.assertEqual(manifest["scan"]["sealedAt"], "2026-05-31T18:09:00Z")
+        self.assertEqual(manifest["scan"]["completedAt"], "2026-05-31T18:09:00Z")
         self.assertNotIn(stale_status, report)
         self.assertNotIn("Runtime or test status", report)
 
@@ -1940,7 +1940,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         )
         FINALIZER._write_prepared_scan_finalization(prepared)
         manifest = self.read_json("scan-manifest.json")
-        self.assertIn("sealedAt", manifest["scan"])
+        self.assertIn("artifacts", manifest["scan"])
 
     def test_report_projection_rejects_symlink_output_without_sealing(self) -> None:
         self.write_scan()
@@ -1954,7 +1954,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
 
             self.assertEqual(external_report.read_text(encoding="utf-8"), "unchanged\n")
             manifest = self.read_json("scan-manifest.json")
-            self.assertNotIn("sealedAt", manifest["scan"])
+            self.assertNotIn("artifacts", manifest["scan"])
             self.assertNotIn("artifacts", manifest["scan"])
 
     def test_report_semantics_are_schema_validated_before_projection(self) -> None:
@@ -1966,7 +1966,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
 
         self.assertEqual(report_markdown, (self.scan_dir / "report.md").read_bytes())
         manifest = self.read_json("scan-manifest.json")
-        self.assertNotIn("sealedAt", manifest["scan"])
+        self.assertNotIn("artifacts", manifest["scan"])
         self.assertNotIn("artifacts", manifest["scan"])
 
     def test_rerun_preserves_additional_sealed_artifact_records(self) -> None:
@@ -2731,7 +2731,7 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         )
         self.assertEqual(manifest["scan"]["startedAt"], "2026-05-31T18:00:00Z")
         self.assertEqual(manifest["scan"]["completedAt"], "2026-05-31T18:10:00Z")
-        self.assertEqual(manifest["scan"]["sealedAt"], "2026-05-31T18:10:00Z")
+        self.assertEqual(manifest["scan"]["completedAt"], "2026-05-31T18:10:00Z")
         self.assertEqual(manifest["scan"]["coverageRef"], "coverage.json")
         self.assertEqual(manifest["scan"]["findingsRef"], "findings.json")
         self.assertEqual(manifest["scan"]["target"]["targetId"], "target_sha256_example")
@@ -2889,11 +2889,15 @@ class FinalizeScanContractTest(FinalizerSarifCases, ScanFixtureTestCase):
         sarif = self.read_json("exports/results.sarif")
         self.assertEqual(sarif["runs"][0]["results"], [])
 
-    def test_rejects_empty_artifacts_with_existing_seal(self) -> None:
-        self.manifest["scan"]["sealedAt"] = self.manifest["scan"]["completedAt"]
+    def test_obsolete_timestamp_does_not_seal_a_draft(self) -> None:
+        self.manifest["scan"]["sealedAt"] = "legacy timestamp"
         self.manifest["scan"]["artifacts"] = []
         self.write_scan()
-        self.assert_finalization_fails("requires artifact records")
+        with self.assertRaisesRegex(FINALIZER.ContractError, "requires a sealed scan"):
+            FINALIZER.build_sarif_projection(self.scan_dir)
+        manifest, _, _ = FINALIZER.finalize_scan(self.scan_dir)
+        self.assertNotIn("sealedAt", manifest["scan"])
+        self.assertTrue(manifest["scan"]["artifacts"])
 
 
 if __name__ == "__main__":

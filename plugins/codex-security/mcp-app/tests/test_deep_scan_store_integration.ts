@@ -1157,8 +1157,9 @@ async function testPartialWorkerCoverageSurvivesParentCompletion() {
       );
     }
     assert.equal(
-      typeof (await readJson(run.scanDir, "scan-manifest.json")).scan.sealedAt,
-      "string",
+      (await readJson(run.scanDir, "scan-manifest.json")).scan.artifacts
+        .length > 0,
+      true,
     );
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true });
@@ -1445,7 +1446,7 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
       JSON.stringify(savedScan),
       /Skipped malformed saved threat model.*missing required schema property/,
     );
-    assert.equal(manifest.scan.sealedAt, undefined);
+    assert.equal(manifest.scan.artifacts, undefined);
     assert.equal(manifest.scan.complete, undefined);
     assert.equal(
       Object.keys(manifest.scan.preservedSources).some((source) =>
@@ -1477,7 +1478,7 @@ async function testDeadlinePreservesValidWorkerCheckpoints() {
       coverage.deferred,
     );
     const sealed = await readJson(run.scanDir, "scan-manifest.json");
-    assert.equal(typeof sealed.scan.sealedAt, "string");
+    assert.ok(sealed.scan.artifacts.length);
     assert.deepEqual(
       (await readJson(run.scanDir, "findings.json")).findings,
       recovered.findings,
@@ -1844,7 +1845,7 @@ async function testReceiptRepairSurvivesStoppedRecovery(
     );
     const manifest = await readJson(run.scanDir, "scan-manifest.json");
     assert.equal(manifest.scan.status, "canceled");
-    assert.equal(typeof manifest.scan.sealedAt, "string");
+    assert.ok(manifest.scan.artifacts.length);
   } finally {
     await rm(fixtureRoot, { recursive: true, force: true });
   }

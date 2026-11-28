@@ -338,7 +338,6 @@ async function fixture(
       : "directory_snapshot";
     if (versioned)
       manifest.scan.target.revision = git(target, "rev-parse", "HEAD");
-    delete manifest.scan.sealedAt;
     delete manifest.scan.artifacts;
     if (timestamp !== undefined) {
       const targetContract = (

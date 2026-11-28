@@ -359,7 +359,7 @@ async function runDetachedPlugin(pluginRoot, executable) {
     );
     assert.equal(completed.manifest.scan.id, scanId);
     assert.equal(completed.manifest.scan.status, "completed");
-    assert.ok(completed.manifest.scan.sealedAt);
+    assert.ok(completed.manifest.scan.artifacts.length);
   } finally {
     await rpc.close();
   }
@@ -455,7 +455,7 @@ async function runInstalledSdk(pluginRoot, executable) {
     });
     assert.equal(result.threadId, owner);
     assert.equal(result.manifest.scan.status, "completed");
-    assert.ok(result.manifest.scan.sealedAt);
+    assert.ok(result.manifest.scan.artifacts.length);
     assert.equal(result.manifest.scan.id, scanId);
     assert.deepEqual(result.findings.findings, []);
     assert.ok(

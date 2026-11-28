@@ -19,6 +19,7 @@ from finalize_scan_contract import (
     _validate_schema_node,
     finding_candidate_id,
     finding_within_scope,
+    manifest_is_sealed,
     write_scan_local_bytes,
 )
 from review_state import uses_legacy_review
@@ -213,7 +214,7 @@ def merge_saved_results(
                         *(["coverage.json"] if uses_legacy_review(parent_scan) else []),
                     )
                 )
-            if not parent_scan.get("sealedAt") or allow_frozen_legacy_parent:
+            if not manifest_is_sealed(parent_scan) or allow_frozen_legacy_parent:
                 payload = _encoded(parent)
                 parent_digest = hashlib.sha256(payload).hexdigest()
                 parent_checkpoint = f"checkpoints/{parent_digest}.json"
@@ -914,7 +915,7 @@ def merge_saved_results(
         return None
     if (
         parent_manifest
-        and parent_manifest["scan"].get("sealedAt")
+        and manifest_is_sealed(parent_manifest["scan"])
         and parent_manifest["scan"].get("status") == binding["status"]
         and parent_manifest["scan"].get("preservedSources") == source_digests
         and parent_manifest["scan"].get("preservedCheckpointHeads", {}) == checkpoint_heads
@@ -1173,7 +1174,7 @@ def merge_saved_results(
     represented_candidate_history: dict[tuple[str, str, Any, Any, Any], set[str]] = {}
     rejected_history: dict[tuple[str, str], list[dict[str, Any]]] = {}
     stopped_parent_seal = bool(
-        stopped and parent_manifest and parent_manifest["scan"].get("sealedAt")
+        stopped and parent_manifest and manifest_is_sealed(parent_manifest["scan"])
     )
 
     # A damaged canonical row must not replace a checkpoint's established identity.

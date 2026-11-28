@@ -328,7 +328,7 @@ def test_empty_artifact_envelope_remains_a_recoverable_draft(
         )
     sealed = json.loads(manifest_path.read_text())
     assert sealed["scan"]["status"] == outcome
-    assert sealed["scan"]["sealedAt"]
+    assert sealed["scan"]["artifacts"]
     original = manifest_path.read_bytes()
     if outcome == "failed":
         run_workbench(

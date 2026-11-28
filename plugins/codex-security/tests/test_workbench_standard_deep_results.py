@@ -2291,7 +2291,7 @@ def test_recovery_keeps_latest_generic_closure_reason(tmp_path: Path, canonical_
     closure = {"id": "review-closeout", "reason": "Review and follow-up are complete."}
     coverage = {**saved_coverage(), "resolvedDeferred": [closure]}
     (scan_dir / "scan-manifest.json").write_text(
-        json.dumps({"scan": {"complete": True, "sealedAt": "2026-01-01T00:00:00Z"}})
+        json.dumps({"scan": {"complete": True, "artifacts": [{"path": "findings.json"}]}})
     )
     (scan_dir / "findings.json").write_text(json.dumps({"findings": []}))
     (scan_dir / "coverage.json").write_text(json.dumps(coverage))

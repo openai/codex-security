@@ -487,7 +487,7 @@ def test_deep_completion_preserves_findings_with_missing_optional_writeups(
     assert valid_path in report
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())
     assert manifest["scan"]["status"] == "completed"
-    assert manifest["scan"]["sealedAt"]
+    assert manifest["scan"]["artifacts"]
 
 
 @pytest.mark.cross_platform

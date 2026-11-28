@@ -2881,26 +2881,31 @@ try {
     /has not completed/,
   );
 
-  const sealedManifest = {
-    scan: {
-      id: scanId,
-      status: "completed",
-      sealedAt: "2026-07-28T02:00:00Z",
-      artifacts: [{ path: "findings.json" }, { path: "coverage.json" }],
-    },
-  };
-  const sealedFindings = { scanId, findings: [] };
-  const sealedCoverage = {
+  const pluginRoot = path.resolve(import.meta.dirname, "../..");
+  const example = path.join(pluginRoot, "examples", "legacy-completed-scan");
+  const sealedManifest = await readJson(example, "scan-manifest.json");
+  sealedManifest.scan.id = scanId;
+  delete sealedManifest.scan.sealedAt;
+  const sealedFindings = {
+    documentType: "codex-security.findings",
+    schemaVersion: "1.0",
     scanId,
-    surfaces: [],
-    completeness: "complete",
-    explicitExclusions: [],
+    findings: [],
   };
-  await writeJsonLine(path.join(root, "scan-manifest.json"), sealedManifest);
+  const sealedCoverage = await readJson(example, "coverage.json");
+  sealedCoverage.scanId = scanId;
+  sealedCoverage.surfaces[0].disposition = "no_issue_found";
   await writeJsonLine(path.join(root, "findings.json"), sealedFindings);
   await writeJsonLine(path.join(root, "coverage.json"), sealedCoverage);
+  for (const record of sealedManifest.scan.artifacts) {
+    record.sha256 = hash(
+      "sha256",
+      await readFile(path.join(root, record.path)),
+    );
+  }
+  await writeJsonLine(path.join(root, "scan-manifest.json"), sealedManifest);
 
-  const completeContext = { ...context, status: "complete" };
+  const completeContext = { ...context, pluginRoot, status: "complete" };
   assert.deepEqual(
     await getCodexSecurityCompletedScan(completeContext, {
       scanId,
@@ -2915,6 +2920,7 @@ try {
   );
 
   await writeJsonLine(path.join(root, "findings.json"), {
+    ...sealedFindings,
     scanId: "d7caa0cf-b785-47ef-95e7-e753dc288608",
     findings: [],
   });
@@ -2923,7 +2929,7 @@ try {
       scanId,
       handoffClaimToken: claimToken,
     }),
-    /do not match the sealed workbench scan/,
+    /scan IDs do not match/,
   );
 
   await writeJsonLine(path.join(root, "findings.json"), sealedFindings);
@@ -2933,7 +2939,7 @@ try {
       scanId,
       handoffClaimToken: claimToken,
     }),
-    /malformed|invalid JSON/,
+    /malformed|invalid JSON/i,
   );
 
   await writeJsonLine(path.join(root, "coverage.json"), sealedCoverage);
@@ -2946,7 +2952,7 @@ try {
       scanId,
       handoffClaimToken: claimToken,
     }),
-    /safe regular file|regular file|symbolic link/,
+    /file inside the scan directory|regular file|symbolic link/,
   );
 } finally {
   await rm(root, { recursive: true, force: true });

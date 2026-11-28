@@ -104,7 +104,7 @@ def preserve_sealed_completion(
 ) -> dict[str, Any]:
     """Copy the original timestamps and producer version from a sealed manifest into binding, then return it."""
     manifest_scan = manifest.get("scan") if manifest is not None else None
-    if isinstance(manifest_scan, dict) and manifest_scan.get("sealedAt") is not None:
+    if isinstance(manifest_scan, dict) and manifest_is_sealed(manifest_scan):
         # Keep the original producer; finalization still validates schema, seal and owner.
         binding["startedAt"] = manifest_scan.get("startedAt")
         binding["completedAt"] = manifest_scan.get("completedAt")
@@ -266,7 +266,7 @@ def coverage_summary_for_history(
             ):
                 raise ContractError("The sealed scan manifest changed after completion.")
             sealed_scan = manifest["scan"]
-            if sealed_scan["id"] != scan["id"] or not sealed_scan.get("sealedAt"):
+            if sealed_scan["id"] != scan["id"] or not manifest_is_sealed(sealed_scan):
                 raise ContractError("The sealed coverage does not belong to this scan.")
             if "coverageRef" not in sealed_scan:
                 coverage = review_state(sealed_scan)

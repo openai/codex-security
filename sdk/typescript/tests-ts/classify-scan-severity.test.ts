@@ -164,7 +164,6 @@ async function savedFixture() {
   const artifacts = await writeScanArtifacts(root, scanId);
   const path = join(scanDirectory, "scan-manifest.json");
   const manifest = JSON.parse(await readFile(path, "utf8"));
-  delete manifest.scan.sealedAt;
   delete manifest.scan.artifacts;
   manifest.scan.target.kind = "directory_snapshot";
   delete manifest.scan.target.revision;

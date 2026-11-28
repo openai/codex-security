@@ -62,7 +62,7 @@ def test_stopped_scan_requires_valid_rejection_evidence_before_sealing(
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
     warnings = json.loads(row["completion_warnings_json"])
     if error:
-        assert not manifest.get("sealedAt")
+        assert not manifest.get("artifacts")
         assert not report_path.exists()
         assert coverage_path.read_bytes() == coverage_bytes
         assert any(
@@ -70,7 +70,7 @@ def test_stopped_scan_requires_valid_rejection_evidence_before_sealing(
             for warning in warnings
         )
     else:
-        assert manifest["sealedAt"]
+        assert manifest["artifacts"]
         assert report_path.is_file()
         assert warnings == []
         findings = json.loads((scan.scan_dir / "findings.json").read_text())["findings"]
@@ -119,12 +119,12 @@ def test_standard_completion_requires_valid_closure_evidence_before_sealing(
     manifest = json.loads((scan.scan_dir / "scan-manifest.json").read_text())["scan"]
     if invalid:
         assert status == "running"
-        assert not manifest.get("sealedAt")
+        assert not manifest.get("artifacts")
         assert not report_path.exists()
         assert coverage_path.read_bytes() == coverage_bytes
     else:
         assert status == "complete"
-        assert manifest["sealedAt"]
+        assert manifest["artifacts"]
         assert report_path.is_file()
         coverage = read_review_state(workbench_db, scan.scan_dir)
         assert coverage["deferred"] == []

@@ -76,7 +76,6 @@ interface DraftManifest {
     threatModel?: unknown;
     reviewState?: CoverageDocument;
     scope: { validationMode?: string };
-    sealedAt?: string;
     artifacts?: unknown;
   };
 }
@@ -233,7 +232,6 @@ export async function runCustomValidation(options: {
   if (legacy) documents.push(coverage);
   if (
     manifest.scan?.scope?.validationMode !== "custom_pending" ||
-    manifest.scan.sealedAt != null ||
     (manifest.scan.artifacts != null &&
       !(
         Array.isArray(manifest.scan.artifacts) &&
