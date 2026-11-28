@@ -551,7 +551,7 @@ function evidence(
       ecosystem,
       installed_version: splitVersion ? null : version(item.version),
       manifest_path: manifestPath(path),
-      fixed_versions: fixed ? [fixed] : [],
+      fixed_versions: fixed && fixed !== "NotAvailable" ? [fixed] : [],
     };
   });
   const locations: { path: string; line: number | null }[] = [...paths].map(
