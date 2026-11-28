@@ -100,7 +100,7 @@ function packageTar({
     "package/schemas/project-config.schema.json",
     "package/schemas/external-findings.schema.json",
     "package/schemas/dependency-stack-inputs-v2.schema.json",
-    "package/schemas/stack-investigation-report-v2.schema.json",
+    "package/schemas/exploitability-report.schema.json",
     "package/LICENSE",
     ...executablePaths,
     ...packageDistFiles,

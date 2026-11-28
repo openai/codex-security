@@ -8,10 +8,7 @@ import {
   type DependencyEvidenceRecord,
 } from "../src/exploitability/evidence-sources.js";
 import { createDependencyCoordinatorSession } from "../src/exploitability/analyzers/repository/coordinator.js";
-import {
-  DependencyInvestigationBlockedError,
-  runReviewedDependencyCheck,
-} from "../src/exploitability/analyzers/repository/check.js";
+import { runReviewedDependencyCheck } from "../src/exploitability/analyzers/repository/check.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 import { execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
@@ -378,20 +375,21 @@ test("a validated block stops the advisory even when the investigator returns a 
       },
     },
   );
-  let failure: unknown;
-  try {
-    await execution;
-  } catch (e) {
-    failure = e;
-  }
-  expect(failure).toBeInstanceOf(DependencyInvestigationBlockedError);
-  expect(
-    (failure as DependencyInvestigationBlockedError).outcome,
-  ).toMatchObject({
+  const result = await execution;
+  expect(result.vulnerabilities[0]).toMatchObject({
+    id: "CVE-2099-1000",
     status: "blocked",
-    cve: "CVE-2099-1000",
-    nativeThreadId: "root",
-    retainedEvidence: { inventoryReceiptIds: [expect.any(String)] },
+    analyses: [
+      {
+        analyzer: "repository",
+        audit: {
+          block: {
+            nativeThreadId: "root",
+            retainedEvidence: { inventoryReceiptIds: [expect.any(String)] },
+          },
+        },
+      },
+    ],
   });
   expect(calls).toBe(1);
 });

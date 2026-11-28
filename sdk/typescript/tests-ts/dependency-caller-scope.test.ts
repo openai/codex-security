@@ -107,21 +107,22 @@ test("a production-only investigation can close a checkout with a test-only mani
         },
       );
       expect(reviewed).toBe(true);
-      if (!("checks" in result)) throw new Error("Expected package report");
-      expect(result.checks[0]!.uses).toHaveLength(0);
+      const vulnerability = result.vulnerabilities[0]!;
+      expect(vulnerability.findings).toHaveLength(0);
+      const coverage = vulnerability.analyses.find(
+        (a) => a.analyzer === "repository",
+      )!.coverage!;
       if (scope) {
-        const [boundary] = result.checks[0]!.assumptions;
+        const [boundary] = coverage.assumptions;
         expect(boundary).toContain(scope);
         expect(boundary).toContain("source boundary: []");
         expect(boundary).toContain('sink boundary: [{"function":"parse"}]');
         expect(boundary).toContain('broad discovery: ["examples"]');
-        expect(result.checks[0]!.coverage).toMatchObject([
+        expect(coverage.dispositions).toMatchObject([
           { kind: "dismissed", location: "tests" },
         ]);
       } else
-        expect(result.checks[0]!.assumptions).toEqual([
-          defaultDependencyCallerScope,
-        ]);
+        expect(coverage.assumptions).toEqual([defaultDependencyCallerScope]);
     }
   } finally {
     await rm(directory, { recursive: true, force: true });

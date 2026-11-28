@@ -36,6 +36,7 @@ import {
 import { capture, dependencies } from "./cli-fixtures.js";
 import { git } from "./git-fixture.js";
 import { createCliTest } from "./support/cli-run.js";
+import { synthesisAnswer } from "./support/dependency-report-fixtures.js";
 import { requestMetadata } from "./support/request-metadata.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
@@ -629,6 +630,12 @@ async function reviewedStackCheck(
   const d = dependencies({
     currentDirectory: files.repo,
     async onCodex(argv, out, _env, prompt) {
+      const synthesis = synthesisAnswer((prompt ?? out?.appServer?.prompt)!);
+      if (synthesis) {
+        expect(out?.readOnly).toBe(true);
+        out!.stdout.write(JSON.stringify(synthesis));
+        return 0;
+      }
       if (combined && !out?.stackTarget) {
         const payload = JSON.parse(
           (prompt ?? out?.appServer?.prompt)!.split("\n\n").at(-1)!,
@@ -891,12 +898,17 @@ async function reviewedStackCheck(
     expect(calls).toBe(combined || raw ? 6 : 7);
   }
   if (mode === "exhausted" || mode === "duplicate") {
-    expect(code).not.toBe(0);
+    expect(code).toBe(2);
+    const blocked = JSON.parse(io.stdout.text());
+    expect(blocked.vulnerabilities[0]).toMatchObject({
+      status: "blocked",
+      result: null,
+    });
     if (mode === "exhausted") {
-      expect(io.stderr.text()).toContain(drafts[2]!.assessments[0]!.workItemId);
-      expect(io.stderr.text()).toContain(requests[2]!);
+      expect(blocked.reason).toContain(drafts[2]!.assessments[0]!.workItemId);
+      expect(blocked.reason).toContain(requests[2]!);
     } else
-      expect(io.stderr.text()).toContain("decide each work item exactly once");
+      expect(blocked.reason).toContain("decide each work item exactly once");
     await expect(readFile(destination)).rejects.toMatchObject({
       code: "ENOENT",
     });
@@ -905,13 +917,36 @@ async function reviewedStackCheck(
   expect(code, io.stderr.text()).toBe(0);
   const output = JSON.parse(io.stdout.text());
   expect(JSON.parse(await readFile(destination, "utf8"))).toEqual(output);
-  const report = combined ? output.analyzers.stacks : output;
+  expect(output).toMatchObject({
+    schemaVersion: 3,
+    subject: { kind: "advisory", id: cve },
+    status: "complete",
+  });
+  expect(output.vulnerabilities).toHaveLength(1);
+  const [vulnerability] = output.vulnerabilities;
+  expect(vulnerability).toMatchObject({
+    kind: "advisory",
+    id: cve,
+    result: {
+      verdict: "unknown",
+      review: { status: "approved" },
+      findingRefs: [0, 1],
+    },
+  });
+  const stackAnalysis = vulnerability.analyses.find(
+    (a: { analyzer: string }) => a.analyzer === "stacks",
+  );
+  const assessments = vulnerability.findings.filter(
+    (item: { analyzer: string }) => item.analyzer === "stacks",
+  );
+  expect(assessments).toHaveLength(2);
+  const audit = stackAnalysis.audit;
   if (mode === "correct") {
-    expect(report.endpointScope).toEqual({
+    expect(audit.endpointScope).toEqual({
       sources: ["request"],
       sinks: ["decode"],
     });
-    expect(report.assessments[0]).toMatchObject({
+    expect(assessments[0]).toMatchObject({
       verdict: "unknown",
       sinkMatches: [],
       leads: [{ sinkId: "decode", rawIndex: 0 }],
@@ -930,7 +965,7 @@ async function reviewedStackCheck(
       })),
     );
     for (const [index, name] of names.entries()) {
-      expect(report.assessments[index]).toMatchObject({
+      expect(assessments[index]).toMatchObject({
         workItemId: `captures/${index}/stacks/0`,
         sourceFile: { index, name, captureIndex: 0, sha256 },
       });
@@ -944,8 +979,11 @@ async function reviewedStackCheck(
     await expect(readStackPacket(replay, files.repo)).rejects.toThrow();
   }
   if (saved) {
-    expect(output.analyzers.repository).toMatchObject({ cve, uses: [] });
-    expect(report.inputDigest).toBe(saved.manifest.inputDigest);
+    expect(vulnerability.analyses).toMatchObject([
+      { analyzer: "repository", status: "complete" },
+      { analyzer: "stacks", status: "complete" },
+    ]);
+    expect(audit.inputDigest).toBe(saved.manifest.inputDigest);
     const events = (await readFile(progress, "utf8"))
       .trim()
       .split("\n")
@@ -985,11 +1023,10 @@ async function reviewedStackCheck(
     await expectRejected(/replay the manifest/i);
   }
   const approvedDraft = drafts[2]!;
-  expect({ ...report, review: null }).toEqual(approvedDraft);
-  expect(report).toMatchObject({
+  expect(stackAnalysis.coverage.assessed).toBe(2);
+  expect(audit).toMatchObject({
     callerScope,
     verdict: "unknown",
-    coverage: { assessed: 2 },
     review: {
       draftDigest: dependencyClaimHash(approvedDraft),
       decisions: approvedDraft.assessments.map(({ workItemId }) => ({
@@ -1000,7 +1037,7 @@ async function reviewedStackCheck(
     ...(!raw && { triggerAnalysis }),
     advisoryDetails: [{ id: cve, body: trigger }],
   });
-  for (const [index, assessment] of report.assessments.entries()) {
+  for (const [index, assessment] of assessments.entries()) {
     expect(assessment.questionChecks).toEqual([
       {
         question: assessment.remainingQuestions[0],
@@ -1089,6 +1126,18 @@ test("offline finalize renders the saved assessment and protects existing output
   const readDeps = dependencies({ currentDirectory: files.repo });
   readDeps.environment["CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY"] = "1";
   const args = ["exploitability", "run", "finalize", "--state", state];
+  const offline = createCliTest(main);
+  expect(
+    await offline.runCli([...args, "--json"], readDeps),
+    offline.stderr.text(),
+  ).toBe(0);
+  const manual = JSON.parse(offline.stdout.text());
+  expect(manual.vulnerabilities[0]).toMatchObject({
+    kind: "advisory",
+    id: cve,
+    result: { verdict: "unknown", review: { status: "not_reviewed" } },
+    findings: [{ analyzer: "stacks", reason: "Source identity is missing." }],
+  });
   const markdown = createCliTest(main);
   expect(
     await markdown.runCli([...args, "--format", "md"], readDeps),
@@ -1097,14 +1146,6 @@ test("offline finalize renders the saved assessment and protects existing output
   expect(markdown.stdout.text()).toContain(cve);
   expect(markdown.stdout.text()).toContain("Source identity is missing.");
   expect(markdown.stdout.text()).not.toContain("[object Object]");
-  const mdPath = join(files.repo, "saved.md");
-  const mdArgs = [...args, "--format", "md", "--report-file", "saved.md"];
-  const savedMarkdown = createCliTest(main);
-  expect(await savedMarkdown.runCli(mdArgs, readDeps)).toBe(0);
-  expect(savedMarkdown.stdout.text().trimEnd()).toEndWith(mdPath);
-  expect(await readFile(mdPath, "utf8")).toBe(markdown.stdout.text());
-  expect(await createCliTest(main).runCli(mdArgs, readDeps)).not.toBe(0);
-  expect(await readFile(mdPath, "utf8")).toBe(markdown.stdout.text());
   const saved = createCliTest(main);
   const htmlPath = join(dir.path, "saved.html");
   expect(

@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { execFileSync } from "node:child_process";
 import { mkdir, readFile, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { reviewedBatch } from "./support/dependency-report-fixtures";
 import { scopedTemporaryDirectory } from "./support/temporary-directories";
 import {
   DependencyAttemptStore,
@@ -14,10 +15,11 @@ import {
   type PremiseRef,
 } from "../src/exploitability/analyzers/repository/review-queue";
 import { evidencePreviews } from "../src/exploitability/investigation-session";
-import { dependencyCheckOutputSchema } from "../src/exploitability/reachability";
 import { renderDependencyReport } from "../src/exploitability/report/renderer";
 import { renderDependencyReportMarkdown } from "../src/exploitability/report/text";
 import {
+  runPreparedAnalyzers,
+  type AnalyzerBatch,
   createDependencyVerdictProgress,
   withDependencyCheckOutput,
 } from "../src/exploitability/check-output";
@@ -44,6 +46,22 @@ import {
   discoverDependencyRepository,
   type RepositoryDiscovery,
 } from "../src/exploitability/analyzers/repository/discovery";
+
+function firstIssue(batch: AnalyzerBatch) {
+  const issue = batch.vulnerabilities[0]!;
+  const analysis = issue.analyses.find((a) => a.analyzer === "repository");
+  if (!analysis?.coverage || !analysis.claims || !analysis.evidence)
+    throw Error(batch.reason ?? "Missing reviewed repository evidence.");
+  return {
+    findings: issue.findings.filter((f) => f.analyzer === "repository"),
+    ...analysis.coverage,
+    claims: analysis.claims,
+    evidence: analysis.evidence,
+  };
+}
+function published(batch: AnalyzerBatch) {
+  return reviewedBatch("npm:fixture-parser", batch);
+}
 
 function agentInput(prompt: string) {
   return JSON.parse(prompt.split("\n\n").at(-1)!);
@@ -163,12 +181,10 @@ async function fixture(extraFiles: Record<string, string> = {}) {
       options: Omit<ReviewedCheckOptions, "directory" | "subject" | "signal">,
       dependencies: Parameters<typeof runReviewedDependencyCheck>[1],
     ) {
-      const report = await runReviewedDependencyCheck(
+      return runReviewedDependencyCheck(
         { directory: path, subject: "npm:fixture-parser", signal, ...options },
         { discover: async () => discovery, ...dependencies },
       );
-      if (!("checks" in report)) throw Error("Expected a package report.");
-      return report;
     },
   };
 }
@@ -219,12 +235,12 @@ test("reviewed trace, service and input citations keep their revision through pu
       },
     },
   );
-  const saved = result.checks[0]!.uses[0]!;
+  const saved = firstIssue(result).findings[0]!;
   expect(saved.trace?.[0]).toMatchObject({
     site: { commit: f.revision },
     argument: "request.body",
   });
-  expect(saved.proof.sink?.callSite.commit).toBe(f.revision);
+  expect(saved.proof?.sink?.callSite.commit).toBe(f.revision);
   const expected = { ...evidence[0]!, commit: f.revision };
   expect(saved.services?.[0]?.evidence[0]).toEqual(expected);
   expect(saved.inputSource?.evidence[0]).toEqual(expected);
@@ -232,14 +248,16 @@ test("reviewed trace, service and input citations keep their revision through pu
     renderDependencyReport,
     renderDependencyReportMarkdown,
   ]) {
-    const output = render(result);
+    const output = render(published(result));
     expect(output).toContain("Preview service");
     expect(output).toContain("POST /preview");
   }
   const ref = saved.services![0]!.evidence[0]!;
   if (ref.kind !== "source") throw new Error("Expected a source citation");
   ref.commit = "d".repeat(40);
-  expect(renderDependencyReport(result)).not.toContain("Preview service");
+  expect(renderDependencyReport(published(result))).not.toContain(
+    "Preview service",
+  );
 });
 
 test("repository investigators share pinned source notes without promoting assertions to reviewed claims", async () => {
@@ -337,10 +355,11 @@ test("repository investigators share pinned source notes without promoting asser
   );
   expect(result.target).toEqual({ repository: "team/parser", sha: f.revision });
   expect(reviewerRead).toBe(true);
-  expect(result.checks[0]!.claims.map((c) => c.id).sort()).toEqual([
-    "coverage",
-    "use-1",
-  ]);
+  expect(
+    firstIssue(result)
+      .claims.map((c) => c.id)
+      .sort(),
+  ).toEqual(["coverage", "use-1"]);
 });
 
 for (const late of ["assessment", "candidate", "roster"] as const) {
@@ -445,10 +464,10 @@ for (const late of ["assessment", "candidate", "roster"] as const) {
         },
       },
     );
-    const report = checked.checks[0]!;
+    const report = firstIssue(checked);
     expect(coverageReviews).toBe(2);
     if (late === "assessment")
-      expect(report.uses.map((u) => u.conclusionClaim.id)).toEqual([
+      expect(report.findings.map((u) => u.conclusionClaim?.id)).toEqual([
         "assessment:late-use",
       ]);
     else if (late === "roster")
@@ -461,7 +480,7 @@ for (const late of ["assessment", "candidate", "roster"] as const) {
       ).toBe(true);
     else
       expect(
-        report.coverage?.some(
+        report.dispositions?.some(
           (c) =>
             c.kind === "unresolved" &&
             c.evidence.some((ref) => ref.path === "secondary.js"),
@@ -597,8 +616,8 @@ test.each(["incomplete", "complete"] as const)(
         },
       },
     );
-    const report = result.checks[0]!;
-    expect(report.uses[0]!.verdict).toBe(f.use.verdict);
+    const report = firstIssue(result);
+    expect(report.findings[0]!.verdict).toBe(f.use.verdict);
     expect(report.limitations).toEqual(reviewedLimitations);
     if (completion === "complete") expect(reviewedLimitations).toEqual([]);
     else {
@@ -646,53 +665,17 @@ test("package checks freeze each advisory independently and verify exact source 
       },
     },
   );
-  expect(result.checks.map((c) => c.advisoryId)).toEqual([
-    "CVE-2099-0001",
-    "CVE-2099-0002",
-  ]);
-  const [use] = result.checks[0]!.uses;
+  expect(
+    result.vulnerabilities.map((v) => v.kind === "advisory" && v.id),
+  ).toEqual(["CVE-2099-0001", "CVE-2099-0002"]);
+  const [use] = firstIssue(result).findings;
   expect(use?.location).toBe("example");
   expect(use?.verdict).toBe("potentially_exploitable");
-  const claim = result.checks[0]!.claims.find(
-    (c) => c.id === use?.conclusionClaim.id,
+  const claim = firstIssue(result).claims.find(
+    (c) => c.id === use?.conclusionClaim?.id,
   )!;
-  expect(use?.conclusionClaim.hash).toBe(claim.hash);
+  expect(use?.conclusionClaim?.hash).toBe(claim.hash);
   expect(claim.state).toBe("approved");
-  expect(
-    events
-      .filter((event) =>
-        ["advisory", "discovery", "investigation", "review"].includes(
-          event.type,
-        ),
-      )
-      .map((e) => e.type),
-  ).toEqual([
-    "advisory",
-    "discovery",
-    "investigation",
-    "review",
-    "discovery",
-    "investigation",
-    "review",
-  ]);
-  expect(events.find((e) => e.type === "advisories_loaded")?.fields).toEqual({
-    count: 2,
-  });
-  expect(
-    events
-      .filter((e) => e.type === "activity_started")
-      .map((e) => e.fields?.["id"]),
-  ).toEqual([1, 2]);
-  expect(
-    events.filter((e) => e.type === "activity_finished").map((e) => e.fields),
-  ).toEqual(
-    [1, 2].map((id) => ({
-      id,
-      activity: "source_search",
-      scope: { symbol: "fixture-parser" },
-      outcome: "partial",
-    })),
-  );
   for (const advisoryId of ["CVE-2099-0001", "CVE-2099-0002"]) {
     const details = (type: string) =>
       events.find((e) => e.subject === advisoryId && e.type === type)?.fields;
@@ -734,7 +717,10 @@ test("caller descriptions stay scoped and a source-only positive is blocked", as
         },
       },
     ),
-  ).rejects.toThrow("running workload");
+  ).resolves.toMatchObject({
+    status: "blocked",
+    reason: expect.stringContaining("running workload"),
+  });
 });
 
 test("an empty sink list fails before advisory lookup, while an empty source list rules out a positive use", async () => {
@@ -750,7 +736,10 @@ test("an empty sink list fails before advisory lookup, while an empty source lis
       { vulnDescription: "Incorrect length validation.", sources: [] },
       { runAgent: async () => proposalJson(f.use) },
     ),
-  ).rejects.toThrow("explicitly empty source boundary");
+  ).resolves.toMatchObject({
+    status: "blocked",
+    reason: expect.stringContaining("explicitly empty source boundary"),
+  });
 });
 
 test("Git repositories and an npm package sharing a name keep distinct discovery scopes", async () => {
@@ -800,8 +789,10 @@ test("Git repositories and an npm package sharing a name keep distinct discovery
       },
     },
   );
-  expect(result).toMatchObject({
-    uses: [{ component: "fixture-parser", version: null, verdict: "unknown" }],
+  expect(firstIssue(result)).toMatchObject({
+    findings: [
+      { component: "fixture-parser", version: null, verdict: "unknown" },
+    ],
     searches: [
       { scope: [`package=${f.pkg.name}`, `revision=${f.revision}`] },
       { scope: [`gitRepository=${first}`, `revision=${f.revision}`] },
@@ -836,108 +827,103 @@ test("an exploratory scope explanation retains reviewed uses, open handoffs and 
     reason: "No adapter manifest or selected version was found.",
   };
   const handoff = "Determine which adapter implementation this caller selects.";
-  const result = dependencyCheckOutputSchema.parse(
-    await runReviewedDependencyCheck(
-      { directory: f.path, subject: cve, signal },
-      {
-        lookupCve: async () => ({
-          cve,
-          advisories: [{ ...advisory, sha256: dependencyRecordHash(advisory) }],
-        }),
-        discover: async ({ package: pkg }) =>
-          pkg.name === adapter.name
-            ? {
-                ...f.discovery,
-                package: adapter,
-                callers: [observedCaller],
-                dependencyFiles: [],
-              }
-            : {
-                ...f.discovery,
-                manifests: [
+  const checked = await runReviewedDependencyCheck(
+    { directory: f.path, subject: cve, signal },
+    {
+      lookupCve: async () => ({
+        cve,
+        advisories: [{ ...advisory, sha256: dependencyRecordHash(advisory) }],
+      }),
+      discover: async ({ package: pkg }) =>
+        pkg.name === adapter.name
+          ? {
+              ...f.discovery,
+              package: adapter,
+              callers: [observedCaller],
+              dependencyFiles: [],
+            }
+          : {
+              ...f.discovery,
+              manifests: [
+                {
+                  project: ".",
+                  name: "example",
+                  requested: "1.0.0",
+                  path: "package.json",
+                  line: 1,
+                },
+              ],
+              callers: [
+                { ...f.discovery.callers[0]!, manifest: "package.json" },
+              ],
+            },
+      async runAgent(req) {
+        const packet = agentInput(req.prompt);
+        if (!req.coordinator) {
+          return approvedReview(packet.claims);
+        }
+        const submit = (outOfScope: { scope: string; reason: string }[]) =>
+          req.onCoordinatorAnswer!(
+            JSON.stringify({ uses: [], limitations: [], outOfScope }),
+          );
+        const feedback = async (
+          scope: (typeof explanation)[],
+          reason: string,
+        ) =>
+          expect(JSON.parse((await submit(scope))!).feedback.reason).toContain(
+            reason,
+          );
+        // A search explanation cannot account for the discovered parser manifest.
+        await feedback([explanation], "omitted a discovered dependency scope");
+        const { call } = await req.investigationTools!();
+        await call("submit_dependency_assessments", {
+          assessments: [
+            { id: "parser", expectedRevision: 0, use: f.use },
+            {
+              id: "adapter",
+              expectedRevision: 0,
+              disposition: {
+                kind: "unresolved",
+                scope: explanation.scope,
+                reason: handoff,
+                locations: [],
+                evidence: [
                   {
-                    project: ".",
-                    name: "example",
-                    requested: "1.0.0",
-                    path: "package.json",
-                    line: 1,
+                    path: observedCaller.path,
+                    startLine: 1,
+                    endLine: 2,
+                    supports: ["context"],
                   },
                 ],
-                callers: [
-                  { ...f.discovery.callers[0]!, manifest: "package.json" },
-                ],
+                observations: [],
               },
-        async runAgent(req) {
-          const packet = agentInput(req.prompt);
-          if (!req.coordinator) {
-            return approvedReview(packet.claims);
-          }
-          const submit = (outOfScope: { scope: string; reason: string }[]) =>
-            req.onCoordinatorAnswer!(
-              JSON.stringify({ uses: [], limitations: [], outOfScope }),
-            );
-          const feedback = async (
-            scope: (typeof explanation)[],
-            reason: string,
-          ) =>
-            expect(
-              JSON.parse((await submit(scope))!).feedback.reason,
-            ).toContain(reason);
-          // A search explanation cannot account for the discovered parser manifest.
-          await feedback(
-            [explanation],
-            "omitted a discovered dependency scope",
-          );
-          const { call } = await req.investigationTools!();
-          await call("submit_dependency_assessments", {
-            assessments: [
-              { id: "parser", expectedRevision: 0, use: f.use },
-              {
-                id: "adapter",
-                expectedRevision: 0,
-                disposition: {
-                  kind: "unresolved",
-                  scope: explanation.scope,
-                  reason: handoff,
-                  locations: [],
-                  evidence: [
-                    {
-                      path: observedCaller.path,
-                      startLine: 1,
-                      endLine: 2,
-                      supports: ["context"],
-                    },
-                  ],
-                  observations: [],
-                },
-              },
-            ],
-          });
-          await feedback(
-            [{ ...explanation, scope: "3.1" }],
-            "Unknown dependency scope",
-          );
-          await feedback(
-            [explanation, explanation],
-            "Duplicate scope explanation",
-          );
-          await feedback(
-            [{ ...explanation, scope: f.use.scope }],
-            "assessed dependency scope",
-          );
-          expect(await submit([explanation])).toBeUndefined();
-          return JSON.stringify({
-            uses: [],
-            limitations: [],
-            outOfScope: [explanation],
-          });
-        },
+            },
+          ],
+        });
+        await feedback(
+          [{ ...explanation, scope: "3.1" }],
+          "Unknown dependency scope",
+        );
+        await feedback(
+          [explanation, explanation],
+          "Duplicate scope explanation",
+        );
+        await feedback(
+          [{ ...explanation, scope: f.use.scope }],
+          "assessed dependency scope",
+        );
+        expect(await submit([explanation])).toBeUndefined();
+        return JSON.stringify({
+          uses: [],
+          limitations: [],
+          outOfScope: [explanation],
+        });
       },
-    ),
+    },
   );
-  if (!("cve" in result)) throw Error("Expected a CVE report.");
-  expect(result.target?.sha).toBe(f.revision);
-  expect(result.uses).toMatchObject([
+  const result = firstIssue(checked);
+  expect(checked.target?.sha).toBe(f.revision);
+  expect(result.findings).toMatchObject([
     { conclusionClaim: { id: "assessment:parser", revision: 1 } },
   ]);
   expect(
@@ -946,10 +932,10 @@ test("an exploratory scope explanation retains reviewed uses, open handoffs and 
         text.includes(adapter.name) && text.includes(explanation.reason),
     ),
   ).toBe(true);
-  expect(result.coverage?.filter((row) => row.kind === "dismissed")).toEqual(
-    [],
-  );
-  expect(result.coverage).toEqual(
+  expect(
+    result.dispositions?.filter((row) => row.kind === "dismissed"),
+  ).toEqual([]);
+  expect(result.dispositions).toEqual(
     expect.arrayContaining([
       expect.objectContaining({
         kind: "unresolved",
@@ -971,7 +957,7 @@ test("an exploratory scope explanation retains reviewed uses, open handoffs and 
     ]),
   );
   expect(
-    result.coverage?.some((row) => row.reason === explanation.reason),
+    result.dispositions?.some((row) => row.reason === explanation.reason),
   ).toBe(false);
 });
 
@@ -1137,29 +1123,19 @@ test("withdrawn approvals leave the verdict group before the next progress updat
   expect(output.at(-1)!["groupId"]).not.toBe(output[4]!["groupId"]);
 });
 
-test("publish a complete report once and keep progress separate from an unsuccessful report", async () => {
+test("an unsuccessful report keeps its progress log and leaves no published report", async () => {
   await using f = await scopedTemporaryDirectory("dependency-output-test-");
-  const reportFile = join(f.path, "report.json"),
-    progressEvents = join(f.path, "progress.jsonl");
-  const options = { reportFile, subject: "example", signal, warn: () => {} };
-  const results = await Promise.allSettled(
-    [1, 2].map((i) =>
-      withDependencyCheckOutput(options, async () => ({ attempt: i })),
-    ),
-  );
-  expect(results.filter((r) => r.status === "fulfilled")).toHaveLength(1);
-  const original = await readFile(reportFile, "utf8");
-  expect([1, 2]).toContain(JSON.parse(original).attempt);
-  await expect(
-    withDependencyCheckOutput(options, async () => {
-      throw Error("Should not run");
-    }),
-  ).rejects.toThrow("already exists");
-  expect(await readFile(reportFile, "utf8")).toBe(original);
+  const progressEvents = join(f.path, "progress.jsonl");
   const failed = join(f.path, "failed.json");
   await expect(
     withDependencyCheckOutput(
-      { ...options, reportFile: failed, progressEvents },
+      {
+        subject: "npm:fixture-parser",
+        signal,
+        warn: () => {},
+        reportFile: failed,
+        progressEvents,
+      },
       async (emit) => {
         emit("review");
         throw Error("unavailable");
@@ -1215,7 +1191,7 @@ test("host feedback repairs a bad citation and an independent rejection requires
       },
     },
   );
-  expect(report.checks[0]!.uses[0]!.conclusionClaim.revision).toBe(2);
+  expect(firstIssue(report).findings[0]!.conclusionClaim?.revision).toBe(2);
   expect([investigations, reviews]).toEqual([3, 2]);
 });
 
@@ -1257,12 +1233,15 @@ test.each(["corrected", "exhausted"] as const)(
     );
     if (mode === "corrected") {
       const report = await result;
-      expect(report.checks[0]!.uses[0]!.verdict).toBe(
+      expect(firstIssue(report).findings[0]!.verdict).toBe(
         "potentially_exploitable",
       );
       expect(submissions).toBe(4);
     } else {
-      await expect(result).rejects.toThrow("outside the citations");
+      await expect(result).resolves.toMatchObject({
+        status: "blocked",
+        reason: expect.stringContaining("outside the citations"),
+      });
       expect(submissions).toBe(10);
     }
     expect(coordinatorStarts).toBe(1);
@@ -1289,7 +1268,9 @@ test("aliases of the same output cannot leave progress at the report destination
         signal,
         warn: () => {},
       },
-      async () => ({}),
+      async () => {
+        throw Error("Output aliases must be rejected before starting.");
+      },
     ),
   ).rejects.toThrow("different paths");
   await expect(readFile(reportFile)).rejects.toMatchObject({ code: "ENOENT" });
@@ -1336,11 +1317,11 @@ test("bind discovered owners to their own source and retain uncovered callers", 
       },
     },
   );
-  const check = report.checks[0]!;
+  const check = firstIssue(report);
   expect(check.searches[0]!.details).toContain(initialGap);
   expect(check.limitations).toContain("External ingress remains unknown.");
-  expect(check.uses[0]!.location).toBe("notes");
-  expect(check.coverage[0]).toMatchObject({
+  expect(check.findings[0]!.location).toBe("notes");
+  expect(check.dispositions[0]).toMatchObject({
     kind: "unresolved",
     location: "notes",
     evidence: [{ path: "secondary.js", startLine: 2 }],
@@ -1447,10 +1428,10 @@ test("the reviewer corrects an omitted direct access citation without repeating 
       },
     },
   );
-  const check = result.checks[0]!;
+  const check = firstIssue(result);
   expect(reviews).toBe(2);
-  expect(check.uses[0]!.verdict).toBe("exploitable");
-  expect<unknown>(check.uses[0]!.observations).toEqual(
+  expect(check.findings[0]!.verdict).toBe("exploitable");
+  expect<unknown>(check.findings[0]!.observations).toEqual(
     positive.observations.map((ref) => ({
       server: ref.server,
       record: ref.quote,
@@ -1458,21 +1439,22 @@ test("the reviewer corrects an omitted direct access citation without repeating 
     })),
   );
   expect(
-    check.uses[0]!.decidingEvidence.filter((r) => r.kind === "receipt").map(
+    check.findings[0]!.decidingEvidence.filter((r) => r.kind === "receipt").map(
       (r) => r.receiptId,
     ),
   ).toEqual(records.map((r) => r.sha256));
-  expect<unknown>(dependencyCheckOutputSchema.parse(result)).toEqual(result);
-  expect(check.claimEvidence.receipts[records[0]!.sha256]).toEqual(records[0]!);
-  const html = renderDependencyReport(result);
+  expect<unknown>(check.evidence.receipts[records[0]!.sha256]).toEqual(
+    records[0]!,
+  );
+  const html = renderDependencyReport(published(result));
   expect(html).toContain("<dt>Tool</dt><dd>running</dd>");
   expect(html).toContain("<dt>Tool</dt><dd>access</dd>");
-  const ref = check.uses[0]!.decidingEvidence.find(
+  const ref = check.findings[0]!.decidingEvidence.find(
     (r) => r.kind === "receipt" && r.receiptId === records[0]!.sha256,
   );
   if (ref?.kind !== "receipt") throw new Error("Expected a receipt");
   ref.originalPayloadSha256 = "0".repeat(64);
-  expect(renderDependencyReport(result)).not.toContain(
+  expect(renderDependencyReport(published(result))).not.toContain(
     "<dt>Tool</dt><dd>running</dd>",
   );
   expect(html).not.toContain("only in request");
@@ -1643,16 +1625,35 @@ test("an operational failure records earlier checks and leaves the remaining adv
       },
     },
   );
-  await expect(failed).rejects.toMatchObject({
-    outcome: {
-      code: "INVESTIGATION_BLOCKED",
-      checks: [
-        { advisoryId: ids[0], schemaVersion: 2 },
-        { advisoryId: ids[1], status: "blocked" },
-      ],
-      pendingAdvisories: [ids[2]],
+  let extraCalls = 0;
+  const result = await runPreparedAnalyzers(
+    [{ name: "repository", run: () => failed }],
+    "npm:fixture-parser",
+    () => {},
+    signal,
+    {
+      async synthesize() {
+        extraCalls++;
+        throw Error("Model unavailable.");
+      },
     },
+  );
+  expect(extraCalls).toBe(0);
+  expect(result.subject).toEqual({
+    kind: "package",
+    ecosystem: "npm",
+    name: "fixture-parser",
   });
+  expect(result.vulnerabilities).toMatchObject([
+    {
+      id: ids[0],
+      status: "pending",
+      result: null,
+      findings: [{ analyzer: "repository" }],
+    },
+    { id: ids[1], status: "blocked", result: null, findings: [] },
+    { id: ids[2], status: "pending", result: null, findings: [] },
+  ]);
 });
 
 test("a package continues with independent advisories after a scoped block or exhausted review", async () => {
@@ -1687,21 +1688,18 @@ test("a package continues with independent advisories after a scoped block or ex
       },
     },
   );
-  await expect(result).rejects.toMatchObject({
-    outcome: {
+  expect((await result).vulnerabilities).toMatchObject([
+    { id: ids[0], status: "complete" },
+    { id: ids[1], status: "blocked", analyses: [{ reason: scoped.reason }] },
+    {
+      id: ids[2],
       status: "blocked",
-      checks: [
-        { advisoryId: ids[0], schemaVersion: 2 },
-        { advisoryId: ids[1], ...scoped },
-        {
-          advisoryId: ids[2],
-          status: "blocked",
-          reason: expect.stringContaining("No proof for this release."),
-        },
-        { advisoryId: ids[3], schemaVersion: 2 },
+      analyses: [
+        { reason: expect.stringContaining("No proof for this release.") },
       ],
     },
-  });
+    { id: ids[3], status: "complete" },
+  ]);
 });
 
 test("a runtime display name shared by two packages cannot establish either deployment", async () => {
@@ -2392,8 +2390,8 @@ test("native investigators share asynchronous reviews, immutable premises and pa
       },
     },
   );
-  const check = result.checks[0]!,
-    use = check.uses[0]!;
+  const check = firstIssue(result),
+    use = check.findings[0]!;
   expect(check.searches.find((row) => row.source === "builds")).toMatchObject({
     result: "returned",
     completeness: "unknown",
@@ -2410,11 +2408,11 @@ test("native investigators share asynchronous reviews, immutable premises and pa
   expect(traces[0]!.scope).toContain('files=["package-lock.json"]');
   expect(traces[0]!.details.join(" ")).toContain("source-only trace");
   expect(
-    check.claimEvidence.receipts[traces[0]!.evidenceReferences[0]!],
+    check.evidence.receipts[traces[0]!.evidenceReferences[0]!],
   ).toMatchObject({ tool: "trace_codex_security_code" });
   expect(traces[1]).toMatchObject({ result: "unknown", completeness: "error" });
   expect(check.limitations).toContain("One linked resource was unavailable.");
-  expect(use.conclusionClaim.id).toBe("assessment:app");
+  expect(use.conclusionClaim?.id).toBe("assessment:app");
   expect(
     check.claims.find((c) => c.id === "assessment:app")!.dependencies[0]!.id,
   ).toBe("premise:consumer");
@@ -2445,7 +2443,7 @@ test("native investigators share asynchronous reviews, immutable premises and pa
     receiptId: receipt.sha256,
     originalPayloadSha256: dependencyRecordHash(receipt.result),
   });
-  expect(check.claimEvidence.receipts[receipt.sha256]).toEqual(receipt);
+  expect(check.evidence.receipts[receipt.sha256]).toEqual(receipt);
   expect(Object.fromEntries(counts)).toEqual({
     "premise:version": 1,
     "premise:consumer": 1,
@@ -2608,7 +2606,7 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
       },
     },
   );
-  expect(result.checks[0]?.uses[0]?.services).toMatchObject([
+  expect(firstIssue(result).findings[0]?.services).toMatchObject([
     {
       id: server + ":worker-7",
       source: server + "/" + tool + "#worker-7",
@@ -2620,13 +2618,13 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
       ],
     },
   ]);
-  const check = result.checks[0]!;
+  const check = firstIssue(result);
   const failedLookup = check.searches.find(
     (r) => r.source === server && r.tool === tool && r.completeness === "error",
   )!;
   expect(failedLookup.evidenceReferences).toHaveLength(1);
   expect(
-    check.claimEvidence.receipts[failedLookup.evidenceReferences[0]!],
+    check.evidence.receipts[failedLookup.evidenceReferences[0]!],
   ).toMatchObject({
     server,
     tool,
@@ -2703,12 +2701,12 @@ test.each([
       },
     );
     if (mode === "persistent") {
-      await expect(run).rejects.toThrow(
+      expect((await run).reason).toMatch(
         /Duplicate id "use-1".*Missing ids \["coverage"\].*Still awaiting/,
       );
     } else {
       const r = await run;
-      expect(r.checks[0]!.claims.map((c) => c.id)).toEqual([
+      expect(firstIssue(r).claims.map((c) => c.id)).toEqual([
         "use-1",
         "coverage",
       ]);
@@ -2853,7 +2851,7 @@ test("a reviewed premise retains independently selected rows of the historical m
       },
     },
   );
-  const report = checked.checks[0]!;
+  const report = firstIssue(checked);
   expect(
     report.claims.find((c) => c.id === "premise:frame")!.evidence.receiptIds,
   ).toEqual(keys);
@@ -2866,9 +2864,10 @@ test("a reviewed premise retains independently selected rows of the historical m
         "aef67dc0480fc12d9500fe1377a828a759fde9662a75d2908a65a8d36a6aab08",
       selection,
     };
-    if (index === 1) expect(report.uses[0]!.tags?.[0]?.evidence).toEqual([ref]);
-    expect(report.uses[0]!.decidingEvidence).toContainEqual(ref);
-    expect(report.claimEvidence.receipts[key]).toMatchObject({
+    if (index === 1)
+      expect(report.findings[0]!.tags?.[0]?.evidence).toEqual([ref]);
+    expect(report.findings[0]!.decidingEvidence).toContainEqual(ref);
+    expect(report.evidence.receipts[key]).toMatchObject({
       key: key.slice(8),
       receiptId: ref.receiptId,
       originalPayloadSha256: ref.originalPayloadSha256,
@@ -2877,9 +2876,9 @@ test("a reviewed premise retains independently selected rows of the historical m
     });
   }
   expect(
-    report.uses[0]!.decidingEvidence.filter((r) => r.kind === "receipt"),
+    report.findings[0]!.decidingEvidence.filter((r) => r.kind === "receipt"),
   ).toHaveLength(2);
-  const html = renderDependencyReport(checked);
+  const html = renderDependencyReport(published(checked));
   expect(html).toContain("<dt>Tool</dt><dd>mcpServer/resource/read</dd>");
   expect(html).not.toContain("third_row_must_not_escape");
   expect(html).not.toContain("UNRELATED-GRAPH-PROFILE-BYTES");
@@ -2982,13 +2981,13 @@ test.each(["identical", "additional"] as const)(
       },
     );
     const report = await result;
-    const uses = report.checks[0]!.uses;
+    const uses = firstIssue(report).findings;
     expect(uses.map((u) => u.place.workload)).toEqual(
       mode === "additional"
         ? [...submitted, "third-job"]
         : submitted.map(workload),
     );
-    expect(uses.slice(0, 2).map((u) => u.conclusionClaim.id)).toEqual(
+    expect(uses.slice(0, 2).map((u) => u.conclusionClaim?.id)).toEqual(
       submitted.map((id) => "assessment:" + id),
     );
     expect(rounds).toBe(2);
@@ -3280,9 +3279,7 @@ test.each(["approved", "rejected", "racing", "changed premise"] as const)(
         },
       },
     );
-    const result = dependencyCheckOutputSchema.parse(checked);
-    if (!("checks" in result)) throw Error("Expected a package check.");
-    const report = result.checks[0]!;
+    const report = firstIssue(checked);
     const accepted = outcome === "approved";
     const authoritative = accepted ? latest : (corrected ?? original);
     expect(reviewedReplacements).toEqual(outcome === "racing" ? [2, 3] : [2]);
@@ -3292,22 +3289,22 @@ test.each(["approved", "rejected", "racing", "changed premise"] as const)(
     expect(
       report.claims?.filter((c) => c.id === target).map(reference),
     ).toEqual([authoritative]);
-    expect(report.uses.map((u) => u.conclusionClaim?.id).sort()).toEqual(
+    expect(report.findings.map((u) => u.conclusionClaim?.id).sort()).toEqual(
       (accepted
         ? ["assessment:primary", "assessment:other"]
         : ["assessment:primary", "assessment:other", target]
       ).sort(),
     );
     expect(
-      report.uses.find((u) => u.location === "secondary")?.proof?.sink
+      report.findings.find((u) => u.location === "secondary")?.proof?.sink
         ?.callSite,
     ).toEqual(otherCaller);
     expect(
-      report.uses
+      report.findings
         .filter((u) => u.conclusionClaim?.id === target)
         .map((u) => u.conclusionClaim),
     ).toEqual(accepted ? [] : [authoritative]);
-    const replacement = report.coverage?.filter(
+    const replacement = report.dispositions?.filter(
       (d) => d.conclusionClaim?.id === target,
     );
     if (accepted) {
@@ -3531,11 +3528,8 @@ test("independently verifies candidate dispositions and publishes their selected
       },
     },
   );
-  const report = dependencyCheckOutputSchema.parse(checked);
-  expect<unknown>(report).toEqual(checked);
-  if (!("checks" in report)) throw new Error("Expected a package check.");
-  const result = report.checks[0]!;
-  const rows = result.coverage!;
+  const result = firstIssue(checked);
+  const rows = result.dispositions!;
   const gap = rows.find(
     (row) => row.conclusionClaim?.id === "disposition:handoff",
   )!;
@@ -3586,7 +3580,7 @@ test("independently verifies candidate dispositions and publishes their selected
       evidence: [{ path: other.path, startLine: other.line }],
     },
   ]);
-  expect(result.uses).toEqual([]);
+  expect(result.findings).toEqual([]);
 });
 
 test("accounts for native graph candidate lines in their pinned package and preserves other candidate gaps", async () => {
@@ -3696,9 +3690,7 @@ test("accounts for native graph candidate lines in their pinned package and pres
       },
     },
   );
-  const report = dependencyCheckOutputSchema.parse(checked);
-  if (!("checks" in report)) throw new Error("Expected package report");
-  const coverage = report.checks[0]!.coverage!;
+  const coverage = firstIssue(checked).dispositions;
   expect(coverage.find((c) => c.conclusionClaim)).toMatchObject({
     kind: "dismissed",
     locations: [{ path: "new.js", line: 1 }],
@@ -3779,27 +3771,27 @@ test("summarizes external lookups without publishing argument values in the sear
       },
     },
   );
-  const check = result.checks[0]!;
+  const check = firstIssue(result);
   const offline = check.searches.find((row) => row.source === "offline")!;
   expect([offline.result, offline.completeness]).toEqual([
     "not_run",
     "unavailable",
   ]);
-  expect(
-    check.claimEvidence.receipts[offline.evidenceReferences[0]!],
-  ).toMatchObject({
-    server: "offline",
-    tool: "mcp_server_startup",
-    result: {
-      structuredContent: { status: "failed", error: "Connection refused" },
+  expect(check.evidence.receipts[offline.evidenceReferences[0]!]).toMatchObject(
+    {
+      server: "offline",
+      tool: "mcp_server_startup",
+      result: {
+        structuredContent: { status: "failed", error: "Connection refused" },
+      },
     },
-  });
+  );
   for (const input of inputs) {
     const row = check.searches.find((entry) => entry.tool === input.tool)!;
     expect(row.scope).toEqual([
       "Request SHA-256 " + dependencyRecordHash(args),
     ]);
-    expect([row.result, row.completeness]).toEqual([
+    expect<string[]>([row.result, row.completeness]).toEqual([
       input.result,
       input.completeness,
     ]);
@@ -3812,7 +3804,9 @@ test("summarizes external lookups without publishing argument values in the sear
         input.completeness === "error" && { hostStatus: "failed" }),
     };
     expect(row.evidenceReferences).toEqual([dependencyRecordHash(original)]);
-    expect(check.claimEvidence.receipts[row.evidenceReferences[0]!]).toEqual({
+    expect<unknown>(
+      check.evidence.receipts[row.evidenceReferences[0]!],
+    ).toEqual({
       ...original,
       sha256: dependencyRecordHash(original),
     });

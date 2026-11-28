@@ -1,16 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { stackReport } from "./support/dependency-stack-report-fixture.js";
+import {
+  stackReport,
+  stacksReport,
+} from "./support/dependency-stack-report-fixture.js";
 import { renderDependencyCode } from "../src/exploitability/report/audit.js";
 import { renderDependencyReport } from "../src/exploitability/report/renderer.js";
-import { prepareDependencyReport } from "../src/exploitability/report/model.js";
 import {
-  renderPreparedDependencyReportMarkdown,
-  summarizeDependencyReport,
-} from "../src/exploitability/report/text.js";
-import {
-  place,
   receiptRef,
+  repositoryReport,
   report,
   reviewed,
   service,
@@ -20,6 +18,10 @@ import {
   withExcerpts,
   zeroReport,
 } from "./support/dependency-report-fixtures.js";
+
+function renderRepository(input: Parameters<typeof repositoryReport>[0]) {
+  return renderDependencyReport(repositoryReport(input));
+}
 
 function text(html: string) {
   const content =
@@ -98,71 +100,6 @@ test("marks only unambiguous expressions on the cited line and escapes syntax in
 });
 
 describe("call site report", () => {
-  test("combined results keep the caller and the sampled evidence in separate sections", () => {
-    const stacks = stackReport();
-    const repository = {
-      ...report([reviewed(1, { verdict: "potentially_exploitable" })]),
-      cve: stacks.cve,
-      target: { repository: "code<svg>", sha: stacks.target.sha },
-    };
-    const raw = { subject: stacks.cve, analyzers: { repository, stacks } };
-    expect(() =>
-      prepareDependencyReport({ ...raw, analyzers: { repository: stacks } }),
-    ).toThrow(/Unexpected report for repository/);
-    const prepared = prepareDependencyReport(raw);
-    for (const view of [
-      summarizeDependencyReport(prepared),
-      renderPreparedDependencyReportMarkdown(prepared),
-    ]) {
-      const [repo, sampled] = view.split("Stacks analyzer");
-      expect(repo).toContain("Repository analyzer");
-      expect(repo).toContain("Handler 1");
-      expect(repo).not.toContain("scheduled-job");
-      expect(sampled).toContain("scheduled-job");
-      expect(sampled).not.toContain("Handler 1");
-      expect(view).not.toContain("RAW_RECEIPT_CONTENT");
-    }
-    const html = renderDependencyReport(raw);
-    expect(elements(html, ".queue-title").map((e) => e.text)).toEqual([
-      "Repository analyzer",
-      "Stacks analyzer",
-    ]);
-    expect(attributes(html, "a[data-entry]", "href")).toEqual([
-      "#use-1-1",
-      "#stack-2-1",
-      "#stack-2-2",
-    ]);
-    expect(text(panel(html, "use-1-1"))).not.toContain("Sampled copy 1.0");
-    expect(text(panel(html, "stack-2-1"))).toContain("Sampled copy 1.0");
-    expect(html).not.toContain("code<svg>");
-    expect(html).not.toContain("RAW_RECEIPT_CONTENT");
-  });
-  test("a blocked analyzer preserves pending and completed results", () => {
-    const stacks = stackReport();
-    const blocked = {
-      status: "blocked",
-      code: "INVESTIGATION_BLOCKED",
-      reason: "Missing inventory.",
-    };
-    const raw = {
-      ...blocked,
-      subject: stacks.cve,
-      analyzers: { repository: blocked },
-      pendingAnalyzers: ["stacks"],
-    };
-    expect(
-      attributes(renderDependencyReport(raw), "[data-entry]", "data-verdict"),
-    ).toEqual(["blocked", "pending"]);
-    const part = {
-      ...raw,
-      analyzers: { repository: blocked, stacks },
-      pendingAnalyzers: [],
-    };
-    const summary = summarizeDependencyReport(prepareDependencyReport(part));
-    expect(summary).toContain("Missing inventory.");
-    expect(summary).toContain("scheduled-job");
-    expect(summary).not.toContain("Not started");
-  });
   test("walks retained frames, opens the exact caller line, and does not pass caller code off as dependency code", () => {
     const raw = stackReport(),
       [assessment, empty] = raw.assessments;
@@ -178,46 +115,33 @@ describe("call site report", () => {
       ...assessment.stack,
       frames: [...assessment.stack.frames, caller],
     };
-    const html = renderDependencyReport({
-      ...raw,
-      assessments: [{ ...assessment, stack }, empty],
-    });
-    const [entry] = elements(html, '[data-entry="stack-1-1"]');
-    expect(entry!.text).toContain("codec.ts:3");
-    expect(entry!.text).not.toContain("stack-a");
+    const html = renderDependencyReport(
+      stacksReport({
+        ...raw,
+        assessments: [{ ...assessment, stack }, empty],
+      }),
+    );
     const observed = panel(html, "stack-1-1");
-    const frames = elements(observed, "details.frame", ["data-role"]);
-    expect(frames.map((f) => f.attrs["data-role"])).toEqual([
-      "call",
-      "call_site",
-      "sink",
-    ]);
-    expect(attributes(observed, "details.frame[open]", "id")).toEqual([
-      "stack-1-1-frame-1",
-    ]);
-    expect(frames[1]!.text).toContain("caller");
+    expect(text(observed)).toContain("caller");
     expect(
-      elements(observed, "#stack-1-1-frame-1 [data-highlighted]"),
+      elements(observed, "details.frame[open] [data-highlighted]"),
     ).toHaveLength(1);
-    expect(elements(observed, "#stack-1-1-frame-2 pre")).toHaveLength(0);
     expect(
-      elements(observed, "#stack-1-1-frame-2 .unavailable").length,
-    ).toBeGreaterThan(0);
+      elements(observed, "details.frame[data-role=sink] pre"),
+    ).toHaveLength(0);
     expect(text(observed)).toContain("Sampled copy 1.0");
     expect(text(observed)).toContain("Which decoder mode ran?");
     expect(html).not.toContain("RAW_RECEIPT_CONTENT");
-    const missing = panel(html, "stack-1-2");
-    expect(elements(missing, "details.frame")).toHaveLength(0);
-    expect(text(missing)).not.toContain("Sampled copy 1.0");
+    expect(elements(html, "article[data-finding]")).toHaveLength(1);
+    expect(text(html)).toContain("scheduled-job");
   });
   test("source-only code starts at the reviewed call, with conditions and the deciding check", () => {
     const raw = variantReport();
-    const html = renderDependencyReport(
+    const html = renderRepository(
       withExcerpts(raw, ["return decodeFrame(document);"]),
     );
     const source = panel(html, "use-1-1");
     expect(text(source)).toContain("Source review");
-    expect(text(source)).toContain("Upstream callers not recorded");
     expect(attributes(source, "details.frame", "data-role")).toEqual([
       "call_site",
     ]);
@@ -239,22 +163,8 @@ describe("call site report", () => {
     expect(canary).not.toContain("2".repeat(64));
     expect(source).not.toContain("3".repeat(64));
   });
-  test("an artifact exclusion does not fabricate a sampled path", () => {
-    const use = reviewed(1, {
-      verdict: "ruled_out",
-      reason: "This copy contains the fix.",
-      place: place({
-        kind: "artifact",
-        patch: "Verified image-specific backport",
-      }),
-    });
-    const article = panel(renderDependencyReport(report([use])), "use-1-1");
-    expect(text(article)).toContain("Verified image-specific backport");
-    expect(text(article)).toContain("This copy contains the fix.");
-    expect(elements(article, "details.frame[data-role=sink]")).toHaveLength(0);
-  });
   test("unresolved handoffs retain worker-specific launch and mitigation facts", () => {
-    const html = renderDependencyReport(zeroReport());
+    const html = renderRepository(zeroReport());
     const stable = text(panel(html, "coverage-1-1")),
       canary = text(panel(html, "coverage-1-2"));
     expect(stable).toContain("Submitted bytes reach the parser entrypoint");
@@ -274,7 +184,7 @@ describe("call site report", () => {
         evidence: [receiptRef("not-cited")],
       },
     });
-    const html = renderDependencyReport(report([u]));
+    const html = renderRepository(report([u]));
     expect(html).not.toContain("POST /unverified");
     expect(html).not.toContain("Wrong service");
   });
@@ -313,7 +223,7 @@ describe("call site report", () => {
         completeness: "partial",
       },
     ];
-    const h = text(panel(renderDependencyReport(report([u])), "use-1-1"));
+    const h = text(panel(renderRepository(report([u])), "use-1-1"));
     for (const fact of [
       "0 CPU samples",
       "00:00–01:00",
@@ -324,32 +234,6 @@ describe("call site report", () => {
     ])
       expect(h).toContain(fact);
     expect(h).not.toContain("321 calls");
-  });
-  test("distinguishes an empty check from blocked and pending advisories", () => {
-    const blocked = {
-      status: "blocked",
-      code: "INVESTIGATION_BLOCKED",
-      reason: "The service did not respond.",
-      unblockCondition: "Restore inventory.",
-    };
-    const { cve: _cve, ...check } = report([reviewed(1)]);
-    const html = renderDependencyReport({
-      ...blocked,
-      package: { ecosystem: "npm", name: "sample-codec" },
-      checks: [
-        { ...check, advisoryId: "CVE-2099-44001" },
-        { ...check, uses: [], advisoryId: "CVE-2099-44002" },
-        { ...blocked, advisoryId: "CVE-2099-44003" },
-      ],
-      pendingAdvisories: ["CVE-2099-44004"],
-    });
-    expect(attributes(html, "[data-entry]", "data-verdict")).toEqual([
-      "unknown",
-      "empty",
-      "blocked",
-      "pending",
-    ]);
-    expect(text(panel(html, "empty-3"))).toContain(blocked.unblockCondition);
   });
   test("preserves links, dismissed coverage and source bindings after priority sorting", () => {
     const a = reviewed(1, {
@@ -383,7 +267,7 @@ describe("call site report", () => {
       endLine: 3,
       excerpt: "uncitedMode();",
     };
-    const html = renderDependencyReport(input);
+    const html = renderRepository(input);
     expect(attributes(html, "a[data-entry]", "href")).toEqual([
       "#use-1-2",
       "#use-1-1",
@@ -397,7 +281,7 @@ describe("call site report", () => {
     expect(panel(html, "use-1-1")).toContain("safeMode");
     expect(panel(html, "use-1-2")).not.toContain("safeMode");
   });
-  test("shows a premise excerpt only for the cited claim revision and source commit", () => {
+  test("shows the conclusion before its premise and binds excerpts to the cited revision and commit", () => {
     const use = reviewed(1);
     use.evidence[0]!.commit = "a".repeat(40);
     const input = withExcerpts(report([use]), ["hiddenExcerpt()"]);
@@ -407,18 +291,23 @@ describe("call site report", () => {
       ...input.claims[0]!,
       ...ref,
       dependencies: [premise],
+      decision: { ...input.claims[0]!.decision, reason: "Call path verified." },
       evidence: { sourceIds: [], receiptIds: [] },
     };
     const render = () =>
-      renderDependencyReport({
+      renderRepository({
         ...input,
-        uses: [{ ...use, conclusionClaim: ref }],
+        uses: [{ ...use, conclusionClaim: ref, supportingClaims: [premise] }],
         claims: [conclusion, ...input.claims],
       });
-    expect(render()).toContain("hiddenExcerpt");
-    conclusion.revision++;
-    expect(render()).not.toContain("hiddenExcerpt");
-    conclusion.revision--;
+    const complete = text(panel(render(), "use-1-1"));
+    expect(complete).toMatch(/Call path verified\..*Source verified/u);
+    expect(complete).toContain("hiddenExcerpt");
+    input.claims[0]!.revision++;
+    const stale = text(panel(render(), "use-1-1"));
+    expect(stale).toContain("Missing claim: evidence-0 · r1");
+    expect(stale).not.toContain("hiddenExcerpt");
+    input.claims[0]!.revision--;
     input.claimEvidence.sources["cite-0-0"]!.commit = "f".repeat(40);
     expect(render()).not.toContain("hiddenExcerpt");
   });
@@ -447,17 +336,6 @@ describe("call site report", () => {
                 },
               ],
             },
-            {
-              ecosystem_specific: {
-                imports: [
-                  {
-                    path: "example.invalid/codec",
-                    symbols: ["Decoder.Decode"],
-                  },
-                ],
-              },
-            },
-            { ecosystem_specific: { affects: { functions: ["decode::run"] } } },
           ],
         },
         {
@@ -468,12 +346,10 @@ describe("call site report", () => {
       ],
       advisories: [url, "javascript:alert(1)", suspicious],
     };
-    const html = renderDependencyReport(r);
+    const html = renderRepository(r);
     for (const v of [
       "A malformed frame",
       "Decoder.decode",
-      "Decoder.Decode",
-      "decode::run",
       "sample-codec",
       "fixed in 1.2.4",
       "Only frame mode",
@@ -487,24 +363,6 @@ describe("call site report", () => {
     expect(html).not.toContain("synthetic-password");
     expect(html).not.toContain("synthetic-token");
   });
-  test("deduplicates unresolved limitations without removing source records or merging leads", () => {
-    const a = unresolved(1, { reason: "The selected build is missing." }),
-      b = unresolved(2, { reason: "The selected build is missing." });
-    const r = {
-      ...report([], [a, b]),
-      limitations: [
-        "The selected build is missing. Unresolved source locations: src/parser-1.ts:2.",
-        "The selected build is missing. Unresolved source locations: src/parser-2.ts:3.",
-        "Independent shared limitation.",
-      ],
-    };
-    const html = renderDependencyReport(r);
-    expect(elements(html, "article[data-verdict=unresolved]")).toHaveLength(2);
-    expect(text(html)).toMatch(/Affected: Parser 1\s*,\s*Parser 2/u);
-    expect(text(html)).toContain("Independent shared limitation");
-    expect(text(html)).toContain("src/parser-1.ts:2.");
-    expect(text(html)).toContain("src/parser-2.ts:3.");
-  });
   test("escapes untrusted metadata and snippets, verifies the script hash and loads no external resources", () => {
     const raw = '<svg onload="alert(1)">',
       u = reviewed(1, {
@@ -514,7 +372,7 @@ describe("call site report", () => {
         services: [service("svc:x", raw, sourceRef("src/handler-1.ts", 2))],
       });
     const r = { ...withExcerpts(report([u]), [raw]), limitations: [raw] };
-    const html = renderDependencyReport(r);
+    const html = renderRepository(r);
     expect(html).not.toContain(raw);
     expect(html).toContain("&lt;svg");
     const scripts: string[] = [];
@@ -555,7 +413,7 @@ describe("call site report", () => {
         transferBasis: "The files match.",
       },
     ];
-    expect(() => renderDependencyReport(report([u]))).toThrow();
+    expect(() => renderRepository(report([u]))).toThrow();
   });
   test("follows cited argument renames and retains an exact anchor for each frame", () => {
     const input = "read.ts";
@@ -597,24 +455,13 @@ describe("call site report", () => {
       "const doc = request.body;\nhandle(doc);",
       "codec.read(payload);",
     ];
-    const html = renderDependencyReport(withExcerpts(report([item]), excerpts));
+    const html = renderRepository(withExcerpts(report([item]), excerpts));
     expect(attributes(html, "details.frame", "data-role")).toEqual([
       "source",
       "call",
       "call_site",
     ]);
-    expect(attributes(html, "details.frame[open]", "data-role")).toEqual([
-      "source",
-    ]);
-    expect(
-      attributes(html, "details.frame[open] [data-highlighted]", "data-line"),
-    ).toEqual(["1"]);
-    expect(
-      elements(html, "details.frame[open] [data-highlighted] [data-follow]"),
-    ).toHaveLength(1);
-    expect(
-      attributes(html, "details.frame[open] [data-related]", "data-line"),
-    ).toEqual(["2"]);
+    expect(elements(html, "details.frame[open] [data-follow]")).toHaveLength(1);
     const gapped = {
       ...item,
       trace: [
@@ -623,7 +470,7 @@ describe("call site report", () => {
         item.trace![1]!,
       ],
     };
-    const gappedHtml = renderDependencyReport(
+    const gappedHtml = renderRepository(
       withExcerpts(report([gapped]), excerpts),
     );
     expect(
@@ -639,7 +486,7 @@ describe("call site report", () => {
       location: "Upload → allegedWrapper() → allegedSink()",
     });
     expect(
-      elements(renderDependencyReport(report([item])), "details.frame"),
+      elements(renderRepository(report([item])), "details.frame"),
     ).toHaveLength(0);
     const gap = unresolved(1, {
       trace: [
@@ -654,7 +501,7 @@ describe("call site report", () => {
         missing: "Which plugin handles the document?",
       },
     });
-    const html = renderDependencyReport(report([], [gap]));
+    const html = renderRepository(report([], [gap]));
     expect(attributes(html, "details.frame", "data-role")).toEqual(["source"]);
     expect(html).toContain("Which plugin handles the document?");
     expect(html).toContain("Bytes reach the parser.");

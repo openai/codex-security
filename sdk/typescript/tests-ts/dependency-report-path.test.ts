@@ -1,9 +1,13 @@
 import { expect, test } from "bun:test";
 import { inspectPath } from "../src/exploitability/report/path.js";
 import { prepareDependencyReport } from "../src/exploitability/report/model.js";
-import { stackReport } from "./support/dependency-stack-report-fixture.js";
+import {
+  stackReport,
+  stacksReport,
+} from "./support/dependency-stack-report-fixture.js";
 import {
   report,
+  repositoryReport,
   reviewed,
   sourceRef,
 } from "./support/dependency-report-fixtures.js";
@@ -11,7 +15,8 @@ import {
 const sha = "a".repeat(40);
 const path = "src/codec.ts";
 function sample() {
-  const section = prepareDependencyReport(stackReport()).sections[0]!;
+  const section = prepareDependencyReport(stacksReport(stackReport()))
+    .sections[0]!;
   const finding = section.prepared!.findings.find(
     (f) => f.kind === "stack" && f.assessment.stack,
   )!;
@@ -84,8 +89,8 @@ test("a missing or unreviewed source step is a gap, not a selectable call", () =
       { kind: "gap", label: "Producer unknown" },
     ],
   });
-  const finding = prepareDependencyReport(report([use])).sections[0]!.prepared!
-    .findings[0]!;
+  const finding = prepareDependencyReport(repositoryReport(report([use])))
+    .sections[0]!.prepared!.findings[0]!;
   const result = inspectPath(finding);
   expect(result.frames.map((f) => f.role)).toEqual(["gap", "gap"]);
   expect(result.initialIndex).toBe(-1);

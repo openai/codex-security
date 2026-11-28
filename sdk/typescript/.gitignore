@@ -8,4 +8,4 @@
 /private_release/dist/
 /*.tsbuildinfo
 /schemas/dependency-stack-inputs-v2.schema.json
-/schemas/stack-investigation-report-v2.schema.json
+/schemas/exploitability-report.schema.json
