@@ -1,10 +1,15 @@
 import { expect, test } from "bun:test";
 import { PassThrough, Writable } from "node:stream";
-import { dependencyCoordinatorPermissionsMatch } from "../src/exploitability/analyzers/repository/coordinator.js";
+import {
+  createDependencyCoordinatorSession,
+  dependencyCoordinatorPermissionsMatch,
+} from "../src/exploitability/analyzers/repository/coordinator.js";
 import { readSkillCommandOutput } from "../src/cli.js";
+import type { JsonObject } from "../src/config.js";
 import {
   createDependencyEvidenceCapture,
   type DependencyEvidenceRecord,
+  type Sample,
 } from "../src/exploitability/evidence-sources.js";
 import { createDependencyLinkedResourceCapture } from "../src/exploitability/linked-resources.js";
 import {
@@ -12,15 +17,16 @@ import {
   evidencePage,
 } from "../src/exploitability/investigation-session.js";
 
+const profile = {
+  filesystem: { ":root": "read" },
+  network: { enabled: false },
+};
+const config = {
+  default_permissions: "dependency_investigation",
+  permissions: { dependency_investigation: profile },
+};
+
 test("the selected coordinator's child retrieves linked evidence on its own native thread before exit", async () => {
-  const profile = {
-    filesystem: { ":root": "read" },
-    network: { enabled: false },
-  };
-  const flags = {
-    default_permissions: "dependency_investigation",
-    permissions: { dependency_investigation: profile },
-  };
   const stream = new PassThrough();
   const requests: Record<string, unknown>[] = [];
   const records: DependencyEvidenceRecord[] = [];
@@ -64,8 +70,8 @@ test("the selected coordinator's child retrieves linked evidence on its own nati
         write({
           id: req.id,
           result: {
-            config: flags,
-            layers: [{ name: { type: "sessionFlags" }, config: flags }],
+            config,
+            layers: [{ name: { type: "sessionFlags" }, config }],
           },
         });
       else if (req.method === "thread/start") {
@@ -171,78 +177,113 @@ test("the selected coordinator's child retrieves linked evidence on its own nati
   expect(usage).toMatchObject([{ input_tokens: 7, output_tokens: 4 }]);
 });
 
-test("evidence previews and citations select the same original JSON", () => {
+test("evidence pages require exact, own JSON paths", () => {
+  const receipt = { server: "mcp", tool: "list", sha256: "id", arguments: {} };
+  type Path = (string | number)[];
   const page = (
     result: Record<string, unknown>,
-    textBlock: number | null,
-    record: (string | number)[],
-    path?: (string | number)[],
+    record: Path,
+    path: Path = [],
+    textBlock: number | null = 0,
   ) =>
     evidencePage(
-      {
-        sha256: "receipt",
-        server: "sampler",
-        tool: "lookup",
-        arguments: {},
-        result,
-      },
-      {
-        id: "receipt",
-        selection: { textBlock, record },
-        ...(path && { path }),
-      },
+      { ...receipt, result },
+      { id: "id", selection: { textBlock, record }, path },
     ).text;
   const text = '{"rows":[{"__proto__":false}]}';
   const tool = { content: [{ type: "text", text }] };
+  expect(page(tool, ["rows", 0], ["__proto__"])).toBe("false");
   const resource = { contents: [{ text }] };
-  expect(page(tool, 0, ["rows", 0], ["__proto__"])).toBe("false");
-  expect(page(resource, 0, ["rows", 0, "__proto__"])).toBe("false");
-  expect(
-    page({ structuredContent: null, structured_content: "other" }, null, []),
-  ).toBe("null");
-  expect(() => page(tool, 0, ["rows"], ["0"])).toThrow(/Selector/);
-  expect(() => page(tool, 0, ["rows", "0"])).toThrow(/Selector/);
-  expect(() => page(tool, 0, ["rows", 0, "constructor"])).toThrow(/Selector/);
-  expect(() => page({ content: [{ type: "image", text }] }, 0, [])).toThrow(
-    /JSON text block/,
-  );
+  expect(page(resource, ["rows", 0, "__proto__"])).toBe("false");
+  const dual = { structuredContent: null, structured_content: "other" };
+  expect(page(dual, [], [], null)).toBe("null");
+  expect(() => page(tool, ["rows"], ["0"])).toThrow(/Selector/);
+  expect(() => page(tool, ["rows", "0"])).toThrow(/Selector/);
+  expect(() => page(tool, ["rows", 0, "constructor"])).toThrow(/Selector/);
+  const image = { content: [{ type: "image", text }] };
+  expect(() => page(image, [])).toThrow(/JSON text block/);
 });
 
 test("native permission table merging cannot silently widen linked evidence sessions", () => {
-  const profile = {
-    filesystem: { ":root": "read" },
-    network: { enabled: false },
-  };
-  const config = {
-    default_permissions: "dependency_investigation",
-    permissions: { dependency_investigation: profile },
-  };
   const layers = [{ name: { type: "sessionFlags" }, config }];
-  expect(dependencyCoordinatorPermissionsMatch(config, layers)).toBe(true);
-  expect(
+  const matches = (actual: JsonObject) =>
     dependencyCoordinatorPermissionsMatch(
-      {
-        ...config,
-        permissions: {
-          dependency_investigation: { ...profile, extends: null },
-        },
-      },
+      { ...config, permissions: { dependency_investigation: actual } },
       layers,
-    ),
-  ).toBe(true);
-  expect(
-    dependencyCoordinatorPermissionsMatch(
-      {
-        ...config,
-        permissions: {
-          dependency_investigation: {
-            ...profile,
-            filesystem: { ...profile.filesystem, "/tmp": "write" },
-          },
-        },
-      },
-      layers,
-    ),
-  ).toBe(false);
+    );
+  expect(matches({ ...profile, extends: null })).toBe(true);
+  const filesystem = { ...profile.filesystem, "/tmp": "write" };
+  expect(matches({ ...profile, filesystem })).toBe(false);
   expect(dependencyCoordinatorPermissionsMatch(config, [])).toBe(false);
+});
+
+test("native sampling rejects tool calls and stale turns, and cancels pending requests", async () => {
+  const sent: Record<string, unknown>[] = [];
+  const abort = new AbortController();
+  let turn = "turn-1";
+  let sample: Sample | undefined;
+  const totals: number[] = [];
+  const session = createDependencyCoordinatorSession(
+    {
+      async item() {},
+      sampler: (fn) => {
+        sample = fn;
+      },
+      signal: abort.signal,
+      usage: (value) => totals.push(value.total_tokens),
+    },
+    (request) => sent.push(request),
+    undefined,
+    () => turn,
+  );
+  session.register("root");
+  const ask = () => sample!("lookup");
+  function reply(text: string | null, sourceTurnId = turn) {
+    session.receive({
+      id: sent.at(-1)!["id"],
+      result: { sourceTurnId, text, inputTokens: 5, outputTokens: 1 },
+    });
+  }
+
+  const toolAttempt = ask();
+  expect(sent[0]).toMatchObject({
+    method: "thread/sample",
+    params: {
+      threadId: "root",
+      expectedTurnId: turn,
+      allowInProgressTurn: true,
+      disableMcp: true,
+      prompt: "lookup",
+    },
+  });
+  reply(null);
+  expect(await toolAttempt).toBeUndefined();
+  expect(sent).toHaveLength(1);
+
+  session.receive({
+    method: "turn/completed",
+    params: { threadId: "root", turn: { id: turn } },
+  });
+  const completed = ask();
+  reply("complete");
+  expect(await completed).toBe("complete");
+  expect(totals).toEqual([6, 6]);
+  const wrong = ask();
+  reply("complete", "wrong");
+  expect(await wrong).toBeUndefined();
+  const stale = ask();
+  turn = "turn-2";
+  reply("complete", "turn-1");
+  expect(await stale).toBeUndefined();
+
+  const pending = ask();
+  const requestId = sent.at(-1)!["id"];
+  abort.abort();
+  expect(await pending).toBeUndefined();
+  expect(sent.at(-1)).toMatchObject({
+    method: "thread/sample/cancel",
+    params: { requestId },
+  });
+  session.close();
+  expect(sample).toBeUndefined();
 });

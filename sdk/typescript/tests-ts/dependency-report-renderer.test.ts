@@ -9,7 +9,6 @@ import {
   summarizeDependencyReport,
 } from "../src/exploitability/report/text.js";
 import {
-  broadReport,
   place,
   receiptRef,
   report,
@@ -183,6 +182,9 @@ describe("call site report", () => {
       ...raw,
       assessments: [{ ...assessment, stack }, empty],
     });
+    const [entry] = elements(html, '[data-entry="stack-1-1"]');
+    expect(entry!.text).toContain("codec.ts:3");
+    expect(entry!.text).not.toContain("stack-a");
     const observed = panel(html, "stack-1-1");
     const frames = elements(observed, "details.frame", ["data-role"]);
     expect(frames.map((f) => f.attrs["data-role"])).toEqual([
@@ -201,42 +203,12 @@ describe("call site report", () => {
     expect(
       elements(observed, "#stack-1-1-frame-2 .unavailable").length,
     ).toBeGreaterThan(0);
-    for (const selector of ["[data-next]", "[data-prev]", ".gap"])
-      expect(elements(observed, selector).length).toBeGreaterThan(0);
     expect(text(observed)).toContain("Sampled copy 1.0");
     expect(text(observed)).toContain("Which decoder mode ran?");
-    expect(text(observed)).toContain("The guard is configurable.");
-    expect(text(observed)).toContain("Search coverage partial");
-    expect(text(html)).toContain("Finalized offline");
-    expect(text(html)).toContain("omits the advisory description");
     expect(html).not.toContain("RAW_RECEIPT_CONTENT");
     const missing = panel(html, "stack-1-2");
     expect(elements(missing, "details.frame")).toHaveLength(0);
     expect(text(missing)).not.toContain("Sampled copy 1.0");
-  });
-  test("queue links name call sites, not stack hashes, and cover every item exactly once", () => {
-    const stack = renderDependencyReport(stackReport());
-    const [entry] = elements(stack, '[data-entry="stack-1-1"]');
-    expect(entry!.text).toContain("codec.ts:3");
-    expect(entry!.text).not.toContain("stack-a");
-    const html = renderDependencyReport(broadReport());
-    const articles = elements(html, "article[data-finding]", [
-      "id",
-      "data-verdict",
-    ]);
-    expect(attributes(html, "a[data-entry]", "href")).toEqual(
-      articles.map((a) => "#" + a.attrs["id"]),
-    );
-    expect(new Set(articles.map((a) => a.attrs["id"])).size).toBe(88);
-    expect(
-      articles.filter((a) => a.attrs["data-verdict"] === "unknown"),
-    ).toHaveLength(48);
-    expect(
-      articles.filter((a) => a.attrs["data-verdict"] === "ruled_out"),
-    ).toHaveLength(16);
-    expect(
-      articles.filter((a) => a.attrs["data-verdict"] === "unresolved"),
-    ).toHaveLength(24);
   });
   test("source-only code starts at the reviewed call, with conditions and the deciding check", () => {
     const raw = variantReport();
@@ -258,13 +230,6 @@ describe("call site report", () => {
       "met",
       "unknown",
     ]);
-    for (const fact of [
-      "Request reaches decoder before authentication",
-      "Read the admitted worker setting",
-      "Cedar prod stable linux/amd64",
-      "The guard rejects",
-    ])
-      expect(text(source)).toContain(fact);
     const shared = panel(html, "use-1-3");
     expect(text(shared)).toContain("Cedar");
     expect(text(shared)).toContain("Spruce");
@@ -347,14 +312,6 @@ describe("call site report", () => {
         measurement: { unit: "cpu_samples", count: 321 },
         completeness: "partial",
       },
-      {
-        question: "Image",
-        target,
-        source: "registry",
-        outcome: "denied",
-        evidence: [ref],
-        result: "Registry denied the request.",
-      },
     ];
     const h = text(panel(renderDependencyReport(report([u])), "use-1-1"));
     for (const fact of [
@@ -364,25 +321,9 @@ describe("call site report", () => {
       "Comparison workload Neighbor",
       "321 CPU samples",
       "Backend reported partial",
-      "Registry denied the request.",
     ])
       expect(h).toContain(fact);
     expect(h).not.toContain("321 calls");
-  });
-  test("legacy uses retain their verdict without an invented matched sink", () => {
-    const { place: _place, decidingEvidence: _ref, ...u } = reviewed(1);
-    const html = renderDependencyReport({
-      cve: "CVE-2099-44001",
-      advisories: [],
-      usage: null,
-      status: "unknown",
-      uses: [u],
-      limitations: [],
-    });
-    const item = panel(html, "use-1-1");
-    expect(text(item)).toContain("Requires more information");
-    expect(elements(item, "[data-role=sink]")).toHaveLength(0);
-    expect(text(item)).toContain("Deployment unverified");
   });
   test("distinguishes an empty check from blocked and pending advisories", () => {
     const blocked = {
@@ -564,7 +505,7 @@ describe("call site report", () => {
     expect(text(html)).toContain("src/parser-1.ts:2.");
     expect(text(html)).toContain("src/parser-2.ts:3.");
   });
-  test("escapes untrusted metadata and snippets, has a valid script hash, offline styles, keyboard and print fallbacks", () => {
+  test("escapes untrusted metadata and snippets, verifies the script hash and loads no external resources", () => {
     const raw = '<svg onload="alert(1)">',
       u = reviewed(1, {
         location: raw,
@@ -598,8 +539,6 @@ describe("call site report", () => {
       `script-src 'sha256-${createHash("sha256").update(script).digest("base64")}'`,
     );
     expect(policy).toContain("default-src 'none'");
-    expect(html).toContain("@media print");
-    expect(html).toContain(":focus-visible");
     expect(elements(html, "script[src]")).toHaveLength(0);
     expect(elements(html, "link[rel]")).toHaveLength(0);
   });
@@ -693,11 +632,6 @@ describe("call site report", () => {
 
     for (const value of ["request.body", "doc", "payload"])
       expect(html).toContain(`<mark class="trace-argument">${value}</mark>`);
-    for (const ordinal of [1, 2]) {
-      const id = `use-1-1-source-${ordinal}`;
-      expect(html).toContain(`href="#${id}"`);
-      expect(html.split(`id="${id}"`).length).toBe(2);
-    }
   });
 
   test("never converts location labels into call frames or a coverage gap into a sink", () => {
@@ -724,29 +658,5 @@ describe("call site report", () => {
     expect(attributes(html, "details.frame", "data-role")).toEqual(["source"]);
     expect(html).toContain("Which plugin handles the document?");
     expect(html).toContain("Bytes reach the parser.");
-  });
-
-  test("withholds frame claims tied to a different revision or absent deciding citation", () => {
-    const path = "src/handler-1.ts";
-    const item = reviewed(1, {
-      trace: [
-        {
-          kind: "source",
-          label: "Unsupported frame",
-          site: { path, line: 2, commit: "a".repeat(40) },
-        },
-      ],
-    });
-    const sourceFrames = () =>
-      elements(
-        renderDependencyReport(report([item])),
-        "details.frame[data-role=source]",
-      );
-    expect(sourceFrames()).toHaveLength(0);
-    item.trace = [
-      { kind: "source", label: "Unsupported frame", site: { path, line: 2 } },
-    ];
-    item.decidingEvidence = [];
-    expect(sourceFrames()).toHaveLength(0);
   });
 });

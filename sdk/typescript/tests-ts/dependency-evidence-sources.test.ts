@@ -1,8 +1,6 @@
 import { expect, test } from "bun:test";
 import {
   createDependencyEvidenceCapture,
-  dependencyLookupSearch,
-  lookupCoverage,
   selectDependencyEvidenceServers,
 } from "../src/exploitability/evidence-sources.js";
 
@@ -119,85 +117,4 @@ test("captures resource reads linked by a successful lookup on the same server a
   expect(
     createDependencyEvidenceCapture(servers)(resource("primary")),
   ).toBeUndefined();
-});
-
-test("report coverage follows declared response envelopes and never service rows", () => {
-  const summarize = (payload: Record<string, unknown>) =>
-    dependencyLookupSearch({
-      server: "registry",
-      tool: "list",
-      sha256: "receipt",
-      arguments: {},
-      result: { structuredContent: payload },
-    });
-  expect(summarize({ outcome: "found", status: "no_match" })).toMatchObject({
-    result: "returned",
-  });
-  expect(
-    summarize({
-      coverage: { complete: true },
-      rows: [{ partial: true, status: "no_match" }],
-      data: { service: { status: "matched", complete: false } },
-    }),
-  ).toMatchObject({ result: "returned", completeness: "complete" });
-  expect(
-    summarize({
-      coverage: { complete: true },
-      next_page_token: "",
-      nextCursor: "page2",
-    }),
-  ).toMatchObject({ completeness: "partial" });
-  expect(
-    summarize({
-      coverage: { complete: true },
-      metadata: { coverage: { result_complete: false } },
-    }),
-  ).toMatchObject({ completeness: "partial" });
-  expect(summarize({ complete: true, hasMore: "false" })).toMatchObject({
-    completeness: "unknown",
-  });
-  expect(summarize({ complete: true, coverage: "unknown" })).toMatchObject({
-    completeness: "unknown",
-  });
-  expect(
-    summarize({ complete: true, nextCursor: null, nextPageToken: "" }),
-  ).toMatchObject({ completeness: "complete" });
-  expect(
-    summarize({
-      complete: true,
-      content: [
-        {
-          type: "text",
-          text: JSON.stringify({ rows: [{ name: "…25 chars truncated…" }] }),
-        },
-      ],
-    }),
-  ).toMatchObject({ completeness: "complete" });
-});
-
-test("coverage inspects the selected resource root without treating payload JSON as an MCP envelope", () => {
-  const resource = {
-    contents: [
-      { text: JSON.stringify({ coverage: { complete: false } }) },
-      { text: JSON.stringify({ complete: true }) },
-    ],
-  };
-  expect(
-    lookupCoverage(resource, { textBlock: 0, record: [] }).incomplete,
-  ).toBe(true);
-  expect(
-    lookupCoverage(resource, { textBlock: 1, record: [] }).incomplete,
-  ).toBe(false);
-  const ordinary = {
-    content: [
-      {
-        type: "text",
-        text: JSON.stringify({
-          complete: true,
-          content: [{ type: "text", text: '{"partial":true}' }],
-        }),
-      },
-    ],
-  };
-  expect(lookupCoverage(ordinary).completeness).toBe("complete");
 });

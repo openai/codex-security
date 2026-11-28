@@ -10,9 +10,11 @@ import {
 } from "../src/exploitability/analyzers/stacks/run.js";
 import type { DependencyClaimReference } from "../src/exploitability/analyzers/stacks/claims.js";
 import {
+  captureWorkItems,
   prepareStackPacket,
   readStackPacket,
 } from "../src/exploitability/analyzers/stacks/packet.js";
+import { readRuntimeStackCaptures } from "../src/exploitability/analyzers/stacks/runtime-receipts.js";
 import { git } from "./git-fixture.js";
 import { dependencies } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";
@@ -96,7 +98,7 @@ async function fixture(root: string) {
   };
 }
 
-test("the gated CLI accepts an interactive init and runtime evidence without a packet", async () => {
+test("the gated CLI can attach a CVE to an existing capture without a packet", async () => {
   await using dir = await scopedTemporaryDirectory("incremental-stack-cli-");
   const { repo, state } = await fixture(dir.path);
   async function invoke(args: string[], input?: unknown) {
@@ -117,6 +119,10 @@ test("the gated CLI accepts an interactive init and runtime evidence without a p
     capture("debugger"),
   );
   expect(observed.workItemIds).toEqual(["captures/0/stacks/0"]);
+  expect(await invoke(["next", "--state", state])).toMatchObject({
+    workItem: null,
+    openQuestions: ["Supply the CVE identifier."],
+  });
   expect(
     await invoke(["init", "--repo", repo, "--state", state, "--json-stdin"], {
       cve,
@@ -130,21 +136,6 @@ test("the gated CLI accepts an interactive init and runtime evidence without a p
       sinkMatches: [{ sinkId: sink.id, rawIndex: 0 }],
     },
   });
-  const evidence = await invoke(
-    ["record-evidence", "--state", state, "--json-stdin"],
-    {
-      kind: "runtime",
-      server: "fixture",
-      tool: "inventory",
-      result: { version: "1.0.0" },
-    },
-  );
-  expect(evidence.receiptId).toMatch(/^runtime-/);
-  const { commands } = await invoke(["tools", "--state", state]);
-  const names = commands.map((item: { name: string }) => item.name);
-  expect(names).toContain("record-evidence");
-  expect(names).toContain("record-observations");
-  expect(names).not.toContain("read-stacks");
 });
 
 function capture(origin: string) {
@@ -212,18 +203,27 @@ test("interactive runs import runtime evidence, append work, and resume a finali
   );
   const initialized = (await executeStackRun("init", { state, repo })) as {
     inputDigest: string;
+    runId: string;
   };
-  await executeStackRun("init", {
-    state,
-    repo,
-    input: {
-      cve,
-      advisory,
-      sources: [],
-      sinks: [sink],
-      repository: "example/decoder",
-    },
+  const update = (input: unknown) =>
+    executeStackRun("init", { state, repo, input });
+  await expect(update({ cve, sinks: [] })).rejects.toThrow(
+    /Supply at least one sink/,
+  );
+  const updated = await update({
+    cve,
+    advisory,
+    sources: [],
+    sinks: [sink],
+    repository: "example/decoder",
   });
+  expect(updated).toMatchObject({
+    inputDigest: initialized.inputDigest,
+    runId: initialized.runId,
+  });
+  await expect(update({ cve: "CVE-2099-0002" })).rejects.toThrow(
+    "already recorded differently",
+  );
   const firstQuery = capture("first");
   const runtime = await recordQuery(firstQuery);
   const write = {
@@ -376,6 +376,17 @@ test.each(["direct", "imported"])("%s capture provenance", async (kind) => {
   });
   const original = capture("supplemental");
   const runtime = kind === "imported" ? await recordQuery(original) : null;
+  if (runtime) {
+    await expect(
+      run("record-observations", { receiptId: "missing" }),
+    ).rejects.toThrow(/receipt/i);
+    const altered = structuredClone(original);
+    altered.captures[0]!.stacks[0]!.frames[0]!.name = "fabricated";
+    await expect(
+      run("record-observations", { receiptId: runtime.receiptId, ...altered }),
+    ).rejects.toThrow();
+    expect(await run("next")).toMatchObject({ workItem: null });
+  }
   await run(
     "record-observations",
     runtime ? { receiptId: runtime.receiptId } : original,
@@ -431,25 +442,100 @@ test.each(["direct", "imported"])("%s capture provenance", async (kind) => {
   }
 });
 
-test("a receipt cannot be reused to introduce fabricated frames", async () => {
-  await using dir = await scopedTemporaryDirectory(
-    "incremental-stack-integrity-",
-  );
+test("profiler pages preserve coverage, leaf-first positions and unattributed frames", async () => {
+  await using dir = await scopedTemporaryDirectory("stack-live-profiler-");
   const { repo, state, run, recordQuery } = await fixture(dir.path);
-  await executeStackRun("init", {
-    state,
-    repo,
-    input: { cve, advisory, sinks: [sink] },
-  });
-  const original = capture("original");
-  const runtime = await recordQuery(original);
-  await expect(
-    run("record-observations", { receiptId: "missing" }),
-  ).rejects.toThrow(/receipt/i);
-  const altered = structuredClone(original);
-  altered.captures[0]!.stacks[0]!.frames[0]!.name = "fabricated";
-  await expect(
-    run("record-observations", { receiptId: runtime.receiptId, ...altered }),
-  ).rejects.toThrow();
-  expect(await run("next")).toMatchObject({ workItem: null });
+  await executeStackRun("init", { repo, state, input: { cve, sinks: [sink] } });
+  const store = new DependencyAttemptStore(state, { create: false });
+  try {
+    const graph = {
+      format: "codex-security-graph-evidence/v1",
+      frame_order: "root_first",
+      metadata: {
+        clickhouse_query_id: "query-id",
+        scope: {
+          service: "sample",
+          start: window.start,
+          end: window.end,
+          query: {
+            kind: "pair",
+            sources: [{ name: "request" }],
+            sinks: [{ name: "decode" }],
+          },
+        },
+        coverage: { result_complete: false },
+        limits: { truncated: false },
+      },
+      observations: [
+        {
+          id: "call",
+          kind: "sampled_stack",
+          scope: { service: "sample", window, stack_key: "opaque-key" },
+          frames: ["request", "decode"].map((name) => ({
+            kind: "function",
+            name,
+            attributes: { name, language: "javascript" },
+          })),
+        },
+      ],
+    };
+    const receipt = await recordQuery(graph);
+    await run("record-observations", { receiptId: receipt.receiptId });
+    const next = await run("next");
+    expect(next).toMatchObject({
+      workItem: {
+        id: "captures/0/stacks/0",
+        query: { coverage: "partial" },
+        stack: { frames: [{ name: "decode" }, { name: "request" }] },
+        sinkMatches: [],
+        leads: [{ sinkId: "decode", rawIndex: 0 }],
+      },
+    });
+    // Keep the provider's opaque stack key in the original receipt.
+    expect(next).toHaveProperty("workItem.stack.labels", { service: "sample" });
+    const empty = {
+      ...graph,
+      metadata: {
+        ...graph.metadata,
+        status: "empty_matches",
+        coverage: { result_complete: true },
+      },
+      observations: [],
+    };
+    for (const [result, status] of [
+      [empty, "no_match"],
+      [{ ...empty, nextCursor: "more" }, "no_coverage"],
+      [{ structuredContent: empty, nextCursor: "more" }, "no_coverage"],
+      [{ ...empty, nextCursor: 1 }, "no_coverage"],
+      [
+        { ...empty, metadata: { ...empty.metadata, limits: {} } },
+        "no_coverage",
+      ],
+    ] as const) {
+      const saved = await recordQuery(result);
+      const [page] = readRuntimeStackCaptures(store, saved.receiptId);
+      expect(captureWorkItems(page!, 0, [])[0]?.status).toBe(status);
+    }
+    const page = { query: { coverage: "complete" }, stacks: [] };
+    const bulk = await recordQuery({
+      format: "codex-security.stacks/v2",
+      captures: [page, { ...page, origin: "second search" }],
+    });
+    expect(
+      await run("record-observations", { receiptId: bulk.receiptId }),
+    ).toMatchObject({
+      workItemIds: ["captures/1", "captures/2"],
+    });
+    const inferred = await recordQuery({
+      ...graph,
+      metadata: {
+        ...graph.metadata,
+        join_basis: "inferred_creator_code",
+        instance_correlation_verified: false,
+      },
+    });
+    expect(() => readRuntimeStackCaptures(store, inferred.receiptId)).toThrow();
+  } finally {
+    store.close();
+  }
 });

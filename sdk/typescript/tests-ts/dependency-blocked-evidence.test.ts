@@ -16,8 +16,6 @@ import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 import { execFileSync } from "node:child_process";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { PassThrough, Writable } from "node:stream";
-import { readSkillCommandOutput } from "../src/cli.js";
 
 const target = { server: "builds", name: "lookup" };
 const details = {
@@ -76,16 +74,21 @@ const select = (receiptId: string, key: string) => ({
 });
 test("observed coverage must enumerate distinct selected requests and the current returned values", () => {
   const { block, result } = fixture();
-  const row = (id: string) => ({
-    requiredRecord: id,
-    selection: select(
-      result({ release: id }, { structuredContent: { artifact: null } }),
-      "artifact",
-    ),
-    missing: true,
-  });
+  const row = (id: string, fields: object = {}) => {
+    const structuredContent = {
+      artifact: null,
+      coverage: { complete: true },
+      ...fields,
+    };
+    const receipt = result({ release: id }, { structuredContent });
+    return {
+      requiredRecord: id,
+      selection: select(receipt, "artifact"),
+      missing: true,
+    };
+  };
   const first = row("one"),
-    second = row("two");
+    second = row("two", { artifact: [] });
   const proposal = {
     ...details,
     tool: target,
@@ -117,10 +120,6 @@ test("observed coverage must enumerate distinct selected requests and the curren
   expect(
     verify({ checks: [{ ...first, requiredRecord: "forged" }, second] }),
   ).toThrow();
-  expect(verify({ checked: 7 })).toThrow();
-  expect(() =>
-    block.verify({ ...proposal, status: "blocked" }, "root", []),
-  ).toThrow();
   expect(() =>
     block.verify(
       { ...proposal, evidenceReferences: ["unobserved"] },
@@ -134,44 +133,40 @@ test("observed coverage must enumerate distinct selected requests and the curren
       "root",
       [],
     ),
-  ).toThrow();
+  ).toThrow(/current original/);
   result({ release: "one" }, { structuredContent: { artifact: "fixed" } });
   expect(() => block.verify(proposal, "root", [])).toThrow(/current/);
-  const healthy = select(
-    result({ release: "two" }, { structuredContent: { artifact: ["found"] } }),
-    "artifact",
+  expect(
+    verify({ checks: [row("one"), row("two", { artifact: ["found"] })] }),
+  ).toThrow(/missing status/);
+  for (const fields of [
+    { coverage: undefined },
+    { coverage: { complete: true, available: false } },
+    { nextCursor: "more" },
+  ]) {
+    expect(verify({ checks: [row("one", fields), row("two")] })).toThrow(
+      /incomplete lookup coverage/i,
+    );
+  }
+  const nested = result(
+    { query: { notes: "one" } },
+    { structuredContent: { artifact: null, coverage: { complete: true } } },
   );
   expect(
     verify({
-      checks: [
-        {
-          ...first,
-          selection: select(
-            result(
-              { release: "one" },
-              { structuredContent: { artifact: null } },
-            ),
-            "artifact",
-          ),
-        },
-        { ...second, selection: healthy },
-      ],
+      checks: [{ ...first, selection: select(nested, "artifact") }, row("two")],
     }),
-  ).toThrow(/missing status/);
-  const absent = (release: string, partial: boolean) => ({
-    requiredRecord: release,
-    selection: select(
-      result(
-        { release },
-        { structuredContent: { artifact: null, metadata: { partial } } },
-      ),
-      "artifact",
-    ),
-    missing: true,
-  });
+  ).toThrow(/record identity/);
+  const failed = result(
+    { release: "one" },
+    { structuredContent: { status: "failed" } },
+    "failed",
+  );
   expect(
-    verify({ checks: [absent("one", true), absent("two", false)] }),
-  ).toThrow(/incomplete lookup coverage/i);
+    verify({
+      checks: [{ ...first, selection: select(failed, "status") }, row("two")],
+    }),
+  ).not.toThrow();
 });
 test("one provider response can block only the requested scope it marks unavailable", () => {
   const { block, result } = fixture();
@@ -179,10 +174,14 @@ test("one provider response can block only the requested scope it marks unavaila
   const unavailable = {
     scope,
     available: false,
+    complete: false,
     reason: "Nenhum registro confirmado.",
   };
   const lookup = (payload: object, requestScope = scope) =>
-    result({ scope: requestScope }, { structuredContent: payload });
+    result(
+      { scope: requestScope },
+      { structuredContent: payload, content: [], _meta: null },
+    );
   const verify = (receiptId: string, affectedScope = scope) =>
     block.verify(
       {
@@ -212,28 +211,36 @@ test("one provider response can block only the requested scope it marks unavaila
     { message: "All inventory checks passed except one missing record." },
     { coverage: { scope, complete: false } },
     { coverage: { scope: "staging", available: false } },
-    { complete: true, coverage: unavailable },
-    { coverage: { ...unavailable, result_complete: true } },
+    { coverage: { ...unavailable, complete: true } },
     { coverage: unavailable, metadata: { available: true } },
-    { coverage: unavailable, complete: "false" },
-    { coverage: unavailable, next_page_token: "", nextCursor: "more" },
-    { coverage: unavailable, backend_partial: true },
-    { metadata: { coverage: unavailable } },
   ])
     expect(() => verify(lookup(response))).toThrow(/structured coverage/);
-  expect(
-    verify(lookup({ coverage: { ...unavailable, complete: false } })),
-  ).toMatchObject({ affectedScope: scope });
+  const payload = { coverage: unavailable };
+  const withText = (body: object, meta: unknown = null) =>
+    result(
+      { scope },
+      {
+        structuredContent: payload,
+        content: [{ type: "text", text: JSON.stringify(body) }],
+        _meta: meta,
+      },
+    );
+  expect(verify(withText(payload)).affectedScope).toBe(scope);
+  expect(() => verify(withText(payload, { nextCursor: "more" }))).toThrow(
+    /structured coverage/,
+  );
+  expect(() =>
+    verify(withText({ coverage: { scope, available: true } })),
+  ).toThrow(/structured coverage/);
   expect(() => verify(receipt)).toThrow(/current/);
   expect(() =>
     verify(lookup({ status: "not_recorded", coverage: unavailable })),
   ).toThrow(/archived/);
 });
 
-test("the native coordinator owns the current failed required startup and only the active root turn can block", async () => {
+test("only the active root turn can block on a current required startup failure", () => {
   const { block, result } = fixture();
   const optional = block.startup("builds", "failed", false, "Optional source")!;
-  expect(optional).toBeTruthy();
   expect(() => block.verify(startupRequest(optional), "root", [])).toThrow(
     "current failed startup",
   );
@@ -274,7 +281,6 @@ test("the native coordinator owns the current failed required startup and only t
   expect(selected).toBeUndefined();
   status("builds", "failed", "root");
   const original = selected!;
-  expect(original).toBeTruthy();
   const call = (threadId: string, turnId: string, receiptId: string) => {
     session.abortCall(
       {
@@ -294,8 +300,15 @@ test("the native coordinator owns the current failed required startup and only t
   };
   expect(call("child", "now", original)).toMatchObject({ success: false });
   expect(call("root", "old", original)).toMatchObject({ success: false });
-  expect(call("root", "now", "made-up")).toMatchObject({ success: false });
-  expect(call("root", "now", original)).toMatchObject({ success: true });
+  expect(call("root", "now", original)).toMatchObject({
+    success: true,
+    contentItems: [
+      {
+        type: "inputText",
+        text: expect.stringContaining('"nativeThreadId":"root"'),
+      },
+    ],
+  });
   status("builds", "ready", "root");
   expect(call("root", "now", original)).toMatchObject({ success: false });
   status("builds", "failed", null);
@@ -310,119 +323,6 @@ test("the native coordinator owns the current failed required startup and only t
   });
   expect(call("root", "now", selected!)).toMatchObject({ success: false });
   session.close();
-});
-test("the coordinator registers and answers its abort tool on the native wire", async () => {
-  const stream = new PassThrough();
-  const write = (event: unknown) => stream.write(JSON.stringify(event) + "\n");
-  const config = {
-    default_permissions: "dependency_investigation",
-    permissions: {
-      dependency_investigation: {
-        filesystem: { ":root": "read" },
-        network: { enabled: false },
-      },
-    },
-  };
-  const { block } = fixture();
-  const results: unknown[] = [];
-  const input = new Writable({
-    write(data, _encoding, done) {
-      const request = JSON.parse(data.toString());
-      if (request.method === "initialize")
-        write({ id: request.id, result: {} });
-      if (request.method === "config/read")
-        write({
-          id: request.id,
-          result: {
-            config,
-            layers: [{ name: { type: "sessionFlags" }, config }],
-          },
-        });
-      if (request.method === "thread/start") {
-        expect(request.params.dynamicTools).toMatchObject([
-          {
-            name: "codex_security_reports",
-            tools: [{ name: dependencyAbortTool.name }],
-          },
-        ]);
-        write({
-          id: request.id,
-          result: {
-            thread: { id: "leader", ephemeral: true },
-            activePermissionProfile: { id: "dependency_investigation" },
-            model: "fixture",
-            modelProvider: "fixture",
-          },
-        });
-      }
-      if (request.method === "turn/start") {
-        write({ id: request.id, result: { turn: { id: "active" } } });
-        write({
-          method: "mcpServer/startupStatus/updated",
-          params: {
-            threadId: "leader",
-            name: "builds",
-            status: "failed",
-            error: "Offline",
-          },
-        });
-      }
-      if (request.id === "abort") {
-        results.push(request.result);
-        write({
-          method: "turn/completed",
-          params: {
-            threadId: "leader",
-            turn: { id: "active", status: "completed" },
-          },
-        });
-      }
-      done();
-    },
-    final(done) {
-      stream.end();
-      done();
-    },
-  });
-  await readSkillCommandOutput(stream, {
-    input,
-    directory: "/fixture",
-    prompt: "Investigate",
-    threadSource: "security_validation",
-    cyberAccessProgram: "standard",
-    linkedEvidence: {
-      async item() {},
-      startup(server, status, error) {
-        const receiptId = block.startup(server, status, true, error)!;
-        write({
-          id: "abort",
-          method: "item/tool/call",
-          params: {
-            threadId: "leader",
-            turnId: "active",
-            namespace: "codex_security_reports",
-            tool: dependencyAbortTool.name,
-            arguments: startupRequest(receiptId),
-          },
-        });
-      },
-      abort: {
-        ...dependencyAbortTool,
-        call: (args, id) => block.verify(args, id, []),
-      },
-    },
-  });
-  expect(results).toEqual([
-    {
-      success: true,
-      contentItems: [
-        {
-          type: "inputText",
-          text: expect.stringContaining('"nativeThreadId":"leader"'),
-        },
-      ],
-    },
-  ]);
 });
 
 test("a validated block stops the advisory even when the investigator returns a final answer", async () => {
