@@ -660,6 +660,28 @@ class ControlValidation(unittest.TestCase):
                 with self.assertRaisesRegex(ValueError, "invalid assessment line range"):
                     builder.validate(self.model, assessment_bytes)
 
+    def test_assessment_line_range_requires_integer_bounds(self):
+        assessment = b"policy denies this caller\n"
+        self.model["assessmentSha256"] = hashlib.sha256(assessment).hexdigest()
+        evidence = self.model["evidence"][0]
+        evidence.update(startLine=1, endLine=1)
+        builder.validate(self.model, assessment)
+        for start, end in (
+            (True, True),
+            (True, 1),
+            (1, True),
+            (False, 1),
+            (1, False),
+            (0, 0),
+            (1.0, 1),
+        ):
+            evidence.update(startLine=start, endLine=end)
+            with (
+                self.subTest(start=start, end=end),
+                self.assertRaisesRegex(ValueError, "invalid assessment line range"),
+            ):
+                builder.validate(self.model, assessment)
+
     def test_builder_reports_invalid_utf8_before_checking_quotes(self):
         self.build_html(b"x" * 8192 + b"\xff", error="byte 0xff in position 8192")
 

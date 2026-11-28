@@ -475,7 +475,11 @@ def validate(model, assessment_bytes: bytes):
         if "startLine" in e or "endLine" in e:
             a, b = e.get("startLine"), e.get("endLine")
             require(
-                isinstance(a, int) and isinstance(b, int) and 1 <= a <= b <= len(lines),
+                isinstance(a, int)
+                and not isinstance(a, bool)
+                and isinstance(b, int)
+                and not isinstance(b, bool)
+                and 1 <= a <= b <= len(lines),
                 f"{e['id']}: invalid assessment line range",
             )
             require(
