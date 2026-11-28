@@ -26,7 +26,7 @@ import {
   expandHome,
 } from "./runtime.js";
 import { VERSION } from "./version.js";
-import { cloudBaseUrl } from "./cloud-endpoint.js";
+import { cloudPublishUrl } from "./cloud-endpoint.js";
 const CHATGPT_LOGIN_REQUIRED =
   "Cloud publication requires a ChatGPT login already available to Codex Security and saved to a file. Set cli_auth_credentials_store = \"file\" in ~/.codex/config.toml (or $CODEX_HOME/config.toml), run 'codex-security login', then retry.";
 
@@ -172,9 +172,7 @@ async function publishCloudPayload(
     };
   }
   const environment = dependencies.environment ?? process.env;
-  const publishUrl =
-    environment["CODEX_SECURITY_CLOUD_PUBLISH_URL"]?.trim() ||
-    `${cloudBaseUrl(environment)}/cli/findings`;
+  const publishUrl = cloudPublishUrl(environment);
   const credentials = await readCloudCredentials(
     environment,
     dependencies.signal,

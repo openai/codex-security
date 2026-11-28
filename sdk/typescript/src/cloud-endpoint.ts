@@ -36,16 +36,13 @@ export function cloudFindingsUrl(
   return url.href;
 }
 
-/** Resolve the deployment once so discovery, writes, and retries share a host. */
-export function cloudBaseUrl(environment: NodeJS.ProcessEnv): string {
-  const configured = environment["CODEX_SECURITY_CLOUD_BASE_URL"];
-  if (configured === undefined) return DEFAULT_CLOUD_BASE_URL;
+function parseCloudApiUrl(value: string, variable: string): URL {
   let url: URL;
   try {
-    url = new URL(configured.trim());
+    url = new URL(value.trim());
   } catch {
     throw new CodexSecurityError(
-      "CODEX_SECURITY_CLOUD_BASE_URL must be an absolute HTTP(S) Cloud API base URL.",
+      `${variable} must be an absolute HTTP(S) Cloud API URL.`,
     );
   }
   if (
@@ -56,7 +53,7 @@ export function cloudBaseUrl(environment: NodeJS.ProcessEnv): string {
     url.hash
   )
     throw new CodexSecurityError(
-      "CODEX_SECURITY_CLOUD_BASE_URL must be an HTTP(S) Cloud API base URL without credentials, a query, or a fragment.",
+      `${variable} must be an HTTP(S) Cloud API URL without credentials, a query, or a fragment.`,
     );
   if (
     url.protocol === "http:" &&
@@ -65,7 +62,27 @@ export function cloudBaseUrl(environment: NodeJS.ProcessEnv): string {
     !(isIP(url.hostname) === 4 && url.hostname.startsWith("127."))
   )
     throw new CodexSecurityError(
-      "CODEX_SECURITY_CLOUD_BASE_URL requires HTTPS for remote Cloud APIs; HTTP is supported only for loopback development.",
+      `${variable} requires HTTPS for remote Cloud APIs; HTTP is supported only for loopback development.`,
     );
-  return url.href.replace(/\/+$/u, "");
+  return url;
+}
+
+/** Resolve the deployment once so discovery, writes, and retries share a host. */
+export function cloudBaseUrl(environment: NodeJS.ProcessEnv): string {
+  const configured = environment["CODEX_SECURITY_CLOUD_BASE_URL"];
+  if (configured === undefined) return DEFAULT_CLOUD_BASE_URL;
+  return parseCloudApiUrl(
+    configured,
+    "CODEX_SECURITY_CLOUD_BASE_URL",
+  ).href.replace(/\/+$/u, "");
+}
+
+/** Native scan publishing; the legacy publish URL must satisfy the same transport rules. */
+export function cloudPublishUrl(environment: NodeJS.ProcessEnv): string {
+  const configured = environment["CODEX_SECURITY_CLOUD_PUBLISH_URL"]?.trim();
+  if (configured !== undefined && configured !== "") {
+    parseCloudApiUrl(configured, "CODEX_SECURITY_CLOUD_PUBLISH_URL");
+    return configured;
+  }
+  return `${cloudBaseUrl(environment)}/cli/findings`;
 }

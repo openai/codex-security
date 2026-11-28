@@ -2162,6 +2162,10 @@ full app URL. The preview and result can then supply a repository-specific
 `cloudUrl`. With a custom API and no web URL, the CLI prints navigation
 instructions. API requests always use the API root. The older
 `CODEX_SECURITY_CLOUD_PUBLISH_URL` setting applies only to native scan publishing.
+It accepts a different publish endpoint but enforces the same transport rules as
+the API root: remote URLs require HTTPS, loopback development also accepts HTTP,
+and an invalid setting stops publication before authentication or network
+requests.
 
 ### Resume interrupted imports
 
