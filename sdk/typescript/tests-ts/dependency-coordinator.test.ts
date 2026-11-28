@@ -171,6 +171,43 @@ test("the selected coordinator's child retrieves linked evidence on its own nati
   expect(usage).toMatchObject([{ input_tokens: 7, output_tokens: 4 }]);
 });
 
+test("evidence previews and citations select the same original JSON", () => {
+  const page = (
+    result: Record<string, unknown>,
+    textBlock: number | null,
+    record: (string | number)[],
+    path?: (string | number)[],
+  ) =>
+    evidencePage(
+      {
+        sha256: "receipt",
+        server: "sampler",
+        tool: "lookup",
+        arguments: {},
+        result,
+      },
+      {
+        id: "receipt",
+        selection: { textBlock, record },
+        ...(path && { path }),
+      },
+    ).text;
+  const text = '{"rows":[{"__proto__":false}]}';
+  const tool = { content: [{ type: "text", text }] };
+  const resource = { contents: [{ text }] };
+  expect(page(tool, 0, ["rows", 0], ["__proto__"])).toBe("false");
+  expect(page(resource, 0, ["rows", 0, "__proto__"])).toBe("false");
+  expect(
+    page({ structuredContent: null, structured_content: "other" }, null, []),
+  ).toBe("null");
+  expect(() => page(tool, 0, ["rows"], ["0"])).toThrow(/Selector/);
+  expect(() => page(tool, 0, ["rows", "0"])).toThrow(/Selector/);
+  expect(() => page(tool, 0, ["rows", 0, "constructor"])).toThrow(/Selector/);
+  expect(() => page({ content: [{ type: "image", text }] }, 0, [])).toThrow(
+    /JSON text block/,
+  );
+});
+
 test("native permission table merging cannot silently widen linked evidence sessions", () => {
   const profile = {
     filesystem: { ":root": "read" },

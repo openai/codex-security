@@ -11,7 +11,10 @@ import {
   recordObservations,
   supplementalReceipt,
 } from "../src/exploitability/analyzers/stacks/live.js";
-import { stackPacketWorkItems } from "../src/exploitability/analyzers/stacks/packet.js";
+import {
+  captureWorkItems,
+  stackPacketWorkItems,
+} from "../src/exploitability/analyzers/stacks/packet.js";
 import {
   prepareRuntimeEvidence,
   readRuntimeStackCaptures,
@@ -159,6 +162,24 @@ test("a profiler reply preserves search coverage and leaf-first positions withou
       sinkMatches: [],
       leads: [{ sinkId: "decode", rawIndex: 0 }],
     });
+    const empty = {
+      ...graph,
+      metadata: {
+        ...graph.metadata,
+        status: "empty_matches",
+        coverage: { result_complete: true },
+      },
+      observations: [],
+    };
+    for (const [result, status] of [
+      [empty, "no_match"],
+      [{ ...empty, hasMore: true }, "no_coverage"],
+      [{ structuredContent: empty, nextCursor: "more" }, "no_coverage"],
+    ] as const) {
+      const saved = await imported(result);
+      const [page] = readRuntimeStackCaptures(store, saved.receiptId);
+      expect(captureWorkItems(page!, 0, [])[0]?.status).toBe(status);
+    }
     const inferred = await imported({
       ...graph,
       metadata: {

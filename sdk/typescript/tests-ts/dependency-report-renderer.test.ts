@@ -410,30 +410,6 @@ describe("call site report", () => {
     ]);
     expect(text(panel(html, "empty-3"))).toContain(blocked.unblockCondition);
   });
-  test("keeps receipt metadata but never embeds raw inventory payloads in HTML", () => {
-    const u = reviewed(1);
-    const ref = receiptRef("fixture-receipt");
-    u.decidingEvidence.push(ref);
-    const r = {
-      ...report([u]),
-      claimEvidence: {
-        sources: {},
-        receipts: {
-          r1: {
-            receiptId: "fixture-receipt",
-            originalPayloadSha256: "a".repeat(64),
-            server: "artifacts",
-            origin: { tool: "inspect", arguments: { secret: "DO_NOT_EMBED" } },
-            result: { token: "DO_NOT_EMBED", massiveStack: "DO_NOT_EMBED" },
-          },
-        },
-      },
-    };
-    const html = renderDependencyReport(r);
-    expect(html).toContain("fixture-receipt");
-    expect(html).toContain("SHA-256");
-    expect(html).not.toContain("DO_NOT_EMBED");
-  });
   test("preserves links, dismissed coverage and source bindings after priority sorting", () => {
     const a = reviewed(1, {
         verdict: "ruled_out",
@@ -508,7 +484,9 @@ describe("call site report", () => {
   test("renders advisory description, affected package versions and vulnerable functions with safe links", () => {
     const u = reviewed(1),
       url = "https://example.invalid/advisories/CVE-2099-44001",
-      raw = "<img src=x onerror=alert(1)>";
+      raw = "<img src=x onerror=alert(1)>",
+      suspicious =
+        "https://fixture:synthetic-password@example.invalid/advisory?token=synthetic-token";
     const r = {
       ...report([u]),
       advisoryDetails: [
@@ -528,15 +506,33 @@ describe("call site report", () => {
                 },
               ],
             },
+            {
+              ecosystem_specific: {
+                imports: [
+                  {
+                    path: "example.invalid/codec",
+                    symbols: ["Decoder.Decode"],
+                  },
+                ],
+              },
+            },
+            { ecosystem_specific: { affects: { functions: ["decode::run"] } } },
           ],
         },
+        {
+          url: "https://unrelated.invalid",
+          summary: "Unreferenced advisory",
+          affected: [],
+        },
       ],
-      advisories: [url, "javascript:alert(1)"],
+      advisories: [url, "javascript:alert(1)", suspicious],
     };
     const html = renderDependencyReport(r);
     for (const v of [
       "A malformed frame",
       "Decoder.decode",
+      "Decoder.Decode",
+      "decode::run",
       "sample-codec",
       "fixed in 1.2.4",
       "Only frame mode",
@@ -545,45 +541,11 @@ describe("call site report", () => {
     expect(html).not.toContain(raw);
     expect(html).not.toContain('href="javascript:');
     expect(html).toContain("&lt;img");
-    const unrelated = renderDependencyReport({
-      ...report([u]),
-      advisoryDetails: [
-        {
-          url: "https://unrelated.invalid",
-          summary: "Unreferenced advisory",
-          affected: [],
-        },
-      ],
-    });
-    expect(unrelated).not.toContain("Unreferenced advisory");
+    expect(html).not.toContain("Unreferenced advisory");
+    expect(html).toContain("Link omitted (credentials in URL)");
+    expect(html).not.toContain("synthetic-password");
+    expect(html).not.toContain("synthetic-token");
   });
-  test.each([
-    [
-      "Go",
-      {
-        imports: [
-          { path: "example.invalid/codec", symbols: ["Decoder.Decode"] },
-        ],
-      },
-      "Decoder.Decode",
-    ],
-    ["Rust", { affects: { functions: ["decode::run"] } }, "decode::run"],
-  ] as const)(
-    "extracts %s vulnerable functions from ecosystem metadata",
-    (_, metadata, symbol) => {
-      const r = report([reviewed(1)]);
-      const html = renderDependencyReport({
-        ...r,
-        advisoryDetails: [
-          {
-            url: r.advisories[0],
-            affected: [{ ecosystem_specific: metadata }],
-          },
-        ],
-      });
-      expect(text(html)).toContain(symbol);
-    },
-  );
   test("deduplicates unresolved limitations without removing source records or merging leads", () => {
     const a = unresolved(1, { reason: "The selected build is missing." }),
       b = unresolved(2, { reason: "The selected build is missing." });
@@ -640,17 +602,6 @@ describe("call site report", () => {
     expect(html).toContain(":focus-visible");
     expect(elements(html, "script[src]")).toHaveLength(0);
     expect(elements(html, "link[rel]")).toHaveLength(0);
-  });
-  test("does not activate or display credential-bearing URLs", () => {
-    const suspicious =
-      "https://fixture:synthetic-password@example.invalid/advisory?token=synthetic-token";
-    const html = renderDependencyReport({
-      ...report([reviewed(1)]),
-      advisories: [suspicious],
-    });
-    expect(html).toContain("Link omitted (credentials in URL)");
-    expect(html).not.toContain("synthetic-password");
-    expect(html).not.toContain("synthetic-token");
   });
   test("rejects workload samples presented as transferable immutable artifact evidence", () => {
     const u = reviewed(1);

@@ -158,6 +158,20 @@ test("observed coverage must enumerate distinct selected requests and the curren
       ],
     }),
   ).toThrow(/missing status/);
+  const absent = (release: string, partial: boolean) => ({
+    requiredRecord: release,
+    selection: select(
+      result(
+        { release },
+        { structuredContent: { artifact: null, metadata: { partial } } },
+      ),
+      "artifact",
+    ),
+    missing: true,
+  });
+  expect(
+    verify({ checks: [absent("one", true), absent("two", false)] }),
+  ).toThrow(/incomplete lookup coverage/i);
 });
 test("one provider response can block only the requested scope it marks unavailable", () => {
   const { block, result } = fixture();
@@ -199,8 +213,17 @@ test("one provider response can block only the requested scope it marks unavaila
     { coverage: { scope, complete: false } },
     { coverage: { scope: "staging", available: false } },
     { complete: true, coverage: unavailable },
+    { coverage: { ...unavailable, result_complete: true } },
+    { coverage: unavailable, metadata: { available: true } },
+    { coverage: unavailable, complete: "false" },
+    { coverage: unavailable, next_page_token: "", nextCursor: "more" },
+    { coverage: unavailable, backend_partial: true },
+    { metadata: { coverage: unavailable } },
   ])
     expect(() => verify(lookup(response))).toThrow(/structured coverage/);
+  expect(
+    verify(lookup({ coverage: { ...unavailable, complete: false } })),
+  ).toMatchObject({ affectedScope: scope });
   expect(() => verify(receipt)).toThrow(/current/);
   expect(() =>
     verify(lookup({ status: "not_recorded", coverage: unavailable })),
