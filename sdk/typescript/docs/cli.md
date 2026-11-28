@@ -2659,7 +2659,8 @@ The command writes `results.sarif` in the current directory. The output director
 must already exist.
 
 SARIF is the default format, and `./results.sarif` is the default output path.
-Use `--export-format json` or `--export-format csv` to choose another format.
+Use `--export-format json`, `--export-format csv`, or `--export-format html` to
+choose another format.
 An existing default output file is preserved. Pass `--output FILE` to choose
 a filename or explicitly replace it. Use `--output -` to pipe the complete
 artifact. Response filters, token controls, and `--full-output` require a
@@ -2678,6 +2679,15 @@ JSON preserves the saved findings. CSV marks them open, omits local triage state
 and retains distinct occurrence IDs. It escapes spreadsheet-formula prefixes and
 leading apostrophes; import removes the escape. Use JSON to recover ambiguous
 apostrophes from older CSV exports.
+
+HTML writes an offline report to `./findings.html` by default. It shows
+the severity, primary location, summary, and remediation for each finding.
+The export excludes triage status and review coverage. Consult `report.md` for
+coverage and the workbench for current finding status.
+
+```bash
+codex-security export --scan SCAN_ID --export-format html --output findings.html
+```
 
 For SARIF, `--source-root` adds source-line fingerprints that help tools match
 findings across scans. Before changing the scanned files or applying patches,
@@ -2743,9 +2753,9 @@ To print a policy workflow's saved threat model, pass its results directory and
 codex-security export /path/to/policy-results --artifact threat-model --output -
 ```
 
-`--output -` emits only artifact content, with diagnostics on stderr. Markdown
-and CSV stdout cannot combine with JSON command output. Exporting into a checkout
-does not make the model scan input; pass it with `--knowledge-base`.
+`--output -` emits only artifact content, with diagnostics on stderr. Markdown,
+CSV, and HTML stdout cannot combine with JSON command output. Exporting into a
+checkout does not make the model scan input; pass it with `--knowledge-base`.
 
 ### Export with the SDK
 
@@ -2762,7 +2772,7 @@ const exported = await exportArtifact({
 console.log(exported.path, exported.provenance);
 ```
 
-Use `artifact: "findings"` with `format: "csv" | "json" | "sarif"` for findings.
+Use `artifact: "findings"` with `format: "csv" | "html" | "json" | "sarif"` for findings.
 For ServiceNow, use `format: "servicenow-avit"` and set `avitTemplate` to the
 path of the application's populated CSV template.
 `output: "-"` streams stdout and returns null path/provenance. `pythonPath`

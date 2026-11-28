@@ -8,9 +8,34 @@ import json
 import re
 from collections import Counter
 from collections.abc import Iterator
+from html import escape
 from itertools import chain
 from typing import Any
 
+_HTML_EXPORT_STYLE = """
+:root { color-scheme: light dark; }
+body { font: 15px/1.45 system-ui, sans-serif; margin: 1.5rem auto; max-width: 72rem;
+  padding: 0 1rem; overflow-wrap: anywhere; }
+h1 { font-size: 1.5rem; margin: 0 0 .35rem; }
+table { border-collapse: collapse; width: 100%; margin: 1rem 0 2rem; }
+th, td { border-bottom: 1px solid #ccc; text-align: left; padding: .45rem .5rem;
+  vertical-align: top; }
+th { font-size: .8rem; letter-spacing: .04em; text-transform: uppercase; }
+.sev { display: inline-block; border-radius: .25rem; font-size: .75rem;
+  font-weight: 600; padding: .1rem .45rem; text-transform: uppercase; color: white; }
+.critical { background: #7f1d1d; }
+.high { background: #b91c1c; }
+.medium { background: #b45309; }
+.low { background: #1d4ed8; }
+.informational { background: #4b5563; }
+.finding { border-top: 1px solid #ccc; margin: 1.5rem 0; padding-top: 1rem; }
+.finding h2 { font-size: 1.1rem; }
+dl { display: grid; gap: .25rem 1rem; grid-template-columns: max-content 1fr; }
+dt { font-weight: 600; }
+dd { margin: 0; white-space: pre-wrap; }
+code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; }
+a { color: inherit; }
+""".strip()
 SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3, "informational": 4}
 CONFIDENCE_ORDER = {"high": 0, "medium": 1, "low": 2}
 REPORTABLE_SEVERITIES = {"critical", "high", "medium", "low"}
@@ -457,14 +482,23 @@ def _level_mix(findings: list[dict[str, Any]], field: str, order: dict[str, int]
     return ", ".join(f"{level}: {counts[level]}" for level in order if counts[level]) or "none"
 
 
+def primary_finding_location(finding: dict[str, Any]) -> dict[str, Any]:
+    return next(
+        (location for location in finding["locations"] if location.get("role") == "root_control"),
+        finding["locations"][0],
+    )
+
+
+def _line_suffix(location: dict[str, Any]) -> str:
+    start = location["startLine"]
+    end = location.get("endLine", start)
+    return f":{start}" if end == start else f":{start}-{end}"
+
+
 def _locations(finding: dict[str, Any]) -> str:
-    rendered = []
-    for location in finding["locations"]:
-        start = location["startLine"]
-        end = location.get("endLine", start)
-        suffix = f":{start}" if end == start else f":{start}-{end}"
-        rendered.append(f"{_path_text(location['path'])}{suffix}")
-    return ", ".join(rendered)
+    return ", ".join(
+        _path_text(location["path"]) + _line_suffix(location) for location in finding["locations"]
+    )
 
 
 def _finding_sort_key(finding: dict[str, Any]) -> tuple[int, str, str]:
@@ -1039,6 +1073,71 @@ def build_report_markdown(
             if prompt:
                 lines.append(f"  - Follow-up prompt: {prompt}")
     return "\n".join(lines).rstrip() + "\n"
+
+
+def build_html_projection(manifest: dict[str, Any], findings: dict[str, Any]) -> bytes:
+    """Render a standalone HTML export from a validated, sealed scan."""
+    scan = manifest["scan"]
+    heading = "Codex Security findings — " + escape(scan["target"]["displayName"])
+    items = findings["findings"]
+    summary = "1 finding" if len(items) == 1 else f"{len(items)} findings"
+    if items:
+        summary += f" · {_level_mix(items, 'severity', SEVERITY_ORDER)}"
+        if scan["status"] != "completed":
+            summary += ". The scan stopped before completing its review."
+    meta = " · ".join(escape(scan[key]) for key in ("id", "status", "completedAt"))
+    rows: list[str] = []
+    details: list[str] = []
+    for index, finding in enumerate(items, start=1):
+        primary = primary_finding_location(finding)
+        location = escape(primary["path"] + _line_suffix(primary))
+        severity = escape(finding["severity"]["level"])
+        badge = f'<span class="sev {severity}">{severity}</span>'
+        title = escape(finding["title"])
+        rows.append(
+            f'<tr><td>{badge}</td><td><a href="#finding-{index}">{title}</a></td>'
+            f"<td><code>{location}</code></td></tr>"
+        )
+        description = "".join(
+            f"<dt>{label}</dt><dd>{escape(finding[key])}</dd>"
+            for label, key in (
+                ("Finding ID", "findingId"),
+                ("Occurrence ID", "occurrenceId"),
+                ("Summary", "summary"),
+                ("Remediation", "remediation"),
+            )
+        )
+        details.append(
+            f'<article class="finding" id="finding-{index}"><h2>{title}</h2>'
+            f"<dl><dt>Severity</dt><dd>{badge}</dd><dt>Location</dt><dd><code>{location}</code></dd>"
+            f"{description}</dl></article>"
+        )
+    if not items:
+        message = (
+            "No findings were reported."
+            if scan["status"] == "completed"
+            else "No findings were retained before the scan stopped. No vulnerability conclusion can be drawn."
+        )
+        rows.append(f'<tr><td colspan="3">{message}</td></tr>')
+    return f"""<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>{heading}</title>
+<style>{_HTML_EXPORT_STYLE}</style>
+</head>
+<body>
+<header><h1>{heading}</h1><p>{meta}</p>
+<p>This sealed snapshot excludes triage status and review coverage.</p><p>{summary}</p></header>
+<table>
+<thead><tr><th>Severity</th><th>Finding</th><th>Location</th></tr></thead>
+<tbody>{"".join(rows)}</tbody>
+</table>
+{"".join(details)}
+</body>
+</html>
+""".encode("utf-8")
 
 
 def generate_report_markdown(

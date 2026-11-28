@@ -100,6 +100,7 @@ describe("CLI", () => {
       );
       for (const [format, expected] of [
         ["csv", "occurrence_id,finding_id\n"],
+        ["html", "<!DOCTYPE html>\n"],
         ["json", '{"documentType":"codex-security.findings"}\n'],
         ["sarif", '{"version":"2.1.0"}\n'],
         ["md", "# Synthetic threat model\n"],
@@ -576,6 +577,10 @@ describe("CLI", () => {
         ["saved", "--artifact", "threat-model", "--output", "-", "--json"],
         "Markdown stdout cannot",
       ],
+      [
+        ["saved", "--export-format", "html", "--output", "-", "--json"],
+        "HTML stdout cannot",
+      ],
     ] as const) {
       const stderr = captureCli(main, "stderr");
       const deps = dependencies();
@@ -862,6 +867,7 @@ describe("CLI", () => {
       const source = JSON.parse(before[1]!.toString()).findings[0];
       for (const [format, filename] of [
         ["csv", "findings.csv"],
+        ["html", "findings.html"],
         ["json", "findings.json"],
         ["sarif", "results.sarif"],
       ] as const) {
@@ -878,6 +884,9 @@ describe("CLI", () => {
         const contents = await readFile(output, "utf8");
         if (format === "csv") {
           expect(contents).toContain("occurrence_id,finding_id,");
+        } else if (format === "html") {
+          expect(contents).toContain("<!DOCTYPE html>");
+          expect(contents).toContain(source.occurrenceId);
         } else if (format === "json") {
           expect(JSON.parse(contents)).toMatchObject({
             documentType: "codex-security.findings",
