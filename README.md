@@ -232,6 +232,7 @@ for examples.
 - [Online documentation](https://learn.chatgpt.com/docs/security/cli)
 - [Agent workflows and recovery](docs/agent-workflows.md)
 - [CLI reference](sdk/typescript/docs/cli.md)
+- [Dependency exploitability](sdk/typescript/docs/dependency-exploitability.md)
 - [Imported finding identity and evidence](docs/scanner-imports/schema-guide.md)
 - [Project configuration](docs/project-configuration.md)
 - [Validation providers](docs/validation-providers.md)
