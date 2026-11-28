@@ -666,7 +666,15 @@ class ControlValidation(unittest.TestCase):
         evidence = self.model["evidence"][0]
         evidence.update(startLine=1, endLine=1)
         builder.validate(self.model, assessment)
-        for start, end in ((True, True), (True, 1), (1, True), (False, 1), (1, False), (1.0, 1)):
+        for start, end in (
+            (True, True),
+            (True, 1),
+            (1, True),
+            (False, 1),
+            (1, False),
+            (0, 0),
+            (1.0, 1),
+        ):
             evidence.update(startLine=start, endLine=end)
             with (
                 self.subTest(start=start, end=end),
