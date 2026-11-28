@@ -1,8 +1,9 @@
 import assert from 'node:assert/strict';
 import { execFileSync } from 'node:child_process';
 import { createHash } from 'node:crypto';
+import { statSync } from 'node:fs';
 import { copyFile, readFile, writeFile } from 'node:fs/promises';
-import { resolve } from 'node:path';
+import { basename, delimiter, dirname, isAbsolute, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 
 const packageName = '@openai/codex-security';
@@ -70,12 +71,43 @@ export async function validateReleaseSource(actionRoot, sourceCommit) {
   }
 }
 
+async function windowsNpmCli() {
+  const isFile = path => statSync(path, { throwIfNoEntry: false })?.isFile();
+  const cliAt = directory => resolve(directory, 'node_modules/npm/bin/npm-cli.js');
+  const configured = process.env.npm_execpath && resolve(process.env.npm_execpath);
+  if (configured && basename(configured).toLowerCase() === 'npm-cli.js' && isFile(configured)) return configured;
+
+  // A standalone node.exe can use npm from a different installation on PATH.
+  const directory = (process.env.PATH ?? '').split(delimiter)
+    .map(entry => entry.replace(/^"(.*)"$/, '$1'))
+    .find(entry => isAbsolute(entry) && isFile(resolve(entry, 'npm.cmd')));
+  let cli;
+  if (directory) {
+    cli = cliAt(directory);
+    if (!isFile(cli)) throw new Error(`Cannot locate the npm CLI for ${resolve(directory, 'npm.cmd')}. Run release preparation through npm or set npm_execpath to its npm-cli.js.`);
+  } else {
+    const { resolveNpm } = await import('../../sdk/typescript/scripts/package-smoke-npm.mjs');
+    cli = resolve((await resolveNpm()).args[0]);
+  }
+
+  // Match npm.cmd's global prefix lookup without loading the checkout's configuration.
+  const prefix = execFileSync(process.execPath, [cli, 'prefix', '--global'], { cwd: dirname(process.execPath), encoding: 'utf8' }).trimEnd();
+  const globalCli = cliAt(prefix);
+  return isFile(globalCli) ? globalCli : cli;
+}
+
 export async function prepareRelease(actionRoot, version, sourceCommit, cliIntegrity) {
   releaseIdentity(version, sourceCommit, cliIntegrity);
   await updateReleaseManifests(actionRoot, version);
-  execFileSync('npm', ['install', '--package-lock-only', '--ignore-scripts', '--include=optional', '--no-audit', '--no-fund', '--registry=https://registry.npmjs.org/'], {
-    cwd: resolve(actionRoot, 'runtime'), stdio: 'inherit',
-  });
+  const args = ['install', '--package-lock-only', '--ignore-scripts', '--include=optional', '--no-audit', '--no-fund', '--registry=https://registry.npmjs.org/'];
+  const options = { cwd: resolve(actionRoot, 'runtime'), stdio: 'inherit' };
+  try {
+    execFileSync('npm', args, options);
+  } catch (error) {
+    // Keep native shims on PATH. Run the JS entry point directly on .cmd-only installs.
+    if (process.platform !== 'win32' || error.code !== 'ENOENT') throw error;
+    execFileSync(process.execPath, [await windowsNpmCli(), ...args], options);
+  }
   await validateRelease(actionRoot, version, cliIntegrity);
 }
 
@@ -97,12 +129,17 @@ export async function writeReleaseMetadata(actionRoot, version, sourceCommit, cl
   for (const [key, value] of Object.entries(hashes)) {
     assert.equal(manifest[key], value, 'Rebuild the Action after updating its locks');
   }
+  await validateReleaseBundles(actionRoot, manifest);
+  await writeJson(manifestPath, { ...manifest, status: 'released', ...identity });
+}
+
+export async function validateReleaseBundles(actionRoot, manifest) {
+  manifest ??= await readJson(resolve(actionRoot, 'build/release-manifest.json'));
   for (const file of ['dist/index.cjs', 'dist/post.cjs']) {
     const bytes = await readFile(resolve(actionRoot, file));
     assert.equal(manifest.files[file].sha256, sha256(bytes), `${file} differs from the built release metadata`);
     assert.equal(manifest.files[file].bytes, bytes.length, `${file} length differs from the built release metadata`);
   }
-  await writeJson(manifestPath, { ...manifest, status: 'released', ...identity });
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {

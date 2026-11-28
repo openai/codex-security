@@ -16,7 +16,7 @@ const writeJson = (path, data) => writeFile(path, JSON.stringify(data, null, 2) 
 const readJson = async path => JSON.parse(await readFile(path, 'utf8'));
 const digest = async path => createHash('sha256').update(await readFile(path)).digest('hex');
 
-async function fixture(t) {
+async function fixture(t, lockedVersion = version) {
   const root = await mkdtemp(join(tmpdir(), 'action-release-'));
   t.after(() => rm(root, { recursive: true, force: true }));
   const actionRoot = join(root, 'github-action');
@@ -30,7 +30,8 @@ async function fixture(t) {
   await writeJson(join(actionRoot, 'package.json'), { name: 'codex-security-action', version: '0.2.0', private: true, dependencies: { '@actions/core': '3.0.1' } });
   await writeJson(join(actionRoot, 'package-lock.json'), { name: 'codex-security-action', version: '0.2.0', lockfileVersion: 3, packages: { '': { name: 'codex-security-action', version: '0.2.0' }, 'node_modules/@actions/core': { version: '3.0.1', integrity: 'sha512-synthetic-action' } } });
   await writeJson(join(actionRoot, 'runtime/package.json'), { private: true, dependencies: { [packageName]: '0.2.0' } });
-  await writeJson(join(actionRoot, 'runtime/package-lock.json'), { lockfileVersion: 3, packages: { '': { dependencies: { [packageName]: version } }, [`node_modules/${packageName}`]: { version, integrity: cliIntegrity } } });
+  const resolved = `https://registry.npmjs.org/${packageName}/-/codex-security-${version}.tgz`;
+  await writeJson(join(actionRoot, 'runtime/package-lock.json'), { lockfileVersion: 3, packages: { '': { dependencies: { [packageName]: lockedVersion } }, [`node_modules/${packageName}`]: { version, resolved, integrity: cliIntegrity } } });
   const git = (...args) => execFileSync('git', args, { cwd: root, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
   git('init', '-b', 'main');
   git('add', '.');
@@ -52,10 +53,23 @@ async function buildMetadata(actionRoot) {
   });
 }
 
-test('release preparation aligns manifests without changing locked Action dependencies', async t => {
-  const { actionRoot } = await fixture(t);
+test('offline release preparation aligns manifests without changing locked Action dependencies', async t => {
+  const { actionRoot, sourceCommit } = await fixture(t, '0.2.0');
   const before = await readJson(join(actionRoot, 'package-lock.json'));
-  await updateReleaseManifests(actionRoot, version);
+  execFileSync(process.execPath, [
+    fileURLToPath(new URL('../scripts/release.mjs', import.meta.url)),
+    'prepare', version, sourceCommit, cliIntegrity, actionRoot,
+  ], {
+    env: {
+      PATH: process.env.PATH, SystemRoot: process.env.SystemRoot,
+      // Package managers such as pnpm set this to their own entry point.
+      npm_execpath: join(actionRoot, 'pnpm.cjs'),
+      HOME: actionRoot, USERPROFILE: actionRoot,
+      npm_config_offline: 'true', npm_config_update_notifier: 'false',
+      npm_config_cache: join(actionRoot, '../npm cache'),
+    },
+    stdio: 'pipe',
+  });
   assert.equal((await readJson(join(actionRoot, 'package.json'))).version, version);
   assert.equal((await readJson(join(actionRoot, 'runtime/package.json'))).dependencies[packageName], version);
   const after = await readJson(join(actionRoot, 'package-lock.json'));
