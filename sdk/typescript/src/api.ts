@@ -1901,6 +1901,14 @@ export class CodexSecurity {
       options.signal,
       inputs.gitMetadataPaths,
     );
+    await checkScanStorage(
+      inputs.stateDirectory,
+      inputs.outputDir === null &&
+        this.#dependencies.prepareOutputDir === undefined
+        ? basename(inputs.repository)
+        : undefined,
+      "policies",
+    );
     const preflight = await this.#preflightInputs(inputs, options);
     return {
       ...target,

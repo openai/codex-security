@@ -533,6 +533,35 @@ describe("CodexSecurity policy API", () => {
     await f.security.close();
   });
 
+  test("reports an unusable state directory before starting Codex", async () => {
+    const onPrepare = mock();
+    const f = await setup({ onPrepare });
+    const stateFile = join(f.root, "state-file");
+    await writeFile(stateFile, "not a directory\n");
+    const unusable = new InternalSecurity(
+      {},
+      {
+        environment: { CODEX_SECURITY_STATE_DIR: stateFile },
+        prepareRuntime: async () => {
+          onPrepare();
+          throw new Error("Preflight must not prepare a runtime");
+        },
+      },
+    );
+    await expect(unusable.preflightPolicy(f.repository)).rejects.toThrow(
+      "Cannot use policy state directory",
+    );
+    // A policy preflight must describe the same storage the CLI dry run does.
+    await expect(unusable.preflightPolicy(f.repository)).rejects.toThrow(
+      "CODEX_SECURITY_STATE_DIR",
+    );
+    expect(onPrepare).not.toHaveBeenCalled();
+    expect(f.threads).toHaveLength(0);
+    expect(await readFile(stateFile, "utf8")).toBe("not a directory\n");
+    await unusable.close();
+    await f.security.close();
+  });
+
   test("gives a usable remedy for a nonempty policy output directory", async () => {
     const onPrepare = mock();
     const f = await setup({
