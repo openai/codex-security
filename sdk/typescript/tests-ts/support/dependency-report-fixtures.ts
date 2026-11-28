@@ -1,7 +1,7 @@
 import type {
   DependencyReviewReference,
   Finding,
-} from "../../src/dependency-report-model.js";
+} from "../../src/dependency/report/model.js";
 type DependencyCoverageDisposition = Extract<
   Finding,
   { kind: "coverage" }

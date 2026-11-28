@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
-import { inspectPath } from "../src/dependency-report-path.js";
-import { prepareDependencyReport } from "../src/dependency-report-model.js";
+import { inspectPath } from "../src/dependency/report/path.js";
+import { prepareDependencyReport } from "../src/dependency/report/model.js";
 import { stackReport } from "./support/dependency-stack-report-fixture.js";
 import {
   report,

@@ -4,26 +4,26 @@ import { join } from "node:path";
 import { Readable } from "node:stream";
 import { main, runCodexSkillCommand } from "../src/cli.js";
 import { parse as parseToml } from "smol-toml";
-import { DependencyAttemptStore } from "../src/dependency-attempt-store.js";
+import { DependencyAttemptStore } from "../src/dependency/attempt-store.js";
 import {
   analyzeStackAdvisory,
   lookupDependencyAdvisory,
-} from "../src/dependency-advisory.js";
+} from "../src/dependency/advisory.js";
 import { sqliteDatabaseOpener } from "../src/runtime.js";
 import {
   prepareStackPacket,
   readStackPacket,
   stackPacketWorkItems,
-} from "../src/dependency-stack-packet.js";
-import type { StackInvestigationReport } from "../src/dependency-stack-assessment.js";
+} from "../src/dependency/analyzers/stacks/packet.js";
+import type { StackInvestigationReport } from "../src/dependency/analyzers/stacks/assessment.js";
 import {
   dependencyClaimHash,
   type DependencyClaimReference,
-} from "../src/dependency-stack-claims.js";
+} from "../src/dependency/analyzers/stacks/claims.js";
 import {
   executeStackRun,
   readFinalStackReport,
-} from "../src/dependency-stack-run.js";
+} from "../src/dependency/analyzers/stacks/run.js";
 import { capture, dependencies } from "./cli-fixtures.js";
 import { git } from "./git-fixture.js";
 import { createCliTest } from "./support/cli-run.js";

@@ -98,7 +98,7 @@ async function runJson(repo, args, input) {
 async function initialize(fixture) {
   const { prepareStackPacket } = await import(
     pathToFileURL(
-      join(dirname(cli), "..", "dist", "dependency-stack-packet.js"),
+      join(dirname(cli), "..", "dist", "dependency/analyzers/stacks/packet.js"),
     ).href
   );
   const attempt = await mkdtemp(join(scratch, "attempt-"));

@@ -1,7 +1,7 @@
 import {
   renderPreparedDependencyReportMarkdown,
   summarizeDependencyReport,
-} from "../src/dependency-report-text.js";
+} from "../src/dependency/report/text.js";
 import { expect, test } from "bun:test";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
@@ -10,9 +10,9 @@ import {
   runPreparedAnalyzers,
   withDependencyCheckOutput,
   writeDependencyReportFile,
-} from "../src/dependency-check-output.js";
-import { prepareDependencyReport } from "../src/dependency-report-model.js";
-import { renderPreparedDependencyReport } from "../src/dependency-report-renderer.js";
+} from "../src/dependency/check-output.js";
+import { prepareDependencyReport } from "../src/dependency/report/model.js";
+import { renderPreparedDependencyReport } from "../src/dependency/report/renderer.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 import {
   variantReport,

@@ -2,20 +2,20 @@ import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { DependencyAttemptStore } from "../src/dependency-attempt-store.js";
-import { prepareStackAssessment } from "../src/dependency-stack-assessment.js";
-import type { DependencyClaimRecord } from "../src/dependency-stack-claims.js";
+import { DependencyAttemptStore } from "../src/dependency/attempt-store.js";
+import { prepareStackAssessment } from "../src/dependency/analyzers/stacks/assessment.js";
+import type { DependencyClaimRecord } from "../src/dependency/analyzers/stacks/claims.js";
 import type {
   StackPacket,
   StackWorkItem,
-} from "../src/dependency-stack-packet.js";
+} from "../src/dependency/analyzers/stacks/packet.js";
 import {
   isRuntimeReceipt,
   prepareRuntimeEvidence,
   runtimeEvidenceInputSchema,
   saveRuntimeEvidence,
   selectRuntimeReceipt,
-} from "../src/dependency-stack-runtime-receipts.js";
+} from "../src/dependency/analyzers/stacks/runtime-receipts.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
 test("runtime evidence preserves and selects the host-saved original across reopen", async () => {

@@ -6,12 +6,12 @@ import { main } from "../src/cli.js";
 import {
   executeStackRun,
   readFinalStackReport,
-} from "../src/dependency-stack-run.js";
-import type { DependencyClaimReference } from "../src/dependency-stack-claims.js";
+} from "../src/dependency/analyzers/stacks/run.js";
+import type { DependencyClaimReference } from "../src/dependency/analyzers/stacks/claims.js";
 import {
   prepareStackPacket,
   readStackPacket,
-} from "../src/dependency-stack-packet.js";
+} from "../src/dependency/analyzers/stacks/packet.js";
 import { git } from "./git-fixture.js";
 import { dependencies } from "./cli-fixtures.js";
 import { createCliTest } from "./support/cli-run.js";

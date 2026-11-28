@@ -1,8 +1,8 @@
 import { expect, test } from "bun:test";
-import { readStackReport } from "../src/dependency-report-reader.js";
-import { renderDependencyReport } from "../src/dependency-report-renderer.js";
-import { renderDependencyReportMarkdown } from "../src/dependency-report-text.js";
-import { dependencyClaimHash } from "../src/dependency-stack-claims.js";
+import { readStackReport } from "../src/dependency/report/reader.js";
+import { renderDependencyReport } from "../src/dependency/report/renderer.js";
+import { renderDependencyReportMarkdown } from "../src/dependency/report/text.js";
+import { dependencyClaimHash } from "../src/dependency/analyzers/stacks/claims.js";
 import { stackReport } from "./support/dependency-stack-report-fixture.js";
 
 test("projects a sparse observation, query limits and no-match without inventing reviewed uses", () => {

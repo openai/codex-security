@@ -3,8 +3,8 @@ import { hash } from "node:crypto";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { JsonObject } from "../src/config.js";
-import { DependencyAttemptStore } from "../src/dependency-attempt-store.js";
-import { createDependencySourceTools } from "../src/dependency-source-evidence.js";
+import { DependencyAttemptStore } from "../src/dependency/attempt-store.js";
+import { createDependencySourceTools } from "../src/dependency/analyzers/repository/source-evidence.js";
 import { git } from "./git-fixture.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 

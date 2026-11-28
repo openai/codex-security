@@ -1,13 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { stackReport } from "./support/dependency-stack-report-fixture.js";
-import { renderDependencyCode } from "../src/dependency-report-audit.js";
-import { renderDependencyReport } from "../src/dependency-report-renderer.js";
-import { prepareDependencyReport } from "../src/dependency-report-model.js";
+import { renderDependencyCode } from "../src/dependency/report/audit.js";
+import { renderDependencyReport } from "../src/dependency/report/renderer.js";
+import { prepareDependencyReport } from "../src/dependency/report/model.js";
 import {
   renderPreparedDependencyReportMarkdown,
   summarizeDependencyReport,
-} from "../src/dependency-report-text.js";
+} from "../src/dependency/report/text.js";
 import {
   broadReport,
   place,

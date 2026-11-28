@@ -3,7 +3,7 @@ import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { discoverDependencyRepository } from "../src/dependency-discovery.js";
+import { discoverDependencyRepository } from "../src/dependency/analyzers/repository/discovery.js";
 
 const pkg = { ecosystem: "npm", name: "sample-codec" };
 
