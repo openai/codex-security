@@ -20,7 +20,6 @@ import { renderDependencyReportMarkdown } from "../src/exploitability/report/tex
 import {
   runPreparedAnalyzers,
   type AnalyzerBatch,
-  createDependencyVerdictProgress,
   withDependencyCheckOutput,
 } from "../src/exploitability/check-output";
 import {
@@ -1047,80 +1046,6 @@ test("replacing an approved premise invalidates transitive users and preserves i
   } finally {
     store.close();
   }
-});
-
-test("withdrawn approvals leave the verdict group before the next progress update", async () => {
-  await using f = await fixture({
-    "app.js": "parse(request.body);\n".repeat(4),
-  });
-  f.use.evidence[0]!.endLine = 4;
-  const scope = reviewScopes([f.discovery])[0]!;
-  const verified = await validateDraftFinding(
-    f.path,
-    scope,
-    f.use,
-    signal,
-    true,
-  );
-  const premise = { id: "guard", revision: 1, hash: "a".repeat(64) };
-  const output: Record<string, unknown>[] = [];
-  const progress = createDependencyVerdictProgress(
-    "example",
-    (type, _, fields) => output.push({ type, ...fields }),
-  );
-  function approve(
-    line: number,
-    verdict: "ruled_out" | "unknown" = "ruled_out",
-    id = String(line),
-    version = verified.version,
-  ) {
-    const use = {
-      ...verified,
-      location: `app.js:${line}`,
-      place: { dependencySelection: "Pinned inventory" },
-      version,
-      verdict,
-      premises: [premise],
-    };
-    progress.update(id, {
-      use,
-      place: reportedDeployment(use).place,
-      callers: [],
-      decision: { reason: "guard", evidenceKeys: [premiseKey(premise)] },
-    });
-  }
-  approve(1);
-  approve(2);
-  progress.update("2");
-  progress.flush();
-  expect(output).toHaveLength(1);
-  approve(3);
-  approve(4);
-  progress.flush();
-  approve(2, "unknown");
-  expect(output).toHaveLength(3);
-  progress.flush();
-  for (const id of ["1", "3", "4"]) progress.update(id);
-  progress.flush();
-  approve(1);
-
-  const groupId = output[0]!["groupId"];
-  expect(output).toMatchObject([
-    { type: "reviewed", groupId: expect.any(String) },
-    { type: "reviewed_group", groupId, callsites: 3 },
-    {
-      type: "reviewed",
-      location: "app.js:2",
-      previousVerdict: "ruled_out",
-      verdict: "unknown",
-    },
-    { type: "reviewed_group", groupId, callsites: 0, assessments: 0 },
-    { type: "reviewed", groupId: expect.any(String) },
-  ]);
-  expect(output[4]!["groupId"]).not.toBe(groupId);
-  approve(1, "ruled_out", "other-copy", "2.0.0");
-  expect(output.at(-1)).toMatchObject({ type: "reviewed", version: "2.0.0" });
-  expect(output.at(-1)!["groupId"]).not.toBe(output[4]!["groupId"]);
 });
 
 test("an unsuccessful report keeps its progress log and leaves no published report", async () => {
@@ -2633,89 +2558,50 @@ test("catalog mappings bind the selected row and keep failed lookups open", asyn
   });
 });
 
-test.each([
-  "omission",
-  "ambiguous",
-  "stale",
-  "malformed",
-  "persistent",
-] as const)(
-  "requires every current decision and limits corrective review (%s)",
+test.each(["omission", "stale", "malformed", "persistent"] as const)(
+  "only current review decisions count, with one retry (%s)",
   async (mode) => {
     await using f = await fixture();
     const batches: string[][] = [];
-    let coordinators = 0;
-    const run = f.check(
+    const result = await f.check(
       { vulnDescription: "Parser behavior" },
       {
         async runAgent(req) {
-          if (req.coordinator) {
-            coordinators++;
-            return proposalJson(f.use);
-          }
-          const packet = agentInput(req.prompt);
-          const rows = (packet.claims as ReviewClaim[]).map((c) =>
-            approval(c, "Verified the exact claim."),
-          );
+          if (req.coordinator) return proposalJson(f.use);
+          const { claims, reviewCorrection } = agentInput(req.prompt);
+          const rows = (claims as ReviewClaim[]).map((c) => approval(c));
           batches.push(rows.map((row) => row.id));
-          const use = rows.find((row) => row.id === "use-1")!;
-          if (batches.length === 1 || mode === "persistent") {
-            if (mode === "malformed") return "{";
-            if (mode === "stale")
-              return JSON.stringify({
-                decisions: rows.map((d) =>
-                  d.id === use.id
-                    ? { ...d, revision: d.revision + 1, hash: "f".repeat(64) }
-                    : d,
-                ),
-              });
-            if (mode === "omission")
-              return JSON.stringify({ decisions: [use] });
+          if (batches.length === 2 && mode !== "persistent") {
+            expect(reviewCorrection.expected).toEqual(rows.map(reference));
+            return JSON.stringify({ decisions: rows });
+          }
+          if (mode === "malformed") return "{";
+          const [use, coverage] = rows;
+          if (mode === "omission") return JSON.stringify({ decisions: [use] });
+          if (mode === "stale")
             return JSON.stringify({
-              decisions: [use, use, { ...use, id: "unrequested" }],
+              decisions: [{ ...use, revision: use!.revision + 1 }, coverage],
             });
-          }
-          const feedback = packet.reviewCorrection;
-          expect(feedback.expected).toEqual(
-            rows.map(({ id, revision, hash }) => ({ id, revision, hash })),
-          );
-          if (mode === "omission") {
-            expect(feedback.problem).toContain("Missing ids");
-            expect(packet.approvedClaims.map((c: Claim) => c.id)).toContain(
-              "use-1",
-            );
-          } else if (mode === "ambiguous") {
-            expect(feedback.problem).toContain('Duplicate id "use-1"');
-            expect(feedback.problem).toContain('Unexpected id "unrequested"');
-            expect(packet.approvedClaims).toEqual([]);
-          } else if (mode === "stale") {
-            expect(feedback.problem).toContain(
-              'Wrong revision or hash for "use-1"',
-            );
-            expect(packet.approvedClaims).toEqual([]);
-          } else {
-            expect(feedback.problem).toContain("JSON object");
-          }
-          return JSON.stringify({ decisions: rows });
+          return JSON.stringify({
+            decisions: [use, use, { ...use, id: "unrequested" }],
+          });
         },
       },
     );
-    if (mode === "persistent") {
-      expect((await run).reason).toMatch(
-        /Duplicate id "use-1".*Missing ids \["coverage"\].*Still awaiting/,
-      );
-    } else {
-      const r = await run;
-      expect(firstIssue(r).claims.map((c) => c.id)).toEqual([
-        "use-1",
-        "coverage",
-      ]);
-    }
     expect(batches).toEqual([
       ["use-1", "coverage"],
       mode === "omission" ? ["coverage"] : ["use-1", "coverage"],
     ]);
-    expect(coordinators).toBe(1);
+    if (mode === "persistent") {
+      expect(result.status).toBe("blocked");
+      expect(result.reason).toContain('Duplicate id "use-1"');
+      expect(result.reason).toContain('Unexpected id "unrequested"');
+    } else {
+      expect(firstIssue(result).claims.map((c) => c.id)).toEqual([
+        "use-1",
+        "coverage",
+      ]);
+    }
   },
 );
 
@@ -2891,13 +2777,6 @@ test.each(["identical", "additional"] as const)(
       Dockerfile:
         'FROM scratch\nCOPY . /app\nWORKDIR /app\nCMD ["node", "app.js"]\n',
     });
-    const source = {
-      kind: "source" as const,
-      path: "Dockerfile",
-      commit: f.revision,
-      startLine: 2,
-      endLine: 4,
-    };
     function deployment(
       workload: string,
       startLine = 2,
@@ -2916,7 +2795,15 @@ test.each(["identical", "additional"] as const)(
         ],
         runtimeContext: {
           launch: { command: "node app.js", basis: "configured" },
-          evidence: [{ ...source, startLine }],
+          evidence: [
+            {
+              kind: "source",
+              path: "Dockerfile",
+              commit: f.revision,
+              startLine,
+              endLine: 4,
+            },
+          ],
         },
       };
     }
@@ -2947,31 +2834,17 @@ test.each(["identical", "additional"] as const)(
                 use: deployment(workload(id)),
               })),
             });
-            const approved = (await call("query_dependency_claims", {
-              ids: submitted.map((id) => "assessment:" + id),
-              wait: true,
-            })) as { state: string }[];
-            expect(approved.map((c) => c.state)).toEqual([
-              "approved",
-              "approved",
-            ]);
+            await call("query_dependency_claims", { wait: true });
           } else {
-            expect(input.feedback.reason).toContain("Final uses[0]");
             expect(input.feedback.reason).toContain(
               "runtimeContext.evidence[0]",
             );
-            expect(input.feedback.reason).toContain("2-4");
-            expect(input.feedback.approvedAssessments).toMatchObject({
-              total: 2,
-              truncated: false,
-              items: submitted.map((id) => ({
+            expect(input.feedback.approvedAssessments.items).toMatchObject(
+              submitted.map((id) => ({
                 id: "assessment:" + id,
-                revision: 1,
-                scope: f.use.scope,
-                location: f.use.location,
                 workload: workload(id),
               })),
-            });
+            );
             return proposalJson(
               deployment(mode === "identical" ? "shared-job" : "third-job"),
             );

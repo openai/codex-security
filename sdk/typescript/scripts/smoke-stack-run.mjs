@@ -140,7 +140,11 @@ export async function smokeStackRun({
     ],
   });
   assert.equal(command("summarize-coverage").assessed, 2);
-  assert.equal(command("finalize").verdict, "unknown");
+  const [vulnerability] = command("finalize").vulnerabilities;
+  assert.equal(vulnerability.result.verdict, "unknown");
+  assert.equal(vulnerability.result.review.status, "not_reviewed");
+  assert.equal(vulnerability.findings.length, 0);
+  assert.equal(vulnerability.analyses[0].coverage.items.length, 2);
   assert.match(
     invoke("summarize-coverage", ["--format", "yaml"]),
     /assessed: 2/u,

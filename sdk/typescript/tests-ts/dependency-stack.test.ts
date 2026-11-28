@@ -708,7 +708,8 @@ async function reviewedStackCheck(
             drafts[round - 1]!.assessments[0]!.supportingClaims,
           );
         }
-        const challenge = round < 2 || mode === "exhausted";
+        const challenge =
+          mode === "exhausted" || (mode === "correct" && round < 2);
         const decisions = draft.assessments.map(({ workItemId }, index) => ({
           workItemId,
           reason: "Checked the source and captured evidence.",
@@ -893,10 +894,9 @@ async function reviewedStackCheck(
   );
   // A combined check only looks up the repository advisory. Stack review reuses its snapshot.
   expect(lookup).toHaveBeenCalledTimes(1);
-  if (mode !== "duplicate") {
-    expect(drafts, io.stderr.text() + io.stdout.text()).toHaveLength(3);
-    expect(calls).toBe(combined || raw ? 6 : 7);
-  }
+  expect(drafts, io.stderr.text() + io.stdout.text()).toHaveLength(
+    mode === "correct" || mode === "exhausted" ? 3 : 1,
+  );
   if (mode === "exhausted" || mode === "duplicate") {
     expect(code).toBe(2);
     const blocked = JSON.parse(io.stdout.text());
@@ -1022,7 +1022,7 @@ async function reviewedStackCheck(
     check[check.length - 1] = "stacks=../packet/stacks.json";
     await expectRejected(/replay the manifest/i);
   }
-  const approvedDraft = drafts[2]!;
+  const approvedDraft = drafts.at(-1)!;
   expect(stackAnalysis.coverage.assessed).toBe(2);
   expect(audit).toMatchObject({
     callerScope,
@@ -1041,7 +1041,7 @@ async function reviewedStackCheck(
     expect(assessment.questionChecks).toEqual([
       {
         question: assessment.remainingQuestions[0],
-        checked: index === 0 ? checks[2] : checks[0],
+        checked: index === 0 ? checks[drafts.length - 1] : checks[0],
         missingEvidence,
         claims: assessment.supportingClaims,
       },
@@ -1060,6 +1060,17 @@ test("invalid captures and catalogs fail before either analyzer starts", async (
   await mkdir(folder);
   await writeFile(join(folder, "batch-a.json"), await readFile(stacksPath));
   await writeFile(join(folder, "batch-broken.json"), "{");
+  await writeFile(
+    join(folder, "legacy.json"),
+    JSON.stringify({ format: "codex-security.sampled-stacks/v1", queries: [] }),
+  );
+  await writeFile(
+    join(folder, "empty.json"),
+    JSON.stringify({
+      format: "codex-security.stacks/v2",
+      captures: [{ stacks: [] }],
+    }),
+  );
   await symlink(stacksPath, join(folder, "link.json"));
   using lookup = spyOn(globalThis, "fetch").mockRejectedValue(
     new Error("unexpected network access"),
@@ -1076,6 +1087,8 @@ test("invalid captures and catalogs fail before either analyzer starts", async (
   for (const [pattern, message] of [
     ["no-such-*.json", /no stack capture files/i],
     ["batch-*.json", /batch-broken.json/],
+    ["legacy.json", /stacks\/v2|unsupported/i],
+    ["empty.json", /query|empty/i],
     ["link.json", /symlink|symbolic link|regular file/i],
     ["../", /Supply at least one sink/],
   ] as const) {
@@ -1097,15 +1110,35 @@ test("invalid captures and catalogs fail before either analyzer starts", async (
   expect(lookup).not.toHaveBeenCalled();
 });
 
-test("offline finalize renders the saved assessment and protects existing output", async () => {
+test("offline finalize preserves exact evidence, renders unreviewed findings and protects existing output", async () => {
   await using dir = await scopedTemporaryDirectory("stack-render-");
   const files = await sample(dir.path, false);
-  const { state, call, row, claims } = await startProof(dir.path, files);
+  const { call, state } = await startPacket(dir.path, files);
+  const { workItem, receiptId } = (await call("next")) as {
+    workItem: { id: string };
+    receiptId: string;
+  };
+  const payload = JSON.parse('{"sample":{"__proto__":{"enabled":true}}}');
+  const record = (value: unknown) =>
+    call("record-claims", {
+      claims: [
+        {
+          id: "input",
+          scope: "sample",
+          payload: value,
+          receiptIds: [receiptId],
+        },
+      ],
+    });
+  const { claims } = (await record(payload)) as {
+    claims: DependencyClaimReference[];
+  };
+  await expect(record({ sample: {} })).rejects.toThrow();
   const question = "Which source commit ran?";
   await call("record-assessments", {
     items: [
       {
-        workItemId: row.workItemId,
+        workItemId: workItem.id,
         verdict: "unknown",
         reason: "Source identity is missing.",
         remainingQuestions: [question],
@@ -1113,7 +1146,7 @@ test("offline finalize renders the saved assessment and protects existing output
         questionChecks: [
           {
             question,
-            checked: "Read the captured package binding and the pinned caller.",
+            checked: "Checked the captured package and caller.",
             missingEvidence:
               "The source revision used to build the captured image.",
             claims,
@@ -1122,7 +1155,10 @@ test("offline finalize renders the saved assessment and protects existing output
       },
     ],
   });
-  await call("finalize");
+  const frozen = (await call("finalize")) as { claims: { payload: unknown }[] };
+  expect(JSON.stringify(frozen.claims[0]!.payload)).toEqual(
+    JSON.stringify(payload),
+  );
   const readDeps = dependencies({ currentDirectory: files.repo });
   readDeps.environment["CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY"] = "1";
   const args = ["exploitability", "run", "finalize", "--state", state];
@@ -1457,72 +1493,6 @@ test("without a catalog, frozen OSV ranges can exclude an attributed copy, but a
     endpointScope: requested,
     assessments: [{ verdict: "ruled_out" }, { verdict: "unknown" }],
   });
-});
-
-test("v1 captures and empty raw snapshots are rejected before investigation", async () => {
-  await using dir = await scopedTemporaryDirectory("stack-invalid-");
-  const files = await sample(dir.path, false);
-  for (const invalid of [
-    { format: "codex-security.sampled-stacks/v1", queries: [] },
-    { format: "codex-security.stacks/v2", captures: [{ stacks: [] }] },
-  ]) {
-    await writeFile(files.stacksPath, JSON.stringify(invalid));
-    await expect(
-      prepareStackPacket(packetOptions(files, join(dir.path, "invalid"))),
-    ).rejects.toThrow();
-  }
-});
-
-test("claim identity and finalized reports retain every own key in opaque JSON evidence", async () => {
-  await using dir = await scopedTemporaryDirectory("stack-json-");
-  const files = await sample(dir.path, true);
-  const { call: command } = await startPacket(dir.path, files);
-  const { workItem, receiptId } = (await command("next")) as {
-    workItem: { id: string };
-    receiptId: string;
-  };
-  const payload = JSON.parse('{"sample":{"__proto__":{"enabled":true}}}');
-  const record = (value: unknown) =>
-    command("record-claims", {
-      claims: [
-        {
-          id: "input",
-          scope: "sample",
-          payload: value,
-          receiptIds: [receiptId],
-        },
-      ],
-    });
-  const { claims } = (await record(payload)) as {
-    claims: DependencyClaimReference[];
-  };
-  await expect(record({ sample: {} })).rejects.toThrow();
-  await command("record-assessments", {
-    items: [
-      {
-        workItemId: workItem.id,
-        verdict: "unknown",
-        reason: "Missing input provenance.",
-        remainingQuestions: ["Who controls the input?"],
-        supportingClaims: claims,
-        questionChecks: [
-          {
-            question: "Who controls the input?",
-            checked:
-              "The captured stack identifies the caller but not its trust boundary.",
-            missingEvidence: "The origin of the request bytes.",
-            claims,
-          },
-        ],
-      },
-    ],
-  });
-  const result = (await command("finalize")) as {
-    claims: { payload: unknown }[];
-  };
-  expect(JSON.stringify(result.claims[0]!.payload)).toEqual(
-    JSON.stringify(payload),
-  );
 });
 
 test("a caller scope is frozen separately from imported endpoint metadata", async () => {

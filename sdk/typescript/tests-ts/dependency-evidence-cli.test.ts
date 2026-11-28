@@ -1,6 +1,5 @@
 import { parse as parseToml } from "smol-toml";
 import { expect, test } from "bun:test";
-import { execFileSync } from "node:child_process";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { Writable } from "node:stream";
@@ -9,7 +8,9 @@ import { exploitabilityReportSchema } from "../src/exploitability/report/schema.
 import { synthesisAnswer } from "./support/dependency-report-fixtures.js";
 import type { PremiseRef } from "../src/exploitability/analyzers/repository/review-queue.js";
 import { main, readSkillCommandOutput } from "../src/cli.js";
-import { capture, dependencies } from "./cli-fixtures.js";
+import { dependencies } from "./cli-fixtures.js";
+import { git } from "./git-fixture.js";
+import { createCliTest } from "./support/cli-run.js";
 import { requestMetadata } from "./support/request-metadata.js";
 import { scopedTemporaryDirectory } from "./support/temporary-directories.js";
 
@@ -18,13 +19,10 @@ async function* commandOutput(...events: object[]) {
 }
 
 test("check advertises a single report schema for every analyzer", async () => {
-  const stdout = capture(),
-    stderr = capture();
+  const { stdout, stderr, runCli } = createCliTest(main);
   expect(
-    await main(
+    await runCli(
       ["exploitability", "check", "--schema", "--json"],
-      stdout.stream,
-      stderr.stream,
       dependencies({
         environment: { CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY: "1" },
       }),
@@ -57,8 +55,7 @@ function approve({ id, revision, hash }: PremiseRef) {
 }
 
 async function commitFixture(path: string) {
-  const git = (...args: string[]) => execFileSync("git", args, { cwd: path });
-  git("init", "-q");
+  git(path, "init", "-q");
   await writeFile(
     join(path, "caller.js"),
     "export const decode = value => value;\n",
@@ -67,16 +64,8 @@ async function commitFixture(path: string) {
     join(path, "package.json"),
     JSON.stringify({ name: "fixture", version: "1.0.0" }),
   );
-  git("add", "caller.js", "package.json");
-  git(
-    "-c",
-    "user.name=Fixture",
-    "-c",
-    "user.email=fixture@example.invalid",
-    "commit",
-    "-qm",
-    "fixture",
-  );
+  git(path, "add", "caller.js", "package.json");
+  git(path, "commit", "-qm", "fixture");
 }
 
 test("check rejects invalid analyzer options before launching an investigation", async () => {
@@ -122,11 +111,10 @@ test("check rejects invalid analyzer options before launching an investigation",
       /missing-capture|does not exist/,
     ],
   ] as const) {
-    const stdout = capture(),
-      stderr = capture();
+    const { stdout, stderr, runCli } = createCliTest(main);
     if (project)
       await writeFile(config, JSON.stringify({ exploitability: project }));
-    const code = await main(
+    const code = await runCli(
       [
         "exploitability",
         "check",
@@ -134,8 +122,6 @@ test("check rejects invalid analyzer options before launching an investigation",
         ...(project ? ["--config", config] : []),
         ...flags,
       ],
-      stdout.stream,
-      stderr.stream,
       deps,
     );
     expect(code).not.toBe(0);
@@ -180,9 +166,8 @@ test.each([
       join(repo.path, "config.toml"),
       '[model_providers.gateway]\nbase_url="https://ambient.invalid/"',
     );
-    const stderr = capture();
-    const stdout = capture();
-    const status = await main(
+    const { stdout, stderr, runCli } = createCliTest(main);
+    const status = await runCli(
       [
         "exploitability",
         "check",
@@ -193,8 +178,6 @@ test.each([
         "Synthetic issue",
         "--json",
       ],
-      stdout.stream,
-      stderr.stream,
       dependencies({
         currentDirectory: repo.path,
         async onCodex() {
@@ -256,11 +239,10 @@ async function checkReviewed(source: "inline" | "native") {
   const wireReceipts = new Map<string, Record<string, unknown>>();
   let traceSearchedPaths: string[] | undefined;
   let reviewed = false;
-  const stdout = capture();
-  const stderr = capture();
+  const { stdout, stderr, runCli } = createCliTest(main);
   const reportPath = join(repo.path, "report.json");
   const eventsPath = join(repo.path, "progress.jsonl");
-  const status = await main(
+  const status = await runCli(
     [
       "exploitability",
       "check",
@@ -291,8 +273,6 @@ async function checkReviewed(source: "inline" | "native") {
       "--progress-events",
       eventsPath,
     ],
-    stdout.stream,
-    stderr.stream,
     dependencies({
       currentDirectory: repo.path,
       environment: {
@@ -600,14 +580,15 @@ test.each(Object.keys(outputFlags) as (keyof typeof outputFlags)[])(
 async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
   await using repo = await scopedTemporaryDirectory("dependency-output-");
   await commitFixture(repo.path);
-  const stdout = capture(format === "summary"),
-    stderr = capture(false);
+  const { stdout, stderr, runCli } = createCliTest(main, {
+    stdout: format === "summary",
+  });
   // The suffix alone must not turn a canonical JSON report into HTML.
   const requestedPath = join(
     repo.path,
     format === "summary" ? "report.html" : "report." + format,
   );
-  const status = await main(
+  const status = await runCli(
     [
       "exploitability",
       "check",
@@ -617,8 +598,6 @@ async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
       ...(format === "html" ? [] : ["--report-file", requestedPath]),
       ...outputFlags[format],
     ],
-    stdout.stream,
-    stderr.stream,
     dependencies({
       currentDirectory: repo.path,
       environment: {
