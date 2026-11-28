@@ -1,16 +1,37 @@
-<!-- release-version: 0.11.0 -->
+<!-- release-version: 0.12.0 -->
 
 <!-- release-section: highlights:start -->
 
 ## Highlights
 
-Codex Security 0.11.0 adds two opt-in ways to investigate a finding. You can check whether a dependency advisory applies to your code or ask AWS Continuum to assess a code finding in a deployed environment.
+<details>
+<summary>Changes to review for highlights</summary>
 
-- **Dependency investigations.** Set `CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1` and run `cs exploitability check "$CVE_ID" --format html` from your checkout. You can also supply captured call stacks. The check asks an independent reviewer to verify the evidence. The report shows which advisory conditions are met and where the evidence is incomplete. [Experimental CLI guide](https://github.com/openai/codex-security/blob/npm-v0.11.0/sdk/typescript/docs/cli.md#experimental-dependency-investigations)
-- **AWS Continuum validation.** Select a trusted project file that configures Continuum. The CLI sends findings to AWS when you request validation. The packaged plugin submits them automatically after a Standard, Deep, or diff scan with that file. Check the destination first. Finding details can contain sensitive information. Local validation notes stay on the host by default. Codex severity and `--fail-on-severity` stay unchanged. [Choose what to send and resume a check](https://github.com/openai/codex-security/blob/npm-v0.11.0/docs/validation-providers.md)
-- **Patch and verify.** On the original host, `cs patch` and `cs verify-fix` can reuse current Continuum evidence. They distinguish issue-wide results from findings assessed individually and evaluate the fix independently. If a finding moves to another issue, rerun `cs validate --scan` with the original options to refresh it. Disputed verdicts and scores require newer evidence.
-- **Deep Scan on Windows.** Deep Scan retries a heartbeat or receipt update when another process briefly holds the file open. If the write fails, the previous file stays intact.
-- **Workbench.** Listing global findings no longer hangs when a legacy finding links scans across worktrees.
+- bump Codex CLI and SDK to 0.172.0 ([#2823](https://github.com/openai/codex-security/pull/2823))
+- add Tenzai Test findings imports ([#2816](https://github.com/openai/codex-security/pull/2816))
+- include the Tenzai importer in the SDK package inventory ([#2849](https://github.com/openai/codex-security/pull/2849))
+- simplify worker profile checks and coordinator failure events ([#2838](https://github.com/openai/codex-security/pull/2838))
+- simplify workbench actions and artifact schema declarations ([#2837](https://github.com/openai/codex-security/pull/2837))
+- avoid repeated scans when matching truncated command output ([#2839](https://github.com/openai/codex-security/pull/2839))
+- reuse equivalent option and argument schemas ([#2840](https://github.com/openai/codex-security/pull/2840))
+- index retained outcomes and share finding scope checks ([#2841](https://github.com/openai/codex-security/pull/2841))
+- simplify dependency trace tool lookup and report preparation ([#2847](https://github.com/openai/codex-security/pull/2847))
+- render policy diffs directly from changed ranges ([#2829](https://github.com/openai/codex-security/pull/2829))
+- keep duplicate grouping evidence with each finding cluster ([#2832](https://github.com/openai/codex-security/pull/2832))
+- honor Continuum issue changes and member evidence across retries ([#2821](https://github.com/openai/codex-security/pull/2821))
+- simplify worker results and coordinator waits ([#2834](https://github.com/openai/codex-security/pull/2834))
+- simplify session progress and usage accounting ([#2835](https://github.com/openai/codex-security/pull/2835))
+- index and reconcile Linear publication evidence once ([#2833](https://github.com/openai/codex-security/pull/2833))
+- define opt-in flags with a shared schema factory ([#2830](https://github.com/openai/codex-security/pull/2830))
+- simplify workbench requests and finding history projections ([#2827](https://github.com/openai/codex-security/pull/2827))
+- simplify dependency discovery, worklist queries, and trace scheduling ([#2836](https://github.com/openai/codex-security/pull/2836))
+- simplify sealed finding projections and SARIF line hashes ([#2826](https://github.com/openai/codex-security/pull/2826))
+- default scans to GPT-6.1 Sol with high reasoning effort ([#2358](https://github.com/openai/codex-security/pull/2358))
+- honor scan automation options and output contracts ([#1186](https://github.com/openai/codex-security/pull/1186))
+- select workflow instructions at runtime ([#2296](https://github.com/openai/codex-security/pull/2296))
+- document experimental dependency exploitability ([#2853](https://github.com/openai/codex-security/pull/2853))
+
+</details>
 
 <!-- release-section: highlights:end -->
 
@@ -18,10 +39,8 @@ Codex Security 0.11.0 adds two opt-in ways to investigate a finding. You can che
 
 ## Upgrade notes
 
-The experimental CLI change requires no migration from 0.10.1. If a development build script called `cs exploitability run read-stacks`, switch to `cs exploitability run next --state "$STATE"` and read `workItem` and `receiptId` from its JSON output.
+<!-- Replace each candidate with the affected users and the action they need to take. -->
 
-If a saved Continuum assessment shows `outdated`, keep the original state directory and repeat plugin completion or rerun the saved CLI validation on the same host before using the assessment for remediation.
-
-Static verification asks Codex to skip running the code. If you also pass `--assess-patch-risk`, the separate risk assessment may run local tests. [Patch verification guide](https://github.com/openai/codex-security/blob/npm-v0.11.0/sdk/typescript/docs/cli.md#patch-existing-findings)
+- compose repository and stack analyzers and simplify dependency checks ([#2850](https://github.com/openai/codex-security/pull/2850))
 
 <!-- release-section: upgrades:end -->
