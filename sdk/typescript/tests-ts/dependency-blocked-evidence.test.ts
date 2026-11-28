@@ -7,7 +7,7 @@ import {
   createDependencyEvidenceCapture,
   type DependencyEvidenceRecord,
 } from "../src/exploitability/evidence-sources.js";
-import { createDependencyResourceSession } from "../src/exploitability/resource-session.js";
+import { createDependencyCoordinatorSession } from "../src/exploitability/analyzers/repository/coordinator.js";
 import {
   DependencyInvestigationBlockedError,
   runReviewedDependencyCheck,
@@ -319,7 +319,7 @@ test("the native coordinator owns the current failed required startup and only t
   );
   const sent: Record<string, unknown>[] = [];
   let selected: string | undefined;
-  const session = createDependencyResourceSession(
+  const session = createDependencyCoordinatorSession(
     {
       async item() {},
       startup(name, status, error) {
