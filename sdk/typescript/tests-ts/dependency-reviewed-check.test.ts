@@ -753,22 +753,24 @@ test("an empty sink list fails before advisory lookup, while an empty source lis
   ).rejects.toThrow("explicitly empty source boundary");
 });
 
-test("a Git-only library gets its own discovery scope alongside a packaged wrapper", async () => {
+test("Git repositories and an npm package sharing a name keep distinct discovery scopes", async () => {
   await using f = await fixture();
   const cve = "CVE-2099-0001";
+  const first = "https://example.invalid/one/fixture-parser.git";
+  const second = "https://example.invalid/two/fixture-parser.git";
+  const annotated =
+    "https://git@example.invalid/one/fixture-parser.git?ref=a#readme";
   const advisory = {
     id: cve,
     url: "https://example.invalid/advisory",
     affected: [
-      { package: { ecosystem: "npm", name: "wrapper" } },
+      { package: f.pkg },
       {
-        ranges: [
-          {
-            type: "GIT",
-            repo: "https://example.invalid/fixture-parser.git",
-            events: [{ introduced: "0" }],
-          },
-        ],
+        ranges: [annotated, second, first, first].map((repo) => ({
+          type: "GIT",
+          repo,
+          events: [{ introduced: "0" }],
+        })),
       },
     ],
   };
@@ -780,11 +782,15 @@ test("a Git-only library gets its own discovery scope alongside a packaged wrapp
         advisories: [{ ...advisory, sha256: dependencyRecordHash(advisory) }],
       }),
       runAgent: async ({ prompt }) => {
-        const { scopes, claims } = agentInput(prompt);
+        const { scopes, discoveries, claims } = agentInput(prompt);
         if (claims) return approvedReview(claims);
-        expect(scopes[0].component).toBe("wrapper");
-        expect(scopes[1].component).toBe("fixture-parser");
+        expect(scopes).toMatchObject([
+          { component: f.pkg.name, ecosystem: "npm" },
+          { component: f.pkg.name, ecosystem: "GIT", gitRepository: first },
+          { component: f.pkg.name, ecosystem: "GIT", gitRepository: second },
+        ]);
         expect(scopes[1].selectedVersion).toBeUndefined();
+        expect(discoveries[1].sourceLeads).toContain("app.js");
         return proposalJson({
           ...f.use,
           scope: scopes[1].id,
@@ -796,6 +802,11 @@ test("a Git-only library gets its own discovery scope alongside a packaged wrapp
   );
   expect(result).toMatchObject({
     uses: [{ component: "fixture-parser", version: null, verdict: "unknown" }],
+    searches: [
+      { scope: [`package=${f.pkg.name}`, `revision=${f.revision}`] },
+      { scope: [`gitRepository=${first}`, `revision=${f.revision}`] },
+      { scope: [`gitRepository=${second}`, `revision=${f.revision}`] },
+    ],
   });
 });
 
@@ -1074,14 +1085,18 @@ test("withdrawn approvals leave the verdict group before the next progress updat
   function approve(
     line: number,
     verdict: "ruled_out" | "unknown" = "ruled_out",
+    id = String(line),
+    version = verified.version,
   ) {
     const use = {
       ...verified,
       location: `app.js:${line}`,
+      place: { dependencySelection: "Pinned inventory" },
+      version,
       verdict,
       premises: [premise],
     };
-    progress.update(String(line), {
+    progress.update(id, {
       use,
       place: reportedDeployment(use).place,
       callers: [],
@@ -1117,6 +1132,9 @@ test("withdrawn approvals leave the verdict group before the next progress updat
     { type: "reviewed", groupId: expect.any(String) },
   ]);
   expect(output[4]!["groupId"]).not.toBe(groupId);
+  approve(1, "ruled_out", "other-copy", "2.0.0");
+  expect(output.at(-1)).toMatchObject({ type: "reviewed", version: "2.0.0" });
+  expect(output.at(-1)!["groupId"]).not.toBe(output[4]!["groupId"]);
 });
 
 test("publish a complete report once and keep progress separate from an unsuccessful report", async () => {
@@ -1836,6 +1854,55 @@ test("a gap in local input flow keeps the selected version, a missing receiver d
   ).rejects.toThrow("selected dependency version");
 });
 
+test("a same-named native library needs its own record inside the selected wrapper", async () => {
+  const wrapper = { name: "fixture-parser", version: "1.0.0" };
+  const native = { name: "fixture-parser", version: "2.0.0" };
+  await using f = await fixture({
+    "inventory.json": JSON.stringify({ ...wrapper, native }),
+    "wrapper.json": JSON.stringify(wrapper),
+    "siblings.json": JSON.stringify([wrapper, native]),
+  });
+  const scope = {
+    ...reviewScopes([f.discovery])[0]!,
+    selectedVersion: wrapper.version,
+  };
+  const check = (path: string, version: string) =>
+    validateDraftFinding(
+      f.path,
+      scope,
+      {
+        ...f.use,
+        embeddedComponent: native.name,
+        version,
+        evidence: [
+          ...f.use.evidence,
+          { path, startLine: 1, endLine: 1, supports: ["affected_copy"] },
+        ],
+      },
+      signal,
+      false,
+      [],
+      undefined,
+      undefined,
+      async () => '{"parent":0,"child":0}',
+    );
+  const embedded = await check("inventory.json", native.version);
+  expect(embedded.version).toBe("2.0.0");
+  expect(embedded.findingEvidence).toContainEqual({
+    field: "embedded copy",
+    keys: [dependencyRecordHash(embedded.evidence.at(-1)!)],
+  });
+  await expect(check("wrapper.json", wrapper.version)).rejects.toThrow(
+    "embedded dependency",
+  );
+  await expect(check("siblings.json", native.version)).rejects.toThrow(
+    "embedded dependency",
+  );
+  await expect(
+    validateDraftFinding(f.path, scope, f.use, signal, false),
+  ).rejects.toThrow("frozen advisory excludes");
+});
+
 test("an embedded component has its own selected version, deployment and deciding citations", async () => {
   const digest = "a".repeat(64);
   await using f = await fixture({
@@ -1854,7 +1921,7 @@ test("an embedded component has its own selected version, deployment and decidin
   };
   const use: Proposal["uses"][number] = {
     ...f.use,
-    component: "fixture-codec",
+    embeddedComponent: "fixture-codec",
     version: "2.0.3",
     place: {
       artifact: "sha256:abc",
@@ -1908,7 +1975,7 @@ test("an embedded component has its own selected version, deployment and decidin
   for (const bad of [
     { version: scope.selectedVersion },
     { version: "2.0.30" },
-    { component: "unrelated-codec" },
+    { embeddedComponent: "unrelated-codec" },
   ])
     await expect(verify({ ...use, ...bad }, classify)).rejects.toThrow(
       "embedded dependency",
