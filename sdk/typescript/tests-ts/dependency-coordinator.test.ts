@@ -1,6 +1,6 @@
 import { expect, test } from "bun:test";
 import { PassThrough, Writable } from "node:stream";
-import { dependencyResourcePermissionsMatch } from "../src/exploitability/resource-session.js";
+import { dependencyCoordinatorPermissionsMatch } from "../src/exploitability/analyzers/repository/coordinator.js";
 import { readSkillCommandOutput } from "../src/cli.js";
 import {
   createDependencyEvidenceCapture,
@@ -181,9 +181,9 @@ test("native permission table merging cannot silently widen linked evidence sess
     permissions: { dependency_investigation: profile },
   };
   const layers = [{ name: { type: "sessionFlags" }, config }];
-  expect(dependencyResourcePermissionsMatch(config, layers)).toBe(true);
+  expect(dependencyCoordinatorPermissionsMatch(config, layers)).toBe(true);
   expect(
-    dependencyResourcePermissionsMatch(
+    dependencyCoordinatorPermissionsMatch(
       {
         ...config,
         permissions: {
@@ -194,7 +194,7 @@ test("native permission table merging cannot silently widen linked evidence sess
     ),
   ).toBe(true);
   expect(
-    dependencyResourcePermissionsMatch(
+    dependencyCoordinatorPermissionsMatch(
       {
         ...config,
         permissions: {
@@ -207,5 +207,5 @@ test("native permission table merging cannot silently widen linked evidence sess
       layers,
     ),
   ).toBe(false);
-  expect(dependencyResourcePermissionsMatch(config, [])).toBe(false);
+  expect(dependencyCoordinatorPermissionsMatch(config, [])).toBe(false);
 });
