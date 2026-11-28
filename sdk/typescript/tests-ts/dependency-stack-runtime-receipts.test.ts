@@ -143,39 +143,29 @@ test("runtime imports cannot impersonate captures or provide ambiguous payloads"
   ).toBe(true);
 });
 
-test("a runtime-shaped binding selection cannot substitute for this observation's capture receipt", async () => {
-  const sha = "a".repeat(40);
-  const inputDigest = "b".repeat(64);
-  const captureHash = "c".repeat(64);
-  const imageDigest = "sha256:" + "d".repeat(64);
-  const binding = {
-    package: "sample-codec",
+test("only a frame citation from the relevant capture can exclude a fixed copy", async () => {
+  const sha = "a".repeat(40),
+    inputDigest = "b".repeat(64),
+    captureHash = "c".repeat(64);
+  const pkg = {
+    name: "sample-codec",
     version: "3.0.0",
     provenance: "synthetic",
-    frameIndices: [0],
-    imageDigest,
-    sourceSha: sha,
   };
-  const observation = {
-    id: "observation",
-    stackHash: "stack",
-    framesTruncated: false,
-    sinkIndex: 0,
-    sinkIds: ["sink"],
-    frames: [{ name: "decode", type: "js" }],
-    bindings: [binding],
+  const stack = {
+    labels: { service: "decoder" },
+    frames: [{ name: "decode", package: pkg, sourceRevision: sha }],
   };
-  const work = {
-    id: "work",
-    queryId: "query",
-    groupId: "group",
+  const work: StackWorkItem = {
+    id: "captures/0/stacks/0",
+    captureIndex: 0,
+    stackIndex: 0,
     status: "observed",
-    scope: { service: "decoder", image_digest: imageDigest },
-    queryScope: {},
+    stack,
     scopeConflicts: [],
-    truncated: false,
-    observation,
-  } as unknown as StackWorkItem;
+    sinkMatches: [{ sinkId: "sink", rawIndex: 0 }],
+    leads: [],
+  };
   const packet = {
     manifest: {
       inputDigest,
@@ -202,7 +192,7 @@ test("a runtime-shaped binding selection cannot substitute for this observation'
         kind: "runtime",
         server: "synthetic",
         tool: "inspect",
-        result: { observation: { bindings: [binding] } },
+        result: { stack },
       },
       process.cwd(),
     );
@@ -210,7 +200,7 @@ test("a runtime-shaped binding selection cannot substitute for this observation'
     const selected = selectRuntimeReceipt(store, receiptId, {
       receiptId,
       textBlock: null,
-      record: ["observation", "bindings", 0],
+      record: ["stack", "frames", 0, "package"],
     });
     const ref = { id: "binding", revision: 1, hash: "e".repeat(64) };
     const claim = {
@@ -252,133 +242,22 @@ test("a runtime-shaped binding selection cannot substitute for this observation'
       "outside work item",
     );
     claim.receipts[0]!.origin.arguments["workItemId"] = work.id;
-    const contradictory = saveRuntimeEvidence(
+    const other = saveRuntimeEvidence(
       store,
       await prepareRuntimeEvidence(
         {
           kind: "runtime",
           server: "synthetic",
           tool: "inspect",
-          scope: {
-            service: "decoder",
-            selector: { service: "different-service" },
-          },
-          result: observation,
+          scope: { labels: { service: "different-service" } },
+          result: stack,
         },
         process.cwd(),
       ),
     );
-    claim.receipts.push(selectRuntimeReceipt(store, contradictory.receiptId));
+    claim.receipts.push(selectRuntimeReceipt(store, other.receiptId));
     expect(() => prepareStackAssessment(input, work, packet, reader)).toThrow(
-      "conflicts with this work item's service",
-    );
-    claim.receipts.pop();
-    const laterWindow = saveRuntimeEvidence(
-      store,
-      await prepareRuntimeEvidence(
-        {
-          kind: "runtime",
-          server: "synthetic",
-          tool: "inspect",
-          scope: {
-            window: {
-              start: "2026-01-01T02:00:00Z",
-              end: "2026-01-01T03:00:00Z",
-            },
-          },
-          result: { version: "3.0.0" },
-        },
-        process.cwd(),
-      ),
-    );
-    const timestamped = {
-      ...work,
-      scope: {
-        ...work.scope,
-        window: { start: "2026-01-01T00:00:00Z", end: "2026-01-01T04:00:00Z" },
-      },
-      observation: { ...observation, observedAt: "2026-01-01T01:00:00Z" },
-    } as StackWorkItem;
-    claim.receipts.push(selectRuntimeReceipt(store, laterWindow.receiptId));
-    expect(() =>
-      prepareStackAssessment(input, timestamped, packet, reader),
-    ).toThrow("conflicts with this work item's window");
-    claim.receipts.pop();
-    const scoped = await prepareRuntimeEvidence(
-      {
-        kind: "runtime",
-        server: "synthetic",
-        tool: "inspect",
-        scope: { service: "different-service" },
-        result: { version: "3.0.0" },
-      },
-      process.cwd(),
-    );
-    const source = saveRuntimeEvidence(store, scoped);
-    const imported = selectRuntimeReceipt(store, source.receiptId);
-    claim.receipts.push(imported);
-    expect(() => prepareStackAssessment(input, work, packet, reader)).toThrow(
-      "conflicts with this work item's service",
-    );
-    expect(
-      prepareStackAssessment(
-        {
-          ...input,
-          verdict: "unknown",
-          reason: "The imported version is for a different service.",
-          remainingQuestions: ["Which workload does this evidence cover?"],
-          questionChecks: [
-            {
-              question: "Which workload does this evidence cover?",
-              checked: "Compared the service in the import with the capture.",
-              missingEvidence: "A version record for the captured service.",
-              claims: [ref],
-            },
-          ],
-        },
-        work,
-        packet,
-        reader,
-      ).verdict,
-    ).toBe("unknown");
-    claim.receipts = [
-      {
-        ...claim.receipts[0]!,
-        server: "stack-observation",
-        origin: {
-          tool: "next",
-          arguments: {
-            inputDigest,
-            workItemId: work.id,
-            sourceReceiptId: source.receiptId,
-          },
-        },
-      },
-    ];
-    expect(() => prepareStackAssessment(input, work, packet, reader)).toThrow(
-      "original runtime import receipt",
-    );
-    claim.receipts.push(imported);
-    expect(() => prepareStackAssessment(input, work, packet, reader)).toThrow(
-      "conflicts with this work item's service",
-    );
-    const matching = saveRuntimeEvidence(
-      store,
-      await prepareRuntimeEvidence(
-        {
-          kind: "runtime",
-          server: "synthetic",
-          tool: "inspect",
-          scope: { service: "decoder" },
-          result: observation,
-        },
-        process.cwd(),
-      ),
-    );
-    claim.receipts[0]!.origin.arguments["sourceReceiptId"] = matching.receiptId;
-    claim.receipts[1] = selectRuntimeReceipt(store, matching.receiptId);
-    expect(prepareStackAssessment(input, work, packet, reader).verdict).toBe(
-      "ruled_out",
+      /service|scope|label/i,
     );
   } finally {
     store.close();

@@ -382,7 +382,7 @@
           "additionalProperties": false
         },
         "analyzers": {
-          "description": "Omit to enable all analyzers. An explicit map enables only the named analyzers. Stacks runs only when given a capture directory.",
+          "description": "Omit to enable all analyzers. An explicit map enables only the named analyzers. Stacks runs only when given input.",
           "type": "object",
           "properties": {
             "repository": {
@@ -396,7 +396,7 @@
               "type": "object",
               "properties": {
                 "input": {
-                  "description": "Capture directory, relative to this config file.",
+                  "description": "Capture file, directory or glob, relative to this config file.",
                   "type": "string",
                   "minLength": 1,
                   "pattern": "\\S"

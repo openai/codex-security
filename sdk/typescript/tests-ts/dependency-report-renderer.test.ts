@@ -167,13 +167,13 @@ describe("call site report", () => {
   test("walks retained frames, opens the exact caller line, and does not pass caller code off as dependency code", () => {
     const raw = stackReport(),
       [assessment, empty] = raw.assessments;
-    const o = assessment.observation;
+    const o = assessment.stack;
     const html = renderDependencyReport({
       ...raw,
       assessments: [
         {
           ...assessment,
-          observation: {
+          stack: {
             ...o,
             frames: [
               ...o.frames,
@@ -182,18 +182,10 @@ describe("call site report", () => {
                 rawIndex: 2,
                 frame: {
                   name: "caller",
+                  sourceRevision: raw.target.sha,
                   location: "/app.runfiles/_main/src/codec.ts:3",
                   type: "function",
                 },
-              },
-            ],
-            bindings: [
-              ...o.bindings,
-              {
-                package: "example",
-                sourceSha: raw.target.sha,
-                version: raw.target.sha,
-                provenance: "sampled build",
               },
             ],
           },
@@ -202,17 +194,13 @@ describe("call site report", () => {
       ],
     });
     const observed = panel(html, "stack-1-1");
-    const frames = elements(observed, "details.frame", [
-      "data-role",
-      "data-in-range",
-    ]);
+    const frames = elements(observed, "details.frame", ["data-role"]);
     expect(frames.map((f) => f.attrs["data-role"])).toEqual([
       "call",
-      "source",
+      "call",
       "call_site",
       "sink",
     ]);
-    expect(frames[0]!.attrs["data-in-range"]).toBe("false");
     expect(attributes(observed, "details.frame[open]", "id")).toEqual([
       "stack-1-1-frame-2",
     ]);
@@ -224,17 +212,12 @@ describe("call site report", () => {
     expect(
       elements(observed, "#stack-1-1-frame-3 .unavailable").length,
     ).toBeGreaterThan(0);
-    for (const selector of [
-      "[data-range]",
-      "[data-next]",
-      "[data-prev]",
-      ".gap",
-    ])
+    for (const selector of ["[data-next]", "[data-prev]", ".gap"])
       expect(elements(observed, selector).length).toBeGreaterThan(0);
     expect(text(observed)).toContain("Sampled copy 1.0");
     expect(text(observed)).toContain("Which decoder mode ran?");
     expect(text(observed)).toContain("The guard is configurable.");
-    expect(text(observed)).toContain("Query truncated Yes");
+    expect(text(observed)).toContain("Search coverage partial");
     expect(text(html)).toContain("Finalized offline");
     expect(text(html)).toContain("omits the advisory description");
     expect(html).not.toContain("RAW_RECEIPT_CONTENT");

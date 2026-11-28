@@ -12,17 +12,68 @@ test("projects a sparse observation, query limits and no-match without inventing
   expect(report.coverage).toEqual(input.coverage);
   expect(report).not.toHaveProperty("uses");
   const [path, missing] = report.assessments;
-  expect(path?.scope.service).toBe("uploader");
-  expect(path?.queryScope.service).toBeUndefined();
-  expect(path?.observation).toEqual(input.assessments[0].observation);
+  expect(path?.stack?.labels?.["process"]).toBe("uploader");
+  expect(path?.query?.selectors?.["process"]).toBeUndefined();
+  expect(path?.stack).toEqual(input.assessments[0].stack);
   expect(path?.reason).toBe(input.assessments[0].reason);
   expect(path?.use?.reason).toBe(input.assessments[0].use.reason);
   expect(path?.claims.map((c) => c.id)).toEqual(["copy", "call"]);
   expect(path?.claims[1]?.sources[0]?.text).toBe("return decode(bytes);");
   expect(JSON.stringify(report)).not.toContain("RAW_RECEIPT_CONTENT");
   expect(missing?.claims).toEqual([]);
-  expect(missing?.observation).toBeNull();
+  expect(missing?.stack).toBeNull();
   expect(missing?.use).toBeUndefined();
+});
+
+test("a debugger stack with only a name is a lead, with no fabricated search or package", () => {
+  const raw = stackReport();
+  const first = raw.assessments[0];
+  const entry = {
+    ...first,
+    sourceFile: {
+      index: 1,
+      name: "debug<svg>.json",
+      captureIndex: 0,
+      sha256: "d".repeat(64),
+    },
+    query: undefined,
+    use: undefined,
+    supportingClaims: [],
+    frameIndices: [0, 1],
+    sinkMatches: [],
+    leads: [{ sinkId: "codec", rawIndex: 0 }],
+    stack: {
+      frames: [
+        { rawIndex: 0, frame: { name: "decode" } },
+        { rawIndex: 1, frame: { name: "open_file" } },
+      ],
+    },
+  };
+  const report = {
+    ...raw,
+    assessments: [entry],
+    claims: [],
+    coverage: {
+      ...raw.coverage,
+      total: 1,
+      assessed: 1,
+      noMatch: [],
+      incompleteSearch: [],
+    },
+  };
+  for (const render of [
+    renderDependencyReport,
+    renderDependencyReportMarkdown,
+  ]) {
+    const result = render(report);
+    expect(result).toContain("open_file");
+    expect(result).toContain("files[1]");
+    expect(result).toContain(entry.sourceFile.sha256);
+    expect(result).toMatch(/name-only lead/iu);
+    expect(result).not.toContain("Search window");
+    expect(result).not.toContain("sample-codec");
+  }
+  expect(renderDependencyReport(report)).not.toContain("debug<svg>.json");
 });
 
 test("shared premises appear once and require the exact revision and hash", () => {

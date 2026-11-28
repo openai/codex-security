@@ -146,23 +146,19 @@ async function initialize(fixture) {
 // This scripted handoff exercises the public host and the grader without a model.
 async function contracts(fixture) {
   const { manifest, tool } = await initialize(fixture);
-  const next = await tool("next");
-  // The harness can also compare CLI builds that returned only a frame count.
-  const item = Array.isArray(next.workItem.observation.frames)
-    ? { ...next.workItem, receiptId: next.receiptId }
-    : await tool("read-stacks", { workItemId: next.workItem.id });
-  const binding = item.observation.bindings[0];
+  const { workItem: item, receiptId } = await tool("next");
+  const pkg = item.stack.frames[0].package;
   const result = await tool("record-claims", {
     claims: [
       {
         id: "running-version",
         scope: fixture.scope,
-        payload: binding,
+        payload: pkg,
         receiptSelections: [
           {
-            receiptId: item.receiptId,
+            receiptId,
             textBlock: null,
-            record: ["observation", "bindings", 0],
+            record: ["stack", "frames", 0, "package"],
           },
         ],
       },
@@ -255,7 +251,9 @@ try {
   if (mode === "contracts") {
     const result = await contracts(summaries.fixtures.fixed);
     await jsonFile(join(out, "contracts.json"), result);
-    console.log("Fixed binding, reopened claims and tamper check passed");
+    console.log(
+      "Fixed package attribution, reopened claims and tamper check passed",
+    );
   }
   if (mode === "benchmark") {
     const result = await benchmark(summaries.fixtures.positive);

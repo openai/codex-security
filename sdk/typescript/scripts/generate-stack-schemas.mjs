@@ -4,8 +4,8 @@ import { stackInvestigationReportSchema } from "../dist/exploitability/analyzers
 import { stackPacketJsonSchema } from "../dist/exploitability/analyzers/stacks/packet.js";
 
 const schemas = {
-  "dependency-stack-inputs-v1.schema.json": stackPacketJsonSchema(),
-  "stack-investigation-report-v1.schema.json": z.toJSONSchema(
+  "dependency-stack-inputs-v2.schema.json": stackPacketJsonSchema(),
+  "stack-investigation-report-v2.schema.json": z.toJSONSchema(
     stackInvestigationReportSchema,
     { reused: "ref" },
   ),

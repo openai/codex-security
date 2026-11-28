@@ -35,8 +35,8 @@
     },
     "./schemas/project-config.schema.json": "./schemas/project-config.schema.json",
     "./schemas/hosted-scan-v2.fixture.json": "./schemas/hosted-scan-v2.fixture.json",
-    "./schemas/dependency-stack-inputs-v1.schema.json": "./schemas/dependency-stack-inputs-v1.schema.json",
-    "./schemas/stack-investigation-report-v1.schema.json": "./schemas/stack-investigation-report-v1.schema.json"
+    "./schemas/dependency-stack-inputs-v2.schema.json": "./schemas/dependency-stack-inputs-v2.schema.json",
+    "./schemas/stack-investigation-report-v2.schema.json": "./schemas/stack-investigation-report-v2.schema.json"
   },
   "bin": {
     "codex-security": "./bin/codex-security.mjs",

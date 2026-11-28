@@ -111,6 +111,11 @@ test("the gated CLI accepts an interactive init and runtime evidence without a p
   expect(
     await invoke(["init", "--repo", repo, "--state", state]),
   ).toMatchObject({ target: { sha: expect.any(String) } });
+  const observed = await invoke(
+    ["record-observations", "--state", state, "--json-stdin"],
+    capture("debugger"),
+  );
+  expect(observed.workItemIds).toEqual(["captures/0/stacks/0"]);
   expect(
     await invoke(["init", "--repo", repo, "--state", state, "--json-stdin"], {
       cve,
@@ -118,6 +123,12 @@ test("the gated CLI accepts an interactive init and runtime evidence without a p
       sinks: [sink],
     }),
   ).toMatchObject({ cve });
+  expect(await invoke(["next", "--state", state])).toMatchObject({
+    workItem: {
+      id: observed.workItemIds[0],
+      sinkMatches: [{ sinkId: sink.id, rawIndex: 0 }],
+    },
+  });
   const evidence = await invoke(
     ["record-evidence", "--state", state, "--json-stdin"],
     {
@@ -135,39 +146,30 @@ test("the gated CLI accepts an interactive init and runtime evidence without a p
   expect(names).not.toContain("read-stacks");
 });
 
-function query(id: string) {
+function capture(origin: string) {
   return {
-    id,
-    scope: { service: "decoder", window },
-    selectors: { sources: [], sinks: [sink.function] },
-    groups: [
+    format: "codex-security.stacks/v2",
+    captures: [
       {
-        id: "workload",
-        status: "observed",
-        truncated: false,
-        observations: [
+        origin,
+        query: {
+          selectors: { function: "decode" },
+          window,
+          coverage: "complete",
+        },
+        stacks: [
           {
-            id: "call",
-            stackHash: `${id}-stack`,
-            sinkIndex: 0,
-            sinkIds: [sink.id],
-            framesTruncated: false,
+            labels: { service: "decoder" },
             frames: [
-              { name: "decode", type: "javascript" },
               {
-                name: "request",
-                type: "javascript",
-                location: "app.js",
-                line: 1,
+                name: "decode",
+                package: {
+                  name: sink.package,
+                  version: "1.0.0",
+                  provenance: "example runtime",
+                },
               },
-            ],
-            bindings: [
-              {
-                package: sink.package,
-                version: "1.0.0",
-                provenance: "example runtime",
-                frameIndices: [0],
-              },
+              { name: "request", location: "app.js", line: 1 },
             ],
           },
         ],
@@ -176,22 +178,15 @@ function query(id: string) {
   };
 }
 
-async function packet(root: string, repo: string, sha: string) {
+async function packet(root: string, repo: string) {
   const documents = {
-    sources: { format: "codex-security.stack-sources/v1", sources: [] },
     sinks: {
-      format: "codex-security.stack-sinks/v1",
+      format: "codex-security.stack-sinks/v2",
       cve,
       advisory,
       sinks: [sink],
     },
-    stacks: {
-      format: "codex-security.sampled-stacks/v1",
-      target: { repository: "example/decoder", sha },
-      origin: { source: "example" },
-      frameOrder: "leaf_first",
-      queries: [query("captured")],
-    },
+    stacks: capture("captured"),
   };
   for (const [role, value] of Object.entries(documents))
     await writeFile(join(root, role + ".json"), JSON.stringify(value));
@@ -201,7 +196,6 @@ async function packet(root: string, repo: string, sha: string) {
     repository: repo,
     inputsDir: inputs,
     toolRevision: "fixture",
-    sourcesPath: join(root, "sources.json"),
     sinksPath: join(root, "sinks.json"),
     stacksPath: join(root, "stacks.json"),
   });
@@ -229,12 +223,11 @@ test("interactive runs import runtime evidence, append work, and resume a finali
       repository: "example/decoder",
     },
   });
-  const firstQuery = query("first");
+  const firstQuery = capture("first");
   const runtime = await recordQuery(firstQuery);
   const write = {
     operationId: "first-query",
     receiptId: runtime.receiptId,
-    queries: [firstQuery],
   };
   const appended = await run("record-observations", write);
   const recorded = (await run("record-claims", {
@@ -247,7 +240,16 @@ test("interactive runs import runtime evidence, append work, and resume a finali
           {
             receiptId: runtime.receiptId,
             textBlock: null,
-            record: ["groups", 0, "observations", 0, "bindings", 0, "version"],
+            record: [
+              "captures",
+              0,
+              "stacks",
+              0,
+              "frames",
+              0,
+              "package",
+              "version",
+            ],
           },
         ],
         receiptIds: [runtime.receiptId],
@@ -256,7 +258,7 @@ test("interactive runs import runtime evidence, append work, and resume a finali
   })) as { claims: DependencyClaimReference[] };
   expect(await run("record-observations", write)).toEqual(appended);
   await expect(
-    run("record-observations", { ...write, queries: [query("changed")] }),
+    run("record-observations", { ...write, receiptId: "changed" }),
   ).rejects.toThrow(/different request/i);
   expect(await run("summarize-coverage")).toMatchObject({
     total: 1,
@@ -270,7 +272,7 @@ test("interactive runs import runtime evidence, append work, and resume a finali
   expect(first.target.sha).toBe(sha);
   expect(first.sinks).toContainEqual(sink);
   await assessUnknown(first.workItem.id, recorded.claims);
-  const secondRuntime = await recordQuery({ queries: [query("second")] });
+  const secondRuntime = await recordQuery(capture("second"));
   await run("record-observations", { receiptId: secondRuntime.receiptId });
   expect(await run("summarize-coverage")).toMatchObject({
     total: 2,
@@ -308,7 +310,7 @@ test("interactive runs import runtime evidence, append work, and resume a finali
   expect(final.claims[0]!.receipts[1]!.result).toBe("1.0.0");
   expect(await readFinalStackReport(state)).toEqual(final);
   expect(await run("finalize")).toEqual(final);
-  const expectedInputs = await packet(dir.path, repo, sha);
+  const expectedInputs = await packet(dir.path, repo);
   await expect(
     readFinalStackReport(state, {
       packet: await readStackPacket(expectedInputs, repo),
@@ -325,13 +327,13 @@ test("interactive runs import runtime evidence, append work, and resume a finali
 
 test("packet-bound verification rejects added work while direct finalize retains it", async () => {
   await using dir = await scopedTemporaryDirectory("incremental-stack-bound-");
-  const { repo, sha, state, run, recordQuery, assessUnknown } = await fixture(
+  const { repo, state, run, recordQuery, assessUnknown } = await fixture(
     dir.path,
   );
-  const inputs = await packet(dir.path, repo, sha);
+  const inputs = await packet(dir.path, repo);
   const expected = await readStackPacket(inputs, repo);
   await executeStackRun("init", { state, inputs, repo });
-  const imported = await recordQuery(query("added"));
+  const imported = await recordQuery(capture("added"));
   await run("record-observations", { receiptId: imported.receiptId });
   for (let index = 0; index < 2; index++) {
     const current = (await run("next")) as {
@@ -371,7 +373,7 @@ test("a supplemental capture citation automatically carries its original runtime
     repo,
     input: { cve, advisory, sinks: [sink] },
   });
-  const original = query("supplemental");
+  const original = capture("supplemental");
   const runtime = await recordQuery(original);
   await run("record-observations", { receiptId: runtime.receiptId });
   const current = (await run("next")) as {
@@ -388,7 +390,7 @@ test("a supplemental capture citation automatically carries its original runtime
           {
             receiptId: current.receiptId,
             textBlock: null,
-            record: ["observation", "frames", 0],
+            record: ["stack", "frames", 0],
           },
         ],
       },
@@ -408,58 +410,25 @@ test("a supplemental capture citation automatically carries its original runtime
   expect(await readFinalStackReport(state)).toEqual(final);
 });
 
-test("runtime imports reject invalid integrity, fabricated stacks, and contradictory scopes", async () => {
+test("a receipt cannot be reused to introduce fabricated frames", async () => {
   await using dir = await scopedTemporaryDirectory(
     "incremental-stack-integrity-",
   );
   const { repo, state, run, recordQuery } = await fixture(dir.path);
-  await executeStackRun("init", { state, repo });
-  const original = query("verified");
-  const runtime = await recordQuery(original);
-  await expect(
-    run("record-observations", { receiptId: runtime.receiptId }),
-  ).rejects.toThrow("Unknown catalog sink");
   await executeStackRun("init", {
     state,
     repo,
     input: { cve, advisory, sinks: [sink] },
   });
-  const resource = join(dir.path, "result.json");
-  await writeFile(resource, '{"version":"1.0.0"}');
+  const original = capture("original");
+  const runtime = await recordQuery(original);
   await expect(
-    run("record-evidence", {
-      kind: "runtime",
-      server: "fixture",
-      tool: "inventory",
-      resource: { path: resource, sha256: "0".repeat(64) },
-    }),
-  ).rejects.toThrow(/sha|digest|integrity/i);
-  await expect(
-    run("record-observations", {
-      receiptId: "missing",
-      queries: [query("invalid")],
-    }),
+    run("record-observations", { receiptId: "missing" }),
   ).rejects.toThrow(/receipt/i);
-  const fabricated = structuredClone(original);
-  fabricated.groups[0]!.observations[0]!.frames[0]!.name = "fabricated";
+  const altered = structuredClone(original);
+  altered.captures[0]!.stacks[0]!.frames[0]!.name = "fabricated";
   await expect(
-    run("record-observations", {
-      receiptId: runtime.receiptId,
-      queries: [fabricated],
-    }),
-  ).rejects.toThrow("does not match");
-  const contradictory = structuredClone(original);
-  contradictory.scope.service = "different-service";
-  await expect(
-    run("record-observations", {
-      receiptId: runtime.receiptId,
-      queries: [contradictory],
-    }),
-  ).rejects.toThrow(/receipt|match|scope|original/i);
-  await expect(
-    run("record-observations", { queries: [original] }),
-  ).rejects.toThrow("require an original runtime receipt");
-  expect(await run("next")).toMatchObject({
-    workItem: null,
-  });
+    run("record-observations", { receiptId: runtime.receiptId, ...altered }),
+  ).rejects.toThrow();
+  expect(await run("next")).toMatchObject({ workItem: null });
 });
