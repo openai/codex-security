@@ -2228,7 +2228,9 @@ test("a premise carries its cited command into the finding without unrelated com
     },
   );
   const report = firstIssue(checked);
-  expect<unknown>(report.evidence.receipts[comparison.sha256]).toEqual(comparison);
+  expect<unknown>(report.evidence.receipts[comparison.sha256]).toEqual(
+    comparison,
+  );
   expect(report.evidence.receipts[unused.sha256]).toBeUndefined();
   expect(report.findings[0]!.decidingEvidence).toContainEqual({
     kind: "receipt",
