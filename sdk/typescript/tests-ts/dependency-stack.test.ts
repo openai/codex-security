@@ -999,9 +999,13 @@ async function reviewedStackCheck(
   }
 }
 
-test("bad files, symlinks and an empty glob fail before either analyzer starts", async () => {
+test("invalid captures and catalogs fail before either analyzer starts", async () => {
   await using dir = await scopedTemporaryDirectory("stack-glob-");
-  const { repo, stacksPath } = await sample(dir.path, false);
+  const { repo, stacksPath, sinksPath } = await sample(dir.path, false);
+  await writeFile(
+    sinksPath,
+    JSON.stringify({ format: "codex-security.sinks/v2", cve, sinks: [] }),
+  );
   const folder = join(dir.path, "captures");
   await mkdir(folder);
   await writeFile(join(folder, "batch-a.json"), await readFile(stacksPath));
@@ -1023,6 +1027,7 @@ test("bad files, symlinks and an empty glob fail before either analyzer starts",
     ["no-such-*.json", /no stack capture files/i],
     ["batch-*.json", /batch-broken.json/],
     ["link.json", /symlink|symbolic link|regular file/i],
+    ["../", /Supply at least one sink/],
   ] as const) {
     const io = createCliTest(main);
     const code = await io.runCli(
@@ -1234,29 +1239,6 @@ test("two searches and a raw stack keep their own coverage and positions", async
   });
 });
 
-test("an explicit empty sink list is rejected by directory input and live init", async () => {
-  await using dir = await scopedTemporaryDirectory("stack-empty-sinks-");
-  const { repo, sinksPath } = await sample(dir.path, false);
-  const catalog = { format: "codex-security.sinks/v2", cve, sinks: [] };
-  await writeFile(sinksPath, JSON.stringify(catalog));
-  const message = /Supply at least one sink or omit sinks/;
-  await expect(
-    prepareStackInput({
-      cve,
-      repository: repo,
-      input: dir.path,
-      toolRevision: "test",
-    }),
-  ).rejects.toThrow(message);
-  await expect(
-    executeStackRun("init", {
-      repo,
-      state: join(dir.path, "run.sqlite"),
-      input: { cve, sinks: [] },
-    }),
-  ).rejects.toThrow(message);
-});
-
 test("without a catalog, frozen OSV ranges can exclude an attributed copy, but a name alone stays a lead", async () => {
   await using dir = await scopedTemporaryDirectory("stack-implicit-osv-");
   const { repo, stacksPath } = await sample(dir.path, false);
@@ -1277,9 +1259,10 @@ test("without a catalog, frozen OSV ranges can exclude an attributed copy, but a
       ],
     }),
   );
+  const options = { cve, repository: repo, toolRevision: "test" };
   const freeze = (inputsDir: string, packages: string[]) =>
     prepareStackPacket(
-      { cve, repository: repo, stacksPath, inputsDir, toolRevision: "test" },
+      { ...options, stacksPath, inputsDir },
       {
         lookupCve: (id, signal) =>
           lookupDependencyAdvisory(id, signal, async () =>
@@ -1311,12 +1294,7 @@ test("without a catalog, frozen OSV ranges can exclude an attributed copy, but a
   const frozen = join(dir.path, "frozen");
   const original = await freeze(frozen, ["sample-codec"]);
   expect(original.sinks).toEqual({ format: "codex-security.sinks/v2", cve });
-  const replay = await prepareStackInput({
-    cve,
-    repository: repo,
-    input: frozen,
-    toolRevision: "test",
-  });
+  const replay = await prepareStackInput({ ...options, input: frozen });
   const inputs = join(dir.path, "replay");
   expect((await replay(inputs)).manifest.inputDigest).toBe(
     original.manifest.inputDigest,

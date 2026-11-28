@@ -177,11 +177,12 @@ async function fixture(extraFiles: Record<string, string> = {}) {
 test("reviewed trace, service and input citations keep their revision through publication and rendering", async () => {
   await using f = await fixture();
   const scope = reviewScopes([f.discovery])[0]!;
+  const site = { path: "secondary.js", line: 2 };
   f.use.trace = [
     {
       kind: "source",
       label: "Request body",
-      site: { path: "secondary.js", line: 2 },
+      site,
       argument: "request.body",
     },
   ];
@@ -189,12 +190,7 @@ test("reviewed trace, service and input citations keep their revision through pu
   await expect(
     verifyProposedUse(f.path, scope, f.use, signal, true),
   ).rejects.toThrow(/trace/u);
-  f.use.trace[0] = {
-    kind: "source",
-    label: "Request body",
-    site: { path: "app.js", line: 2 },
-    argument: "request.body",
-  };
+  site.path = "app.js";
   const evidence = [
     { kind: "source" as const, path: "app.js", startLine: 2, endLine: 2 },
   ];
@@ -731,11 +727,10 @@ test("caller descriptions stay scoped and a source-only positive is blocked", as
           expect(agentInput(prompt).issue.description).toBe(
             "Incorrect length validation.",
           );
-          return JSON.stringify({
-            uses: [
-              { ...f.use, verdict: "exploitable", remainingQuestions: [] },
-            ],
-            limitations: [],
+          return proposalJson({
+            ...f.use,
+            verdict: "exploitable",
+            remainingQuestions: [],
           });
         },
       },
@@ -749,13 +744,7 @@ test("an empty sink list fails before advisory lookup, while an empty source lis
     throw new Error("Unexpected lookup or model call");
   };
   await expect(
-    f.check(
-      { sinks: [] },
-      {
-        lookupPackage: unexpected,
-        runAgent: unexpected,
-      },
-    ),
+    f.check({ sinks: [] }, { lookupPackage: unexpected, runAgent: unexpected }),
   ).rejects.toThrow("at least one sink endpoint");
   await expect(
     f.check(
@@ -3737,7 +3726,7 @@ test("accounts for native graph candidate lines in their pinned package and pres
   ).toEqual(["app.js", "package.json", "remaining.js"]);
 });
 
-test("reports the scope and outcome of original evidence lookups across MCP response formats", async () => {
+test("summarizes external lookups without publishing argument values in the search scope", async () => {
   await using f = await fixture();
   const args = {
     selector: { environment: "prod", name: "release\nitem" },
@@ -3854,8 +3843,6 @@ test("reports the scope and outcome of original evidence lookups across MCP resp
   for (const input of inputs) {
     const row = check.searches.find((entry) => entry.tool === input.tool)!;
     expect(row.scope).toEqual([
-      "environment=prod",
-      "name=release\\u000aitem",
       "Request SHA-256 " + dependencyRecordHash(args),
     ]);
     expect([row.result, row.completeness]).toEqual([

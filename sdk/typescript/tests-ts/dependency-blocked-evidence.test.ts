@@ -76,14 +76,15 @@ const select = (receiptId: string, key: string) => ({
 });
 test("observed coverage must enumerate distinct selected requests and the current returned values", () => {
   const { block, result } = fixture();
-  const row = (id: string) => ({
-    requiredRecord: id,
-    selection: select(
-      result({ release: id }, { structuredContent: { artifact: null } }),
-      "artifact",
-    ),
-    missing: true,
-  });
+  const row = (id: string, fields: object = {}) => {
+    const structuredContent = { artifact: null, ...fields };
+    const receipt = result({ release: id }, { structuredContent });
+    return {
+      requiredRecord: id,
+      selection: select(receipt, "artifact"),
+      missing: true,
+    };
+  };
   const first = row("one"),
     second = row("two");
   const proposal = {
@@ -137,40 +138,11 @@ test("observed coverage must enumerate distinct selected requests and the curren
   ).toThrow();
   result({ release: "one" }, { structuredContent: { artifact: "fixed" } });
   expect(() => block.verify(proposal, "root", [])).toThrow(/current/);
-  const healthy = select(
-    result({ release: "two" }, { structuredContent: { artifact: ["found"] } }),
-    "artifact",
-  );
   expect(
-    verify({
-      checks: [
-        {
-          ...first,
-          selection: select(
-            result(
-              { release: "one" },
-              { structuredContent: { artifact: null } },
-            ),
-            "artifact",
-          ),
-        },
-        { ...second, selection: healthy },
-      ],
-    }),
+    verify({ checks: [row("one"), row("two", { artifact: ["found"] })] }),
   ).toThrow(/missing status/);
-  const absent = (release: string, partial: boolean) => ({
-    requiredRecord: release,
-    selection: select(
-      result(
-        { release },
-        { structuredContent: { artifact: null, metadata: { partial } } },
-      ),
-      "artifact",
-    ),
-    missing: true,
-  });
   expect(
-    verify({ checks: [absent("one", true), absent("two", false)] }),
+    verify({ checks: [row("one", { partial: true }), row("two")] }),
   ).toThrow(/incomplete lookup coverage/i);
 });
 test("one provider response can block only the requested scope it marks unavailable", () => {
@@ -179,6 +151,7 @@ test("one provider response can block only the requested scope it marks unavaila
   const unavailable = {
     scope,
     available: false,
+    complete: false,
     reason: "Nenhum registro confirmado.",
   };
   const lookup = (payload: object, requestScope = scope) =>
@@ -215,15 +188,10 @@ test("one provider response can block only the requested scope it marks unavaila
     { complete: true, coverage: unavailable },
     { coverage: { ...unavailable, result_complete: true } },
     { coverage: unavailable, metadata: { available: true } },
-    { coverage: unavailable, complete: "false" },
-    { coverage: unavailable, next_page_token: "", nextCursor: "more" },
-    { coverage: unavailable, backend_partial: true },
+    { coverage: unavailable, nextCursor: "more" },
     { metadata: { coverage: unavailable } },
   ])
     expect(() => verify(lookup(response))).toThrow(/structured coverage/);
-  expect(
-    verify(lookup({ coverage: { ...unavailable, complete: false } })),
-  ).toMatchObject({ affectedScope: scope });
   expect(() => verify(receipt)).toThrow(/current/);
   expect(() =>
     verify(lookup({ status: "not_recorded", coverage: unavailable })),

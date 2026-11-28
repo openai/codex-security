@@ -171,41 +171,31 @@ test("the selected coordinator's child retrieves linked evidence on its own nati
   expect(usage).toMatchObject([{ input_tokens: 7, output_tokens: 4 }]);
 });
 
-test("evidence previews and citations select the same original JSON", () => {
+test("evidence pages require exact, own JSON paths", () => {
+  const receipt = { server: "mcp", tool: "list", sha256: "id", arguments: {} };
+  type Path = (string | number)[];
   const page = (
     result: Record<string, unknown>,
-    textBlock: number | null,
-    record: (string | number)[],
-    path?: (string | number)[],
+    record: Path,
+    path: Path = [],
+    textBlock: number | null = 0,
   ) =>
     evidencePage(
-      {
-        sha256: "receipt",
-        server: "sampler",
-        tool: "lookup",
-        arguments: {},
-        result,
-      },
-      {
-        id: "receipt",
-        selection: { textBlock, record },
-        ...(path && { path }),
-      },
+      { ...receipt, result },
+      { id: "id", selection: { textBlock, record }, path },
     ).text;
   const text = '{"rows":[{"__proto__":false}]}';
   const tool = { content: [{ type: "text", text }] };
+  expect(page(tool, ["rows", 0], ["__proto__"])).toBe("false");
   const resource = { contents: [{ text }] };
-  expect(page(tool, 0, ["rows", 0], ["__proto__"])).toBe("false");
-  expect(page(resource, 0, ["rows", 0, "__proto__"])).toBe("false");
-  expect(
-    page({ structuredContent: null, structured_content: "other" }, null, []),
-  ).toBe("null");
-  expect(() => page(tool, 0, ["rows"], ["0"])).toThrow(/Selector/);
-  expect(() => page(tool, 0, ["rows", "0"])).toThrow(/Selector/);
-  expect(() => page(tool, 0, ["rows", 0, "constructor"])).toThrow(/Selector/);
-  expect(() => page({ content: [{ type: "image", text }] }, 0, [])).toThrow(
-    /JSON text block/,
-  );
+  expect(page(resource, ["rows", 0, "__proto__"])).toBe("false");
+  const dual = { structuredContent: null, structured_content: "other" };
+  expect(page(dual, [], [], null)).toBe("null");
+  expect(() => page(tool, ["rows"], ["0"])).toThrow(/Selector/);
+  expect(() => page(tool, ["rows", "0"])).toThrow(/Selector/);
+  expect(() => page(tool, ["rows", 0, "constructor"])).toThrow(/Selector/);
+  const image = { content: [{ type: "image", text }] };
+  expect(() => page(image, [])).toThrow(/JSON text block/);
 });
 
 test("native permission table merging cannot silently widen linked evidence sessions", () => {
