@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { basename } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import {
   git,
@@ -93,14 +94,112 @@ export function exactClaim(claims, ref) {
   return matches[0];
 }
 
-export function gradeStack(report, fixture, { reviewed }) {
+export function vulnerabilityFor(report, advisoryId, { reviewed = true } = {}) {
+  assert.equal(report.schemaVersion, 3);
+  assert.equal(report.status, "complete");
+  if (report.subject.kind === "advisory")
+    assert.equal(report.subject.id, advisoryId);
+  const matches = report.vulnerabilities.filter(
+    (item) =>
+      item.kind === "advisory" &&
+      (item.id === advisoryId ||
+        item.analyses.some((analysis) =>
+          analysis.audit?.advisoryDetails?.some(
+            (advisory) =>
+              advisory.id === advisoryId ||
+              advisory.aliases?.includes(advisoryId),
+          ),
+        )),
+  );
+  assert.equal(matches.length, 1, "one vulnerability for the fixture advisory");
+  const [vulnerability] = matches;
+  assert.equal(vulnerability.status, "complete");
+  assert.equal(
+    vulnerability.result?.review?.status,
+    reviewed ? "approved" : "not_reviewed",
+    "final result review",
+  );
+  if (reviewed)
+    assert.match(
+      vulnerability.result.review.reason,
+      /\S/u,
+      "final reviewer reason",
+    );
+  assert.match(vulnerability.result.reason, /\S/u, "final result reason");
+  const refs = vulnerability.result.findingRefs;
+  assert(
+    Array.isArray(refs) &&
+      refs.every(
+        (index) =>
+          Number.isSafeInteger(index) &&
+          index >= 0 &&
+          index < vulnerability.findings.length,
+      ) &&
+      new Set(refs).size === refs.length,
+    "valid final finding references",
+  );
+  return vulnerability;
+}
+
+function analysisFor(vulnerability, analyzer) {
+  const matches = vulnerability.analyses.filter(
+    (item) => item.analyzer === analyzer,
+  );
+  assert.equal(matches.length, 1, "one " + analyzer + " analysis");
+  assert.equal(matches[0].status, "complete");
+  return matches[0];
+}
+
+export function repositoryReport(response, advisoryId) {
+  const vulnerability = vulnerabilityFor(response, advisoryId);
+  const analysis = analysisFor(vulnerability, "repository");
+  assert(
+    vulnerability.analyses.every(
+      (item) => item === analysis || item.status === "skipped",
+    ),
+    "unexpected active analyzer",
+  );
+  assert(
+    vulnerability.findings.every(
+      (finding) => finding.analyzer === "repository",
+    ),
+    "repository findings only",
+  );
+  return {
+    claims: analysis.claims,
+    claimEvidence: analysis.evidence,
+    searches: analysis.coverage?.searches,
+    assumptions: analysis.coverage?.assumptions,
+    uses: vulnerability.findings,
+  };
+}
+
+export function assertCheckout(report, repo, sha) {
+  assert.deepEqual(
+    report.target,
+    { repository: basename(repo), sha },
+    "fixture checkout",
+  );
+}
+
+export function gradeStack(response, fixture, { reviewed }) {
   const { variant, target, repo, observation, scope, advisory, files, docs } =
     fixture;
-  assert.equal(
-    report.schemaVersion,
-    "codex-security.pipeline-stacks.report/v2",
-  );
-  assert.equal(report.cve, summaryCve);
+  const vulnerability = vulnerabilityFor(response, summaryCve, { reviewed });
+  const analysis = analysisFor(vulnerability, "stacks");
+  const { items, ...coverage } = analysis.coverage;
+  assert.deepEqual(items, [], "no unobserved stack items in this fixture");
+  const report = {
+    schemaVersion: "codex-security.pipeline-stacks.report/v2",
+    cve: vulnerability.id,
+    target: response.target,
+    ...analysis.audit,
+    coverage,
+    claims: analysis.claims,
+    assessments: vulnerability.findings
+      .filter((finding) => finding.analyzer === "stacks")
+      .map(({ analyzer: _, ...assessment }) => assessment),
+  };
   assert.deepEqual(report.target, target);
   assert(report.runId && report.attemptId && report.toolRevision);
   const material = {
@@ -221,6 +320,7 @@ export function gradeStack(report, fixture, { reviewed }) {
   }
   assert.equal(selected.size, report.claims.length, "exact claim closure");
   assert.equal(a.verdict, report.verdict);
+  assert.equal(vulnerability.result.verdict, report.verdict);
   const expected = {
     positive: ["exploitable"],
     fixed: ["ruled_out"],
@@ -703,26 +803,14 @@ export function gradeMixed(
   packageCheck = false,
   evidenceSource,
 ) {
-  let report = response;
   if (packageCheck) {
-    assert.equal(response.package.name, "linkify-it");
-    const checks = response.checks.filter(
-      (c) =>
-        c.advisoryId === reviewedCve ||
-        c.advisoryDetails?.some(
-          (a) => a.id === reviewedCve || a.aliases?.includes(reviewedCve),
-        ),
-    );
-    assert.equal(
-      checks.length,
-      1,
-      "one package check for the fixture advisory",
-    );
-    [report] = checks;
+    assert.equal(response.subject.kind, "package");
+    assert.equal(response.subject.name, "linkify-it");
   } else {
-    assert.equal(report.cve, reviewedCve);
+    assert.equal(response.subject.kind, "advisory");
   }
-  assert.equal(report.schemaVersion, 2);
+  assertCheckout(response, fixture.repo, fixture.sha);
+  const report = repositoryReport(response, reviewedCve);
   const validate = sourceReader(fixture.repo, fixture.sha);
   assert.equal(report.uses.length, 2, "both services assessed separately");
   const outcomes = [];
