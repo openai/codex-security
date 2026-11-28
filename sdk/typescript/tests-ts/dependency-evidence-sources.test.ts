@@ -2,7 +2,7 @@ import { expect, test } from "bun:test";
 import {
   createDependencyEvidenceCapture,
   selectDependencyEvidenceServers,
-} from "../src/dependency/evidence-sources.js";
+} from "../src/exploitability/evidence-sources.js";
 
 test("an investigator can cite only completed calls to its selected evidence tools", () => {
   const deployments = {

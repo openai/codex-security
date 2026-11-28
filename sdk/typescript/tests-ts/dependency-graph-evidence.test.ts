@@ -2,8 +2,8 @@ import { expect, test } from "bun:test";
 import {
   createDependencyGraphEvidenceTools,
   type DependencyEvidenceGraph,
-} from "../src/dependency/graph-evidence.js";
-import type { DependencyEvidenceRecord } from "../src/dependency/evidence-sources.js";
+} from "../src/exploitability/graph-evidence.js";
+import type { DependencyEvidenceRecord } from "../src/exploitability/evidence-sources.js";
 
 function tools(entries?: DependencyEvidenceRecord[]) {
   const graph: DependencyEvidenceGraph = {

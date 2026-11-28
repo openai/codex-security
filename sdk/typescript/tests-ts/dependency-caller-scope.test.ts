@@ -6,10 +6,10 @@ import { join } from "node:path";
 import {
   defaultDependencyCallerScope,
   dependencyPathExcluded,
-} from "../src/dependency/caller-scope.js";
+} from "../src/exploitability/caller-scope.js";
 import type { DependencyRuntimeSelector } from "../src/index.js";
 import { resolveProjectConfig } from "../src/project-config.js";
-import { runReviewedDependencyCheck } from "../src/dependency/analyzers/repository/check.js";
+import { runReviewedDependencyCheck } from "../src/exploitability/analyzers/repository/check.js";
 
 test("project configuration preserves supplied boundaries and runtime selector metadata", () => {
   const selector: DependencyRuntimeSelector = {

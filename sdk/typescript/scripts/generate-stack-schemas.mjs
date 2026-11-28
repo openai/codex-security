@@ -1,7 +1,7 @@
 import { writeFile } from "node:fs/promises";
 import { z } from "zod";
-import { stackInvestigationReportSchema } from "../dist/dependency/analyzers/stacks/assessment.js";
-import { stackPacketJsonSchema } from "../dist/dependency/analyzers/stacks/packet.js";
+import { stackInvestigationReportSchema } from "../dist/exploitability/analyzers/stacks/assessment.js";
+import { stackPacketJsonSchema } from "../dist/exploitability/analyzers/stacks/packet.js";
 
 const schemas = {
   "dependency-stack-inputs-v1.schema.json": stackPacketJsonSchema(),

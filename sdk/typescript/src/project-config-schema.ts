@@ -1,5 +1,5 @@
 import { z } from "zod";
-import { dependencyBoundarySchema } from "./dependency/caller-scope.js";
+import { dependencyBoundarySchema } from "./exploitability/caller-scope.js";
 import {
   DeepScanSettingsSchema,
   FailureSeveritySchema,

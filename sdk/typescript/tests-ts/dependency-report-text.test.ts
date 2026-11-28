@@ -3,8 +3,8 @@ import {
   renderDependencyReportMarkdown,
   renderPreparedDependencyReportMarkdown,
   summarizeDependencyReport,
-} from "../src/dependency/report/text.js";
-import { prepareDependencyReport } from "../src/dependency/report/model.js";
+} from "../src/exploitability/report/text.js";
+import { prepareDependencyReport } from "../src/exploitability/report/model.js";
 import {
   variantReport,
   zeroReport,

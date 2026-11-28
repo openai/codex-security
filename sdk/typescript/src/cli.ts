@@ -8,8 +8,8 @@ import { appServerCyberAccessProgram } from "./cli-daybreak.js";
 import type {
   DependencyCoordinatorRecovery,
   DependencyResourceEvents,
-} from "./dependency/resource-session.js";
-import type { DependencyAgentRequest } from "./dependency/cli.js";
+} from "./exploitability/resource-session.js";
+import type { DependencyAgentRequest } from "./exploitability/cli.js";
 import {
   providerPreflightCommand,
   restoreProviderProfile,
@@ -8382,7 +8382,7 @@ export async function main(
       "CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY",
     ) === "1"
   ) {
-    const { createExploitabilityCli } = await import("./dependency/cli.js");
+    const { createExploitabilityCli } = await import("./exploitability/cli.js");
     cli.command(
       createExploitabilityCli({
         hasOutputFilter: () => frameworkFlags.filters.length > 0,
@@ -10935,7 +10935,7 @@ async function runDependencyAgent(
   if (!request.investigationTools)
     return executeDependencyAgent(request, dependencies, stderr);
   const { startInvestigationTools } =
-    await import("./dependency/investigation-session.js");
+    await import("./exploitability/investigation-session.js");
   const bridge = await startInvestigationTools(request.investigationTools);
   try {
     return await executeDependencyAgent(
@@ -11082,7 +11082,7 @@ async function executeDependencyAgent(
     deny,
   );
   const evidence = request.onEvidence
-    ? await import("./dependency/evidence-sources.js")
+    ? await import("./exploitability/evidence-sources.js")
     : undefined;
   const servers = evidence
     ? evidence.selectDependencyEvidenceServers(
@@ -11097,7 +11097,7 @@ async function executeDependencyAgent(
   const linked =
     request.coordinator && request.onEvidence && Object.keys(servers).length
       ? (
-          await import("./dependency/linked-resources.js")
+          await import("./exploitability/linked-resources.js")
         ).createDependencyLinkedResourceCapture({
           servers: { ...servers },
           onEvidence: request.onEvidence,
@@ -11131,7 +11131,7 @@ async function executeDependencyAgent(
           ...(request.abortInvestigation && {
             abort: {
               ...(
-                await import("./dependency/analyzers/repository/blocked-evidence.js")
+                await import("./exploitability/analyzers/repository/blocked-evidence.js")
               ).dependencyAbortTool,
               call: request.abortInvestigation,
             },
@@ -11140,7 +11140,7 @@ async function executeDependencyAgent(
       : undefined;
   if (toolsUrl) {
     const { investigationServer } =
-      await import("./dependency/evidence-sources.js");
+      await import("./exploitability/evidence-sources.js");
     if (Object.hasOwn(servers, investigationServer))
       throw new ConfigurationError(
         "The project MCP server name conflicts with the built-in investigation tools.",
@@ -11751,7 +11751,7 @@ export async function readSkillCommandOutput(
   const resumeId = recovery?.threadId;
   const resources = appServer?.linkedEvidence
     ? (
-        await import("./dependency/resource-session.js")
+        await import("./exploitability/resource-session.js")
       ).createDependencyResourceSession(
         appServer.linkedEvidence,
         send,
@@ -12094,7 +12094,7 @@ export async function readSkillCommandOutput(
           }
           if (resumeId && recovery) {
             const { recoveredDependencyTurn, continueDependencyInvestigation } =
-              await import("./dependency/resource-session.js");
+              await import("./exploitability/resource-session.js");
             const saved = recoveredDependencyTurn(result.thread, recovery);
             if (saved.kind === "completed") {
               completed = true;
