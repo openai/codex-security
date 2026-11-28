@@ -352,14 +352,28 @@ for (const bindSource of [true, false]) {
         await expect(call("finalize")).rejects.toThrow();
         return;
       }
-      await call("record-assessments", { items: [row] });
-      const report = await call("finalize");
+      await call("record-assessments", {
+        items: [{ ...row, frameIndices: [0] }],
+      });
+      const report = (await call("finalize")) as StackInvestigationReport;
       expect(report).toMatchObject({
         verdict: "exploitable",
+        assessments: [
+          { stack: { capturedFrameCount: 2, frames: [{ rawIndex: 0 }] } },
+        ],
         review: null,
         coverage: { total: 1, assessed: 1 },
       });
       expect(report).toEqual(await readFinalStackReport(state));
+      // A report finalized before capture depth was stored keeps its digest on replay.
+      delete report.assessments[0]!.stack!.capturedFrameCount;
+      const saved = new DependencyAttemptStore(state, { create: false });
+      try {
+        saved.set("report", "final", report);
+      } finally {
+        saved.close();
+      }
+      expect(await readFinalStackReport(state)).toEqual(report);
       await expect(
         call("record-evidence", {
           scope: "caller",

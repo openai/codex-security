@@ -5,6 +5,7 @@ import {
   stacksReport,
 } from "./support/dependency-stack-report-fixture.js";
 import { renderDependencyCode } from "../src/exploitability/report/audit.js";
+import { renderDependencyReportMarkdown } from "../src/exploitability/report/text.js";
 import { renderDependencyReport } from "../src/exploitability/report/renderer.js";
 import {
   receiptRef,
@@ -134,6 +135,55 @@ describe("call site report", () => {
     expect(html).not.toContain("RAW_RECEIPT_CONTENT");
     expect(elements(html, "article[data-finding]")).toHaveLength(1);
     expect(text(html)).toContain("scheduled-job");
+  });
+  test("sparse stacks jump to the assessed version and show omitted callers and callees", () => {
+    const raw = stackReport();
+    const [a, empty] = raw.assessments;
+    const decoder = a.stack.frames[0]!.frame;
+    const render = (version: string) =>
+      stacksReport({
+        ...raw,
+        assessments: [
+          {
+            ...a,
+            sinkMatches: [
+              { sinkId: "codec", rawIndex: 1 },
+              { sinkId: "other", rawIndex: 3 },
+            ],
+            frameIndices: [1, 3],
+            stack: {
+              ...a.stack,
+              capturedFrameCount: 6,
+              frames: [
+                { rawIndex: 1, frame: decoder },
+                {
+                  rawIndex: 3,
+                  frame: {
+                    ...decoder,
+                    package: { ...decoder.package!, version },
+                  },
+                },
+              ],
+            },
+          },
+          empty,
+        ],
+      });
+    const report = render("2.0");
+    const html = panel(renderDependencyReport(report), "stack-1-1");
+    expect(attributes(html, "[data-jump]", "data-jump")).toEqual(["1"]);
+    expect(attributes(html, "details.frame > summary", "id")).toEqual([
+      "stack-1-1-raw-3",
+      "stack-1-1-raw-1",
+    ]);
+    expect(text(html)).toContain("2 frames omitted");
+    expect(text(html)).toContain("1 frame omitted at the leaf");
+    expect(renderDependencyReportMarkdown(report)).toContain(
+      "1 frame omitted at the leaf",
+    );
+    const ambiguous = panel(renderDependencyReport(render("1.0")), "stack-1-1");
+    expect(elements(ambiguous, "[data-jump]")).toHaveLength(0);
+    expect(text(ambiguous)).toContain("does not identify a single sink frame");
   });
   test("source-only code starts at the reviewed call, with conditions and the deciding check", () => {
     const raw = variantReport();

@@ -41,6 +41,13 @@ test("a different reviewed revision cannot label the captured frame as its call 
   expect(frame().role).toBe("call");
   expect(frame().code?.commit).toBe(sha);
 });
+test("a repeated call site stays in the source review instead of labeling either captured frame", () => {
+  const { finding, observation, caller } = sample();
+  observation.frames.push({ rawIndex: 3, frame: caller });
+  const path = inspectPath(finding, { repository: "example", sha });
+  expect(path.frames.some((f) => f.citesCall)).toBe(false);
+  expect(path.uncapturedCall?.site.line).toBe(3);
+});
 test("a missing or stale frame revision cannot borrow the revision of a sibling", () => {
   const { caller, observation, frame } = sample();
   observation.frames[0]!.frame.sourceRevision = sha;
