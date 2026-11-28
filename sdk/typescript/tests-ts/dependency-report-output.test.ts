@@ -18,6 +18,7 @@ import {
   repositoryBatch,
   reviewed,
   report,
+  withExcerpts,
 } from "./support/dependency-report-fixtures.js";
 import {
   stackReport,
@@ -93,18 +94,25 @@ test("a blocked analyzer preserves completed findings without publishing a compl
 
 test("synthesis combines complementary findings only for the same advisory and checkout", async () => {
   const stack = stackReport();
+  const source = "decode(upload.bytes);\n".repeat(28000);
   const repo = {
-    ...report([
-      reviewed(1, {
-        verdict: "potentially_exploitable",
-        version: "1.0",
-        reason:
-          "The upload handler selects the affected mode and passes attacker bytes to decode.",
-      }),
-    ]),
+    ...withExcerpts(
+      report([
+        reviewed(1, {
+          verdict: "potentially_exploitable",
+          version: "1.0",
+          reason:
+            "The upload handler selects the affected mode and passes attacker bytes to decode.",
+        }),
+      ]),
+      [source],
+    ),
     cve: stack.cve,
     target: stack.target,
   };
+  const claim = repo.claims[0]!;
+  claim.payload.fact = source;
+  repo.claims.push({ ...claim, revision: 2 });
   const combine = (other: typeof stack) =>
     assembleExploitabilityReport(stack.cve, [
       repositoryBatch(repo),
@@ -141,7 +149,23 @@ test("synthesis combines complementary findings only for the same advisory and c
   const verdict = await synthesizeVulnerabilityResult(combined!, {
     directory: ".",
     signal,
-    runAgent: async () => JSON.stringify(responses.shift()),
+    async runAgent({ prompt }) {
+      expect(prompt.length).toBeLessThanOrEqual(1_048_576);
+      const data = JSON.parse(
+        prompt.split("\n").find((line) => line.startsWith("{"))!,
+      );
+      expect(data.findings).toEqual(combined!.findings);
+      expect(data.analyses[0].claims).toEqual([
+        {
+          ...repo.uses[0]!.supportingClaims![0],
+          reason: claim.decision.reason,
+        },
+      ]);
+      expect(data.analyses[1].claims[0].receipts[0].originalPayloadSha256).toBe(
+        "b".repeat(64),
+      );
+      return JSON.stringify(responses.shift());
+    },
   });
   expect(verdict).toMatchObject({
     verdict: "exploitable",
