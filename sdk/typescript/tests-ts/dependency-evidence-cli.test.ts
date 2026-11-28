@@ -561,6 +561,9 @@ async function checkReviewed(source: "inline" | "native") {
 const outputFlags = {
   md: ["--format", "md"],
   html: ["--format", "html"],
+  yaml: ["--format", "yaml"],
+  toon: ["--format", "toon"],
+  jsonl: ["--format", "jsonl"],
   summary: [],
   filter: ["--filter-output", "vulnDescription"],
 };
@@ -577,7 +580,9 @@ async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
   // The suffix alone must not turn a canonical JSON report into HTML.
   const requestedPath = join(
     repo.path,
-    format === "summary" ? "report.html" : "report.json",
+    format === "summary"
+      ? "report.html"
+      : "report." + (format === "filter" ? "json" : format),
   );
   const status = await main(
     [
@@ -623,22 +628,28 @@ async function checkCoordinatorOutput(format: keyof typeof outputFlags) {
     const contents = await readFile(reportPath, "utf8");
     expect(contents).toStartWith("<!doctype html>");
     expect(contents).toContain("No applicable package was found.");
-  } else
+  } else if (format === "md") {
+    const contents = await readFile(reportPath, "utf8");
+    expect(contents).toStartWith("# ");
+    expect(contents).toContain("No applicable package was found.");
+    expect(stdout.text().trimEnd()).toEndWith(reportPath);
+  } else if (format === "summary" || format === "filter") {
     expect(JSON.parse(await readFile(reportPath, "utf8")).checks).toHaveLength(
       1,
     );
+  } else {
+    const contents = await readFile(reportPath, "utf8");
+    expect(contents.trimEnd()).toBe(stdout.text().trimEnd());
+    expect(contents).toContain("Supplied condition");
+  }
   const output = stdout.text().trim();
   switch (format) {
     case "summary":
     case "html":
+    case "md":
       expect(output).not.toContain("<!doctype html>");
       expect(output).toContain("0 reviewed uses");
       expect(output).toContain("No applicable package was found.");
-      break;
-    case "md":
-      expect(output).toContain("# ");
-      expect(output).toContain("No applicable package was found.");
-      expect(output).not.toContain("[object Object]");
       break;
     case "filter":
       expect(output).toBe("Supplied condition");
