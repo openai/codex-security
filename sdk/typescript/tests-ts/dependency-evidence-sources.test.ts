@@ -1,8 +1,48 @@
 import { expect, test } from "bun:test";
 import {
+  commandEvidenceTool,
   createDependencyEvidenceCapture,
+  investigationServer,
+  isCommandEvidence,
   selectDependencyEvidenceServers,
 } from "../src/exploitability/evidence-sources.js";
+import { dependencyRecordHash } from "../src/exploitability/attempt-store.js";
+
+test("only successful native commands become local evidence", () => {
+  const capture = createDependencyEvidenceCapture({});
+  const result = {
+    command: "git show HEAD:'build record.txt'",
+    cwd: "/fixture app",
+    exitCode: 0,
+    output: "build 1\r\n",
+  };
+  const item = {
+    type: "commandExecution",
+    status: "completed",
+    ...result,
+    aggregatedOutput: result.output,
+  };
+  const record = (changes = {}) =>
+    capture({
+      method: "item/completed",
+      params: { item: { ...item, ...changes } },
+    });
+  const original = record()!;
+  const expected = {
+    server: investigationServer,
+    tool: commandEvidenceTool,
+    arguments: {},
+    result,
+  };
+  expect(original).toEqual({
+    ...expected,
+    sha256: dependencyRecordHash(expected),
+  });
+  expect(isCommandEvidence({ ...original, server: "external" })).toBe(false);
+  expect(record({ status: "failed" })).toBeUndefined();
+  expect(record({ exitCode: 1 })).toBeUndefined();
+  expect(record({ type: "agentMessage" })).toBeUndefined();
+});
 
 test("an investigator can cite only completed calls to its selected evidence tools", () => {
   const deployments = {
