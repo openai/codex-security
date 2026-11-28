@@ -104,7 +104,7 @@ export const ProjectConfigInputSchema = z.strictObject({
     .optional(),
   exploitability: z
     .strictObject({
-      ...dependencyBoundarySchema.shape,
+      scope: dependencyBoundarySchema.shape.scope,
       analyzers: dependencyAnalyzersSchema
         .optional()
         .describe(

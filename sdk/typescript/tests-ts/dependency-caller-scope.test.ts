@@ -7,27 +7,7 @@ import {
   defaultDependencyCallerScope,
   dependencyPathExcluded,
 } from "../src/exploitability/caller-scope.js";
-import type { DependencyRuntimeSelector } from "../src/index.js";
-import { resolveProjectConfig } from "../src/project-config.js";
 import { runReviewedDependencyCheck } from "../src/exploitability/analyzers/repository/check.js";
-
-test("project configuration preserves supplied boundaries and runtime selector metadata", () => {
-  const selector: DependencyRuntimeSelector = {
-    name: "decode",
-    location: "codec.c",
-    line: 8,
-    binary: "libcodec",
-    provider_detail: { resource: 3 },
-  };
-  for (const boundary of [
-    { sources: [] },
-    { sinks: [{ function: "decode", runtime_selectors: [selector] }] },
-  ]) {
-    expect(
-      resolveProjectConfig({ exploitability: boundary }).exploitability,
-    ).toEqual(boundary);
-  }
-});
 
 test("broad production and explicit exclusions reopen paths with their own SECURITY.md", () => {
   const policyPaths = new Set(["SECURITY.md", "examples/service/SECURITY.md"]);

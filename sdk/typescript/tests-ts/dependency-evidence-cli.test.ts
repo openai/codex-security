@@ -100,7 +100,7 @@ async function commitFixture(path: string) {
   );
 }
 
-test("check rejects invalid analyzer choices before launching an investigation", async () => {
+test("check rejects invalid analyzer options before launching an investigation", async () => {
   await using repo = await scopedTemporaryDirectory(
     "dependency-analyzer-options-",
   );
@@ -115,24 +115,33 @@ test("check rejects invalid analyzer choices before launching an investigation",
       return 1;
     },
   });
-  for (const [project, inputs, problem] of [
+  for (const [project, flags, problem] of [
     [{ analyzers: {} }, [], /at least 1|fewer than 1|at least one/i],
     [{ analyzers: { other: {} } }, [], /additional properties|unknown/i],
     [{ analyzers: { stacks: {} } }, [], /No analyzer has input/],
     [
       { analyzers: { repository: {} } },
-      ["stacks=unused"],
+      ["--analyzer-input", "stacks=unused"],
       /unknown or disabled/,
     ],
+    [undefined, ["--sources", "  "], /sources/],
+    [undefined, ["--sinks="], /sinks/],
     [
-      { analyzers: { stacks: { input: "missing-capture" } }, sinks: [] },
-      [],
-      /exploitability\/sinks/,
+      undefined,
+      ["--analyzer-input", "repository=unused"],
+      /takes no input path/,
     ],
-    [undefined, ["repository=unused"], /takes no input path/],
-    [undefined, ["stacks"], /NAME=PATH/],
-    [undefined, ["stacks=a", "stacks=b"], /Duplicate --analyzer-input/],
-    [undefined, ["stacks=missing-capture"], /missing-capture|does not exist/],
+    [undefined, ["--analyzer-input", "stacks"], /NAME=PATH/],
+    [
+      undefined,
+      ["--analyzer-input", "stacks=a", "--analyzer-input", "stacks=b"],
+      /Duplicate --analyzer-input/,
+    ],
+    [
+      undefined,
+      ["--analyzer-input", "stacks=missing-capture"],
+      /missing-capture|does not exist/,
+    ],
   ] as const) {
     const stdout = capture(),
       stderr = capture();
@@ -144,7 +153,7 @@ test("check rejects invalid analyzer choices before launching an investigation",
         "check",
         "CVE-2099-1000",
         ...(project ? ["--config", config] : []),
-        ...inputs.flatMap((value) => ["--analyzer-input", value]),
+        ...flags,
       ],
       stdout.stream,
       stderr.stream,
@@ -287,6 +296,16 @@ async function checkReviewed(source: "inline" | "native") {
       'model_reasoning_effort="medium"',
       "--vuln-description",
       "A parser issue",
+      ...(source === "inline"
+        ? [
+            "--sources",
+            "handle",
+            "--sources",
+            "loadConfig",
+            "--sinks",
+            "decode",
+          ]
+        : []),
       "--json",
       "--report-file",
       reportPath,
@@ -313,6 +332,16 @@ async function checkReviewed(source: "inline" | "native") {
         const payload = JSON.parse(
           (prompt ?? output?.appServer?.prompt)!.split("\n\n").at(-1)!,
         );
+        if (source === "inline") {
+          expect(payload.sources).toEqual([
+            { function: "handle" },
+            { function: "loadConfig" },
+          ]);
+          expect(payload.sinks).toEqual([{ function: "decode" }]);
+        } else {
+          expect(payload).not.toHaveProperty("sources");
+          expect(payload).not.toHaveProperty("sinks");
+        }
         const features = parseToml(
           args.find((v) => v.startsWith("features="))!,
         )["features"];

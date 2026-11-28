@@ -50,7 +50,9 @@ export CODEX_SECURITY_ENABLE_DEPENDENCY_EXPLOITABILITY=1
 cs exploitability check CVE-2019-10744 --format md --report-file review.md
 ```
 
-To trace a particular path, add `--sources handle --sinks defaultsDeep`. Repeat either flag for more functions. The [dependency exploitability guide](dependency-exploitability.md) covers [source and sink selection](dependency-exploitability.md#trace-an-input-to-a-vulnerable-function), captured stacks, report verdicts and hosted agent integration.
+To trace a particular path, add `--sources handle --sinks defaultsDeep`. Repeat either flag for more functions. Omit a flag to discover that end of the path.
+
+The [dependency exploitability guide](dependency-exploitability.md) covers [source and sink selection](dependency-exploitability.md#trace-an-input-to-a-vulnerable-function), captured stacks, report verdicts and hosted agent integration.
 
 ## Updating the CLI
 
