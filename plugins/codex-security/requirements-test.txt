@@ -4,7 +4,7 @@ jsonschema==4.26.0
 packaging==26.3
 pytest==9.2.0
 pytest-xdist==3.8.0
-PyYAML==6.0.3
+PyYAML==6.0.4
 # jsonschema uses these to check timestamps in artifacts and URIs in schemas.
 rfc3339-validator==0.1.4
 rfc3986-validator==0.1.1
