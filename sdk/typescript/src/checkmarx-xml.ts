@@ -204,6 +204,16 @@ export function checkmarxXmlId(source: Record<string, unknown>): string {
   ]);
 }
 
+// Checkmarx One names for the predefined CxSAST result state IDs. Custom state
+// IDs pass through unchanged.
+const resultStates = new Map<string | undefined, string>([
+  ["0", "TO_VERIFY"],
+  ["1", "NOT_EXPLOITABLE"],
+  ["2", "CONFIRMED"],
+  ["3", "URGENT"],
+  ["4", "PROPOSED_NOT_EXPLOITABLE"],
+]);
+
 export function normalizeCheckmarxXml(
   contents: string,
   repository: string,
@@ -233,7 +243,7 @@ export function normalizeCheckmarxXml(
             verdict:
               result["FalsePositive"]?.toLowerCase() === "true"
                 ? "False positive"
-                : result["state"],
+                : (resultStates.get(result["state"]) ?? result["state"]),
             cwe: query["cweId"],
             sourceData:
               !row["instance"] && instance ? { ...row, instance } : row,

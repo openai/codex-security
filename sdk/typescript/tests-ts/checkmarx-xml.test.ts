@@ -63,6 +63,26 @@ test("retains native triage and ordered flow with snippets for each CxSAST resul
   expect(JSON.stringify(evidence)).not.toContain("report owner");
 });
 
+test("names predefined CxSAST result states and keeps other state IDs", () => {
+  const verdict = (state: string) =>
+    normalize(
+      report(
+        result(13).replace(
+          'FalsePositive="True" state="1"',
+          `FalsePositive="False" state="${state}"`,
+        ),
+      ),
+    ).findings[0]!.evidence.details?.scanner_verdict;
+  expect(["0", "1", "2", "3", "4", "5"].map(verdict)).toEqual([
+    "TO_VERIFY",
+    "NOT_EXPLOITABLE",
+    "CONFIRMED",
+    "URGENT",
+    "PROPOSED_NOT_EXPLOITABLE",
+    "5",
+  ]);
+});
+
 test("retains optional CxSAST project and team names without changing occurrence IDs", () => {
   const xml = report(result(13));
   const original = normalize(xml);
