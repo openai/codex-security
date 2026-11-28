@@ -1337,7 +1337,7 @@ def merge_saved_results(
                 candidate_id = provenance.get("candidateId")
                 if (
                     isinstance(source_owner, str)
-                    and isinstance(attempt, int)
+                    and type(attempt) is int
                     and isinstance(candidate_id, str)
                     and (source_owner, attempt, candidate_id) in accepted_pending_candidates
                 ):
