@@ -8,6 +8,7 @@ import { readSkillCommandOutput } from "../src/cli.js";
 import type { JsonObject } from "../src/config.js";
 import {
   createDependencyEvidenceCapture,
+  isCommandEvidence,
   type DependencyEvidenceRecord,
   type Sample,
 } from "../src/exploitability/evidence-sources.js";
@@ -26,10 +27,11 @@ const config = {
   permissions: { dependency_investigation: profile },
 };
 
-test("the selected coordinator's child retrieves linked evidence on its own native thread before exit", async () => {
+test("the coordinator collects commands and linked evidence only from its own threads", async () => {
   const stream = new PassThrough();
   const requests: Record<string, unknown>[] = [];
   const records: DependencyEvidenceRecord[] = [];
+  const commandOutputs: unknown[] = [];
   const errors: string[] = [];
   const usage: unknown[] = [];
   const original = "frame\n".repeat(12_000) + "last witness";
@@ -95,6 +97,20 @@ test("the selected coordinator's child retrieves linked evidence on its own nati
         notify("thread/started", {
           thread: { id: "child", parentThreadId: "root" },
         });
+        for (const threadId of ["root", "child", "other"]) {
+          notify("item/completed", {
+            threadId,
+            item: {
+              type: "commandExecution",
+              id: "pwd-" + threadId,
+              status: "completed",
+              command: "pwd",
+              cwd: "/" + threadId,
+              exitCode: 0,
+              aggregatedOutput: "/" + threadId,
+            },
+          });
+        }
         event("other", "sampled");
         event("child", "unselected");
         event("child", "sampled");
@@ -136,7 +152,9 @@ test("the selected coordinator's child retrieves linked evidence on its own nati
       async item(event, read, invocation) {
         const origin = capture(event);
         if (!origin) return;
-        records.push(origin);
+        if (isCommandEvidence(origin))
+          commandOutputs.push(origin.result.output);
+        else records.push(origin);
         await linked(origin, read, invocation);
       },
       usage(v) {
@@ -158,6 +176,7 @@ test("the selected coordinator's child retrieves linked evidence on its own nati
     },
   ]);
   expect(records).toHaveLength(2);
+  expect(commandOutputs).toEqual(["/root", "/child"]);
   expect(records[1]).toMatchObject({
     linkedFrom: records[0]!.sha256,
     result: { contents: [{ text: original }] },
