@@ -58,6 +58,8 @@ const distModules = [
   "exploitability/report/path",
   "exploitability/report/reader",
   "exploitability/report/renderer",
+  "exploitability/report/schema",
+  "exploitability/report/synthesis",
   "exploitability/report/text",
   "exploitability/report/ui",
   "exploitability/source-identity",
